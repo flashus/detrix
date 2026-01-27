@@ -1,0 +1,83 @@
+[package]
+name = "detrix-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# serde is used via serde_json (transitive re-export)
+[package.metadata.cargo-machete]
+ignored = ["serde"]
+
+[[bin]]
+name = "detrix"
+path = "src/main.rs"
+
+[dependencies]
+detrix-core = { path = "../detrix-core" }
+detrix-config = { path = "../detrix-config" }
+detrix-dap = { path = "../detrix-dap" }
+detrix-storage = { path = "../detrix-storage" }
+detrix-application = { path = "../detrix-application" }
+detrix-api = { path = "../detrix-api" }
+detrix-output = { path = "../detrix-output" }
+
+# MCP (Model Context Protocol)
+rmcp.workspace = true
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+
+# CLI
+clap = { workspace = true, features = ["derive"] }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror.workspace = true
+
+# Logging
+detrix-logging = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# Date/time
+chrono = { workspace = true }
+
+# Cross-platform file locking for PID files
+fs2 = { workspace = true }
+
+# TCP socket configuration (keep-alive for Windows compatibility)
+socket2 = { workspace = true }
+
+# Cryptographically secure random number generation
+rand = { workspace = true }
+
+# Regex (for GELF routing patterns)
+regex.workspace = true
+
+# HTTP client (for MCP bridge and CodeLLDB download)
+reqwest = { workspace = true, features = ["json", "blocking"] }
+
+# ZIP archive extraction (for CodeLLDB VSIX files)
+zip = "2.2"
+
+# UUID (for MCP client tracking)
+uuid.workspace = true
+
+# Table formatting for CLI output
+comfy-table = "7.1"
+
+# Unix process management (for daemon commands)
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
+[build-dependencies]
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+wiremock = "0.6"
+sqlx.workspace = true
+detrix-testing = { path = "../detrix-testing" }

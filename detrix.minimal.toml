@@ -1,0 +1,41 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Detrix Configuration - Basic Setup
+# ════════════════════════════════════════════════════════════════════════════
+# This is a minimal configuration with essential settings.
+# For all options, run: detrix init --full
+# Documentation: https://github.com/flashus/detrix
+# ════════════════════════════════════════════════════════════════════════════
+
+[metadata]
+version = "1.0"
+
+# ════════════════════════════════════════════════════════════════════════════
+# BASIC SETTINGS - Most users only need to modify this section
+# ════════════════════════════════════════════════════════════════════════════
+
+# Storage - Where detrix stores metrics and events
+[storage]
+path = "~/detrix/data.db"
+
+# gRPC API (CLI uses this to communicate with daemon)
+[api.grpc]
+enabled = true
+host = "127.0.0.1"
+port = 50061
+
+# REST API (HTTP/JSON)
+[api.rest]
+# Enable REST server
+enabled = false
+host = "127.0.0.1"
+port = 8090
+
+# Safety - Expression validation (uses secure defaults)
+# For custom allowed/prohibited functions, run: detrix init --full
+[safety]
+enable_ast_analysis = true
+
+# ════════════════════════════════════════════════════════════════════════════
+# For advanced settings (safety rules, output streaming, performance tuning),
+# run: detrix init --full
+# ════════════════════════════════════════════════════════════════════════════

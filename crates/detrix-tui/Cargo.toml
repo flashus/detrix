@@ -1,0 +1,45 @@
+[package]
+name = "detrix-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Terminal User Interface for Detrix metrics dashboard"
+
+[[bin]]
+name = "detrix-tui"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace dependencies
+detrix-core = { path = "../detrix-core" }
+detrix-config = { path = "../detrix-config" }
+detrix-api = { path = "../detrix-api" }
+
+# Async runtime
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+
+# gRPC client
+tonic = { workspace = true }
+
+# TUI
+ratatui = { workspace = true }
+crossterm = { workspace = true, features = ["event-stream"] }
+color-eyre = { workspace = true }
+
+# HTTP client (for status API)
+reqwest = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+
+# Utilities
+chrono = { workspace = true }
+detrix-logging = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,781 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Detrix Configuration File (Full)
+# ════════════════════════════════════════════════════════════════════════════
+# This file contains ALL configuration options with detailed comments.
+# For a minimal config, run: detrix init (without --full)
+#
+# Documentation: https://github.com/flashus/detrix
+# ════════════════════════════════════════════════════════════════════════════
+
+[metadata]
+version = "1.0"
+# description = "My Detrix configuration"
+
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║                         BASIC CONFIGURATION                                 ║
+# ║              Most users only need to modify this section                    ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
+
+# ============================================================================
+# Storage - Where detrix stores metrics and events
+# ============================================================================
+[storage]
+# Storage backend type: "sqlite" (default)
+# storage_type = "sqlite"
+
+# Database file path (SQLite)
+# Default: "~/detrix/data.db"
+# path = "~/detrix/data.db"
+
+# Maximum events to retain per metric (default: 10000)
+# max_events_per_metric = 10000
+
+# Retention period in hours for events (default: 168 = 7 days)
+# retention_hours = 168
+
+# Maximum number of database connections in the pool
+# Higher values allow more concurrent operations but use more memory
+pool_size = 5
+
+# SQLite busy timeout in milliseconds
+# How long to wait for a locked database before failing
+busy_timeout_ms = 5000
+
+# ============================================================================
+# gRPC API (CLI uses this to communicate with daemon)
+# ============================================================================
+[api.grpc]
+enabled = true
+host = "127.0.0.1"
+port = 50061
+
+# REST API (HTTP/JSON)
+[api.rest]
+# Enable REST server
+enabled = false
+host = "127.0.0.1"
+port = 8090
+
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║                       ADVANCED CONFIGURATION                                ║
+# ║            Defaults work for most users - modify only if needed             ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
+
+# ============================================================================
+# Project Configuration
+# ============================================================================
+[project]
+# Base path for relative file references
+# base_path = "."
+
+# ============================================================================
+# Compatibility Configuration (NOT YET IMPLEMENTED)
+# ============================================================================
+# Version requirements for supported languages (reserved for future use)
+[compatibility]
+# Minimum Python version
+# python_min = "3.8"
+# Maximum Python version
+# python_max = "3.13"
+# Minimum Go version
+# go_min = "1.18"
+
+# ============================================================================
+# Runtime Configuration (NOT YET IMPLEMENTED)
+# ============================================================================
+# Daemon runtime behavior (reserved for future use)
+[runtime]
+# Default runtime mode: "active" or "sleep"
+# default_mode = "active"
+# Wake daemon on incoming request
+# wake_on_request = true
+# Auto-sleep after N seconds of inactivity (0 = disabled)
+# auto_sleep_after_seconds = 0
+
+# ============================================================================
+# Limits Configuration
+# ============================================================================
+[limits]
+# Maximum total metrics across all connections
+# max_metrics_total = 10000
+
+# Maximum metrics per group
+# max_metrics_per_group = 1000
+
+# Maximum expression length in characters
+# max_expression_length = 10000
+
+# ============================================================================
+# Event Batching Configuration
+# ============================================================================
+# Batching is always enabled for optimal performance.
+# Backpressure is handled via channel capacity.
+[storage.event_batching]
+# Maximum events to batch before flushing
+batch_size = 100
+
+# Maximum time to wait before flushing batch (milliseconds)
+# Balance between latency and batch efficiency
+flush_interval_ms = 1000
+
+# Dead Letter Queue configuration
+[storage.event_batching.dlq]
+# Enable DLQ for failed event flushes
+# Failed events are saved to a separate database for later recovery
+enabled = true
+
+# Retry interval for failed events (milliseconds)
+retry_interval_ms = 30000
+
+# Maximum number of retries before marking as permanently failed
+max_retries = 3
+
+# Number of events to process per retry batch
+batch_size = 50
+
+# ============================================================================
+# DLQ Storage Configuration (Separate Database)
+# ============================================================================
+# DLQ uses a separate database from main storage for true isolation.
+# If the main database fails, DLQ can still capture failed events.
+[storage.dlq_storage]
+# Storage backend: "sqlite_file" or "sqlite_memory"
+# - sqlite_file: Persists DLQ to disk (survives restarts)
+# - sqlite_memory: In-memory only (faster, but lost on restart)
+backend = "sqlite_file"
+
+# Database file path (only used for sqlite_file backend)
+# path = "~/detrix/dlq.db"
+
+# Maximum number of database connections in the pool
+# Smaller than main storage since DLQ is used less frequently
+pool_size = 5
+
+# SQLite busy timeout in milliseconds
+busy_timeout_ms = 3000
+
+# ============================================================================
+# System Event Retention Configuration
+# ============================================================================
+# System events track metric CRUD, connection changes, and debugger crashes.
+# Used for MCP client catch-up queries and audit trails.
+[storage.system_event_retention]
+# Retention period in hours (delete events older than this)
+# retention_hours = 168  # 7 days
+
+# Cleanup interval in seconds (how often to check for old events)
+# cleanup_interval_secs = 3600  # 1 hour
+
+# Maximum events to keep (0 = unlimited, count-based retention)
+# max_events = 100000
+
+# ============================================================================
+# Adapter Connection Settings
+# ============================================================================
+# General settings for DAP adapter connections (applies to all languages)
+[adapter]
+# Default host for adapter connections
+# default_host = "127.0.0.1"
+
+# Default port for adapter connections (debugpy default)
+# default_port = 5678
+
+# Connection timeout in milliseconds
+# connection_timeout_ms = 30000
+
+# Health check timeout in milliseconds (for adapter readiness checks)
+# health_check_timeout_ms = 5000
+
+# Shutdown timeout in milliseconds (for graceful adapter shutdown)
+# shutdown_timeout_ms = 5000
+
+# Retry interval in milliseconds when connecting
+# retry_interval_ms = 100
+
+# Maximum "connection refused" attempts before fast-fail
+# max_connection_refused_attempts = 3
+
+# Request timeout in milliseconds for DAP requests
+# request_timeout_ms = 30000
+
+# Minimum number of metrics to trigger batch operations
+# batch_threshold = 10
+
+# Maximum concurrency for parallel adapter operations
+# batch_concurrency = 4
+
+# Capacity of event channels in the DAP broker
+# event_channel_capacity = 1000
+
+# Maximum length for displayed variable values in DAP responses
+# Longer values are truncated with "..." suffix
+# max_value_length = 100
+
+# Automatic reconnection configuration
+[adapter.reconnect]
+# Enable automatic reconnection
+# enabled = true
+
+# Maximum reconnection attempts (0 = unlimited)
+# max_attempts = 10
+
+# Initial delay before first reconnect attempt (ms)
+# initial_delay_ms = 1000
+
+# Maximum delay between reconnect attempts (ms)
+# max_delay_ms = 30000
+
+# Backoff multiplier for exponential backoff
+# multiplier = 2.0
+
+# Add random jitter to prevent thundering herd (0.0-1.0)
+# jitter = 0.1
+
+# Re-register metrics after successful reconnection
+# restore_metrics = true
+
+# ============================================================================
+# API Configuration
+# ============================================================================
+
+# Capacity of the event broadcast channel (buffer size for metric events)
+# event_buffer_capacity = 10000
+
+# Capacity of the system event broadcast channel
+# System events include crashes, connections, metric CRUD operations
+# system_event_channel_capacity = 1000
+
+# Default limit for query operations
+# default_query_limit = 100
+
+# Maximum limit for query operations
+# max_query_limit = 1000
+
+# Number of lines for code context in file inspection
+# context_lines = 10
+
+# Number of preview lines for file overview in file inspection
+# preview_lines = 20
+
+# Automatically select an available port when the preferred port is occupied
+# port_fallback = false
+
+# Maximum message size in bytes (for receiving large metric queries)
+# [api.grpc]
+# max_message_size = 4194304  # 4MB
+
+
+# Rate limiting for REST endpoints
+[api.rest.rate_limit]
+enabled = true
+
+# Maximum requests per second per client
+per_second = 100
+
+# Burst size (allows temporary spikes above per_second)
+burst_size = 50
+
+# Exempt localhost (127.0.0.1, ::1) from rate limiting
+# This allows local development tools and MCP clients to connect without limits
+localhost_exempt = true
+
+# CORS (Cross-Origin Resource Sharing) configuration
+[api.rest.cors]
+# Allow all origins (not recommended for production)
+# When true, ignores allowed_origins list
+allow_all = false
+
+# List of allowed origins
+# Supports exact matches and wildcard patterns:
+# - "http://localhost:3000" - exact match
+# - "http://localhost:*" - any port on localhost
+# - "https://*.example.com" - any subdomain
+# Default: localhost origins only
+allowed_origins = [
+    "http://localhost",
+    "http://127.0.0.1",
+    "http://[::1]",
+]
+
+# Allow credentials (cookies, authorization headers)
+# Default: true (needed for auth)
+allow_credentials = true
+
+# Maximum age for preflight cache in seconds
+# Default: 3600 (1 hour)
+max_age_seconds = 3600
+
+# ============================================================================
+# API Authentication
+# ============================================================================
+# Authentication modes:
+# - disabled: No authentication (default)
+# - simple: Static bearer token from config
+# - external: JWT validation via JWKS endpoint
+[api.auth]
+# Authentication mode
+# mode = "disabled"
+
+# Bearer token for simple mode
+# bearer_token = "your-secret-token"
+
+# Public endpoints excluded from authentication
+# public_endpoints = ["/health", "/status", "/metrics", "/api/health", "/api/status"]
+
+# JWT configuration for external mode
+# [api.auth.jwt]
+# jwks_url = "https://auth.example.com/.well-known/jwks.json"
+# issuer = "https://auth.example.com"
+# audience = "detrix"
+# cache_ttl_seconds = 300
+
+# ============================================================================
+# Streaming Configuration (WebSocket and gRPC)
+# ============================================================================
+[api.streaming]
+# WebSocket idle timeout in milliseconds (0 = disabled)
+# ws_idle_timeout_ms = 300000
+
+# WebSocket idle check interval in milliseconds
+# ws_idle_check_interval_ms = 10000
+
+# WebSocket ping interval in milliseconds (0 = disabled)
+# ws_ping_interval_ms = 30000
+
+# WebSocket pong timeout in milliseconds
+# ws_pong_timeout_ms = 10000
+
+# gRPC stream maximum duration in milliseconds (0 = unlimited)
+# grpc_stream_max_duration_ms = 0
+
+# Maximum concurrent WebSocket connections per client IP
+# max_ws_connections_per_ip = 10
+
+# ============================================================================
+# MCP Bridge Configuration (Model Context Protocol)
+# ============================================================================
+# MCP bridge settings control communication between MCP clients (Claude Code)
+# and the Detrix daemon. Run MCP with: detrix mcp
+[mcp]
+# HTTP timeout in milliseconds for bridge-to-daemon requests
+# Must be longer than adapter connection timeout (30s) for proper error propagation
+bridge_timeout_ms = 60000
+
+# Timeout in milliseconds for individual tool operations
+# tool_timeout_ms = 5000
+
+# Heartbeat interval in seconds
+heartbeat_interval_secs = 10
+
+# Heartbeat timeout in seconds
+heartbeat_timeout_secs = 30
+
+# Maximum consecutive heartbeat failures before daemon restart
+heartbeat_max_failures = 2
+
+# Shutdown grace period in seconds
+shutdown_grace_period_secs = 10
+
+# Cleanup interval in seconds for stale client detection
+cleanup_interval_secs = 5
+
+# Maximum MCP usage history entries per tool
+usage_history_size = 20
+
+# ============================================================================
+# Safety and Security
+# ============================================================================
+[safety]
+# Enable AST analysis for expression validation
+# Prevents unsafe operations like eval(), exec(), file I/O, etc.
+enable_ast_analysis = true
+
+# Whitelist mode: "strict" (only allowed), "trusted" (allow custom)
+# whitelist_mode = "strict"
+
+# Maximum recursion depth for expression evaluation
+# max_recursion_depth = 10
+
+# Maximum memory usage in MB for expression evaluation
+# max_memory_mb = 100
+
+# Maximum entries in AST parse cache for tree-sitter analysis
+# ast_cache_max_entries = 1000
+
+# Python expression safety
+# Built-in allowed/prohibited functions are defined in constants (PYTHON_PURE_FUNCTIONS, etc.)
+# Use user_* fields to EXTEND the built-in lists with your own functions
+[safety.python]
+# User's additional allowed functions (extend built-in pure functions)
+# user_allowed_functions = ["my_safe_function"]
+
+# User's additional prohibited functions (extend built-in impure functions)
+# user_prohibited_functions = ["dangerous_function"]
+
+# Sensitive variable/attribute patterns to block
+# Case-insensitive substring matching - prevents capturing secrets
+sensitive_patterns = [
+    # Authentication
+    "password", "passwd", "secret", "api_key", "apikey",
+    # Tokens
+    "auth_token", "access_token", "refresh_token", "bearer_token", "jwt", "token",
+    # Database credentials
+    "db_password", "database_password", "connection_string",
+    # Cryptographic keys
+    "private_key", "ssh_key", "encryption_key", "signing_key",
+    # General credentials
+    "credential", "credentials",
+    # PII
+    "ssn", "social_security", "credit_card", "card_number", "cvv", "pin",
+]
+
+# LSP-based purity analysis for Python (advanced)
+# [safety.python.lsp]
+# enabled = false
+# command = "pyright-langserver"
+# args = ["--stdio"]
+# max_call_depth = 5
+# analysis_timeout_ms = 5000
+
+# Go expression safety
+[safety.go]
+# User's additional allowed functions (extend built-in pure functions)
+# user_allowed_functions = []
+
+# User's additional prohibited functions (extend built-in impure functions)
+# user_prohibited_functions = []
+
+# Sensitive variable patterns (uses same defaults as Python)
+# sensitive_patterns = ["password", "secret", "token", ...]
+
+# LSP-based purity analysis for Go
+# [safety.go.lsp]
+# enabled = false
+# command = "gopls"
+# args = ["serve"]
+
+# Rust expression safety
+[safety.rust]
+# User's additional allowed functions (extend built-in pure functions)
+# user_allowed_functions = []
+
+# User's additional prohibited functions (extend built-in impure functions)
+# user_prohibited_functions = []
+
+# Sensitive variable patterns (uses same defaults as Python)
+# sensitive_patterns = ["password", "secret", "token", ...]
+
+# LSP-based purity analysis for Rust
+# [safety.rust.lsp]
+# enabled = false
+# command = "rust-analyzer"
+# args = []
+
+# ============================================================================
+# Daemon Mode
+# ============================================================================
+[daemon]
+
+# pid_file = "~/detrix/daemon.pid"
+
+
+# Graceful shutdown drain timeout in milliseconds
+drain_timeout_ms = 5000
+
+# Health check interval for supervised connections in milliseconds
+health_check_interval_ms = 5000
+
+# Restart delay after connection failure in milliseconds
+restart_delay_ms = 500
+
+# ============================================================================
+# Advanced Daemon Settings
+# ============================================================================
+# These settings are for fine-tuning. Most users should use defaults.
+
+# [ADVANCED] Poll interval for daemon startup/shutdown checks in milliseconds
+# Used by CLI when waiting for daemon to start or stop
+# Only change this if you have specific timing requirements
+# Default: 100
+# poll_interval_ms = 100
+
+# ============================================================================
+# Logging Configuration
+# ============================================================================
+# Log files are stored in ~/detrix/log/ by default
+# - Daemon tracing logs: ~/detrix/log/detrix_daemon.log.{date} (daily rotation)
+# - Daemon startup log: ~/detrix/log/detrix_daemon_startup.log (stdout/stderr)
+# - MCP logs: ~/detrix/log/detrix_mcp_{pid}.log (one per MCP process)
+
+[daemon.logging]
+# Log directory for all log files
+# Default: "~/detrix/log/"
+# log_dir = "~/detrix/log/"
+
+# Daemon tracing log file name (relative to log_dir)
+# Logs are rotated daily: {name}.{date} (e.g., detrix_daemon.log.2026-01-27)
+# Default: "detrix_daemon.log"
+# daemon_log_file = "detrix_daemon.log"
+
+# MCP log file prefix (relative to log_dir)
+# Full filename: {mcp_log_prefix}_{pid}.log
+# Default: "detrix_mcp"
+# mcp_log_prefix = "detrix_mcp"
+
+# Enable file logging
+# When false, logs go to stderr only
+# Default: true
+file_logging_enabled = true
+
+# Log file retention in days (0 = disable cleanup)
+# Default: 7
+# log_retention_days = 7
+
+# Use UTC timestamps in logs (default: false = local time)
+# use_utc = false
+
+# ============================================================================
+# Metric Defaults
+# ============================================================================
+# Default values for newly created metrics
+[defaults]
+# Whether metrics are enabled by default
+# enabled = true
+
+# Default capture mode: stream, sample, sample_interval, first, throttle
+# mode = "stream"
+
+# Use thread-local storage for metrics
+# thread_local = true
+
+# Automatically adjust metric location when code changes
+# auto_adjust = true
+
+# Behavior on evaluation error: "log", "disable", "ignore"
+# on_error = "log"
+
+# Maximum evaluation time in milliseconds
+# max_eval_time_ms = 1000
+
+# Default safety level: "strict", "permissive", "custom"
+# safety_level = "strict"
+
+# Default sample rate (for sample mode)
+# Capture every Nth hit
+# sample_rate = 10
+
+# Default sample interval (for sample_interval mode)
+# Capture every N seconds
+# sample_interval_seconds = 30
+
+# Default throttle limit (for throttle mode)
+# Maximum events per second
+# max_per_second = 100
+
+# ============================================================================
+# Anchor Configuration (Metric Location Tracking)
+# ============================================================================
+# The anchor system enables metrics to "follow" code changes like print
+# statements do. When source files are modified, metrics are automatically
+# relocated using a multi-tier fallback system.
+[anchor]
+# Master switch for anchor tracking
+# enabled = true
+
+# Number of context lines to capture before/after the metric line
+# More lines provide better matching accuracy but use more storage
+# context_lines = 2
+
+# Maximum bytes for each context field (before, line, after)
+# Longer lines are truncated at UTF-8 character boundaries
+# max_context_bytes = 200
+
+# Minimum confidence for fingerprint fuzzy matching (0.0-1.0)
+# - 1.0 = exact match only
+# - 0.8 = allow ~20% difference (recommended)
+# - 0.5 = allow ~50% difference (loose)
+# min_fingerprint_confidence = 0.8
+
+# Automatically relocate metrics when source files change
+# auto_relocate = true
+
+# Debounce time for file change events (milliseconds)
+# Prevents processing the same file multiple times during rapid edits
+# file_change_debounce_ms = 500
+
+# Directories to watch for file changes (empty = watch all metric files)
+# watch_paths = []
+
+# Disable auto-relocation for these metric groups
+# exclude_groups = []
+
+# Normalization rules for fingerprinting
+# [anchor.normalization]
+# strip_blank_lines = true
+# strip_trailing_whitespace = true
+# normalize_internal_whitespace = false
+# strip_comments = false
+
+# ============================================================================
+# Audit Trail Configuration (NOT YET IMPLEMENTED)
+# ============================================================================
+# Controls which events are recorded for audit purposes.
+# This section is reserved for future implementation.
+[audit]
+# Enable audit logging
+# enabled = true
+
+# Retention period in days (0 = forever)
+# retention_days = 90
+
+# Which event types to audit (empty = all)
+# Valid: config_updated, api_call_executed, authentication_failed, expression_validated
+# event_types = []
+
+# Include detailed change tracking (old/new values)
+# include_changes = true
+
+# Include expression details in validation audit events
+# include_expressions = false
+
+# ============================================================================
+# Pre-configured Metrics (Optional)
+# ============================================================================
+# You can pre-configure metrics that will be created on startup
+# Uncomment and customize as needed
+
+# [[metric]]
+# name = "user_login"
+# connection_id = "my-python-app"
+# location = { file = "auth.py", line = 42 }
+# expression = "user.id"
+# group = "authentication"
+# mode = "stream"
+# enabled = true
+
+# ============================================================================
+# TUI Configuration (Terminal User Interface)
+# ============================================================================
+# Run TUI with: detrix tui
+[tui]
+# Maximum events to keep in the rolling buffer
+# Default: 10000
+# event_buffer_size = 10000
+
+# Maximum system events to keep in the rolling buffer
+# Default: 1000
+# system_event_capacity = 1000
+
+# Refresh rate in milliseconds when user is actively interacting (~60 FPS)
+# Default: 16
+# refresh_rate_active_ms = 16
+
+# Refresh rate in milliseconds when idle (4 FPS - saves CPU)
+# Default: 250
+# refresh_rate_idle_ms = 250
+
+# Time in milliseconds before switching to idle refresh rate
+# Default: 500
+# idle_timeout_ms = 500
+
+# Data refresh interval when connected (milliseconds)
+# How often to fetch data from the daemon when connected
+# Default: 2000 (2 seconds)
+# data_refresh_connected_ms = 2000
+
+# Data refresh interval when disconnected (milliseconds)
+# How often to retry connecting when disconnected
+# Default: 5000 (5 seconds)
+# data_refresh_disconnected_ms = 5000
+
+# gRPC request timeout (milliseconds)
+# Short timeout for responsiveness
+# Default: 500
+# grpc_timeout_ms = 500
+
+# Theme configuration
+[tui.theme]
+# Theme name: "dark" or "light"
+# Default: "dark"
+name = "dark"
+
+# Custom color overrides (hex strings like "#1a1b26" or named colors)
+# [tui.theme.colors]
+# background = "#1a1b26"
+# foreground = "#c0caf5"
+# selection = "#33467c"
+# header = "#7aa2f7"
+# border = "#3b4261"
+# connected = "#9ece6a"
+# disconnected = "#f7768e"
+# error = "#f7768e"
+# warning = "#e0af68"
+# metric_name = "#bb9af7"
+# value = "#73daca"
+# timestamp = "#565f89"
+
+# ============================================================================
+# Output Configuration (GELF/Graylog)
+# ============================================================================
+# Stream metric events to external observability systems
+[output.gelf]
+# Enable GELF output to Graylog
+enabled = false
+
+# Transport type: "tcp", "udp", or "http"
+transport = "tcp"
+
+# Graylog server host
+host = "127.0.0.1"
+
+# Graylog server port (default: 12201)
+port = 12201
+
+# Hostname to include in GELF messages
+source_host = "detrix-local"
+
+# TCP-specific settings
+# [output.gelf.tcp]
+# connect_timeout_ms = 5000
+# write_timeout_ms = 5000
+# auto_reconnect = true
+
+# Optional circuit breaker
+# [output.gelf.tcp.circuit_breaker]
+# failure_threshold = 5
+# reset_timeout_ms = 30000
+# success_threshold = 2
+
+# UDP-specific settings
+# [output.gelf.udp]
+# compress = true
+# compression_level = 6
+
+# HTTP-specific settings
+# [output.gelf.http]
+# path = "/gelf"
+# timeout_ms = 5000
+# batch_size = 10
+# flush_interval_ms = 1000
+# compress = false
+# auth_token = "your-token"
+
+# Stream routing rules (route events to different Graylog streams)
+# [[output.gelf.routes]]
+# stream = "production-metrics"
+# [output.gelf.routes.match]
+# connection_id = "prod-*"
+# group = "critical"
+
+# Extra fields added to all GELF messages
+# [output.gelf.extra_fields]
+# environment = "production"
+# service = "my-app"
+
+# ════════════════════════════════════════════════════════════════════════════
+# End of Configuration
+# ════════════════════════════════════════════════════════════════════════════
+# For more information, see:
+# - Documentation: https://github.com/flashus/detrix
+# - Issues: https://github.com/flashus/detrix/issues
+# ════════════════════════════════════════════════════════════════════════════

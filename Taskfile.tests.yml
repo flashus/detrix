@@ -1,0 +1,113 @@
+version: "3"
+
+# Detrix Test Tasks
+# Included from main Taskfile.yml
+
+tasks:
+  test:
+    desc: Run all tests (skips gracefully when tools unavailable)
+    cmds:
+      - cargo test --all -- --test-threads=6
+
+  test-unit:
+    desc: Run unit tests only (lib tests, no external tools needed)
+    cmds:
+      - cargo test --lib --all
+
+  test-integration:
+    desc: Run integration tests only
+    cmds:
+      - cargo test --test '*' --all
+
+  # Test by language/debugger (all skip gracefully when tools unavailable)
+  test-python:
+    desc: Run all Python-related tests (skips if debugpy/pylsp/pyright unavailable)
+    cmds:
+      - cargo test -p detrix-lsp --test purity_e2e -p detrix-dap --test python_tests
+      - cargo test --package detrix-testing --test unified_e2e python -- --test-threads=3
+
+  test-go:
+    desc: Run all Go-related tests (skips if delve/gopls unavailable)
+    cmds:
+      - cargo test -p detrix-lsp --test go_purity_e2e -p detrix-dap --test go_tests
+      - cargo test --package detrix-testing --test unified_e2e go -- --test-threads=3
+
+  test-rust-dap:
+    desc: Run all Rust DAP tests (skips if lldb-dap unavailable)
+    cmds:
+      - cargo test -p detrix-dap --test rust_tests
+      - cargo test --package detrix-testing --test unified_e2e rust -- --test-threads=3
+
+  # LSP Tests
+  test-lsp:
+    desc: Run all LSP tests (skips if LSP servers unavailable)
+    cmds:
+      - cargo test -p detrix-lsp --test purity_e2e --test go_purity_e2e --test rust_purity_e2e
+
+  test-lsp-python:
+    desc: Run Python LSP tests only
+    cmds:
+      - cargo test -p detrix-lsp --test purity_e2e
+
+  test-lsp-go:
+    desc: Run Go LSP tests only
+    cmds:
+      - cargo test -p detrix-lsp --test go_purity_e2e
+
+  test-lsp-rust:
+    desc: Run Rust LSP tests only
+    cmds:
+      - cargo test -p detrix-lsp --test rust_purity_e2e
+
+  # DAP Tests (skip gracefully when debuggers unavailable)
+  test-dap:
+    desc: Run all DAP tests (skips if debuggers unavailable)
+    cmds:
+      - cargo test -p detrix-dap --test python_tests --test go_tests --test rust_tests
+
+  test-dap-python:
+    desc: Run Python DAP tests only
+    cmds:
+      - cargo test -p detrix-dap --test python_tests
+
+  test-dap-go:
+    desc: Run Go DAP tests only
+    cmds:
+      - cargo test -p detrix-dap --test go_tests
+
+  test-dap-rust:
+    desc: Run Rust DAP tests only
+    cmds:
+      - cargo test -p detrix-dap --test rust_tests
+
+  # E2E Tests (skip gracefully when debuggers unavailable)
+  e2e:
+    desc: Run ALL unified E2E tests
+    cmds:
+      - cargo test --package detrix-testing --test unified_e2e -- --test-threads=6
+
+  e2e-all:
+    desc: Run ALL E2E tests with output
+    cmds:
+      - cargo test --package detrix-testing --test unified_e2e -- --nocapture --test-threads=6
+
+  # E2E Tests - By Language/Debugger
+  e2e-python:
+    desc: Run Python E2E tests only
+    cmds:
+      - cargo test --package detrix-testing --test unified_e2e python -- --nocapture --test-threads=3
+
+  e2e-go:
+    desc: Run Go E2E tests only
+    cmds:
+      - cargo test --package detrix-testing --test unified_e2e go -- --nocapture --test-threads=3
+
+  e2e-rust:
+    desc: Run Rust E2E tests only
+    cmds:
+      - cargo test --package detrix-testing --test unified_e2e rust -- --nocapture --test-threads=3
+
+  e2e-basic:
+    desc: Run basic E2E tests (no debugger required)
+    cmds:
+      - cargo test --package detrix-testing --test unified_e2e basic -- --nocapture

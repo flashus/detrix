@@ -1,0 +1,27 @@
+[package]
+name = "detrix-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Enable sqlx error conversion (used by detrix-storage)
+sqlx = ["dep:sqlx"]
+
+[dependencies]
+# Minimal dependencies - core domain should be clean
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+# sqlx is optional - only needed for error conversion in storage layer
+sqlx = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Testing only
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+proptest = { workspace = true }

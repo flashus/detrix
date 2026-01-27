@@ -1,0 +1,26 @@
+[package]
+name = "detrix-ports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Port trait definitions for Detrix (Clean Architecture)"
+
+[dependencies]
+# Domain types
+detrix-core = { path = "../detrix-core" }
+detrix-config = { path = "../detrix-config" }
+
+# Async traits
+async-trait.workspace = true
+
+# Tokio for mpsc channel in DapAdapter/FileWatcher
+tokio = { workspace = true, features = ["sync"] }
+
+# For batch operations in DapAdapter
+futures.workspace = true
+
+# For cache fingerprinting
+sha2.workspace = true
+chrono.workspace = true

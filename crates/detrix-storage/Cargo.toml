@@ -1,0 +1,31 @@
+[package]
+name = "detrix-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+detrix-core = { path = "../detrix-core", features = ["sqlx"] }
+detrix-application = { path = "../detrix-application" }
+detrix-config = { path = "../detrix-config" }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Database
+sqlx = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Utilities
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile.workspace = true
+futures.workspace = true
+proptest = { workspace = true }
+detrix-core = { path = "../detrix-core" }

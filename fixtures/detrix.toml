@@ -1,0 +1,51 @@
+# Detrix Configuration Example
+# LLM-First Dynamic Observability Platform
+
+[metadata]
+version = "1.0"
+
+[project]
+base_path = "."
+
+[runtime]
+default_mode = "active"
+auto_sleep_after_seconds = 3600
+
+[storage]
+storage_type = "sqlite"
+path = "detrix.db"
+max_events = 1000000
+max_age_days = 30
+
+# Example metrics for a trading bot
+# Format: file:line + expression
+
+[[metric]]
+name = "order_placed"
+connection_id = "trading-bot"
+location = { file = "fixtures/python/detrix_example_app.py", line = 20 }
+expression = "f'symbol={symbol}, qty={quantity}, price={price}'"
+language = "python"
+enabled = true
+mode = { mode = "stream" }
+safety_level = "strict"
+
+[[metric]]
+name = "position_updated"
+connection_id = "trading-bot"
+location = { file = "fixtures/python/detrix_example_app.py", line = 30 }
+expression = "f'symbol={symbol}, size={position_size}, pnl={unrealized_pnl}'"
+language = "python"
+enabled = true
+mode = { mode = "throttle", max_per_second = 10 }
+safety_level = "strict"
+
+[[metric]]
+name = "trade_executed"
+connection_id = "trading-bot"
+location = { file = "fixtures/python/detrix_example_app.py", line = 40 }
+expression = "f'filled_qty={filled_quantity}, avg_price={average_price}'"
+language = "python"
+enabled = true
+mode = { mode = "stream" }
+safety_level = "strict"

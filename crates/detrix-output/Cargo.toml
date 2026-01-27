@@ -1,0 +1,38 @@
+[package]
+name = "detrix-output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Core dependencies
+detrix-core = { path = "../detrix-core" }
+detrix-config = { path = "../detrix-config" }
+detrix-ports = { path = "../detrix-ports" }
+
+# Async runtime
+tokio.workspace = true
+async-trait.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Regex (for stream routing)
+regex.workspace = true
+
+# HTTP client (for GELF HTTP)
+reqwest.workspace = true
+
+# Compression (for GELF UDP)
+flate2 = "1.0"
+
+# Random number generation (for GELF chunk message IDs)
+rand = "0.9"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+detrix-testing = { path = "../detrix-testing" }

@@ -1,0 +1,38 @@
+[package]
+name = "detrix-dap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+detrix-core = { path = "../detrix-core" }
+detrix-application = { path = "../detrix-application" }
+detrix-config = { path = "../detrix-config" }
+
+# Async runtime
+tokio = { workspace = true, features = ["io-util", "process", "net"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+async-trait.workspace = true
+thiserror.workspace = true
+
+# Logging
+tracing = { workspace = true }
+
+# Random for jitter in exponential backoff
+rand = "0.9"
+
+# TCP socket configuration (keep-alive for Windows compatibility)
+socket2 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+proptest = { workspace = true }
+detrix-testing = { path = "../detrix-testing" }
+detrix-ports = { path = "../detrix-ports" }

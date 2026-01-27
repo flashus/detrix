@@ -1,0 +1,363 @@
+syntax = "proto3";
+
+package detrix.v1;
+
+import "common.proto";
+
+// ============================================================
+// METRICS SERVICE - Control and Management
+// ============================================================
+
+service MetricsService {
+  // Runtime control
+  rpc Wake(WakeRequest) returns (WakeResponse);
+  rpc Sleep(SleepRequest) returns (SleepResponse);
+  rpc GetStatus(StatusRequest) returns (StatusResponse);
+
+  // Metric management
+  rpc AddMetric(AddMetricRequest) returns (MetricResponse);
+  rpc RemoveMetric(RemoveMetricRequest) returns (RemoveMetricResponse);
+  rpc UpdateMetric(UpdateMetricRequest) returns (MetricResponse);
+  rpc GetMetric(GetMetricRequest) returns (MetricResponse);
+  rpc ListMetrics(ListMetricsRequest) returns (ListMetricsResponse);
+  rpc ToggleMetric(ToggleMetricRequest) returns (ToggleMetricResponse);
+
+  // Group operations
+  rpc EnableGroup(GroupRequest) returns (GroupResponse);
+  rpc DisableGroup(GroupRequest) returns (GroupResponse);
+  rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
+
+  // Configuration
+  rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse);
+  rpc ValidateConfig(ValidateConfigRequest) returns (ValidationResponse);
+  rpc GetConfig(GetConfigRequest) returns (ConfigResponse);
+  rpc UpdateConfig(UpdateConfigRequest) returns (ConfigResponse);
+
+  // Validation and introspection
+  rpc ValidateExpression(ValidateExpressionRequest) returns (ValidateExpressionResponse);
+  rpc InspectFile(InspectFileRequest) returns (InspectFileResponse);
+
+  // MCP usage statistics
+  rpc GetMcpUsage(GetMcpUsageRequest) returns (GetMcpUsageResponse);
+}
+
+// ============================================================
+// RUNTIME CONTROL MESSAGES
+// ============================================================
+
+message WakeRequest {
+  RequestMetadata metadata = 1;
+}
+
+message WakeResponse {
+  string status = 1;           // "active"
+  uint32 metrics_loaded = 2;
+  ResponseMetadata metadata = 3;
+}
+
+message SleepRequest {
+  RequestMetadata metadata = 1;
+}
+
+message SleepResponse {
+  string status = 1;           // "sleeping"
+  uint32 metrics_saved = 2;
+  ResponseMetadata metadata = 3;
+  // Human-readable message (e.g., "All adapters stopped")
+  string message = 4;
+}
+
+message StatusRequest {
+  RequestMetadata metadata = 1;
+}
+
+message StatusResponse {
+  // Status mode: "active" if adapters connected, "idle" otherwise
+  string mode = 1;
+  uint32 enabled_metrics = 2;
+  uint64 uptime_seconds = 3;
+  uint64 total_events = 4;
+  // CPU usage percentage (0-100)
+  double cpu_usage_percent = 5;
+  uint64 memory_usage_bytes = 6;
+  ResponseMetadata metadata = 7;
+
+  // === Extended fields (parity with HTTP) ===
+
+  // Human-readable uptime (e.g., "1d 02:30:45" or "02:30:45")
+  string uptime_formatted = 8;
+  // Started timestamp (ISO 8601)
+  string started_at = 9;
+  uint32 total_metrics = 10;
+  uint32 active_connections = 11;
+  uint32 total_connections = 12;
+  // Whether any DAP adapter is connected
+  bool adapter_connected = 13;
+  // Daemon process info (PID, parent PID)
+  DaemonInfo daemon = 14;
+  // Connected MCP clients
+  repeated McpClientInfo mcp_clients = 15;
+  // List of degraded components (empty if all healthy)
+  repeated string degraded = 16;
+  // Path to the loaded configuration file
+  string config_path = 17;
+}
+
+// ============================================================
+// METRIC MANAGEMENT MESSAGES
+// ============================================================
+
+message AddMetricRequest {
+  string name = 1;
+  optional string group = 2;
+  Location location = 3;
+  string expression = 4;
+  string language = 5;         // "python", "go", "rust"
+  bool enabled = 6;
+  MetricMode mode = 7;
+  optional string condition = 8;
+  string safety_level = 9;     // "strict", "moderate", "relaxed"
+  RequestMetadata metadata = 10;
+  string connection_id = 11;   // Required: ID of the connection to use for this metric
+  // If true, replace any existing metric at the same location (file:line).
+  // If false (default), return error when metric already exists at this location.
+  // DAP only supports one logpoint per line.
+  optional bool replace = 12;
+
+  // Introspection options (Python-only for now)
+  // Stack trace capture
+  optional bool capture_stack_trace = 13;
+  optional uint64 stack_trace_ttl = 14;  // TTL in seconds, null for continuous
+  optional StackTraceSlice stack_trace_slice = 15;
+
+  // Memory snapshot capture
+  optional bool capture_memory_snapshot = 16;
+  optional string snapshot_scope = 17;  // "local", "global", "both"
+  optional uint64 snapshot_ttl = 18;    // TTL in seconds, null for continuous
+}
+
+// Stack trace capture configuration
+message StackTraceSlice {
+  bool full = 1;            // Capture full stack (overrides head/tail)
+  optional uint32 head = 2; // Capture first N frames
+  optional uint32 tail = 3; // Capture last N frames
+}
+
+message MetricResponse {
+  uint64 metric_id = 1;
+  string name = 2;
+  string status = 3;
+  Location location = 4;
+  ResponseMetadata metadata = 5;
+}
+
+message RemoveMetricRequest {
+  oneof identifier {
+    uint64 metric_id = 1;
+    string name = 2;
+  }
+  RequestMetadata metadata = 3;
+}
+
+message RemoveMetricResponse {
+  bool success = 1;
+  ResponseMetadata metadata = 2;
+}
+
+message UpdateMetricRequest {
+  uint64 metric_id = 1;
+  optional string expression = 2;
+  optional bool enabled = 3;
+  optional MetricMode mode = 4;
+  optional string condition = 5;
+  RequestMetadata metadata = 6;
+}
+
+message GetMetricRequest {
+  oneof identifier {
+    uint64 metric_id = 1;
+    string name = 2;
+  }
+  RequestMetadata metadata = 3;
+}
+
+message ListMetricsRequest {
+  optional string group = 1;
+  optional bool enabled_only = 2;
+  optional string name_pattern = 3;  // Wildcards supported
+  RequestMetadata metadata = 4;
+}
+
+message ListMetricsResponse {
+  repeated MetricInfo metrics = 1;
+  ResponseMetadata metadata = 2;
+}
+
+message MetricInfo {
+  uint64 metric_id = 1;
+  string name = 2;
+  optional string group = 3;
+  Location location = 4;
+  string expression = 5;
+  string language = 6;
+  bool enabled = 7;
+  MetricMode mode = 8;
+  int64 created_at = 9;
+  uint64 hit_count = 10;
+  optional int64 last_hit_at = 11;
+  string connection_id = 12;
+
+  // Introspection settings
+  bool capture_stack_trace = 13;
+  bool capture_memory_snapshot = 14;
+}
+
+message ToggleMetricRequest {
+  uint64 metric_id = 1;
+  bool enabled = 2;
+  RequestMetadata metadata = 3;
+}
+
+message ToggleMetricResponse {
+  uint64 metric_id = 1;
+  string name = 2;
+  bool enabled = 3;
+  // Whether storage was successfully updated
+  bool storage_updated = 4;
+  // Whether DAP confirmed the operation (breakpoint set/removed)
+  bool dap_confirmed = 5;
+  // Actual line where breakpoint was set (may differ from requested)
+  optional uint32 actual_line = 6;
+  // Message from DAP (e.g., verification status, errors)
+  optional string dap_message = 7;
+  ResponseMetadata metadata = 8;
+  // Status string for HTTP response (e.g., "enabled", "disabled")
+  string status = 9;
+}
+
+// ============================================================
+// GROUP OPERATIONS MESSAGES
+// ============================================================
+
+message GroupRequest {
+  string group_name = 1;
+  RequestMetadata metadata = 2;
+}
+
+message GroupResponse {
+  string group_name = 1;
+  uint32 metrics_affected = 2;
+  ResponseMetadata metadata = 3;
+}
+
+message ListGroupsRequest {
+  RequestMetadata metadata = 1;
+}
+
+message ListGroupsResponse {
+  repeated GroupInfo groups = 1;
+  ResponseMetadata metadata = 2;
+}
+
+message GroupInfo {
+  string name = 1;
+  uint32 metric_count = 2;
+  uint32 enabled_count = 3;
+}
+
+// ============================================================
+// CONFIGURATION MESSAGES
+// ============================================================
+
+message ReloadConfigRequest {
+  optional string config_path = 1;
+  RequestMetadata metadata = 2;
+}
+
+message ReloadConfigResponse {
+  bool success = 1;
+  uint32 metrics_loaded = 2;
+  repeated string errors = 3;
+  ResponseMetadata metadata = 4;
+}
+
+message ValidateConfigRequest {
+  string config_toml = 1;
+  RequestMetadata metadata = 2;
+}
+
+message ValidationResponse {
+  bool valid = 1;
+  repeated string errors = 2;
+  repeated string warnings = 3;
+  ResponseMetadata metadata = 4;
+}
+
+message GetConfigRequest {
+  optional string path = 1;        // Get specific config value
+  RequestMetadata metadata = 2;
+}
+
+message ConfigResponse {
+  string config_toml = 1;
+  int64 version = 2;
+  ResponseMetadata metadata = 3;
+}
+
+message UpdateConfigRequest {
+  string config_toml = 1;
+  bool merge = 2;
+  bool persist = 3;
+  RequestMetadata metadata = 4;
+}
+
+// ============================================================
+// VALIDATION AND INTROSPECTION MESSAGES
+// ============================================================
+
+message ValidateExpressionRequest {
+  string expression = 1;
+  string language = 2;         // "python", "go", "rust" - defaults to "python"
+  RequestMetadata metadata = 3;
+  // Safety level ('strict', 'trusted'). If not provided, uses default from SafetyConfig.
+  optional string safety_level = 4;
+}
+
+message ValidateExpressionResponse {
+  bool is_safe = 1;
+  string expression = 2;
+  ResponseMetadata metadata = 4;
+  // Language that was validated
+  string language = 5;
+  // List of violations (reasons why expression is unsafe)
+  repeated string violations = 6;
+  // List of warnings (non-blocking issues)
+  repeated string warnings = 7;
+}
+
+message InspectFileRequest {
+  string file_path = 1;
+  optional uint32 line = 2;    // If provided, inspect specific line (1-based)
+  optional string find_variable = 3;  // If provided, search for variable occurrences
+  RequestMetadata metadata = 4;
+}
+
+message InspectFileResponse {
+  bool success = 1;
+  string content = 2;          // JSON-encoded inspection result
+  optional string error = 3;
+  ResponseMetadata metadata = 4;
+}
+
+// ============================================================
+// MCP USAGE STATISTICS MESSAGES
+// ============================================================
+
+message GetMcpUsageRequest {
+  RequestMetadata metadata = 1;
+}
+
+message GetMcpUsageResponse {
+  McpUsageSnapshot usage = 1;
+  ResponseMetadata metadata = 2;
+}

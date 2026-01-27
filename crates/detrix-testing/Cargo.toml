@@ -1,0 +1,62 @@
+[package]
+name = "detrix-testing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Test utilities, mocks, and fixtures for Detrix"
+
+[dependencies]
+# Core dependencies
+detrix-core = { path = "../detrix-core" }
+detrix-config = { path = "../detrix-config" }
+detrix-ports = { path = "../detrix-ports" }
+detrix-application = { path = "../detrix-application" }
+detrix-api = { path = "../detrix-api" }
+
+# Async runtime
+tokio.workspace = true
+async-trait.workspace = true
+
+# Date/time for fixtures
+chrono.workspace = true
+
+# E2E test dependencies
+reqwest = { workspace = true, features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+# WebSocket client
+tokio-tungstenite.workspace = true
+futures = "0.3"
+
+# gRPC client
+tonic.workspace = true
+
+# Directory utilities (home dir expansion)
+dirs = "6"
+
+# Logging
+tracing.workspace = true
+
+# Macro utilities for unified tests
+paste = "1.0"
+
+# TOON format parsing for MCP responses
+toon-format = "0.4"
+
+# Property-based testing
+proptest.workspace = true
+
+# JWT testing dependencies (for external auth mode E2E tests)
+jsonwebtoken = "9"
+rsa = { version = "0.9", features = ["std"] }
+rand = "0.8"
+axum.workspace = true
+base64 = "0.22"
+
+# Unix-specific dependencies (must be last section)
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true

@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+package detrix.v1;
+
+import "common.proto";
+
+// ============================================================
+// CONNECTION SERVICE - Debugger Connection Management
+// ============================================================
+
+service ConnectionService {
+  // Create a new connection to a debugpy server
+  rpc CreateConnection(CreateConnectionRequest) returns (CreateConnectionResponse);
+
+  // Disconnect from a debugpy server
+  rpc CloseConnection(CloseConnectionRequest) returns (CloseConnectionResponse);
+
+  // Get connection by ID
+  rpc GetConnection(GetConnectionRequest) returns (ConnectionResponse);
+
+  // List all connections
+  rpc ListConnections(ListConnectionsRequest) returns (ListConnectionsResponse);
+
+  // List only active connections
+  rpc ListActiveConnections(ListActiveConnectionsRequest) returns (ListConnectionsResponse);
+
+  // Cleanup stale (disconnected/failed) connections
+  rpc CleanupConnections(CleanupConnectionsRequest) returns (CleanupConnectionsResponse);
+}
+
+// ============================================================
+// CONNECTION MESSAGES
+// ============================================================
+
+message CreateConnectionRequest {
+  string host = 1;                  // Host address (e.g., "127.0.0.1", "localhost")
+  uint32 port = 2;                  // Port number (must be >= 1024)
+  string language = 3;              // Language/adapter type (e.g., "python", "go", "rust")
+  optional string connection_id = 4; // Optional custom connection ID
+  RequestMetadata metadata = 5;
+  optional string program = 6;      // Program path for launch mode (Rust direct lldb-dap)
+}
+
+message CreateConnectionResponse {
+  string connection_id = 1;         // Unique connection identifier
+  string status = 2;                // "created", "connected", etc.
+  ConnectionInfo connection = 3;    // Full connection info
+  ResponseMetadata metadata = 4;
+}
+
+message CloseConnectionRequest {
+  string connection_id = 1;
+  RequestMetadata metadata = 2;
+}
+
+message CloseConnectionResponse {
+  bool success = 1;
+  ResponseMetadata metadata = 2;
+}
+
+message GetConnectionRequest {
+  string connection_id = 1;
+  RequestMetadata metadata = 2;
+}
+
+message ConnectionResponse {
+  ConnectionInfo connection = 1;
+  ResponseMetadata metadata = 2;
+}
+
+message ListConnectionsRequest {
+  RequestMetadata metadata = 1;
+}
+
+message ListActiveConnectionsRequest {
+  RequestMetadata metadata = 1;
+}
+
+message ListConnectionsResponse {
+  repeated ConnectionInfo connections = 1;
+  ResponseMetadata metadata = 2;
+}
+
+message CleanupConnectionsRequest {
+  RequestMetadata metadata = 1;
+}
+
+message CleanupConnectionsResponse {
+  uint64 deleted = 1;                // Number of connections deleted
+  ResponseMetadata metadata = 2;
+}
+
+// ============================================================
+// CONNECTION INFO
+// ============================================================
+
+message ConnectionInfo {
+  string connection_id = 1;
+  string host = 2;
+  uint32 port = 3;
+  string language = 4;
+  ConnectionStatus status = 5;
+  int64 created_at = 6;             // Unix timestamp (microseconds)
+  optional int64 connected_at = 7;   // Unix timestamp (microseconds)
+  optional int64 last_active_at = 8; // Unix timestamp (microseconds)
+  bool auto_reconnect = 9;
+  uint32 reconnect_attempts = 10;
+  uint32 max_reconnect_attempts = 11;
+}
+
+// Connection status enum
+enum ConnectionStatus {
+  CONNECTION_STATUS_UNSPECIFIED = 0;
+  CONNECTION_STATUS_DISCONNECTED = 1;
+  CONNECTION_STATUS_CONNECTING = 2;
+  CONNECTION_STATUS_CONNECTED = 3;
+  CONNECTION_STATUS_FAILED = 4;
+}

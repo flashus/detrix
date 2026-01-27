@@ -1,0 +1,151 @@
+syntax = "proto3";
+
+package detrix.v1;
+
+// ============================================================
+// COMMON MESSAGES
+// ============================================================
+
+// Metadata sent with every request
+message RequestMetadata {
+  string request_id = 1;  // Client-provided or auto-generated
+}
+
+// Metadata returned with every response
+message ResponseMetadata {
+  int64 timestamp = 1;    // Unix timestamp (microseconds)
+  string request_id = 2;  // Echo back request_id
+  string server_id = 3;   // Server identifier (for distributed setups)
+}
+
+// Standard error response
+message Error {
+  bool error = 1;
+  string error_code = 2;
+  string error_type = 3;
+  string error_message = 4;
+  map<string, string> error_details = 5;
+  int64 timestamp = 6;
+  string request_id = 7;
+  optional string traceback = 8;
+  optional string help_url = 9;
+}
+
+// Empty message
+message Empty {}
+
+// Location in source code
+message Location {
+  string file = 1;
+  uint32 line = 2;
+}
+
+// Metric mode configuration
+message MetricMode {
+  oneof mode {
+    StreamMode stream = 1;
+    SampleMode sample = 2;              // Capture every Nth hit
+    FirstMode first = 3;
+    ThrottleMode throttle = 4;
+    SampleIntervalMode sample_interval = 5;  // Capture every N seconds
+  }
+}
+
+message StreamMode {}
+
+// Hit-based sampling: capture every Nth hit
+message SampleMode {
+  uint32 rate = 1;  // Capture every N hits (e.g., rate=100 means every 100th hit)
+}
+
+message FirstMode {}
+
+message ThrottleMode {
+  uint32 max_per_second = 1;
+}
+
+// Time-based sampling: capture every N seconds
+message SampleIntervalMode {
+  uint32 seconds = 1;  // Capture every N seconds (e.g., seconds=60 means every 60 seconds)
+}
+
+// ============================================================
+// MCP USAGE STATISTICS
+// ============================================================
+
+// MCP error code for categorizing tool errors
+enum McpErrorCode {
+  MCP_ERROR_CODE_UNSPECIFIED = 0;
+  MCP_ERROR_CODE_LOCATION_MISSING_AT = 1;
+  MCP_ERROR_CODE_LOCATION_MISSING_LINE = 2;
+  MCP_ERROR_CODE_LOCATION_INVALID_LINE = 3;
+  MCP_ERROR_CODE_METRIC_BEFORE_CONNECTION = 4;
+  MCP_ERROR_CODE_CONNECTION_NOT_FOUND = 5;
+  MCP_ERROR_CODE_CONNECTION_DISCONNECTED = 6;
+  MCP_ERROR_CODE_QUERY_MISSING_REQUIRED_PARAM = 7;
+  MCP_ERROR_CODE_UNSAFE_EXPRESSION = 8;
+  MCP_ERROR_CODE_OTHER = 9;
+}
+
+// Error count for a specific error code
+message McpErrorCount {
+  string code = 1;
+  uint64 count = 2;
+}
+
+// Workflow statistics
+message McpWorkflowStats {
+  uint64 correct_workflows = 1;
+  uint64 skipped_inspect = 2;
+  uint64 no_connection = 3;
+  double adherence_rate = 4;
+}
+
+// MCP usage snapshot
+message McpUsageSnapshot {
+  uint64 total_calls = 1;
+  uint64 total_success = 2;
+  uint64 total_errors = 3;
+  double success_rate = 4;
+  double avg_latency_ms = 5;
+  repeated McpErrorCount top_errors = 6;
+  McpWorkflowStats workflow = 7;
+}
+
+// ============================================================
+// DAEMON AND MCP CLIENT INFO
+// ============================================================
+
+// Information about the daemon process
+message DaemonInfo {
+  // Process ID
+  uint32 pid = 1;
+  // Parent process ID
+  uint32 ppid = 2;
+}
+
+// Information about a parent process that spawned an MCP client
+message ParentProcessInfo {
+  // Parent process ID
+  uint32 pid = 1;
+  // Name of the parent process (e.g., "windsurf", "claude", "cursor")
+  string name = 2;
+  // MCP bridge process ID (the direct client)
+  uint32 bridge_pid = 3;
+}
+
+// Information about a connected MCP client
+message McpClientInfo {
+  // Client identifier (UUID)
+  string id = 1;
+  // When the client connected (ISO 8601)
+  string connected_at = 2;
+  // Duration connected in seconds
+  uint64 connected_duration_secs = 3;
+  // Last activity timestamp (ISO 8601)
+  string last_activity = 4;
+  // Seconds since last activity
+  uint64 last_activity_ago_secs = 5;
+  // Parent process information (if available)
+  optional ParentProcessInfo parent_process = 6;
+}

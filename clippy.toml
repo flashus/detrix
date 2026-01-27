@@ -1,0 +1,16 @@
+# Clippy configuration for Detrix
+#
+# This file configures workspace-wide Clippy lints.
+# Run: cargo clippy --all -- -D warnings
+
+# Allow large error types in Result (common with thiserror enums)
+avoid-breaking-exported-api = false
+
+# Configure cognitive complexity threshold
+cognitive-complexity-threshold = 30
+
+# Configure too-many-arguments threshold
+too-many-arguments-threshold = 8
+
+# Configure too-many-lines threshold
+too-many-lines-threshold = 150

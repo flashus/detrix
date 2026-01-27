@@ -1,0 +1,45 @@
+[package]
+name = "detrix-lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LSP-based purity analysis for Detrix"
+
+[dependencies]
+# Core domain types
+detrix-core.path = "../detrix-core"
+
+# Application layer (for PurityAnalyzer trait)
+detrix-application.path = "../detrix-application"
+
+# Configuration
+detrix-config.path = "../detrix-config"
+
+# Async runtime
+tokio.workspace = true
+async-trait.workspace = true
+
+# Serialization (for LSP JSON-RPC)
+serde.workspace = true
+serde_json.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Hashing for cache keys
+sha2.workspace = true
+
+# Pattern matching for body analysis
+regex.workspace = true
+
+[dev-dependencies]
+# Testing
+tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+detrix-testing = { path = "../detrix-testing" }

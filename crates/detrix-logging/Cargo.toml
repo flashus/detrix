@@ -1,0 +1,19 @@
+[package]
+name = "detrix-logging"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Centralized logging configuration for Detrix"
+
+[dependencies]
+detrix-config = { path = "../detrix-config" }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+filetime = "0.2"

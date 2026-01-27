@@ -1,0 +1,122 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/detrix-core",
+    "crates/detrix-config",
+    "crates/detrix-ports",
+    "crates/detrix-dap",
+    "crates/detrix-storage",
+    "crates/detrix-api",
+    "crates/detrix-cli",
+    "crates/detrix-application",
+    "crates/detrix-testing",
+    "crates/detrix-lsp",
+    "crates/detrix-output",
+    "crates/detrix-tui",
+    "crates/detrix-logging",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.80"
+authors = ["Ilya Dyachenko"]
+license = "MIT"
+repository = "https://github.com/flashus/detrix"
+
+[workspace.dependencies]
+# Core dependencies (minimal for detrix-core)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2.0"
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tokio-stream = "0.1"
+async-trait = "0.1"
+futures = "0.3"
+async-stream = "0.3"
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "sqlite", "chrono", "migrate"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time"] }
+tracing-appender = "0.2"
+detrix-logging = { path = "crates/detrix-logging" }
+
+# API frameworks
+axum = { version = "0.8.7", features = ["macros", "ws"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tonic = { version = "0.14", features = ["transport"] }
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
+tonic-build = "0.14"
+tonic-prost-build = "0.14"
+prost-build = "0.14"
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# WebSocket
+tokio-tungstenite = "0.28"
+
+# Utilities
+regex = "1.10"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+anyhow = "1.0"
+sha2 = "0.10"
+toml = "0.9"
+fs2 = "0.4"  # Cross-platform file locking
+socket2 = { version = "0.5", features = ["all"] }  # TCP keep-alive configuration
+tempfile = "3.10"
+hyper = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rand = "0.9"
+
+# MCP (Model Context Protocol)
+rmcp = { version = "0.12", features = ["schemars", "transport-io"] }
+schemars = "1.0"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# TUI
+ratatui = "0.30"
+crossterm = "0.29"
+color-eyre = "0.6"
+
+# Unix process management
+nix = { version = "0.30", features = ["signal", "user"] }
+
+# Testing
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.5"
+
+# Macros
+paste = "1.0"
+
+# System info
+sysinfo = "0.37"
+
+# Tree-sitter for AST parsing
+tree-sitter = "0.25"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-rust = "0.24"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.test]
+opt-level = 1

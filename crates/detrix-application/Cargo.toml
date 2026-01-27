@@ -1,0 +1,65 @@
+[package]
+name = "detrix-application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core dependencies - Application Layer depends on Domain, Config, and Ports
+detrix-core = { path = "../detrix-core" }
+detrix-config = { path = "../detrix-config" }
+detrix-ports = { path = "../detrix-ports" }
+
+# Async runtime
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+async-trait.workspace = true
+
+# Time handling
+chrono.workspace = true
+
+# Hashing for cache keys
+sha2.workspace = true
+
+# TOML parsing for config service
+toml.workspace = true
+
+# Tree-sitter for AST parsing (replaces external analyzers)
+tree-sitter.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-rust.workspace = true
+
+# Concurrent hashmap for better performance
+dashmap = "6"
+
+# File system notifications for anchor tracking
+notify = "8.2"
+
+# Debouncing for file change events
+notify-debouncer-mini = "0.7"
+
+# JWT validation for external auth mode (SEC-02)
+jsonwebtoken = "9"
+
+# HTTP client for JWKS fetching
+reqwest.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile.workspace = true
+proptest = { workspace = true }
+# detrix-testing provides mocks (circular dep broken via detrix-ports extraction)
+detrix-testing = { path = "../detrix-testing" }

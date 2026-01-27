@@ -1,0 +1,7 @@
+**target**
+.cargo/
+.claude/
+logs/
+fixtures/go/detrix_example_app
+fixtures/rust/detrix_example_app
+fixtures/rust/detrix_example_app.dSYM/*

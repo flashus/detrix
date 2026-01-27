@@ -1,0 +1,98 @@
+[package]
+name = "detrix-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# tower is used via tower_governor and tower_http (transitive re-exports)
+[package.metadata.cargo-machete]
+ignored = ["tower"]
+
+[dependencies]
+# Core dependencies (Clean Architecture: API layer depends only on core + application)
+detrix-core = { path = "../detrix-core" }
+detrix-config = { path = "../detrix-config" }
+detrix-application = { path = "../detrix-application" }
+
+# Async runtime
+tokio.workspace = true
+futures.workspace = true
+async-stream.workspace = true
+
+# gRPC
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+
+# REST API
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tower_governor = "0.8"  # Rate limiting middleware
+
+# MCP (Model Context Protocol)
+rmcp.workspace = true
+schemars.workspace = true
+
+# TOON (Token-Oriented Object Notation) - LLM-optimized serialization
+toon-format = "0.4"
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Utilities
+chrono.workspace = true
+uuid.workspace = true
+sysinfo.workspace = true
+regex.workspace = true
+paste.workspace = true
+
+# Unix-specific for process info
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[features]
+# Feature flag for disabled/WIP end-to-end tests
+# These tests need refactoring before they can run
+e2e_tests = []
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tower.workspace = true
+tempfile.workspace = true
+tokio-stream.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+detrix-testing = { path = "../detrix-testing" }
+# Infrastructure crates for integration tests (not used in production code)
+detrix-storage = { path = "../detrix-storage" }
+detrix-dap = { path = "../detrix-dap" }
+
+[[test]]
+name = "grpc_integration"
+path = "tests/grpc_integration_tests.rs"
+
+[[test]]
+name = "grpc_e2e"
+path = "tests/grpc_e2e.rs"
+
+[[test]]
+name = "mcp_e2e"
+path = "tests/mcp_e2e_tests.rs"
+
+# Note: Real E2E tests in detrix-testing crate
+# - mcp_real_dap_e2e.rs → detrix-testing/tests/mcp_e2e.rs
+# - api_parity_e2e.rs → Will be implemented with gRPC/REST backends

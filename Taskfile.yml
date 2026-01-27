@@ -1,0 +1,70 @@
+version: "3"
+
+# Detrix Taskfile - Main Tasks
+# Test tasks are in Taskfile.tests.yml
+
+includes:
+  tests:
+    taskfile: ./Taskfile.tests.yml
+    aliases: [test, t]
+
+tasks:
+  build:
+    desc: Build Detrix in release mode
+    cmds:
+      - cargo build --release
+
+  lint:
+    desc: Run clippy linter
+    cmds:
+      - cargo clippy --all -- -D warnings
+
+  format:
+    desc: Format code with rustfmt
+    cmds:
+      - cargo fmt --all
+
+  format-check:
+    desc: Check code formatting
+    cmds:
+      - cargo fmt --all -- --check
+
+  generate:
+    desc: Regenerate protobuf code from .proto files (uses tonic-build/prost)
+    cmds:
+      - echo "Regenerating protobuf code from .proto files..."
+      - echo "This will trigger build.rs in detrix-api which uses tonic-build (prost)"
+      - cargo build --package detrix-api
+      - echo "✅ Protobuf code regenerated in crates/detrix-api/src/generated/"
+      - echo "Note Proto files are in crates/detrix-api/proto/"
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - cargo clean
+      - rm -f fixtures/detrix.db
+
+  # Quick checks before commit
+  pre-commit:
+    desc: Run all checks before committing (format, lint, ALL tests including ignored)
+    cmds:
+      - task: format
+      - task: lint
+      - task: tests:test
+      - echo "✅ All checks passed! Ready to commit."
+  
+  # Quick access to common test tasks (aliases to Taskfile.tests.yml)
+  test:
+    desc: Run all tests (alias to tests:test)
+    cmds:
+      - task: tests:test
+
+  test-unit:
+    desc: Run unit tests only (alias to tests:test-unit)
+    cmds:
+      - task: tests:test-unit
+
+  e2e:
+    desc: Run ALL E2E tests (alias to tests:e2e)
+    cmds:
+      - task: tests:e2e
