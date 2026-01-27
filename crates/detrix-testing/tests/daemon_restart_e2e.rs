@@ -136,10 +136,10 @@ async fn test_daemon_restart_auto_reconnect_python() {
     // ========================================================================
     reporter.section("PHASE 4: ADD METRICS & CAPTURE EVENTS");
 
-    // Add a metric - use line 46 for trade_bot_forever.py
-    // At line 46: `order_id = place_order(symbol, quantity, price)`
-    // Variables price, quantity, symbol are in scope from lines 41-43
-    let metric_line = 46;
+    // Add a metric - use line 59 for trade_bot_forever.py (after +13 lines Detrix client init)
+    // At line 59: `order_id = place_order(symbol, quantity, price)`
+    // Variables price, quantity, symbol are in scope from lines 54-56
+    let metric_line = 59;
 
     let location = format!("@{}#{}", script_path.display(), metric_line);
     let step = reporter.step_start(

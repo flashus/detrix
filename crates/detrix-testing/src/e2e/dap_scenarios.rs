@@ -133,49 +133,49 @@ impl DapWorkflowConfig {
     /// IMPORTANT: DAP logpoints evaluate BEFORE the line executes, so we must use
     /// lines where variables are already in scope from PREVIOUS assignments.
     ///
-    /// Variables defined at:
-    /// - Line 41: `symbol = random.choice(symbols)`
-    /// - Line 42: `quantity = random.randint(1, 50)`
-    /// - Line 43: `price = random.uniform(100, 1000)`
-    /// - Line 46: `order_id = place_order(...)` <- symbol, quantity, price in scope here
-    /// - Line 53: `print(...)` <- all variables in scope here
+    /// Variables defined at (after Detrix client init block - +13 lines offset):
+    /// - Line 54: `symbol = random.choice(symbols)`
+    /// - Line 55: `quantity = random.randint(1, 50)`
+    /// - Line 56: `price = random.uniform(100, 1000)`
+    /// - Line 59: `order_id = place_order(...)` <- symbol, quantity, price in scope here
+    /// - Line 66: `print(...)` <- all variables in scope here
     ///
     /// So we use:
-    /// - Line 46 for symbol, quantity, price (before order_id is assigned, but after others)
-    /// - Line 53 for order_id (after it's assigned on line 46)
+    /// - Line 59 for symbol, quantity, price (before order_id is assigned, but after others)
+    /// - Line 66 for order_id (after it's assigned on line 59)
     pub fn python() -> Self {
         Self {
             language: SourceLanguage::Python,
             source_file: PathBuf::from("fixtures/python/trade_bot_forever.py"),
             metrics: vec![
-                // order_id is assigned on line 46, so evaluate after that (line 53)
-                MetricPoint::new("order_metric", 53, "order_id").with_group("python_workflow"),
-                // price is assigned on line 43, so evaluate after that (line 46)
-                MetricPoint::new("price_metric", 46, "price").with_group("python_workflow"),
+                // order_id is assigned on line 59, so evaluate after that (line 66)
+                MetricPoint::new("order_metric", 66, "order_id").with_group("python_workflow"),
+                // price is assigned on line 56, so evaluate after that (line 59)
+                MetricPoint::new("price_metric", 59, "price").with_group("python_workflow"),
                 // IMPORTANT: Each metric must be on a DIFFERENT line because DAP logpoints
                 // evaluate only one expression per breakpoint location
-                // quantity is assigned on line 42, evaluate on line 49 (entry_price := price)
-                MetricPoint::new("quantity_metric", 49, "quantity").with_group("python_workflow"),
-                // symbol is assigned on line 41, evaluate on line 50 (current_price := ...)
-                MetricPoint::new("symbol_metric", 50, "symbol").with_group("python_workflow"),
+                // quantity is assigned on line 55, evaluate on line 62 (entry_price := price)
+                MetricPoint::new("quantity_metric", 62, "quantity").with_group("python_workflow"),
+                // symbol is assigned on line 54, evaluate on line 63 (current_price := ...)
+                MetricPoint::new("symbol_metric", 63, "symbol").with_group("python_workflow"),
             ],
             // Introspection metrics: stack trace and memory snapshot capture
-            // Use line 53 where all variables are in scope
+            // Use line 66 where all variables are in scope
             introspection_metrics: vec![
-                MetricPoint::new("stack_trace_metric", 53, "order_id")
+                MetricPoint::new("stack_trace_metric", 66, "order_id")
                     .with_group("python_introspection")
                     .with_stack_trace(),
-                MetricPoint::new("memory_snapshot_metric", 53, "price")
+                MetricPoint::new("memory_snapshot_metric", 66, "price")
                     .with_group("python_introspection")
                     .with_memory_snapshot(),
-                MetricPoint::new("full_introspection_metric", 53, "quantity")
+                MetricPoint::new("full_introspection_metric", 66, "quantity")
                     .with_group("python_introspection")
                     .with_introspection(),
             ],
-            inspect_line: 53,
+            inspect_line: 66,
             inspect_variable: "price".to_string(),
             invalid_metric: Some(
-                MetricPoint::new("bad_metric", 53, "nonexistent_var").with_group("python_workflow"),
+                MetricPoint::new("bad_metric", 66, "nonexistent_var").with_group("python_workflow"),
             ),
             group_name: "python_workflow".to_string(),
             event_wait_secs: 15,

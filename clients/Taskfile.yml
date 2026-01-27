@@ -1,0 +1,199 @@
+version: "3"
+
+# Detrix Client Libraries Taskfile
+#
+# Tasks for managing and generating client libraries from OpenAPI specs.
+# All clients are generated from the shared spec in specs/client-control-plane.openapi.yaml
+
+vars:
+  SPEC_FILE: "specs/client-control-plane.openapi.yaml"
+  GENERATED_DIR: ".generated"
+
+tasks:
+  # ============================================================================
+  # Validation
+  # ============================================================================
+
+  validate-spec:
+    desc: Validate the OpenAPI spec
+    cmds:
+      - |
+        if command -v openapi-generator-cli &> /dev/null; then
+          openapi-generator-cli validate -i {{.SPEC_FILE}}
+        elif command -v npx &> /dev/null; then
+          npx @openapitools/openapi-generator-cli validate -i {{.SPEC_FILE}}
+        else
+          echo "⚠️  openapi-generator-cli not found, using Python yaml validation"
+          python -c "import yaml; yaml.safe_load(open('{{.SPEC_FILE}}'))"
+          echo "✅ YAML syntax valid (install openapi-generator-cli for full validation)"
+        fi
+
+  # ============================================================================
+  # Code Generation - Python
+  # ============================================================================
+
+  generate-python-models:
+    desc: Generate Python Pydantic models from OpenAPI spec
+    dir: python
+    cmds:
+      - mkdir -p detrix/_generated
+      - |
+        uv run datamodel-codegen \
+          --input ../{{.SPEC_FILE}} \
+          --input-file-type openapi \
+          --output detrix/_generated/models.py \
+          --output-model-type pydantic_v2.BaseModel \
+          --use-annotated \
+          --field-constraints \
+          --snake-case-field \
+          --use-default-kwarg \
+          --target-python-version 3.11
+      - echo "✅ Generated Python models in python/detrix/_generated/models.py"
+
+  generate-python-scaffold:
+    desc: Generate Python client scaffold from OpenAPI spec
+    dir: python
+    deps:
+      - generate-python-models
+    cmds:
+      - |
+        echo "📝 Python scaffold generation complete"
+        echo ""
+        echo "Generated files:"
+        echo "  - detrix/_generated/models.py  (Pydantic models)"
+        echo ""
+        echo "Note: The control plane implementation in control.py uses these"
+        echo "models. Update it manually if the spec changes significantly."
+
+  # ============================================================================
+  # Code Generation - Go (future)
+  # ============================================================================
+
+  generate-go-scaffold:
+    desc: Generate Go client scaffold from OpenAPI spec
+    cmds:
+      - mkdir -p go/internal/generated
+      - |
+        if command -v oapi-codegen &> /dev/null; then
+          oapi-codegen -package generated -generate types {{.SPEC_FILE}} > go/internal/generated/types.go
+          oapi-codegen -package generated -generate chi-server {{.SPEC_FILE}} > go/internal/generated/server.go
+          echo "✅ Generated Go code in go/internal/generated/"
+        else
+          echo "⚠️  oapi-codegen not installed. Install with:"
+          echo "    go install github.com/deepmap/oapi-codegen/v2/cmd/oapi-codegen@latest"
+          exit 1
+        fi
+
+  # ============================================================================
+  # Code Generation - Rust (future)
+  # ============================================================================
+
+  generate-rust-scaffold:
+    desc: Generate Rust client scaffold from OpenAPI spec
+    cmds:
+      - mkdir -p rust/src/generated
+      - |
+        if command -v openapi-generator-cli &> /dev/null; then
+          openapi-generator-cli generate \
+            -i {{.SPEC_FILE}} \
+            -g rust \
+            -o rust/src/generated \
+            --additional-properties=library=reqwest
+          echo "✅ Generated Rust code in rust/src/generated/"
+        else
+          echo "⚠️  openapi-generator-cli not installed. Install with:"
+          echo "    npm install -g @openapitools/openapi-generator-cli"
+          exit 1
+        fi
+
+  # ============================================================================
+  # All Languages
+  # ============================================================================
+
+  generate-all:
+    desc: Generate client scaffolds for all languages
+    deps:
+      - validate-spec
+    cmds:
+      - task: generate-python-scaffold
+      # Uncomment when Go client is implemented:
+      # - task: generate-go-scaffold
+      # Uncomment when Rust client is implemented:
+      # - task: generate-rust-scaffold
+      - echo "✅ All client scaffolds generated"
+
+  # ============================================================================
+  # Python Client Tasks
+  # ============================================================================
+
+  python-test:
+    desc: Run Python client tests
+    dir: python
+    cmds:
+      - uv run pytest -v
+
+  python-lint:
+    desc: Lint Python client code
+    dir: python
+    cmds:
+      - uv run ruff check detrix
+
+  python-format:
+    desc: Format Python client code
+    dir: python
+    cmds:
+      - uv run ruff format detrix tests
+
+  python-typecheck:
+    desc: Type check Python client
+    dir: python
+    cmds:
+      - uv run mypy detrix
+
+  python-check:
+    desc: Run all Python checks (lint, typecheck, test)
+    dir: python
+    cmds:
+      - task: python-lint
+      - task: python-typecheck
+      - task: python-test
+      - echo "✅ All Python checks passed"
+
+  # ============================================================================
+  # Client Testing
+  # ============================================================================
+
+  client-test:
+    desc: Run client tests (E2E tests using fixtures with Detrix client enabled)
+    cmds:
+      - |
+        cd .. && cargo test -p detrix-testing client_tests --release -- --nocapture
+
+  # ============================================================================
+  # Development Helpers
+  # ============================================================================
+
+  sync-spec-to-python:
+    desc: Sync OpenAPI spec changes to Python implementation
+    deps:
+      - generate-python-models
+    cmds:
+      - |
+        echo "📝 OpenAPI spec synced to Python"
+        echo ""
+        echo "The generated models are in: python/detrix/_generated/models.py"
+        echo ""
+        echo "Manual updates may be needed in:"
+        echo "  - python/detrix/control.py (HTTP handlers)"
+        echo "  - python/detrix/__init__.py (public API)"
+        echo ""
+        echo "Run 'task python-check' to verify the implementation."
+
+  clean:
+    desc: Clean generated files
+    cmds:
+      - rm -rf {{.GENERATED_DIR}}
+      - rm -rf python/detrix/_generated
+      - rm -rf go/internal/generated
+      - rm -rf rust/src/generated
+      - echo "✅ Cleaned generated files"

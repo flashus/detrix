@@ -3223,14 +3223,14 @@ mod observe_workflow_tests {
         reporter.section("STEP 5: OBSERVE WITH EXPLICIT LINE");
         let step = reporter.step_start(
             "Observe (Explicit Line)",
-            "Using observe tool with line 53 (all variables in scope)",
+            "Using observe tool with line 66 (all variables in scope)",
         );
         reporter.info(&format!("  File: {}", script_path.display()));
         reporter.info("  Expression: price");
-        reporter.info("  Line: 53 (explicit)");
+        reporter.info("  Line: 66 (explicit)");
 
         let observe_request = ObserveRequest::new(script_path.to_str().unwrap(), "price")
-            .with_line(53)
+            .with_line(66)
             .with_connection_id(&connection_id)
             .with_name("observe_price_explicit");
 
@@ -3261,11 +3261,11 @@ mod observe_workflow_tests {
             "Using observe without name - should auto-generate",
         );
         reporter.info("  Expression: order_id");
-        reporter.info("  Line: 50 (different line to avoid DAP conflict)");
+        reporter.info("  Line: 63 (different line to avoid DAP conflict)");
         reporter.info("  Name: (auto-generated)");
 
         let observe_request = ObserveRequest::new(script_path.to_str().unwrap(), "order_id")
-            .with_line(50) // Different line to avoid DAP logpoint conflict
+            .with_line(63) // Different line to avoid DAP logpoint conflict
             .with_connection_id(&connection_id);
         // No name set - should auto-generate
 
@@ -3289,12 +3289,12 @@ mod observe_workflow_tests {
             "Using observe with stack trace + memory snapshot",
         );
         reporter.info("  Expression: quantity");
-        reporter.info("  Line: 51 (different line to avoid DAP conflict)");
+        reporter.info("  Line: 64 (different line to avoid DAP conflict)");
         reporter.info("  Stack Trace: enabled");
         reporter.info("  Memory Snapshot: enabled");
 
         let observe_request = ObserveRequest::new(script_path.to_str().unwrap(), "quantity")
-            .with_line(51) // Different line to avoid DAP logpoint conflict
+            .with_line(64) // Different line to avoid DAP logpoint conflict
             .with_connection_id(&connection_id)
             .with_name("observe_quantity_introspection")
             .with_group("python_observe_test")
@@ -3800,16 +3800,16 @@ mod enable_from_diff_workflow_tests {
 
         // Create a diff with valid Python print statements
         // These expressions should all be parseable (simple identifiers/attributes)
+        // Line numbers updated for +13 lines Detrix client init at top of file
         let diff = format!(
             r#"diff --git a/{path} b/{path}
-@@ -45,6 +45,9 @@ def run_trade_loop():
-     symbol = random.choice(symbols)
-+    print(f"symbol={{symbol}}")
-     quantity = random.randint(1, 50)
-+    print(f"quantity={{quantity}}")
-     price = random.uniform(100, 1000)
-+    print(f"price={{price}}")
-     order_id = place_order(symbol, quantity, price)
+@@ -54,6 +54,9 @@ def main():
+        symbol = random.choice(symbols)
++        print(f"symbol={{symbol}}")
+        quantity = random.randint(1, 50)
++        print(f"quantity={{quantity}}")
+        price = random.uniform(100, 1000)
++        print(f"price={{price}}")
 "#,
             path = script_path.display()
         );
@@ -3951,15 +3951,16 @@ mod enable_from_diff_workflow_tests {
         reporter.section("STEP 2: ENABLE FROM DIFF - PARTIAL SUCCESS");
 
         // Mix of simple and complex expressions
+        // Line numbers updated for +13 lines Detrix client init at top of file
         let diff = format!(
             r#"diff --git a/{path} b/{path}
-@@ -45,6 +45,9 @@ def run_trade_loop():
-     symbol = random.choice(symbols)
-+    print(f"symbol={{symbol}}")
-     quantity = random.randint(1, 50)
-+    print(calculate_total(quantity, price))
-     price = random.uniform(100, 1000)
-+    print(f"price={{price}}")
+@@ -54,6 +54,9 @@ def main():
+        symbol = random.choice(symbols)
++        print(f"symbol={{symbol}}")
+        quantity = random.randint(1, 50)
++        print(calculate_total(quantity, price))
+        price = random.uniform(100, 1000)
++        print(f"price={{price}}")
 "#,
             path = script_path.display()
         );

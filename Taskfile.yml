@@ -7,6 +7,10 @@ includes:
   tests:
     taskfile: ./Taskfile.tests.yml
     aliases: [test, t]
+  clients:
+    taskfile: ./clients/Taskfile.yml
+    dir: ./clients
+    aliases: [client, c]
 
 tasks:
   build:
