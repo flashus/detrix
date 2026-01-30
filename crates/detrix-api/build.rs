@@ -21,6 +21,13 @@ fn main() -> Result<()> {
         // Enable serde derive for JSON compatibility (REST/MCP/WebSocket)
         .type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute(".", "#[serde(rename_all = \"camelCase\")]")
+        // Add serde(default) for bool fields that should default to false when missing
+        // This is needed because proto3 has implicit defaults but serde requires explicit defaults
+        .field_attribute("safe_mode", "#[serde(default)]")
+        .field_attribute("auto_reconnect", "#[serde(default)]")
+        .field_attribute("enabled", "#[serde(default)]")
+        .field_attribute("capture_stack_trace", "#[serde(default)]")
+        .field_attribute("capture_memory_snapshot", "#[serde(default)]")
         // Compile all proto files
         .compile_protos(
             &[

@@ -261,6 +261,11 @@ pub struct CreateConnectionParams {
         description = "Process ID to attach to (for Rust/lldb-dap only). When specified, lldb-dap will attach to this running process."
     )]
     pub pid: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "SafeMode: Only allow logpoints (non-blocking), disable breakpoint-based operations like function calls, stack traces, memory snapshots. Recommended for production environments."
+    )]
+    pub safe_mode: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

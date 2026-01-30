@@ -140,6 +140,7 @@ async fn test_e2e_complete_daemon_workflow() {
             "python".to_string(),
             Some("test-trading-bot".to_string()),
             None,
+            false,
         )
         .await
         .expect("Should create connection");
@@ -165,7 +166,7 @@ async fn test_e2e_complete_daemon_workflow() {
             .await
     );
 
-    let adapter_info = fixture.lifecycle_manager.list_adapters().await;
+    let adapter_info = fixture.lifecycle_manager.list_adapters();
     assert_eq!(adapter_info.len(), 1);
     assert_eq!(adapter_info[0].connection_id.0, "test-trading-bot");
     assert_eq!(adapter_info[0].status, ManagedAdapterStatus::Running);
@@ -240,6 +241,7 @@ async fn test_e2e_multiple_connections() {
             "python".to_string(),
             Some("conn-1".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -252,6 +254,7 @@ async fn test_e2e_multiple_connections() {
             "python".to_string(),
             Some("conn-2".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -264,6 +267,7 @@ async fn test_e2e_multiple_connections() {
             "python".to_string(),
             Some("conn-3".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -394,6 +398,7 @@ async fn test_e2e_event_broadcast_for_streaming() {
             "python".to_string(),
             Some("stream-test".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -438,6 +443,7 @@ async fn test_e2e_concurrent_connection_creation() {
                     "python".to_string(),
                     Some(format!("concurrent-conn-{}", i)),
                     None,
+                    false,
                 )
                 .await
         });
@@ -485,6 +491,7 @@ async fn test_e2e_connection_recreation() {
             "python".to_string(),
             Some("recreate-test".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -521,6 +528,7 @@ async fn test_e2e_connection_recreation() {
             "python".to_string(),
             Some("recreate-test".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -568,6 +576,7 @@ async fn test_adapter_lifecycle_manager_broadcasts_events() {
             "python".to_string(),
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -607,6 +616,7 @@ async fn test_e2e_stop_all_cleanup() {
                 "python".to_string(),
                 Some(format!("stop-all-conn-{}", i)),
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -643,6 +653,7 @@ async fn test_e2e_high_volume_events() {
             "python".to_string(),
             Some("high-volume".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -691,6 +702,7 @@ async fn test_e2e_connection_status_updated_on_crash() {
             "python".to_string(),
             Some("python-conn".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -704,6 +716,7 @@ async fn test_e2e_connection_status_updated_on_crash() {
             "rust".to_string(),
             Some("rust-conn".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();

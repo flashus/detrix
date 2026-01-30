@@ -3,13 +3,12 @@
 //! This module contains the metric management functionality for setting,
 //! removing, and clearing metrics as logpoints/breakpoints.
 
-use super::events::expression_contains_function_call;
 use crate::{
     constants::requests, AdapterProcess, Error, Result, SetBreakpointsArguments, Source,
     SourceBreakpoint,
 };
 use detrix_application::{RemoveMetricResult, SetMetricResult};
-use detrix_core::{Metric, SourceLanguage};
+use detrix_core::{expression_contains_function_call, Metric, SourceLanguage};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

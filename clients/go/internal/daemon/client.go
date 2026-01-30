@@ -55,6 +55,7 @@ type RegisterRequest struct {
 	Language string `json:"language"`
 	Name     string `json:"name"`
 	Token    string `json:"token,omitempty"`
+	SafeMode bool   `json:"safe_mode,omitempty"`
 }
 
 // RegisterResponse is the response from connection registration.

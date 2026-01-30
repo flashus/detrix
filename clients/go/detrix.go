@@ -82,6 +82,11 @@ type Config struct {
 
 	// DelveStartTimeout is the timeout for Delve to start (default: 10s)
 	DelveStartTimeout time.Duration
+
+	// SafeMode enables production-safe mode: only logpoints (non-blocking) are allowed.
+	// Disables operations that require breakpoints: function calls, stack traces, memory snapshots.
+	// Recommended for production environments where execution pauses are unacceptable.
+	SafeMode bool
 }
 
 // StatusResponse contains the current client status.
@@ -160,6 +165,7 @@ func Init(cfg Config) error {
 	s.DaemonURL = cfg.DaemonURL
 	s.DelvePath = delvePath
 	s.DetrixHome = cfg.DetrixHome
+	s.SafeMode = cfg.SafeMode
 	s.HealthCheckTimeoutMs = int(cfg.HealthCheckTimeout.Milliseconds())
 	s.RegisterTimeoutMs = int(cfg.RegisterTimeout.Milliseconds())
 	s.UnregisterTimeoutMs = int(cfg.UnregisterTimeout.Milliseconds())
@@ -263,6 +269,7 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 	debugPort := s.DebugPort
 	name := s.Name
 	detrixHome := s.DetrixHome
+	safeMode := s.SafeMode
 	healthTimeout := time.Duration(s.HealthCheckTimeoutMs) * time.Millisecond
 	registerTimeout := time.Duration(s.RegisterTimeoutMs) * time.Millisecond
 	s.Unlock()
@@ -296,6 +303,7 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 		Language: "go",
 		Name:     name,
 		Token:    token,
+		SafeMode: safeMode,
 	}, registerTimeout)
 	if err != nil {
 		delveManager.Kill(delveProc)

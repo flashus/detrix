@@ -91,7 +91,8 @@ impl McpE2eFixture {
                 5678,
                 "python".to_string(),
                 Some("test".to_string()),
-                None, // No program path for Python
+                None,  // No program path for Python
+                false, // SafeMode disabled for tests
             )
             .await
             .expect("Failed to create mock connection")

@@ -45,6 +45,7 @@ type ClientState struct {
 	DaemonURL   string
 	DelvePath   string
 	DetrixHome  string
+	SafeMode    bool // SafeMode: only logpoints allowed, no breakpoint operations
 
 	// Timeouts (in milliseconds for simplicity)
 	HealthCheckTimeoutMs int

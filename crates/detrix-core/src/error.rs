@@ -57,6 +57,8 @@ pub enum ErrorCode {
     SafetyProcessExecution = 2008,
     /// Hash verification failed (2009)
     SafetyHashVerification = 2009,
+    /// SafeMode violation - operation blocked (2010)
+    SafeModeViolation = 2010,
 
     // Config errors (3xxx)
     /// Invalid configuration (3001)
@@ -200,6 +202,7 @@ impl ErrorCode {
             ErrorCode::SafetyAstFailed => ErrorCategory::Terminal,
             ErrorCode::SafetyError => ErrorCategory::Terminal,
             ErrorCode::SafetyUnsupportedLanguage => ErrorCategory::Terminal,
+            ErrorCode::SafeModeViolation => ErrorCategory::Terminal,
             ErrorCode::SafetyProcessSpawn => ErrorCategory::Terminal,
             ErrorCode::SafetyProcessTimeout => ErrorCategory::Terminal,
             ErrorCode::SafetyOutputParse => ErrorCategory::Terminal,
@@ -258,6 +261,7 @@ impl ErrorCode {
             ErrorCode::SafetyOutputParse => "SAFETY_OUTPUT_PARSE",
             ErrorCode::SafetyProcessExecution => "SAFETY_PROCESS_EXECUTION",
             ErrorCode::SafetyHashVerification => "SAFETY_HASH_VERIFICATION",
+            ErrorCode::SafeModeViolation => "SAFE_MODE_VIOLATION",
 
             // Config errors (3xxx)
             ErrorCode::ConfigInvalid => "CONFIG_INVALID",
@@ -431,6 +435,17 @@ pub enum Error {
     #[error("Safety error: {0}")]
     Safety(String),
 
+    /// SafeMode violation: operation blocked because connection is in SafeMode.
+    /// SafeMode only allows logpoints (non-blocking), and blocks operations that
+    /// require breakpoints: function calls, stack traces, memory snapshots.
+    #[error("SafeMode: {operation} blocked - connection '{connection_id}' is in SafeMode (only logpoints allowed)")]
+    SafeModeViolation {
+        /// The operation that was blocked
+        operation: String,
+        /// The connection ID in SafeMode
+        connection_id: String,
+    },
+
     // Configuration errors
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
@@ -487,6 +502,7 @@ impl Error {
             Error::SafetyViolation { .. } => ErrorCode::SafetyViolation,
             Error::AstAnalysisFailed(_) => ErrorCode::SafetyAstFailed,
             Error::Safety(_) => ErrorCode::SafetyError,
+            Error::SafeModeViolation { .. } => ErrorCode::SafeModeViolation,
 
             // Config errors (3xxx)
             Error::InvalidConfig(_) => ErrorCode::ConfigInvalid,

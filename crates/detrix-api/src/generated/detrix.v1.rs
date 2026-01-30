@@ -394,6 +394,7 @@ pub struct AddMetricRequest {
     #[prost(string, tag = "5")]
     pub language: ::prost::alloc::string::String,
     #[prost(bool, tag = "6")]
+    #[serde(default)]
     pub enabled: bool,
     #[prost(message, optional, tag = "7")]
     pub mode: ::core::option::Option<MetricMode>,
@@ -415,6 +416,7 @@ pub struct AddMetricRequest {
     /// Introspection options (Python-only for now)
     /// Stack trace capture
     #[prost(bool, optional, tag = "13")]
+    #[serde(default)]
     pub capture_stack_trace: ::core::option::Option<bool>,
     /// TTL in seconds, null for continuous
     #[prost(uint64, optional, tag = "14")]
@@ -423,6 +425,7 @@ pub struct AddMetricRequest {
     pub stack_trace_slice: ::core::option::Option<StackTraceSlice>,
     /// Memory snapshot capture
     #[prost(bool, optional, tag = "16")]
+    #[serde(default)]
     pub capture_memory_snapshot: ::core::option::Option<bool>,
     /// "local", "global", "both"
     #[prost(string, optional, tag = "17")]
@@ -500,6 +503,7 @@ pub struct UpdateMetricRequest {
     #[prost(string, optional, tag = "2")]
     pub expression: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(bool, optional, tag = "3")]
+    #[serde(default)]
     pub enabled: ::core::option::Option<bool>,
     #[prost(message, optional, tag = "4")]
     pub mode: ::core::option::Option<MetricMode>,
@@ -569,6 +573,7 @@ pub struct MetricInfo {
     #[prost(string, tag = "6")]
     pub language: ::prost::alloc::string::String,
     #[prost(bool, tag = "7")]
+    #[serde(default)]
     pub enabled: bool,
     #[prost(message, optional, tag = "8")]
     pub mode: ::core::option::Option<MetricMode>,
@@ -582,8 +587,10 @@ pub struct MetricInfo {
     pub connection_id: ::prost::alloc::string::String,
     /// Introspection settings
     #[prost(bool, tag = "13")]
+    #[serde(default)]
     pub capture_stack_trace: bool,
     #[prost(bool, tag = "14")]
+    #[serde(default)]
     pub capture_memory_snapshot: bool,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -593,6 +600,7 @@ pub struct ToggleMetricRequest {
     #[prost(uint64, tag = "1")]
     pub metric_id: u64,
     #[prost(bool, tag = "2")]
+    #[serde(default)]
     pub enabled: bool,
     #[prost(message, optional, tag = "3")]
     pub metadata: ::core::option::Option<RequestMetadata>,
@@ -606,6 +614,7 @@ pub struct ToggleMetricResponse {
     #[prost(string, tag = "2")]
     pub name: ::prost::alloc::string::String,
     #[prost(bool, tag = "3")]
+    #[serde(default)]
     pub enabled: bool,
     /// Whether storage was successfully updated
     #[prost(bool, tag = "4")]
@@ -3297,6 +3306,10 @@ pub struct CreateConnectionRequest {
     /// Program path for launch mode (Rust direct lldb-dap)
     #[prost(string, optional, tag = "6")]
     pub program: ::core::option::Option<::prost::alloc::string::String>,
+    /// SafeMode: only allow logpoints, disable breakpoint-based operations
+    #[prost(bool, tag = "7")]
+    #[serde(default)]
+    pub safe_mode: bool,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -3414,11 +3427,16 @@ pub struct ConnectionInfo {
     #[prost(int64, optional, tag = "8")]
     pub last_active_at: ::core::option::Option<i64>,
     #[prost(bool, tag = "9")]
+    #[serde(default)]
     pub auto_reconnect: bool,
     #[prost(uint32, tag = "10")]
     pub reconnect_attempts: u32,
     #[prost(uint32, tag = "11")]
     pub max_reconnect_attempts: u32,
+    /// SafeMode: only allow logpoints, disable breakpoint-based operations
+    #[prost(bool, tag = "12")]
+    #[serde(default)]
+    pub safe_mode: bool,
 }
 /// Connection status enum
 #[derive(serde::Serialize, serde::Deserialize)]

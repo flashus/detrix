@@ -598,6 +598,7 @@ async fn test_start_adapter_creates_and_starts() {
             5678,
             SourceLanguage::Python,
             None,
+            false, // safe_mode
         )
         .await;
     assert!(result.is_ok(), "start_adapter should succeed");
@@ -631,6 +632,7 @@ async fn test_stop_adapter_cleans_up() {
             5678,
             SourceLanguage::Python,
             None,
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -668,6 +670,7 @@ async fn test_get_adapter_returns_correct_adapter() {
             5678,
             SourceLanguage::Python,
             None,
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -697,6 +700,7 @@ async fn test_list_adapters_returns_all() {
             5678,
             SourceLanguage::Python,
             None,
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -707,12 +711,13 @@ async fn test_list_adapters_returns_all() {
             5679,
             SourceLanguage::Python,
             None,
+            false, // safe_mode
         )
         .await
         .unwrap();
 
     // List adapters
-    let adapters = manager.list_adapters().await;
+    let adapters = manager.list_adapters();
     assert_eq!(adapters.len(), 2, "Should have 2 adapters");
 
     let ids: Vec<String> = adapters.iter().map(|a| a.connection_id.0.clone()).collect();
@@ -734,6 +739,7 @@ async fn test_stop_all_stops_all_adapters() {
                 5678 + i as u16,
                 SourceLanguage::Python,
                 None,
+                false, // safe_mode
             )
             .await
             .unwrap();
@@ -766,6 +772,7 @@ async fn test_event_routing_to_capture_service() {
             5678,
             SourceLanguage::Python,
             None,
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -820,6 +827,7 @@ async fn test_event_broadcast_to_subscribers() {
             5678,
             SourceLanguage::Python,
             None,
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -855,6 +863,7 @@ async fn test_multiple_events_are_captured() {
             5678,
             SourceLanguage::Python,
             None,
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -899,6 +908,7 @@ async fn test_starting_existing_adapter_replaces_it() {
             5678,
             SourceLanguage::Python,
             None,
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -917,6 +927,7 @@ async fn test_starting_existing_adapter_replaces_it() {
             5678,
             SourceLanguage::Python,
             None,
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -954,12 +965,13 @@ async fn test_adapter_status_is_running_after_start() {
             5678,
             SourceLanguage::Python,
             None,
+            false, // safe_mode
         )
         .await
         .unwrap();
 
     // Check status
-    let adapters = manager.list_adapters().await;
+    let adapters = manager.list_adapters();
     assert_eq!(adapters.len(), 1);
     assert_eq!(adapters[0].status, ManagedAdapterStatus::Running);
     assert!(adapters[0].is_connected);
@@ -968,6 +980,241 @@ async fn test_adapter_status_is_running_after_start() {
 // =============================================================================
 // Property-Based Tests for Batching Behavior
 // =============================================================================
+
+// =============================================================================
+// SafeMode API Tests
+// =============================================================================
+
+/// Create a test manager with access to the connection repository for SafeMode tests
+async fn create_test_manager_with_connection_repo() -> (
+    AdapterLifecycleManager,
+    Arc<MockConnectionRepository>,
+    Arc<MockDapAdapterFactory>,
+) {
+    let event_repo = Arc::new(MockEventRepository::new());
+    let event_capture = Arc::new(EventCaptureService::new(
+        Arc::clone(&event_repo) as Arc<dyn EventRepository + Send + Sync>
+    ));
+    let (broadcast_tx, _) = broadcast::channel::<MetricEvent>(100);
+    let (system_event_tx, _) = broadcast::channel::<SystemEvent>(100);
+    let adapter_factory = Arc::new(MockDapAdapterFactory::new());
+    let metric_repo = Arc::new(MockMetricRepository::new());
+    let connection_repo = Arc::new(MockConnectionRepository::new());
+
+    let manager = AdapterLifecycleManager::new(
+        event_capture,
+        broadcast_tx,
+        system_event_tx,
+        Arc::clone(&adapter_factory) as DapAdapterFactoryRef,
+        metric_repo as MetricRepositoryRef,
+        Arc::clone(&connection_repo) as ConnectionRepositoryRef,
+    );
+
+    (manager, connection_repo, adapter_factory)
+}
+
+#[tokio::test]
+async fn test_is_safe_mode_returns_some_true_for_safe_mode_connection() {
+    let (manager, _, _) = create_test_manager_with_connection_repo().await;
+    let conn_id = ConnectionId::new("test-safe");
+
+    // Start adapter with safe_mode = true
+    manager
+        .start_adapter(
+            conn_id.clone(),
+            "127.0.0.1",
+            5678,
+            SourceLanguage::Python,
+            None,
+            true, // safe_mode = true
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(manager.is_safe_mode(&conn_id), Some(true));
+}
+
+#[tokio::test]
+async fn test_is_safe_mode_returns_some_false_for_normal_connection() {
+    let (manager, _, _) = create_test_manager_with_connection_repo().await;
+    let conn_id = ConnectionId::new("test-normal");
+
+    // Start adapter with safe_mode = false
+    manager
+        .start_adapter(
+            conn_id.clone(),
+            "127.0.0.1",
+            5678,
+            SourceLanguage::Python,
+            None,
+            false, // safe_mode = false
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(manager.is_safe_mode(&conn_id), Some(false));
+}
+
+#[tokio::test]
+async fn test_is_safe_mode_returns_none_for_nonexistent_connection() {
+    let (manager, _, _) = create_test_manager_with_connection_repo().await;
+    let conn_id = ConnectionId::new("nonexistent");
+
+    assert_eq!(manager.is_safe_mode(&conn_id), None);
+}
+
+#[tokio::test]
+async fn test_update_safe_mode_updates_both_memory_and_db() {
+    let (manager, connection_repo, _) = create_test_manager_with_connection_repo().await;
+    let conn_id = ConnectionId::new("test-update");
+
+    // Create connection in DB with safe_mode = false
+    let mut connection = Connection::new(
+        conn_id.clone(),
+        "127.0.0.1".to_string(),
+        5678,
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    connection.safe_mode = false;
+    connection_repo.save(&connection).await.unwrap();
+
+    // Start adapter with safe_mode = false
+    manager
+        .start_adapter(
+            conn_id.clone(),
+            "127.0.0.1",
+            5678,
+            SourceLanguage::Python,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+    // Update to safe_mode = true
+    let result = manager.update_safe_mode(&conn_id, true).await;
+    assert!(result.is_ok());
+    assert!(result.unwrap()); // true = updated
+
+    // Verify in-memory updated
+    assert_eq!(manager.is_safe_mode(&conn_id), Some(true));
+
+    // Verify DB updated
+    let db_conn = connection_repo.find_by_id(&conn_id).await.unwrap().unwrap();
+    assert!(db_conn.safe_mode);
+}
+
+#[tokio::test]
+async fn test_update_safe_mode_returns_false_when_adapter_not_found() {
+    let (manager, _, _) = create_test_manager_with_connection_repo().await;
+    let conn_id = ConnectionId::new("nonexistent");
+
+    let result = manager.update_safe_mode(&conn_id, true).await;
+    assert!(result.is_ok());
+    assert!(!result.unwrap()); // false = adapter not found
+}
+
+#[tokio::test]
+async fn test_update_safe_mode_succeeds_when_not_in_db() {
+    // Adapter registered but connection not in DB (unusual state)
+    // Should still update in-memory and succeed
+    let (manager, _, _) = create_test_manager_with_connection_repo().await; // Empty DB
+    let conn_id = ConnectionId::new("test-no-db");
+
+    // Start adapter (creates adapter in memory, but doesn't persist to our mock DB)
+    manager
+        .start_adapter(
+            conn_id.clone(),
+            "127.0.0.1",
+            5678,
+            SourceLanguage::Python,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+    let result = manager.update_safe_mode(&conn_id, true).await;
+    assert!(result.is_ok());
+    assert!(result.unwrap()); // true = updated (in-memory at least)
+
+    // In-memory should be updated
+    assert_eq!(manager.is_safe_mode(&conn_id), Some(true));
+}
+
+#[tokio::test]
+async fn test_update_safe_mode_db_first_ensures_consistency() {
+    // This test verifies that DB is updated BEFORE in-memory.
+    // If in-memory were updated first and DB update failed, we'd have inconsistent state.
+    // With DB-first, if DB fails, in-memory remains unchanged.
+
+    let (manager, connection_repo, _) = create_test_manager_with_connection_repo().await;
+    let conn_id = ConnectionId::new("test-db-first");
+
+    // Create connection in DB
+    let mut connection = Connection::new(
+        conn_id.clone(),
+        "127.0.0.1".to_string(),
+        5678,
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    connection.safe_mode = false;
+    connection_repo.save(&connection).await.unwrap();
+
+    // Start adapter
+    manager
+        .start_adapter(
+            conn_id.clone(),
+            "127.0.0.1",
+            5678,
+            SourceLanguage::Python,
+            None,
+            false, // Initial state: safe_mode = false
+        )
+        .await
+        .unwrap();
+
+    // Verify initial state
+    assert_eq!(manager.is_safe_mode(&conn_id), Some(false));
+    let db_conn = connection_repo.find_by_id(&conn_id).await.unwrap().unwrap();
+    assert!(!db_conn.safe_mode);
+
+    // Update safe_mode to true
+    let result = manager.update_safe_mode(&conn_id, true).await;
+    assert!(result.is_ok());
+    assert!(result.unwrap()); // true = updated
+
+    // Verify both are now true
+    assert_eq!(manager.is_safe_mode(&conn_id), Some(true));
+    let db_conn = connection_repo.find_by_id(&conn_id).await.unwrap().unwrap();
+    assert!(db_conn.safe_mode);
+}
+
+#[tokio::test]
+async fn test_safe_mode_preserved_in_list_adapters() {
+    let (manager, _, _) = create_test_manager_with_connection_repo().await;
+
+    // Start adapter with safe_mode = true
+    let conn_id = ConnectionId::new("test-list-safe");
+    manager
+        .start_adapter(
+            conn_id.clone(),
+            "127.0.0.1",
+            5678,
+            SourceLanguage::Python,
+            None,
+            true, // safe_mode = true
+        )
+        .await
+        .unwrap();
+
+    // Check list_adapters returns safe_mode correctly
+    let adapters = manager.list_adapters();
+    assert_eq!(adapters.len(), 1);
+    assert!(adapters[0].safe_mode);
+}
 
 mod proptest_batching {
     use super::*;

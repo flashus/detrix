@@ -150,6 +150,8 @@ struct CliConnectionResponse {
     port: u32, // API returns u32 (proto), convert to u16
     language: String,
     status: String,
+    #[serde(default)]
+    safe_mode: bool,
 }
 
 /// Response structure matching the CLI's actual JSON output
@@ -401,6 +403,7 @@ impl ApiClient for CliClient {
             port: conn.port as u16, // Convert from proto u32
             language: conn.language,
             status: conn.status,
+            safe_mode: conn.safe_mode,
         }))
     }
 
@@ -441,6 +444,7 @@ impl ApiClient for CliClient {
             port: conn.port as u16,
             language: conn.language,
             status: conn.status,
+            safe_mode: conn.safe_mode,
         }))
     }
 
@@ -463,6 +467,7 @@ impl ApiClient for CliClient {
             port: conn.port as u16,
             language: conn.language,
             status: conn.status,
+            safe_mode: conn.safe_mode,
         }))
     }
 
@@ -485,6 +490,7 @@ impl ApiClient for CliClient {
                     port: c.port as u16,
                     language: c.language,
                     status: c.status,
+                    safe_mode: c.safe_mode,
                 })
                 .collect(),
         ))

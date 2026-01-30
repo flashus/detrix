@@ -54,6 +54,8 @@ pub struct ManagedAdapterInfo {
     pub started_at: Instant,
     /// Whether the adapter is connected
     pub is_connected: bool,
+    /// SafeMode: Only allow logpoints (non-blocking), disable breakpoint-based operations
+    pub safe_mode: bool,
 }
 
 /// Result of starting an adapter, including any degradation info
@@ -81,6 +83,8 @@ struct ManagedAdapter {
     started_at: Instant,
     /// Current status
     status: ManagedAdapterStatus,
+    /// SafeMode: Only allow logpoints (non-blocking), disable breakpoint-based operations
+    safe_mode: bool,
 }
 
 /// Central manager for adapter lifecycle and event routing
@@ -137,6 +141,9 @@ pub struct AdapterLifecycleManager {
 
     /// Handle to the cleanup task
     cleanup_task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+
+    /// Connection repository for updating safe_mode and status
+    connection_repository: ConnectionRepositoryRef,
 
     /// Optional event output for external destinations (Graylog/GELF, etc.)
     event_output: Option<EventOutputRef>,
@@ -232,6 +239,7 @@ impl AdapterLifecycleManager {
             cleanup_task_handle: Arc::clone(&cleanup_task_handle),
             event_output,
             pending_starts: Arc::new(DashMap::new()),
+            connection_repository: Arc::clone(&connection_repository),
         };
 
         // Start the flush task if flush interval is configured
@@ -482,7 +490,7 @@ impl AdapterLifecycleManager {
     ///
     /// # Returns
     /// `StartAdapterResult` with degradation info (sync_failed, resume_failed, metrics counts)
-    #[instrument(skip(self), fields(connection_id = %connection_id.0, host = %host, port = port, language = %language))]
+    #[instrument(skip(self), fields(connection_id = %connection_id.0, host = %host, port = port, language = %language, safe_mode = safe_mode))]
     pub async fn start_adapter(
         &self,
         connection_id: ConnectionId,
@@ -490,10 +498,11 @@ impl AdapterLifecycleManager {
         port: u16,
         language: SourceLanguage,
         program: Option<String>,
+        safe_mode: bool,
     ) -> Result<StartAdapterResult> {
         info!(
-            "Starting {} adapter for connection {} ({}:{})",
-            language, connection_id.0, host, port
+            "Starting {} adapter for connection {} ({}:{}) safe_mode={}",
+            language, connection_id.0, host, port, safe_mode
         );
 
         // Check if another caller is already starting this adapter (prevents race conditions)
@@ -689,6 +698,7 @@ impl AdapterLifecycleManager {
             shutdown_tx,
             started_at: Instant::now(),
             status: ManagedAdapterStatus::Running,
+            safe_mode,
         };
 
         self.adapters.insert(connection_id.clone(), managed);
@@ -709,14 +719,19 @@ impl AdapterLifecycleManager {
     /// * `connection_id` - Unique identifier for this connection
     /// * `adapter` - Pre-created adapter instance (should be started)
     /// * `language` - Language/adapter type (for system event reporting)
-    #[instrument(skip(self, adapter), fields(connection_id = %connection_id.0, language = %language))]
+    /// * `safe_mode` - Whether this connection is in SafeMode (blocks breakpoint-based operations)
+    #[instrument(skip(self, adapter), fields(connection_id = %connection_id.0, language = %language, safe_mode = safe_mode))]
     pub async fn register_adapter(
         &self,
         connection_id: ConnectionId,
         adapter: DapAdapterRef,
         language: SourceLanguage,
+        safe_mode: bool,
     ) -> Result<()> {
-        info!("Registering adapter for connection {}", connection_id.0);
+        info!(
+            "Registering adapter for connection {} safe_mode={}",
+            connection_id.0, safe_mode
+        );
 
         // Check if adapter already exists
         if self.adapters.contains_key(&connection_id) {
@@ -741,6 +756,7 @@ impl AdapterLifecycleManager {
             shutdown_tx,
             started_at: Instant::now(),
             status: ManagedAdapterStatus::Running,
+            safe_mode,
         };
 
         self.adapters.insert(connection_id.clone(), managed);
@@ -1035,8 +1051,81 @@ impl AdapterLifecycleManager {
         self.adapters.contains_key(connection_id)
     }
 
+    /// Check if a connection is in SafeMode
+    ///
+    /// Returns `Some(true)` if the connection is in SafeMode,
+    /// `Some(false)` if not in SafeMode, or `None` if no adapter is registered.
+    pub fn is_safe_mode(&self, connection_id: &ConnectionId) -> Option<bool> {
+        self.adapters.get(connection_id).map(|r| r.safe_mode)
+    }
+
+    /// Update SafeMode for an existing connection
+    ///
+    /// Updates both the in-memory adapter state and persists to the database.
+    /// Database is updated FIRST to ensure consistency (if DB fails, in-memory stays unchanged).
+    ///
+    /// # Returns
+    /// - `Ok(true)` if updated successfully
+    /// - `Ok(false)` if adapter not registered (no-op)
+    /// - `Err` on database error during persistence
+    ///
+    /// # Race Condition Handling
+    /// If the adapter is removed during the async DB operation, the DB update still
+    /// completes (which is the authoritative state), and we log a warning. This is
+    /// acceptable because the adapter is gone anyway.
+    #[instrument(skip(self), fields(connection_id = %connection_id.0, safe_mode = safe_mode))]
+    pub async fn update_safe_mode(
+        &self,
+        connection_id: &ConnectionId,
+        safe_mode: bool,
+    ) -> Result<bool> {
+        // Check adapter exists first (without modifying)
+        // Note: Due to async operations, adapter could be removed between this check
+        // and the final update. This is handled below with a warning.
+        if !self.adapters.contains_key(connection_id) {
+            warn!(
+                "Cannot update safe_mode for connection {}: adapter not found",
+                connection_id.0
+            );
+            return Ok(false);
+        }
+
+        // Persist to database FIRST (fail fast - if DB fails, in-memory stays unchanged)
+        if let Some(mut connection) = self.connection_repository.find_by_id(connection_id).await? {
+            connection.safe_mode = safe_mode;
+            self.connection_repository.update(&connection).await?;
+        } else {
+            // Connection not in database - unusual state, log warning but continue
+            // (update in-memory anyway since caller expects the change to take effect)
+            warn!(
+                "Connection {} has adapter but not in database (updating in-memory only)",
+                connection_id.0
+            );
+        }
+
+        // Update in-memory AFTER successful DB write
+        // Handle race condition: adapter could have been removed during async DB operation
+        if let Some(mut entry) = self.adapters.get_mut(connection_id) {
+            entry.safe_mode = safe_mode;
+            info!(
+                "Updated safe_mode={} for connection {}",
+                safe_mode, connection_id.0
+            );
+        } else {
+            // Adapter was removed during the DB operation - this is a race condition
+            // but acceptable: DB is updated (authoritative state), adapter is gone
+            warn!(
+                "Adapter for connection {} was removed during safe_mode update \
+                 (DB updated, in-memory update skipped)",
+                connection_id.0
+            );
+        }
+
+        Ok(true)
+    }
+
     /// List all managed adapters with their status
-    pub async fn list_adapters(&self) -> Vec<ManagedAdapterInfo> {
+    pub fn list_adapters(&self) -> Vec<ManagedAdapterInfo> {
         self.adapters
             .iter()
             .map(|r| ManagedAdapterInfo {
@@ -1044,6 +1133,7 @@ impl AdapterLifecycleManager {
                 status: r.value().status,
                 started_at: r.value().started_at,
                 is_connected: r.value().adapter.is_connected(),
+                safe_mode: r.value().safe_mode,
             })
             .collect()
     }

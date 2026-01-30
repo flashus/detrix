@@ -72,6 +72,7 @@ async fn test_create_connection_with_auto_generated_id() {
             "python".to_string(),
             None,
             None,
+            false,
         )
         .await;
 
@@ -106,6 +107,7 @@ async fn test_create_connection_with_custom_id() {
             "python".to_string(),
             Some("my-custom-connection".to_string()),
             None,
+            false,
         )
         .await;
 
@@ -135,6 +137,7 @@ async fn test_create_connection_validates_port_range() {
             "python".to_string(),
             None,
             None,
+            false,
         )
         .await;
 
@@ -157,7 +160,7 @@ async fn test_create_connection_validates_host() {
 
     // Act - Empty host should fail
     let result = service
-        .create_connection(String::new(), 5678, "python".to_string(), None, None)
+        .create_connection(String::new(), 5678, "python".to_string(), None, None, false)
         .await;
 
     // Assert
@@ -182,6 +185,7 @@ async fn test_create_connection_starts_adapter() {
             "python".to_string(),
             None,
             None,
+            false,
         )
         .await;
 
@@ -211,6 +215,7 @@ async fn test_disconnect_stops_adapter_and_updates_status() {
             "python".to_string(),
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -261,6 +266,7 @@ async fn test_list_connections_returns_all() {
             "python".to_string(),
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -271,6 +277,7 @@ async fn test_list_connections_returns_all() {
             "python".to_string(),
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -281,6 +288,7 @@ async fn test_list_connections_returns_all() {
             "python".to_string(),
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -327,6 +335,7 @@ async fn test_get_connection_by_id() {
             "python".to_string(),
             Some("test-conn".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -372,6 +381,7 @@ async fn test_get_adapter_returns_adapter_for_active_connection() {
             "python".to_string(),
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -398,6 +408,7 @@ async fn test_get_adapter_returns_none_after_disconnect() {
             "python".to_string(),
             None,
             None,
+            false,
         )
         .await
         .unwrap();

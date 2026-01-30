@@ -132,7 +132,7 @@ impl AppContext {
 
         // Create the ConnectionService with the lifecycle manager
         let connection_service = Arc::new(ConnectionService::new(
-            connection_repo,
+            Arc::clone(&connection_repo),
             Arc::clone(&adapter_lifecycle_manager),
             system_event_tx.clone(),
         ));

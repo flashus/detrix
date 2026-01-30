@@ -60,7 +60,8 @@ pub async fn create_connection_impl(
             params.port as u16,
             params.language.clone(),
             params.connection_id,
-            params.program, // Optional program path for Rust direct lldb-dap
+            params.program,   // Optional program path for Rust direct lldb-dap
+            params.safe_mode, // SafeMode: only allow logpoints
         )
         .await
     {

@@ -443,8 +443,8 @@ pub fn core_group_info_to_proto(
 /// IMPORTANT: Uses exhaustive destructuring - compiler will error if new fields added.
 ///
 /// Core Connection fields:
-///   id, name, host, port, language, status, auto_reconnect, created_at,
-///   last_connected_at, last_active
+///   id, name, host, port, language, status, auto_reconnect, safe_mode,
+///   created_at, last_connected_at, last_active
 pub fn connection_to_info(
     connection: &detrix_core::Connection,
 ) -> crate::generated::detrix::v1::ConnectionInfo {
@@ -459,6 +459,7 @@ pub fn connection_to_info(
         language,
         status,
         auto_reconnect,
+        safe_mode,
         created_at,
         last_connected_at,
         last_active,
@@ -483,6 +484,7 @@ pub fn connection_to_info(
         connected_at: *last_connected_at,
         last_active_at: Some(*last_active),
         auto_reconnect: *auto_reconnect,
+        safe_mode: *safe_mode,
         // Runtime state not tracked in core Connection - use defaults
         reconnect_attempts: 0,
         max_reconnect_attempts: 0, // 0 = unlimited retries
@@ -716,6 +718,7 @@ pub fn proto_to_core_connection(
         language,
         status,
         auto_reconnect: proto.auto_reconnect,
+        safe_mode: proto.safe_mode,
         created_at: proto.created_at,
         last_connected_at: proto.connected_at,
         last_active: proto.last_active_at.unwrap_or(0),
@@ -752,6 +755,7 @@ pub fn core_to_proto_connection_info(conn: &detrix_core::Connection) -> Connecti
         auto_reconnect: conn.auto_reconnect,
         reconnect_attempts: 0,     // Not tracked in current Connection struct
         max_reconnect_attempts: 0, // Not tracked in current Connection struct
+        safe_mode: conn.safe_mode,
     }
 }
 

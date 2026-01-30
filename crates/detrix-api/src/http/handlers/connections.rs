@@ -135,7 +135,8 @@ pub async fn create_connection(
             port,
             payload.language.clone(),
             payload.connection_id,
-            payload.program, // Optional program path for Rust direct lldb-dap
+            payload.program,   // Optional program path for Rust direct lldb-dap
+            payload.safe_mode, // SafeMode: only allow logpoints
         )
         .await
         .http_context("Failed to create connection")?;

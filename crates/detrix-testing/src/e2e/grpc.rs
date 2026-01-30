@@ -327,6 +327,7 @@ impl ApiClient for GrpcClient {
                 connection_id: None,
                 metadata: None,
                 program: program.map(|s| s.to_string()), // Optional program path for launch mode (Rust direct lldb-dap)
+                safe_mode: false,                        // Default to false for tests
             })
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?
@@ -339,6 +340,7 @@ impl ApiClient for GrpcClient {
             port: conn.port as u16, // Convert from proto u32
             language: conn.language,
             status: response.status,
+            safe_mode: conn.safe_mode,
         }))
     }
 
@@ -379,6 +381,7 @@ impl ApiClient for GrpcClient {
             port: conn.port as u16,
             language: conn.language,
             status: format!("{:?}", conn.status),
+            safe_mode: conn.safe_mode,
         }))
     }
 
@@ -402,6 +405,7 @@ impl ApiClient for GrpcClient {
                 port: conn.port as u16,
                 language: conn.language,
                 status: format!("{:?}", conn.status),
+                safe_mode: conn.safe_mode,
             })
             .collect();
 

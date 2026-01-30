@@ -131,6 +131,7 @@ impl McpClient {
                         port,
                         language: parts[3].trim().to_string(),
                         status: parts[4].trim().to_string(),
+                        safe_mode: false, // MCP text output doesn't include safe_mode
                     });
                 }
             }
@@ -905,6 +906,7 @@ impl ApiClient for McpClient {
             port,
             language: language.to_string(),
             status: detrix_core::ConnectionStatus::Connected.to_status_string(),
+            safe_mode: false, // Default to false
         })
         .with_raw(json.to_string()))
     }
@@ -956,6 +958,7 @@ impl ApiClient for McpClient {
             port,
             language: language.to_string(),
             status: detrix_core::ConnectionStatus::Connected.to_status_string(),
+            safe_mode: false, // Default to false
         })
         .with_raw(json.to_string()))
     }
@@ -981,6 +984,7 @@ impl ApiClient for McpClient {
             port: 5678,
             language: "python".to_string(),
             status: detrix_core::ConnectionStatus::Connected.to_status_string(),
+            safe_mode: false, // Default to false
         })
         .with_raw(json.to_string()))
     }

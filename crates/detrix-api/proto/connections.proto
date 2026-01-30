@@ -39,6 +39,7 @@ message CreateConnectionRequest {
   optional string connection_id = 4; // Optional custom connection ID
   RequestMetadata metadata = 5;
   optional string program = 6;      // Program path for launch mode (Rust direct lldb-dap)
+  bool safe_mode = 7;               // SafeMode: only allow logpoints, disable breakpoint-based operations
 }
 
 message CreateConnectionResponse {
@@ -106,6 +107,7 @@ message ConnectionInfo {
   bool auto_reconnect = 9;
   uint32 reconnect_attempts = 10;
   uint32 max_reconnect_attempts = 11;
+  bool safe_mode = 12;              // SafeMode: only allow logpoints, disable breakpoint-based operations
 }
 
 // Connection status enum

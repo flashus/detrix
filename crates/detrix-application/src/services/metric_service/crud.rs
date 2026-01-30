@@ -111,6 +111,9 @@ impl MetricService {
         metric: Metric,
         replace: bool,
     ) -> Result<OperationOutcome<MetricId>> {
+        // Validate SafeMode constraints (stack trace/memory snapshot in SafeMode)
+        self.validate_safe_mode(&metric)?;
+
         // Validate metric (may produce warnings)
         let mut warnings = self.validate_metric(&metric)?;
 
@@ -299,6 +302,9 @@ impl MetricService {
     /// old metric for comparison).
     pub async fn update_metric(&self, metric: &Metric) -> Result<OperationOutcome<()>> {
         let mut warnings = Vec::new();
+
+        // Validate SafeMode constraints (stack trace/memory snapshot in SafeMode)
+        self.validate_safe_mode(metric)?;
 
         // Validate changes
         self.validate_metric(metric)?;

@@ -14,7 +14,7 @@ use crate::{
     StoppedEventBody,
 };
 use detrix_config::constants::DEFAULT_DAP_VALUE_DISPLAY_LIMIT;
-use detrix_core::{Metric, MetricEvent};
+use detrix_core::{expression_contains_function_call, Metric, MetricEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::Receiver;
@@ -353,31 +353,6 @@ pub async fn process_introspection_metric(
             lang, metric.name
         );
     }
-}
-
-/// Detect if an expression contains a function call.
-///
-/// Used to determine whether to use breakpoint mode for Go expressions.
-/// Go/Delve requires the `call` prefix for function calls in evaluate requests.
-///
-/// **WARNING:** Function calls in Go BLOCK the target process while executing.
-/// Use simple variable expressions when possible for non-blocking observability.
-///
-/// Heuristic: look for `identifier(` pattern which indicates function calls.
-/// Examples that match: `fmt.Sprintf(...)`, `len(x)`, `user.GetName()`
-/// Examples that don't match: `(x + y)`, `arr[0]`, `user.name`
-pub fn expression_contains_function_call(expr: &str) -> bool {
-    let bytes = expr.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'(' && i > 0 {
-            let prev = bytes[i - 1];
-            // Check if preceded by identifier char (alphanumeric, underscore, or dot for method calls)
-            if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.' {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// Send continue command to resume execution.

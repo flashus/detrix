@@ -219,7 +219,7 @@ async fn test_parse_output_unknown_metric() {
 // expression_contains_function_call tests
 // ============================================================================
 
-use super::events::expression_contains_function_call;
+use detrix_core::expression_contains_function_call;
 
 #[test]
 fn test_expression_contains_function_call_simple_function() {

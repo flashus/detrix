@@ -40,6 +40,7 @@ impl ConnectionsClient {
         language: &str,
         connection_id: Option<&str>,
         program: Option<&str>,
+        safe_mode: bool,
     ) -> Result<ConnectionInfo> {
         let request = CreateConnectionRequest {
             host: host.to_string(),
@@ -48,6 +49,7 @@ impl ConnectionsClient {
             connection_id: connection_id.map(|s| s.to_string()),
             metadata: Some(RequestMetadata::default()),
             program: program.map(|s| s.to_string()),
+            safe_mode,
         };
 
         let response = self

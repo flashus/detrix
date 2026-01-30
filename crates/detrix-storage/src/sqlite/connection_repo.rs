@@ -13,8 +13,8 @@ impl ConnectionRepository for SqliteStorage {
     async fn save(&self, connection: &Connection) -> Result<ConnectionId> {
         sqlx::query(
             r#"
-            INSERT INTO connections (id, name, host, port, language, status, auto_reconnect, created_at, last_connected_at, last_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO connections (id, name, host, port, language, status, auto_reconnect, safe_mode, created_at, last_connected_at, last_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 host = excluded.host,
@@ -22,6 +22,7 @@ impl ConnectionRepository for SqliteStorage {
                 language = excluded.language,
                 status = excluded.status,
                 auto_reconnect = excluded.auto_reconnect,
+                safe_mode = excluded.safe_mode,
                 last_connected_at = excluded.last_connected_at,
                 last_active = excluded.last_active
             "#,
@@ -33,6 +34,7 @@ impl ConnectionRepository for SqliteStorage {
         .bind(connection.language.as_str())
         .bind(connection.status.to_string())
         .bind(connection.auto_reconnect)
+        .bind(connection.safe_mode)
         .bind(connection.created_at)
         .bind(connection.last_connected_at)
         .bind(connection.last_active)
@@ -47,7 +49,7 @@ impl ConnectionRepository for SqliteStorage {
     async fn find_by_id(&self, id: &ConnectionId) -> Result<Option<Connection>> {
         let row = sqlx::query(
             r#"
-            SELECT id, name, host, port, language, status, auto_reconnect, created_at, last_connected_at, last_active
+            SELECT id, name, host, port, language, status, auto_reconnect, safe_mode, created_at, last_connected_at, last_active
             FROM connections
             WHERE id = ?
             "#,
@@ -68,7 +70,7 @@ impl ConnectionRepository for SqliteStorage {
     async fn find_by_address(&self, host: &str, port: u16) -> Result<Option<Connection>> {
         let row = sqlx::query(
             r#"
-            SELECT id, name, host, port, language, status, auto_reconnect, created_at, last_connected_at, last_active
+            SELECT id, name, host, port, language, status, auto_reconnect, safe_mode, created_at, last_connected_at, last_active
             FROM connections
             WHERE host = ? AND port = ?
             "#,
@@ -90,7 +92,7 @@ impl ConnectionRepository for SqliteStorage {
     async fn list_all(&self) -> Result<Vec<Connection>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, name, host, port, language, status, auto_reconnect, created_at, last_connected_at, last_active
+            SELECT id, name, host, port, language, status, auto_reconnect, safe_mode, created_at, last_connected_at, last_active
             FROM connections
             ORDER BY last_active DESC
             "#,
@@ -250,7 +252,7 @@ impl ConnectionRepository for SqliteStorage {
     async fn find_active(&self) -> Result<Vec<Connection>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, name, host, port, language, status, auto_reconnect, created_at, last_connected_at, last_active
+            SELECT id, name, host, port, language, status, auto_reconnect, safe_mode, created_at, last_connected_at, last_active
             FROM connections
             WHERE LOWER(status) IN ('connected', 'connecting')
             ORDER BY last_active DESC
@@ -273,7 +275,7 @@ impl ConnectionRepository for SqliteStorage {
         // On daemon restart, all connections with auto_reconnect=true should be considered.
         let rows = sqlx::query(
             r#"
-            SELECT id, name, host, port, language, status, auto_reconnect, created_at, last_connected_at, last_active
+            SELECT id, name, host, port, language, status, auto_reconnect, safe_mode, created_at, last_connected_at, last_active
             FROM connections
             WHERE auto_reconnect = 1 AND LOWER(status) IN ('connected', 'disconnected', 'reconnecting', 'failed')
             ORDER BY last_active DESC
@@ -293,7 +295,7 @@ impl ConnectionRepository for SqliteStorage {
     async fn find_by_language(&self, language: &str) -> Result<Vec<Connection>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, name, host, port, language, status, auto_reconnect, created_at, last_connected_at, last_active
+            SELECT id, name, host, port, language, status, auto_reconnect, safe_mode, created_at, last_connected_at, last_active
             FROM connections
             WHERE language = ?
             ORDER BY last_active DESC
@@ -335,6 +337,7 @@ fn row_to_connection(row: &sqlx::sqlite::SqliteRow) -> Result<Connection> {
     let language: String = row.try_get("language")?;
     let status_str: String = row.try_get("status")?;
     let auto_reconnect: i64 = row.try_get("auto_reconnect")?;
+    let safe_mode: i64 = row.try_get("safe_mode").unwrap_or(0);
     let created_at: i64 = row.try_get("created_at")?;
     let last_connected_at: Option<i64> = row.try_get("last_connected_at")?;
     let last_active: i64 = row.try_get("last_active")?;
@@ -375,6 +378,7 @@ fn row_to_connection(row: &sqlx::sqlite::SqliteRow) -> Result<Connection> {
         language,
         status,
         auto_reconnect: auto_reconnect != 0,
+        safe_mode: safe_mode != 0,
         created_at,
         last_connected_at,
         last_active,

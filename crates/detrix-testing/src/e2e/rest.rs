@@ -231,6 +231,7 @@ impl ApiClient for RestClient {
             connection_id: None,
             metadata: None,
             program: program.map(|s| s.to_string()), // Optional program path for launch mode (Rust direct lldb-dap)
+            safe_mode: false,                        // Default to false for tests
         };
 
         let response = self
@@ -269,6 +270,7 @@ impl ApiClient for RestClient {
             port: conn.port as u16, // Convert from proto u32
             language: conn.language,
             status: status_i32_to_string(conn.status),
+            safe_mode: conn.safe_mode,
         })
         .with_raw(raw))
     }
@@ -324,6 +326,7 @@ impl ApiClient for RestClient {
             port: conn.port as u16,
             language: conn.language,
             status: status_i32_to_string(conn.status),
+            safe_mode: conn.safe_mode,
         })
         .with_raw(raw))
     }
@@ -353,6 +356,7 @@ impl ApiClient for RestClient {
                 port: c.port as u16,
                 language: c.language,
                 status: status_i32_to_string(c.status),
+                safe_mode: c.safe_mode,
             })
             .collect();
 

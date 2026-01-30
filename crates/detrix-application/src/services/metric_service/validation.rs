@@ -5,11 +5,85 @@ use crate::services::file_inspection_types::{
     FileInspectionRequest, FileInspectionResult, SourceLanguageExt,
 };
 use crate::Result;
-use detrix_core::{Metric, SafetyLevel};
+use detrix_core::{expression_contains_function_call, Metric, SafetyLevel, SourceLanguage};
 
 use super::MetricService;
 
 impl MetricService {
+    /// Validate SafeMode constraints for a metric.
+    ///
+    /// When a connection is in SafeMode, only logpoints (non-blocking observation)
+    /// are allowed. Operations that require actual breakpoints are blocked:
+    /// - capture_stack_trace: Requires pausing execution to capture stack
+    /// - capture_memory_snapshot: Requires pausing execution to inspect memory
+    /// - Go function calls: Delve requires breakpoints for function evaluation
+    ///
+    /// Language-specific behavior:
+    /// - Python: Function calls use logpoints (non-blocking) - allowed in SafeMode
+    /// - Go: Function calls require breakpoints via `call` prefix - blocked in SafeMode
+    /// - Rust: Function calls use logpoints (non-blocking) - allowed in SafeMode
+    ///
+    /// Uses in-memory lookup from AdapterLifecycleManager (no database query).
+    /// Returns Ok(()) if allowed, SafeModeViolation error if blocked.
+    pub(super) fn validate_safe_mode(&self, metric: &Metric) -> Result<()> {
+        // Determine if this metric requires breakpoint (blocking operation)
+        let needs_introspection = metric.capture_stack_trace || metric.capture_memory_snapshot;
+        let is_go_function_call = metric.language == SourceLanguage::Go
+            && expression_contains_function_call(&metric.expression);
+
+        let requires_breakpoint = needs_introspection || is_go_function_call;
+
+        // Skip SafeMode check if metric doesn't require breakpoint
+        if !requires_breakpoint {
+            return Ok(());
+        }
+
+        // Check if connection is in SafeMode (in-memory lookup, no DB query)
+        match self.adapter_manager.is_safe_mode(&metric.connection_id) {
+            Some(true) => {
+                // SafeMode enabled - block the operation
+                let operation = if is_go_function_call && !needs_introspection {
+                    "Go function call (requires breakpoint)".to_string()
+                } else {
+                    let mut ops = Vec::new();
+                    if metric.capture_stack_trace {
+                        ops.push("capture_stack_trace");
+                    }
+                    if metric.capture_memory_snapshot {
+                        ops.push("capture_memory_snapshot");
+                    }
+                    if is_go_function_call {
+                        ops.push("Go function call");
+                    }
+                    ops.join(" and ")
+                };
+
+                Err(detrix_core::Error::SafeModeViolation {
+                    operation,
+                    connection_id: metric.connection_id.0.clone(),
+                }
+                .into())
+            }
+            Some(false) => {
+                // SafeMode disabled - allow the operation
+                Ok(())
+            }
+            None => {
+                // Adapter not registered - require adapter to be running
+                // for operations that use breakpoints
+                let feature = if is_go_function_call && !needs_introspection {
+                    "Go function calls (they require breakpoints)"
+                } else {
+                    "capture_stack_trace or capture_memory_snapshot"
+                };
+                Err(crate::Error::ConnectionNotFound(format!(
+                    "Connection '{}' not active. Start the connection before adding metrics with {}.",
+                    metric.connection_id.0, feature
+                )))
+            }
+        }
+    }
+
     /// Validate metric expression for safety using language-specific validator
     ///
     /// Uses the `ValidatorRegistry` to dispatch to the appropriate language validator.

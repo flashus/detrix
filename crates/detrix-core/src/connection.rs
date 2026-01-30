@@ -139,6 +139,12 @@ pub struct Connection {
     #[serde(default = "default_auto_reconnect")]
     pub auto_reconnect: bool,
 
+    /// SafeMode: Only allow logpoints (non-blocking), disable breakpoint-based operations.
+    /// When enabled, blocks: function call expressions, stack trace capture, memory snapshots.
+    /// Recommended for production environments where execution pauses are unacceptable.
+    #[serde(default)]
+    pub safe_mode: bool,
+
     /// When the connection was created (microseconds since epoch)
     pub created_at: i64,
 
@@ -196,6 +202,7 @@ impl Connection {
             language,
             status: ConnectionStatus::Disconnected,
             auto_reconnect: true,
+            safe_mode: false,
             created_at: now,
             last_connected_at: None,
             last_active: now,

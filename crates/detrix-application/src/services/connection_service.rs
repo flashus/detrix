@@ -68,6 +68,7 @@ impl ConnectionService {
     /// * `language` - Language/adapter type (e.g., "python", "go", "rust")
     /// * `id` - Optional custom connection ID. If None, auto-generates from host:port
     /// * `program` - Optional program path for Rust direct lldb-dap launch mode
+    /// * `safe_mode` - Enable SafeMode: only allow logpoints, disable breakpoint-based operations
     ///
     /// # Returns
     /// ConnectionId of the created connection
@@ -77,7 +78,7 @@ impl ConnectionService {
     /// - Host must not be empty
     /// - Language must not be empty
     /// - Connection ID must be unique (auto-generated IDs prevent collisions)
-    #[instrument(skip(self), fields(host = %host, port = port, language = %language))]
+    #[instrument(skip(self), fields(host = %host, port = port, language = %language, safe_mode = safe_mode))]
     pub async fn create_connection(
         &self,
         host: String,
@@ -85,6 +86,7 @@ impl ConnectionService {
         language: String,
         id: Option<String>,
         program: Option<String>,
+        safe_mode: bool,
     ) -> Result<ConnectionId> {
         use tracing::info;
 
@@ -120,7 +122,8 @@ impl ConnectionService {
         }
 
         // 4. Create Connection entity (validates host, port, and rejects Unknown language)
-        let connection = Connection::new(connection_id.clone(), host.clone(), port, language)?;
+        let mut connection = Connection::new(connection_id.clone(), host.clone(), port, language)?;
+        connection.safe_mode = safe_mode;
 
         // 5. Save connection to repository (initially Disconnected)
         self.connection_repo.save(&connection).await?;
@@ -136,6 +139,7 @@ impl ConnectionService {
                 port,
                 connection.language,
                 program,
+                connection.safe_mode,
             )
             .await?;
 
@@ -323,7 +327,14 @@ impl ConnectionService {
             // Note: restored connections use attach mode (no program path)
             match self
                 .adapter_lifecycle_manager
-                .start_adapter(conn_id.clone(), &conn.host, conn.port, conn.language, None)
+                .start_adapter(
+                    conn_id.clone(),
+                    &conn.host,
+                    conn.port,
+                    conn.language,
+                    None,
+                    conn.safe_mode,
+                )
                 .await
             {
                 Ok(_) => {
