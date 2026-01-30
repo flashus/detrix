@@ -28,7 +28,9 @@ pub struct AddMetricParams {
         description = "Line number (optional if included in location). Takes precedence over line in location string."
     )]
     pub line: Option<u32>,
-    #[schemars(description = "Expression to evaluate (e.g., user.id, {'a': x, 'b': y})")]
+    #[schemars(
+        description = "Expression to evaluate (e.g., user.id, {'a': x, 'b': y}). For Go: simple variables recommended; non-variadic function calls work but BLOCK process (variadic like fmt.Sprintf NOT supported)."
+    )]
     pub expression: String,
     #[schemars(
         description = "Connection ID to use for this metric. Required. Get from create_connection response or list_connections."
@@ -163,7 +165,9 @@ pub struct ObserveParams {
     #[schemars(description = "File path to observe (relative or absolute)")]
     pub file: String,
 
-    #[schemars(description = "Expression to capture (e.g., 'user.balance', 'len(items)')")]
+    #[schemars(
+        description = "Expression to capture (e.g., 'user.balance', 'len(items)'). For Go: simple variables recommended; non-variadic function calls work but BLOCK process (variadic like fmt.Sprintf NOT supported)."
+    )]
     pub expression: String,
 
     #[schemars(description = "Line number (optional - auto-finds best line if not specified)")]

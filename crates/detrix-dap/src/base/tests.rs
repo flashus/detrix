@@ -214,3 +214,70 @@ async fn test_parse_output_unknown_metric() {
     let result = TestParser::parse_output(&body, &active_metrics).await;
     assert!(result.is_none());
 }
+
+// ============================================================================
+// expression_contains_function_call tests
+// ============================================================================
+
+use super::events::expression_contains_function_call;
+
+#[test]
+fn test_expression_contains_function_call_simple_function() {
+    // Standard function calls
+    assert!(expression_contains_function_call("len(x)"));
+    assert!(expression_contains_function_call("fmt.Sprintf(\"test\")"));
+    assert!(expression_contains_function_call("user.GetName()"));
+    assert!(expression_contains_function_call("calculate(a, b, c)"));
+}
+
+#[test]
+fn test_expression_contains_function_call_method_calls() {
+    // Method calls on objects
+    assert!(expression_contains_function_call("obj.method()"));
+    assert!(expression_contains_function_call("user.GetBalance()"));
+    assert!(expression_contains_function_call("list.append(item)"));
+    assert!(expression_contains_function_call("string.format(x)"));
+}
+
+#[test]
+fn test_expression_contains_function_call_nested() {
+    // Nested function calls
+    assert!(expression_contains_function_call(
+        "fmt.Sprintf(\"%s\", user.GetName())"
+    ));
+    assert!(expression_contains_function_call(
+        "len(strings.Split(s, \",\"))"
+    ));
+}
+
+#[test]
+fn test_expression_contains_function_call_not_function() {
+    // Simple variables - should NOT be detected as function calls
+    assert!(!expression_contains_function_call("x"));
+    assert!(!expression_contains_function_call("user.name"));
+    assert!(!expression_contains_function_call("order.Price"));
+    assert!(!expression_contains_function_call("arr[0]"));
+    assert!(!expression_contains_function_call("map[\"key\"]"));
+}
+
+#[test]
+fn test_expression_contains_function_call_arithmetic() {
+    // Arithmetic expressions with parentheses - NOT function calls
+    assert!(!expression_contains_function_call("(x + y)"));
+    assert!(!expression_contains_function_call("(a + b) * c"));
+    assert!(!expression_contains_function_call("((x))"));
+}
+
+#[test]
+fn test_expression_contains_function_call_type_cast() {
+    // Type casts look like function calls - detected as function call
+    // This is acceptable because Go type casts like int(x) are handled similarly
+    assert!(expression_contains_function_call("int(x)"));
+    assert!(expression_contains_function_call("float64(value)"));
+}
+
+#[test]
+fn test_expression_contains_function_call_empty() {
+    assert!(!expression_contains_function_call(""));
+    assert!(!expression_contains_function_call("   "));
+}

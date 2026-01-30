@@ -305,6 +305,384 @@ mod dap_workflow_tests {
         }
     }
 
+    /// Test Go mixed metric modes (logpoint + breakpoint)
+    ///
+    /// This test verifies that simple variable metrics (logpoint mode) and function
+    /// call metrics (breakpoint mode) can work together on DIFFERENT lines.
+    ///
+    /// Architecture:
+    /// - Simple variables use logpoint mode (setBreakpoints with logMessage) - non-blocking
+    /// - Function calls use breakpoint mode (no logMessage, relies on stopped event) - blocking
+    ///
+    /// Both types can coexist in the same file as long as they're on different lines.
+    #[tokio::test]
+    async fn test_dap_go_mixed_metric_modes() {
+        use detrix_testing::e2e::client::{AddMetricRequest, ApiClient};
+        use std::time::Duration;
+
+        if !detrix_testing::e2e::require_tool(detrix_testing::e2e::ToolDependency::Delve).await {
+            return;
+        }
+        let mut executor = TestExecutor::new();
+        let reporter = TestReporter::new("DAP Go Mixed Metric Modes", "MCP");
+        reporter.print_header();
+
+        let script_path = executor
+            .workspace_root
+            .join("fixtures/go/detrix_example_app.go");
+
+        // Start daemon
+        if let Err(e) = executor.start_daemon().await {
+            reporter.error(&format!("Failed to start daemon: {}", e));
+            executor.print_daemon_logs(50);
+            panic!("Failed to start daemon: {}", e);
+        }
+
+        // Start delve
+        if let Err(e) = executor.start_delve(script_path.to_str().unwrap()).await {
+            reporter.error(&format!("Failed to start delve: {}", e));
+            executor.print_delve_logs(50);
+            panic!("Failed to start delve: {}", e);
+        }
+
+        let client = McpClient::new(executor.http_port);
+
+        // Step 1: Create connection
+        reporter.section("PHASE 1: CREATE CONNECTION");
+        let step = reporter.step_start("Create Connection", "Connect to Go debugger");
+
+        let connection_id = match client
+            .create_connection("127.0.0.1", executor.delve_port, "go")
+            .await
+        {
+            Ok(r) => {
+                reporter.step_success(step, Some(&format!("Connected: {}", r.data.connection_id)));
+                r.data.connection_id
+            }
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to connect: {}", e);
+            }
+        };
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Step 2: Add BOTH types of metrics
+        reporter.section("PHASE 2: ADD MIXED METRICS");
+
+        // Metric 1: Simple variable (logpoint mode) - line 106 where 'symbol' is assigned
+        // This will use logpoint (setBreakpoints with logMessage)
+        let location1 = format!("@{}#111", script_path.display());
+        let step = reporter.step_start(
+            "Add Logpoint Metric",
+            "Add simple variable 'symbol' at line 111 (logpoint mode)",
+        );
+
+        let mut request1 =
+            AddMetricRequest::new("symbol_logpoint", &location1, "symbol", &connection_id);
+        request1.language = Some("go".to_string());
+
+        match client.add_metric(request1).await {
+            Ok(r) => {
+                reporter.step_success(step, Some(&format!("Added id={} (logpoint mode)", r.data)));
+            }
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to add logpoint metric: {}", e);
+            }
+        }
+
+        // Metric 2: Function call (breakpoint mode) - line 116 where pnl is calculated
+        // This will use breakpoint (pauses execution) because it's a function call
+        // Using len() which is a non-variadic function that Delve supports
+        let location2 = format!("@{}#116", script_path.display());
+        let step = reporter.step_start(
+            "Add Breakpoint Metric",
+            "Add function 'len(symbol)' at line 116 (breakpoint mode)",
+        );
+
+        let mut request2 = AddMetricRequest::new(
+            "symbol_len_breakpoint",
+            &location2,
+            "len(symbol)", // Non-variadic function - should work
+            &connection_id,
+        );
+        request2.language = Some("go".to_string());
+        // Enable introspection to force breakpoint mode
+        request2.capture_stack_trace = Some(true);
+
+        match client.add_metric(request2).await {
+            Ok(r) => {
+                reporter.step_success(
+                    step,
+                    Some(&format!("Added id={} (breakpoint mode)", r.data)),
+                );
+            }
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to add breakpoint metric: {}", e);
+            }
+        }
+
+        // Step 3: Wait for events from BOTH metrics
+        reporter.section("PHASE 3: VERIFY BOTH METRICS CAPTURE EVENTS");
+
+        let step = reporter.step_start(
+            "Wait for Events",
+            "Verify both logpoint and breakpoint metrics capture events",
+        );
+
+        let mut logpoint_events = 0;
+        let mut breakpoint_events = 0;
+
+        // Wait up to 20 seconds for events from both
+        for i in 0..20 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            // Check logpoint metric
+            if let Ok(r) = client.query_events("symbol_logpoint", 10).await {
+                if !r.data.is_empty() && logpoint_events == 0 {
+                    reporter.info(&format!(
+                        "Logpoint metric captured {} events (first: '{}')",
+                        r.data.len(),
+                        r.data[0].value
+                    ));
+                }
+                logpoint_events = r.data.len();
+            }
+
+            // Check breakpoint metric
+            if let Ok(r) = client.query_events("symbol_len_breakpoint", 10).await {
+                if !r.data.is_empty() && breakpoint_events == 0 {
+                    reporter.info(&format!(
+                        "Breakpoint metric captured {} events (first: '{}')",
+                        r.data.len(),
+                        r.data[0].value
+                    ));
+                }
+                breakpoint_events = r.data.len();
+            }
+
+            // Success if both have at least one event
+            if logpoint_events > 0 && breakpoint_events > 0 {
+                reporter.step_success(
+                    step,
+                    Some(&format!(
+                        "Both metrics captured events! Logpoint: {}, Breakpoint: {}",
+                        logpoint_events, breakpoint_events
+                    )),
+                );
+                break;
+            }
+
+            if i == 19 {
+                executor.print_daemon_logs(100);
+                reporter.step_failed(
+                    step,
+                    &format!(
+                        "Timeout: logpoint={}, breakpoint={} (both should have >0)",
+                        logpoint_events, breakpoint_events
+                    ),
+                );
+                panic!(
+                    "Mixed metric modes test failed: logpoint={}, breakpoint={}",
+                    logpoint_events, breakpoint_events
+                );
+            }
+        }
+
+        // Step 4: Cleanup
+        reporter.section("PHASE 4: CLEANUP");
+
+        let _ = client.remove_metric("symbol_logpoint").await;
+        let _ = client.remove_metric("symbol_len_breakpoint").await;
+        let _ = client.close_connection(&connection_id).await;
+
+        reporter.section("TEST COMPLETE");
+        reporter.info("Successfully verified mixed logpoint + breakpoint modes work together!");
+        reporter.print_footer(true);
+    }
+
+    /// Test Go variadic function error handling
+    ///
+    /// This test verifies that when a variadic function (like fmt.Sprintf) is used
+    /// as a metric expression in Go, the error message is properly returned to the user.
+    /// Delve does NOT support variadic functions via DAP evaluate - this test ensures
+    /// the error is captured and returned as the event value.
+    #[tokio::test]
+    async fn test_dap_go_variadic_function_error() {
+        use detrix_testing::e2e::client::{AddMetricRequest, ApiClient};
+        use std::time::Duration;
+
+        if !detrix_testing::e2e::require_tool(detrix_testing::e2e::ToolDependency::Delve).await {
+            return;
+        }
+        let mut executor = TestExecutor::new();
+        let reporter = TestReporter::new("DAP Go Variadic Function Error", "MCP");
+        reporter.print_header();
+
+        // Get script path for Go detrix_example_app.go
+        let script_path = executor
+            .workspace_root
+            .join("fixtures/go/detrix_example_app.go");
+
+        // Start daemon
+        if let Err(e) = executor.start_daemon().await {
+            reporter.error(&format!("Failed to start daemon: {}", e));
+            executor.print_daemon_logs(50);
+            panic!("Failed to start daemon: {}", e);
+        }
+
+        // Start delve (Go debugger)
+        if let Err(e) = executor.start_delve(script_path.to_str().unwrap()).await {
+            reporter.error(&format!("Failed to start delve: {}", e));
+            executor.print_delve_logs(50);
+            panic!("Failed to start delve: {}", e);
+        }
+
+        let client = McpClient::new(executor.http_port);
+
+        // Step 1: Create connection
+        reporter.section("PHASE 1: CREATE CONNECTION");
+        let step = reporter.step_start("Create Connection", "Connect to Go debugger");
+
+        let connection_id = match client
+            .create_connection("127.0.0.1", executor.delve_port, "go")
+            .await
+        {
+            Ok(r) => {
+                reporter.step_success(step, Some(&format!("Connected: {}", r.data.connection_id)));
+                r.data.connection_id
+            }
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to connect: {}", e);
+            }
+        };
+
+        // Wait for DAP handshake
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Step 2: Add metric with variadic function (should fail)
+        reporter.section("PHASE 2: ADD VARIADIC FUNCTION METRIC");
+
+        // Use a line where 'symbol' is in scope (line 111 after it's assigned)
+        let location = format!("@{}#111", script_path.display());
+
+        let step = reporter.step_start(
+            "Add Variadic Metric",
+            "Add metric with fmt.Sprintf (variadic function)",
+        );
+
+        // Use fmt.Sprintf which is a variadic function - Delve doesn't support these
+        let mut request = AddMetricRequest::new(
+            "variadic_test",
+            &location,
+            r#"fmt.Sprintf("%s", symbol)"#,
+            &connection_id,
+        );
+        request.language = Some("go".to_string());
+        // Enable introspection to force breakpoint mode (required for function calls)
+        request.capture_stack_trace = Some(true);
+
+        match client.add_metric(request).await {
+            Ok(r) => {
+                reporter.step_response("OK", Some(&format!("id={}", r.data)));
+                reporter.step_success(step, Some("Metric added (will fail on evaluation)"));
+            }
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to add metric: {}", e);
+            }
+        }
+
+        // Step 3: Wait for events and check for variadic error
+        reporter.section("PHASE 3: VERIFY VARIADIC ERROR IN EVENTS");
+
+        let step = reporter.step_start(
+            "Wait for Error Event",
+            "Check that variadic function error is captured",
+        );
+
+        let mut found_variadic_error = false;
+        let mut event_value = String::new();
+
+        // Wait up to 15 seconds for events
+        for _ in 0..15 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            if let Ok(r) = client.query_events("variadic_test", 10).await {
+                for event in &r.data {
+                    reporter.info(&format!(
+                        "Event: value='{}', is_error={}",
+                        event.value, event.is_error
+                    ));
+
+                    // Check for variadic function error patterns:
+                    // - "can not convert value of type string to []interface {}"
+                    // - "too many arguments"
+                    // - "evaluation failed"
+                    if event.value.contains("[]interface")
+                        || event.value.contains("too many arguments")
+                        || event.value.contains("evaluation failed")
+                    {
+                        found_variadic_error = true;
+                        event_value = event.value.clone();
+                        break;
+                    }
+                }
+            }
+
+            if found_variadic_error {
+                break;
+            }
+        }
+
+        if found_variadic_error {
+            reporter.step_success(
+                step,
+                Some(&format!(
+                    "Variadic error captured: {}",
+                    &event_value[..event_value.len().min(100)]
+                )),
+            );
+        } else {
+            executor.print_daemon_logs(100);
+            reporter.step_failed(step, "Variadic function error not captured in events");
+            panic!(
+                "Expected variadic function error in events, but none found. \
+                Delve should return an error like 'can not convert value of type string to []interface {{}}'"
+            );
+        }
+
+        // Step 4: Cleanup
+        reporter.section("PHASE 4: CLEANUP");
+
+        let step = reporter.step_start("Remove Metric", "Remove variadic_test metric");
+        match client.remove_metric("variadic_test").await {
+            Ok(_) => reporter.step_success(step, Some("Removed")),
+            Err(e) => reporter.step_failed(step, &e.to_string()),
+        }
+
+        let step = reporter.step_start("Close Connection", "Close connection");
+        match client.close_connection(&connection_id).await {
+            Ok(_) => reporter.step_success(step, Some("Closed")),
+            Err(e) => reporter.step_failed(step, &e.to_string()),
+        }
+
+        reporter.section("TEST COMPLETE");
+        reporter.info(&format!("Variadic error message: {}", event_value));
+
+        // Verify error message contains expected pattern
+        assert!(
+            event_value.contains("[]interface") || event_value.contains("too many arguments"),
+            "Error message should indicate variadic function issue: {}",
+            event_value
+        );
+
+        reporter.print_footer(true);
+    }
+
     /// Run Rust DAP workflow (requires lldb-dap and compiled detrix_example_app)
     #[tokio::test]
     async fn test_dap_rust_workflow() {
@@ -3493,14 +3871,15 @@ mod observe_workflow_tests {
         reporter.section("STEP 5: OBSERVE GO VARIABLES");
         let step = reporter.step_start(
             "Observe (Go)",
-            "Using observe tool on line 69 (all variables in scope)",
+            "Using observe tool on line 116 (all variables in scope)",
         );
         reporter.info(&format!("  File: {}", source_path.display()));
         reporter.info("  Expression: orderID");
-        reporter.info("  Line: 69");
+        reporter.info("  Line: 116");
 
+        // Line 116 is `pnl := calculatePnl(...)` where all variables are in scope
         let observe_request = ObserveRequest::new(source_path.to_str().unwrap(), "orderID")
-            .with_line(69)
+            .with_line(116)
             .with_connection_id(&connection_id)
             .with_name("observe_go_orderid");
 

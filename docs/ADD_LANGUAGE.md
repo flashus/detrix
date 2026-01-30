@@ -884,6 +884,86 @@ Same pattern as Go, plus:
 - `crates/detrix-cli/src/commands/lldb_serve.rs` - Wrapper command (lldb-dap doesn't support network listening)
 - Type formatters for LLDB to display Rust types readably
 
+## Language-Specific Behaviors
+
+### Go: Expression Evaluation
+
+Go uses Delve as the debug adapter. Expression support depends on complexity:
+
+| Expression Type | DAP Mode | Notes |
+|----------------|----------|-------|
+| Simple variable access (`x`, `user.Name`) | Logpoint | ✅ Fast, non-blocking, **RECOMMENDED** |
+| Non-variadic function calls (`len(x)`, `user.GetBalance()`) | Breakpoint | ⚠️ **BLOCKS process**, experimental |
+| With introspection (stack/memory capture) | Breakpoint | Brief pause, captures context |
+
+**How function calls work:**
+
+Detrix auto-detects function calls and uses Delve's `call` command:
+
+1. **Detection:** `expression_contains_function_call()` detects `identifier(` patterns
+2. **Mode:** Automatically uses breakpoint mode (not logpoint)
+3. **Evaluation:** Prefixes expression with `call ` for Delve DAP
+4. **Resume:** Continues execution after capturing value
+
+**WARNING:** Function calls **BLOCK the target process** while executing. Delve marks this as "highly EXPERIMENTAL due to limitation in Go runtime".
+
+**CRITICAL LIMITATION: Variadic functions are NOT supported!**
+
+```go
+// ❌ DOES NOT WORK - variadic functions fail with error like:
+// "<evaluation failed: Unable to evaluate expression: can not convert value of type string to []interface {}>"
+addMetric(connID, file, 111, `fmt.Sprintf("%s x%d", symbol, qty)`, ...)
+addMetric(connID, file, 112, `fmt.Println(symbol)`, ...)  // variadic
+addMetric(connID, file, 113, `append(slice, item)`, ...)  // variadic
+
+// ✅ WORKS - non-variadic functions only
+addMetric(connID, file, 111, `len(symbol)`, ...)           // builtin
+addMetric(connID, file, 112, `cap(slice)`, ...)            // builtin
+addMetric(connID, file, 113, `user.GetBalance()`, ...)     // method
+addMetric(connID, file, 114, `math.Sqrt(value)`, ...)      // fixed arity
+addMetric(connID, file, 115, `calculatePnl(e, c, q)`, ...) // user func
+```
+
+Delve's `call` command cannot handle variadic functions (`...` parameters).
+The error is returned in the event value for easy debugging.
+See [Delve Issue #2261](https://github.com/go-delve/delve/issues/2261).
+
+**Recommended approach:**
+
+```go
+// ✅ PREFERRED: Simple variables (non-blocking)
+addMetric(connID, file, 111, "symbol", "order_symbol", "go")
+addMetric(connID, file, 112, "quantity", "order_qty", "go")
+
+// ⚠️ SUPPORTED but BLOCKING: Non-variadic function calls
+addMetric(connID, file, 111, `len(symbol)`, "symbol_len", "go")
+addMetric(connID, file, 112, `user.GetBalance()`, "balance", "go")
+```
+
+**When to use function calls:**
+- Calling getters/methods that do simple calculations
+- Built-in functions like `len()`, `cap()`, `real()`, `imag()`
+- User-defined functions with fixed parameter counts
+- One-off debugging sessions
+
+**Code locations:**
+- Detection: `crates/detrix-dap/src/base/events.rs` → `expression_contains_function_call()`
+- Mode selection: `crates/detrix-dap/src/base/metrics.rs` → `set_metric()` method
+- Evaluation: `crates/detrix-dap/src/base/events.rs` → `process_introspection_metric()`
+
+**Technical reference:**
+- [VSCode Go Issue #100](https://github.com/golang/vscode-go/issues/100) - Function call implementation
+- [Delve DAP docs](https://go.googlesource.com/vscode-go/+/HEAD/docs/dlv-dap.md) - Debug console `call` syntax
+- [Delve Issue #2261](https://github.com/go-delve/delve/issues/2261) - Variadic function limitations
+
+### Python: Logpoint Introspection
+
+Python's debugpy supports full expression evaluation in logpoints, including function calls. No special handling needed.
+
+### Rust: Type Formatters
+
+Rust uses lldb-dap which requires type formatters for readable output. Detrix injects these automatically via `initCommands` in the launch request.
+
 ## Known Issues and Fixes
 
 ### DAP setBreakpoints Race Condition (Fixed)

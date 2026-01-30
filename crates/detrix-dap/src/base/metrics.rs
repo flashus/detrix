@@ -3,12 +3,13 @@
 //! This module contains the metric management functionality for setting,
 //! removing, and clearing metrics as logpoints/breakpoints.
 
+use super::events::expression_contains_function_call;
 use crate::{
     constants::requests, AdapterProcess, Error, Result, SetBreakpointsArguments, Source,
     SourceBreakpoint,
 };
 use detrix_application::{RemoveMetricResult, SetMetricResult};
-use detrix_core::Metric;
+use detrix_core::{Metric, SourceLanguage};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -106,15 +107,31 @@ pub trait MetricManager: Send + Sync {
             .values()
             .filter(|m| m.location.file == *file_path)
             .map(|m| {
-                // Use breakpoint only when introspection is enabled AND adapter doesn't support
-                // logpoint-based introspection. This will cause the debugger to stop, allowing
-                // us to capture stack trace and variables via DAP requests.
+                // Determine if we need breakpoint mode (pauses execution):
+                // 1. Introspection (stack trace or memory snapshot) - needs pause to capture context
+                // 2. Go function calls - Delve requires "call" prefix which only works via evaluate
+                //
+                // WARNING: Go function calls BLOCK the target process while executing!
+                // Use simple variable expressions when possible for non-blocking observability.
                 let needs_introspection = m.capture_stack_trace || m.capture_memory_snapshot;
-                if needs_introspection && !Self::supports_logpoint_introspection() {
-                    debug!(
-                        "[{}] Using breakpoint for '{}' (introspection enabled: stack={}, memory={}, logpoint_introspection=false)",
-                        Self::language_name(), m.name, m.capture_stack_trace, m.capture_memory_snapshot
-                    );
+                let is_go_function_call = m.language == SourceLanguage::Go
+                    && expression_contains_function_call(&m.expression);
+
+                let use_breakpoint = (needs_introspection && !Self::supports_logpoint_introspection())
+                    || is_go_function_call;
+
+                if use_breakpoint {
+                    if is_go_function_call {
+                        warn!(
+                            "[{}] Using BLOCKING breakpoint for '{}' (Go function call: '{}') - consider using simple variables",
+                            Self::language_name(), m.name, m.expression
+                        );
+                    } else {
+                        debug!(
+                            "[{}] Using breakpoint for '{}' (introspection enabled: stack={}, memory={})",
+                            Self::language_name(), m.name, m.capture_stack_trace, m.capture_memory_snapshot
+                        );
+                    }
                     SourceBreakpoint::at_line(m.location.line)
                 } else {
                     // Use logpoint - adapter handles introspection in logpoint message if needed

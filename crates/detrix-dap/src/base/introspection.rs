@@ -270,33 +270,86 @@ pub async fn capture_memory_snapshot(
     })
 }
 
-/// Evaluate an expression in the context of a stack frame
+/// Evaluate an expression in the context of a stack frame.
+///
+/// The `context` parameter determines the evaluation mode:
+/// - `"watch"` - Standard watch expression evaluation (default for most languages)
+/// - `"repl"` - REPL context, enables function calls (used by Go/Delve, in Go, only works in breakpoint mode and doesnt support variadic args functions)
+/// - `"hover"` - Hover context for quick evaluation
+///
+/// Returns `Ok(value)` on success, `Err(error_message)` on failure.
+/// The error message contains the actual debugger error for user feedback.
 pub async fn evaluate_expression(
     broker: &Arc<DapBroker>,
     expression: &str,
     frame_id: i64,
-) -> Option<String> {
+    context: &str,
+) -> Result<String, String> {
     let args = serde_json::json!({
         "expression": expression,
         "frameId": frame_id,
-        "context": "watch"  // "watch" context for evaluating expressions
+        "context": context
     });
 
-    let response = broker
-        .send_request("evaluate", Some(args))
-        .await
-        .debug_ok(&format!("Evaluate request failed for '{}'", expression))?;
+    debug!(
+        "Evaluating expression: '{}' in context '{}' (frame_id={})",
+        expression, context, frame_id
+    );
+
+    let response = match broker.send_request("evaluate", Some(args)).await {
+        Ok(r) => r,
+        Err(e) => {
+            let err = format!("DAP request failed: {}", e);
+            warn!("Evaluate request failed for '{}': {}", expression, err);
+            return Err(err);
+        }
+    };
 
     if !response.success {
-        debug!("Evaluate request unsuccessful for '{}'", expression);
-        return None;
+        // Extract detailed error message from response body if available
+        let error_detail = response
+            .body
+            .as_ref()
+            .and_then(|b| b.get("error"))
+            .and_then(|e| e.get("format"))
+            .and_then(|f| f.as_str())
+            .map(String::from)
+            .or_else(|| response.message.clone())
+            .unwrap_or_else(|| "Unknown error".to_string());
+
+        warn!(
+            "Evaluate request unsuccessful for '{}': {}",
+            expression, error_detail
+        );
+        return Err(error_detail);
     }
 
-    response
-        .body?
-        .get("result")
-        .and_then(|r| r.as_str())
-        .map(String::from)
+    let body = response.body.ok_or_else(|| {
+        let err = "Response missing body".to_string();
+        warn!("Evaluate response missing body for '{}'", expression);
+        err
+    })?;
+
+    debug!("Evaluate response body: {:?}", body);
+
+    // Try to get result as string, or convert from other types
+    body.get("result")
+        .map(|r| {
+            if let Some(s) = r.as_str() {
+                s.to_string()
+            } else {
+                // For non-string results, convert to string representation
+                r.to_string()
+            }
+        })
+        .ok_or_else(|| {
+            let err = "Response missing 'result' field".to_string();
+            warn!(
+                "Evaluate response missing 'result' field for '{}': body={:?}",
+                expression, body
+            );
+            err
+        })
 }
 
 /// Find ALL metrics at a stopped location (there may be multiple metrics on the same line)

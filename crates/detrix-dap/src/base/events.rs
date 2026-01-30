@@ -242,7 +242,17 @@ pub async fn get_stopped_location(
     Some((file, line, frame_id))
 }
 
-/// Process a single metric with introspection enabled.
+/// Process a single metric that uses breakpoint mode (introspection enabled).
+///
+/// This is called for metrics that have introspection enabled:
+/// - capture_stack_trace = true
+/// - capture_memory_snapshot = true
+///
+/// NOTE: Go/Delve supports function calls via DAP evaluate requests using the
+/// `call` prefix (e.g., `call len(x)`). Detrix auto-detects function calls and
+/// adds this prefix automatically. However, **variadic functions are NOT supported**
+/// (e.g., fmt.Sprintf, fmt.Println) - they will return an error.
+/// Use simple variable expressions when possible for non-blocking observability.
 pub async fn process_introspection_metric(
     broker: &Arc<DapBroker>,
     metric: &Metric,
@@ -251,15 +261,29 @@ pub async fn process_introspection_metric(
     tx: &tokio::sync::mpsc::Sender<MetricEvent>,
     lang: &'static str,
 ) {
-    // Skip metrics without introspection
-    if !metric.capture_stack_trace && !metric.capture_memory_snapshot {
+    // This function handles metrics that use breakpoint mode (pause execution):
+    // 1. Introspection (stack trace or memory snapshot capture)
+    // 2. Go function calls (require "call" prefix which only works via evaluate)
+    let needs_introspection = metric.capture_stack_trace || metric.capture_memory_snapshot;
+    let is_go_function_call = metric.language == detrix_core::SourceLanguage::Go
+        && expression_contains_function_call(&metric.expression);
+
+    // Skip if this metric doesn't need breakpoint mode
+    if !needs_introspection && !is_go_function_call {
         return;
     }
 
-    debug!(
-        "[{}] Processing introspection metric '{}' (stack={}, memory={})",
-        lang, metric.name, metric.capture_stack_trace, metric.capture_memory_snapshot
-    );
+    if is_go_function_call {
+        debug!(
+            "[{}] Processing Go function call metric '{}' (expression: '{}')",
+            lang, metric.name, metric.expression
+        );
+    } else {
+        debug!(
+            "[{}] Processing introspection metric '{}' (stack={}, memory={})",
+            lang, metric.name, metric.capture_stack_trace, metric.capture_memory_snapshot
+        );
+    }
 
     // Capture introspection data
     let stack_trace = if metric.capture_stack_trace {
@@ -275,9 +299,26 @@ pub async fn process_introspection_metric(
     };
 
     // Evaluate the metric expression
-    let value = evaluate_expression(broker, &metric.expression, frame_id)
+    // For Go function calls, use "call <expr>" prefix (required by Delve DAP)
+    // WARNING: Function calls BLOCK the target process while executing!
+    let (eval_expr, eval_context) = if metric.language == detrix_core::SourceLanguage::Go
+        && expression_contains_function_call(&metric.expression)
+    {
+        // Go function calls require "call " prefix and "repl" context
+        // See: https://github.com/golang/vscode-go/issues/100
+        warn!(
+                "[{}] Using blocking 'call' for function expression '{}' - consider using simple variables",
+                lang, metric.expression
+            );
+        (format!("call {}", metric.expression), "repl")
+    } else {
+        // Simple variable access - use "watch" context (faster)
+        (metric.expression.clone(), "watch")
+    };
+
+    let value = evaluate_expression(broker, &eval_expr, frame_id, eval_context)
         .await
-        .unwrap_or_else(|| "<evaluation failed>".to_string());
+        .unwrap_or_else(|err| format!("<evaluation failed: {}>", err));
 
     // Create metric event - metric must have an ID (saved in storage before evaluation)
     let Some(metric_id) = metric.id else {
@@ -312,6 +353,31 @@ pub async fn process_introspection_metric(
             lang, metric.name
         );
     }
+}
+
+/// Detect if an expression contains a function call.
+///
+/// Used to determine whether to use breakpoint mode for Go expressions.
+/// Go/Delve requires the `call` prefix for function calls in evaluate requests.
+///
+/// **WARNING:** Function calls in Go BLOCK the target process while executing.
+/// Use simple variable expressions when possible for non-blocking observability.
+///
+/// Heuristic: look for `identifier(` pattern which indicates function calls.
+/// Examples that match: `fmt.Sprintf(...)`, `len(x)`, `user.GetName()`
+/// Examples that don't match: `(x + y)`, `arr[0]`, `user.name`
+pub fn expression_contains_function_call(expr: &str) -> bool {
+    let bytes = expr.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'(' && i > 0 {
+            let prev = bytes[i - 1];
+            // Check if preceded by identifier char (alphanumeric, underscore, or dot for method calls)
+            if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.' {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Send continue command to resume execution.
