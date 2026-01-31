@@ -172,11 +172,20 @@ pub async fn initialize_dap(
             pid,
             program,
             wait_for,
+            init_commands,
         } => {
             // For lldb-dap, send attach request with PID or program name.
             // lldb-dap will attach to the running process.
             // See: https://github.com/llvm/llvm-project/blob/main/lldb/tools/lldb-dap/README.md
-            let mut attach_args = serde_json::json!({});
+            //
+            // CRITICAL: stopOnEntry must be false to prevent deadlock when attaching
+            // to a process that is waiting for an HTTP response (e.g., Rust client
+            // waiting for daemon registration response). Without this, lldb-dap
+            // pauses the target via ptrace, the target can't receive the HTTP response,
+            // and the registration times out.
+            let mut attach_args = serde_json::json!({
+                "stopOnEntry": false
+            });
 
             if let Some(p) = pid {
                 attach_args["pid"] = serde_json::json!(p);
@@ -187,10 +196,14 @@ pub async fn initialize_dap(
             if *wait_for {
                 attach_args["waitFor"] = serde_json::json!(true);
             }
+            // Add init commands for type formatters (e.g., Rust &str display)
+            if !init_commands.is_empty() {
+                attach_args["initCommands"] = serde_json::json!(init_commands);
+            }
 
             debug!(
-                "Sending attach request to {}:{} with pid={:?}, program={:?}, waitFor={}",
-                host, port, pid, program, wait_for
+                "Sending attach request to {}:{} with pid={:?}, program={:?}, waitFor={}, init_commands={}",
+                host, port, pid, program, wait_for, init_commands.len()
             );
 
             // Send attach request and wait for response

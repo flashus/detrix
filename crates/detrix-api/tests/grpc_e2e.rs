@@ -180,8 +180,10 @@ impl E2ETestServer {
                 "127.0.0.1".to_string(),
                 debugpy_port,
                 "python".to_string(),
-                None, // auto-generate connection ID
-                None, // No program path for Python
+                None,  // auto-generate connection ID
+                None,  // No program path for Python
+                None,  // No pid (not using AttachPid mode)
+                false, // SafeMode disabled for tests
             )
             .await?;
 

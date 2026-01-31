@@ -155,21 +155,23 @@ impl MetricService {
                     location: format!("{}:{}", metric.location.file, metric.location.line),
                 });
             } else {
-                // No replace flag: return conflict error with existing metric info
-                // Existing metric from storage should always have ID - error if missing
+                // No replace flag: idempotent behavior - return existing metric ID
+                // This allows clients to re-add the same metric after daemon restart without error
                 let existing_id = existing.id.ok_or_else(|| {
                     Error::Storage(format!(
                         "Existing metric '{}' at {}:{} missing ID - database integrity issue",
                         existing.name, metric.location.file, metric.location.line
                     ))
                 })?;
-                return Err(detrix_core::Error::MetricLocationConflict {
-                    location: format!("{}:{}", metric.location.file, metric.location.line),
-                    connection_id: metric.connection_id.0.clone(),
-                    existing_name: existing.name.clone(),
-                    existing_id: existing_id.0,
-                }
-                .into());
+                tracing::info!(
+                    "Metric already exists at {}:{} for connection {}, returning existing ID {} (name='{}')",
+                    metric.location.file,
+                    metric.location.line,
+                    metric.connection_id.0,
+                    existing_id.0,
+                    existing.name
+                );
+                return Ok(OperationOutcome::ok(existing_id));
             }
         }
 

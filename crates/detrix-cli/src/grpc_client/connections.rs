@@ -50,6 +50,7 @@ impl ConnectionsClient {
             metadata: Some(RequestMetadata::default()),
             program: program.map(|s| s.to_string()),
             safe_mode,
+            pid: None, // CLI doesn't use AttachPid mode
         };
 
         let response = self

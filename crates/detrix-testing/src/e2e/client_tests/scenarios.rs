@@ -412,19 +412,28 @@ impl ClientTestScenarios {
             return Err(format!("Expected exactly 1 'awake', got {}", awake_count));
         }
 
-        // Verify only one connection in daemon
+        // Verify only one connected connection in daemon
+        // Note: Disconnected connections may still exist in the list
         let connections = daemon.list_connections().await.map_err(|e| e.to_string())?;
-        if connections.data.len() != 1 {
+        let connected_count = connections
+            .data
+            .iter()
+            .filter(|c| {
+                c.status.to_lowercase().contains("connected")
+                    && !c.status.to_lowercase().contains("disconnected")
+            })
+            .count();
+        if connected_count != 1 {
             reporter.step_failed(
                 step,
                 &format!(
-                    "Expected exactly 1 connection in daemon, got {}",
-                    connections.data.len()
+                    "Expected exactly 1 connected connection in daemon, got {}",
+                    connected_count
                 ),
             );
             return Err(format!(
-                "Expected exactly 1 connection in daemon, got {}",
-                connections.data.len()
+                "Expected exactly 1 connected connection in daemon, got {}",
+                connected_count
             ));
         }
 

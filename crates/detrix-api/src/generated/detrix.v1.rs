@@ -3310,6 +3310,9 @@ pub struct CreateConnectionRequest {
     #[prost(bool, tag = "7")]
     #[serde(default)]
     pub safe_mode: bool,
+    /// Process ID for AttachPid mode (Rust client library)
+    #[prost(uint32, optional, tag = "8")]
+    pub pid: ::core::option::Option<u32>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -370,12 +370,13 @@ mod dap_workflow_tests {
         // Step 2: Add BOTH types of metrics
         reporter.section("PHASE 2: ADD MIXED METRICS");
 
-        // Metric 1: Simple variable (logpoint mode) - line 106 where 'symbol' is assigned
+        // Metric 1: Simple variable (logpoint mode) - line 117 where 'symbol' is assigned
         // This will use logpoint (setBreakpoints with logMessage)
-        let location1 = format!("@{}#111", script_path.display());
+        // Use line 122 (orderID := placeOrder) where symbol is in scope
+        let location1 = format!("@{}#122", script_path.display());
         let step = reporter.step_start(
             "Add Logpoint Metric",
-            "Add simple variable 'symbol' at line 111 (logpoint mode)",
+            "Add simple variable 'symbol' at line 122 (logpoint mode)",
         );
 
         let mut request1 =
@@ -392,13 +393,14 @@ mod dap_workflow_tests {
             }
         }
 
-        // Metric 2: Function call (breakpoint mode) - line 116 where pnl is calculated
+        // Metric 2: Function call (breakpoint mode) - line 127 where pnl is calculated
         // This will use breakpoint (pauses execution) because it's a function call
         // Using len() which is a non-variadic function that Delve supports
-        let location2 = format!("@{}#116", script_path.display());
+        // Use line 127 (pnl := calculatePnl) which is a function call
+        let location2 = format!("@{}#127", script_path.display());
         let step = reporter.step_start(
             "Add Breakpoint Metric",
-            "Add function 'len(symbol)' at line 116 (breakpoint mode)",
+            "Add function 'len(symbol)' at line 127 (breakpoint mode)",
         );
 
         let mut request2 = AddMetricRequest::new(
@@ -566,8 +568,8 @@ mod dap_workflow_tests {
         // Step 2: Add metric with variadic function (should fail)
         reporter.section("PHASE 2: ADD VARIADIC FUNCTION METRIC");
 
-        // Use a line where 'symbol' is in scope (line 111 after it's assigned)
-        let location = format!("@{}#111", script_path.display());
+        // Use a line where 'symbol' is in scope (line 122 after it's assigned on 117)
+        let location = format!("@{}#122", script_path.display());
 
         let step = reporter.step_start(
             "Add Variadic Metric",
@@ -694,9 +696,7 @@ mod dap_workflow_tests {
         reporter.print_header();
 
         // For Rust, start_lldb expects source file path (will compile it)
-        let source_path = executor
-            .workspace_root
-            .join("fixtures/rust/detrix_example_app.rs");
+        let source_path = executor.workspace_root.join("fixtures/rust/src/main.rs");
 
         // Start daemon
         if let Err(e) = executor.start_daemon().await {
@@ -786,9 +786,7 @@ mod dap_workflow_tests {
         reporter.print_header();
 
         // For Rust, start_codelldb expects source file path (will compile it)
-        let source_path = executor
-            .workspace_root
-            .join("fixtures/rust/detrix_example_app.rs");
+        let source_path = executor.workspace_root.join("fixtures/rust/src/main.rs");
 
         // Start daemon
         if let Err(e) = executor.start_daemon().await {
@@ -1079,8 +1077,6 @@ mod dap_workflow_tests {
 
         let config = DapWorkflowConfig::rust();
         let source_file = executor.workspace_root.join(&config.source_file);
-        // Binary path is source file without extension (e.g., detrix_example_app.rs -> detrix_example_app)
-        let binary_path = source_file.with_extension("");
 
         // Note: start_lldb handles building via OnceLock - don't build here to avoid races
 
@@ -1097,6 +1093,12 @@ mod dap_workflow_tests {
             executor.print_lldb_logs(50);
             panic!("Failed to start lldb-dap: {}", e);
         }
+
+        // Get the actual binary path from executor (set by start_lldb after build)
+        let binary_path = executor
+            .rust_binary_path
+            .clone()
+            .expect("rust_binary_path should be set after start_lldb");
 
         let client = McpClient::new(executor.http_port);
         let lldb_port = executor.lldb_port;
@@ -1345,9 +1347,7 @@ mod grpc_dap_workflow_tests {
         let reporter = TestReporter::new("DAP Rust Workflow", "gRPC");
         reporter.print_header();
 
-        let source_path = executor
-            .workspace_root
-            .join("fixtures/rust/detrix_example_app.rs");
+        let source_path = executor.workspace_root.join("fixtures/rust/src/main.rs");
 
         if let Err(e) = executor.start_daemon().await {
             reporter.error(&format!("Failed to start daemon: {}", e));
@@ -1615,8 +1615,6 @@ mod grpc_dap_workflow_tests {
 
         let config = DapWorkflowConfig::rust();
         let source_file = executor.workspace_root.join(&config.source_file);
-        // Binary path is source file without extension (e.g., detrix_example_app.rs -> detrix_example_app)
-        let binary_path = source_file.with_extension("");
 
         // Note: start_lldb handles building via OnceLock - don't build here to avoid races
 
@@ -1631,6 +1629,12 @@ mod grpc_dap_workflow_tests {
             executor.print_lldb_logs(50);
             panic!("Failed to start lldb-dap: {}", e);
         }
+
+        // Get the actual binary path from executor (set by start_lldb after build)
+        let binary_path = executor
+            .rust_binary_path
+            .clone()
+            .expect("rust_binary_path should be set after start_lldb");
 
         let client = GrpcClient::with_http_port(executor.grpc_port, executor.http_port);
         let lldb_port = executor.lldb_port;
@@ -1874,9 +1878,7 @@ mod rest_dap_workflow_tests {
         let reporter = TestReporter::new("DAP Rust Workflow", "REST");
         reporter.print_header();
 
-        let source_path = executor
-            .workspace_root
-            .join("fixtures/rust/detrix_example_app.rs");
+        let source_path = executor.workspace_root.join("fixtures/rust/src/main.rs");
 
         if let Err(e) = executor.start_daemon().await {
             reporter.error(&format!("Failed to start daemon: {}", e));
@@ -2144,8 +2146,6 @@ mod rest_dap_workflow_tests {
 
         let config = DapWorkflowConfig::rust();
         let source_file = executor.workspace_root.join(&config.source_file);
-        // Binary path is source file without extension (e.g., detrix_example_app.rs -> detrix_example_app)
-        let binary_path = source_file.with_extension("");
 
         // Note: start_lldb handles building via OnceLock - don't build here to avoid races
 
@@ -2160,6 +2160,12 @@ mod rest_dap_workflow_tests {
             executor.print_lldb_logs(50);
             panic!("Failed to start lldb-dap: {}", e);
         }
+
+        // Get the actual binary path from executor (set by start_lldb after build)
+        let binary_path = executor
+            .rust_binary_path
+            .clone()
+            .expect("rust_binary_path should be set after start_lldb");
 
         let client = RestClient::new(executor.http_port);
         let lldb_port = executor.lldb_port;
@@ -3871,15 +3877,15 @@ mod observe_workflow_tests {
         reporter.section("STEP 5: OBSERVE GO VARIABLES");
         let step = reporter.step_start(
             "Observe (Go)",
-            "Using observe tool on line 116 (all variables in scope)",
+            "Using observe tool on line 127 (all variables in scope)",
         );
         reporter.info(&format!("  File: {}", source_path.display()));
         reporter.info("  Expression: orderID");
-        reporter.info("  Line: 116");
+        reporter.info("  Line: 127");
 
-        // Line 116 is `pnl := calculatePnl(...)` where all variables are in scope
+        // Line 127 is `pnl := calculatePnl(...)` where all variables are in scope
         let observe_request = ObserveRequest::new(source_path.to_str().unwrap(), "orderID")
-            .with_line(116)
+            .with_line(127)
             .with_connection_id(&connection_id)
             .with_name("observe_go_orderid");
 
@@ -4034,14 +4040,15 @@ mod observe_workflow_tests {
         reporter.section("STEP 5: OBSERVE RUST VARIABLES");
         let step = reporter.step_start(
             "Observe (Rust)",
-            "Using observe tool on line 83 (all variables in scope)",
+            "Using observe tool on line 117 (all variables in scope)",
         );
         reporter.info(&format!("  File: {}", source_path.display()));
         reporter.info("  Expression: order_id");
-        reporter.info("  Line: 83");
+        reporter.info("  Line: 117");
 
+        // Line 117 is the pnl calculation line where order_id is in scope
         let observe_request = ObserveRequest::new(source_path.to_str().unwrap(), "order_id")
-            .with_line(83)
+            .with_line(117)
             .with_connection_id(&connection_id)
             .with_name("observe_rust_orderid");
 

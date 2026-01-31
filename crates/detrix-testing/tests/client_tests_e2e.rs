@@ -128,14 +128,9 @@ macro_rules! generate_client_test {
 }
 
 // Generate tests for each supported language
-// Currently only Python has Detrix client integration in the fixture
 generate_client_test!(test_python_client, python, "Python Client");
-
-// Future: uncomment when Go client is implemented
-// generate_client_test!(test_go_client, go, "Go Client");
-
-// Future: uncomment when Rust client is implemented
-// generate_client_test!(test_rust_client, rust, "Rust Client");
+generate_client_test!(test_go_client, go, "Go Client");
+generate_client_test!(test_rust_client, rust, "Rust Client");
 
 /// Test Python client with daemon restart
 ///
@@ -269,6 +264,229 @@ async fn test_python_client_daemon_restart() {
             );
         }
     }
+
+    reporter.print_footer(true);
+
+    // Cleanup
+    drop(client);
+    executor.stop_all();
+}
+
+/// Test: No duplicate events (triple events regression test)
+///
+/// This test verifies that when observing a variable, events are received
+/// exactly once per occurrence, not duplicated (e.g., 3 times per hit).
+///
+/// Regression test for: https://github.com/flashus/detrix/issues/XXX
+/// Root cause: Broker subscribers not properly cleaned up during reconnection
+#[tokio::test]
+async fn test_rust_client_no_duplicate_events() {
+    use detrix_testing::e2e::client::{AddMetricRequest, ApiClient};
+    use std::collections::HashMap;
+
+    let config = ClientTestConfig::rust();
+
+    // Skip if lldb-dap not available
+    if !require_tool(config.language.tool_dependency()).await {
+        eprintln!("Skipping: lldb-dap not available");
+        return;
+    }
+
+    // Skip if detrix binary not available
+    let workspace_root = get_workspace_root();
+    if find_detrix_binary(&workspace_root).is_none() {
+        eprintln!("Skipping: detrix binary not found");
+        return;
+    }
+
+    // Skip if fixture doesn't exist
+    let fixture_dir = workspace_root.join("fixtures/rust");
+    if !fixture_dir.exists() {
+        eprintln!(
+            "Skipping: Rust test fixture not found at {}",
+            fixture_dir.display()
+        );
+        return;
+    }
+
+    cleanup_orphaned_e2e_processes();
+
+    let reporter = TestReporter::new(
+        "rust_no_duplicate_events",
+        "Rust Client - No Duplicate Events",
+    );
+    reporter.print_header();
+
+    // Start daemon
+    let mut executor = TestExecutor::new();
+    if let Err(e) = executor.start_daemon().await {
+        let step = reporter.step_start("Setup", "Start daemon");
+        reporter.step_failed(step, &format!("Failed to start daemon: {}", e));
+        reporter.print_footer(false);
+        panic!("Failed to start daemon: {}", e);
+    }
+
+    let step = reporter.step_start("Setup", "Start daemon");
+    reporter.step_success(step, Some("Daemon started"));
+
+    // Spawn Rust client using unified tester
+    let daemon_url = format!("http://127.0.0.1:{}", executor.http_port);
+    let client = match ClientProcessTester::spawn(config.clone(), &daemon_url, 0).await {
+        Ok(c) => c,
+        Err(e) => {
+            let step = reporter.step_start("Setup", "Spawn Rust client");
+            reporter.step_failed(step, &format!("Failed to spawn Rust client: {}", e));
+            reporter.print_footer(false);
+            executor.stop_all();
+            panic!("Failed to spawn Rust client: {}", e);
+        }
+    };
+
+    let step = reporter.step_start("Setup", "Spawn Rust fixture app");
+    reporter.step_success(
+        step,
+        Some(&format!("Control port: {}", client.control_port())),
+    );
+
+    // Create REST client for daemon API
+    let daemon_client = RestClient::new(executor.http_port);
+
+    // Wake the client
+    let step = reporter.step_start("Phase1", "Wake Rust client");
+    let connection_id = match client.wake(None).await {
+        Ok(resp) => {
+            if resp.status == "awake" {
+                reporter.step_success(
+                    step,
+                    Some(&format!("Awake, connection_id={}", resp.connection_id)),
+                );
+                resp.connection_id
+            } else {
+                reporter.step_failed(step, &format!("Unexpected status: {}", resp.status));
+                reporter.print_footer(false);
+                executor.stop_all();
+                panic!("Unexpected wake status: {}", resp.status);
+            }
+        }
+        Err(e) => {
+            reporter.step_failed(step, &format!("Wake failed: {}", e));
+            reporter.print_footer(false);
+            executor.stop_all();
+            panic!("Wake failed: {}", e);
+        }
+    };
+
+    // Wait for connection to stabilize
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    // Add a metric to observe the pnl variable
+    // Line 121 is where pnl is calculated: let pnl = calculate_pnl(...)
+    // We observe at line 128 (log! call) where pnl is in scope
+    let fixture_file = fixture_dir.join("src/main.rs");
+    let location = format!("{}#128", fixture_file.display());
+
+    let step = reporter.step_start("Phase2", "Add metric for pnl variable");
+    let metric_req =
+        AddMetricRequest::new("test_pnl", &location, "pnl", &connection_id).with_language("rust");
+
+    match daemon_client.add_metric(metric_req).await {
+        Ok(resp) => {
+            reporter.step_success(step, Some(&format!("Metric ID: {}", resp.data)));
+        }
+        Err(e) => {
+            reporter.step_failed(step, &format!("Failed to add metric: {}", e));
+            client.print_logs(50);
+            executor.print_daemon_logs(50);
+            reporter.print_footer(false);
+            executor.stop_all();
+            panic!("Failed to add metric: {}", e);
+        }
+    }
+
+    // Wait for events to be captured
+    // The trading bot runs every 3 seconds, so we wait 12 seconds to get ~4 events
+    let step = reporter.step_start("Phase3", "Collect events (12 seconds)");
+    tokio::time::sleep(tokio::time::Duration::from_secs(12)).await;
+
+    // Query events
+    let events = match daemon_client.query_events("test_pnl", 100).await {
+        Ok(resp) => resp.data,
+        Err(e) => {
+            reporter.step_failed(step, &format!("Failed to query events: {}", e));
+            client.print_logs(50);
+            executor.print_daemon_logs(50);
+            reporter.print_footer(false);
+            executor.stop_all();
+            panic!("Failed to query events: {}", e);
+        }
+    };
+
+    reporter.step_success(step, Some(&format!("Received {} events", events.len())));
+
+    // Analyze events for duplicates
+    // Group events by timestamp (within 100ms window) to detect duplicates
+    let step = reporter.step_start("Phase4", "Check for duplicate events");
+
+    // Parse timestamps and count occurrences
+    let mut timestamp_counts: HashMap<String, u32> = HashMap::new();
+    for event in &events {
+        // Round to seconds for grouping (events from same hit should have ~same timestamp)
+        let ts_key = event.timestamp_iso.chars().take(19).collect::<String>();
+        *timestamp_counts.entry(ts_key).or_insert(0) += 1;
+    }
+
+    // Check for duplicates (more than 1 event per second is a duplicate)
+    let mut has_duplicates = false;
+    let mut duplicate_details = Vec::new();
+    for (ts, count) in &timestamp_counts {
+        if *count > 1 {
+            has_duplicates = true;
+            duplicate_details.push(format!("{}: {} events", ts, count));
+        }
+    }
+
+    if has_duplicates {
+        reporter.step_failed(
+            step,
+            &format!(
+                "Found duplicate events! {}\nThis is the triple events bug.",
+                duplicate_details.join(", ")
+            ),
+        );
+        client.print_logs(50);
+        executor.print_daemon_logs(50);
+        reporter.print_footer(false);
+        executor.stop_all();
+        panic!(
+            "Triple events bug detected! Duplicate events: {}",
+            duplicate_details.join(", ")
+        );
+    }
+
+    // Verify we got a reasonable number of events (at least 2 in 12 seconds with 3s interval)
+    if events.len() < 2 {
+        reporter.step_failed(
+            step,
+            &format!(
+                "Expected at least 2 events in 12 seconds, got {}",
+                events.len()
+            ),
+        );
+        client.print_logs(50);
+        executor.print_daemon_logs(50);
+        reporter.print_footer(false);
+        executor.stop_all();
+        panic!("Not enough events captured");
+    }
+
+    reporter.step_success(
+        step,
+        Some(&format!(
+            "No duplicates detected. {} events across {} distinct timestamps",
+            events.len(),
+            timestamp_counts.len()
+        )),
+    );
 
     reporter.print_footer(true);
 

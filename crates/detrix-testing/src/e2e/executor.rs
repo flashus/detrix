@@ -1004,9 +1004,7 @@ impl TestExecutor {
 
     /// Get path to Rust detrix_example_app example
     pub fn rust_detrix_example_app_path(&self) -> Option<PathBuf> {
-        let script_path = self
-            .workspace_root
-            .join("fixtures/rust/detrix_example_app.rs");
+        let script_path = self.workspace_root.join("fixtures/rust/src/main.rs");
         if script_path.exists() {
             Some(script_path)
         } else {
@@ -1247,26 +1245,22 @@ impl TestExecutor {
         }
 
         // Build Rust binary once and reuse across all tests
+        // The fixture is a Cargo project at fixtures/rust/
         let binary_path = RUST_TRADING_BOT_PATH
             .get_or_init(|| {
                 let source_file = std::path::Path::new(source_path);
-                let parent_dir = source_file
-                    .parent()
+                // Go from fixtures/rust/src/main.rs -> fixtures/rust
+                let fixture_dir = source_file
+                    .parent() // src
+                    .and_then(|p| p.parent()) // rust
                     .ok_or_else(|| "Invalid source path".to_string())?;
-                let binary_name = source_file
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .ok_or_else(|| "Invalid file name".to_string())?;
-                let binary_path = parent_dir.join(binary_name);
+                let binary_path = fixture_dir.join("target/debug/detrix_example_app");
 
-                let build_output = Command::new("rustc")
-                    .args([
-                        "-g", // Debug symbols
-                        "-o",
-                        binary_path.to_str().unwrap(),
-                        source_path,
-                    ])
-                    .current_dir(parent_dir)
+                eprintln!("Building Rust fixture at {:?}", fixture_dir);
+
+                let build_output = Command::new("cargo")
+                    .args(["build"])
+                    .current_dir(fixture_dir)
                     .output()
                     .map_err(|e| format!("Failed to build Rust binary: {}", e))?;
 
@@ -1277,11 +1271,29 @@ impl TestExecutor {
                     ));
                 }
 
+                // Verify binary was created
+                if !binary_path.exists() {
+                    return Err(format!(
+                        "Rust build succeeded but binary not found at {:?}. Stdout: {}",
+                        binary_path,
+                        String::from_utf8_lossy(&build_output.stdout)
+                    ));
+                }
+
+                eprintln!("Rust fixture built successfully: {:?}", binary_path);
                 Ok(binary_path)
             })
             .as_ref()
             .map_err(|e| e.clone())?
             .clone();
+
+        // Verify binary still exists (might have been deleted between test runs)
+        if !binary_path.exists() {
+            return Err(format!(
+                "Rust binary not found at {:?}. Run 'cargo build' in fixtures/rust/",
+                binary_path
+            ));
+        }
 
         // Store binary path for reference
         self.rust_binary_path = Some(binary_path.clone());
@@ -1338,26 +1350,22 @@ impl TestExecutor {
         }
 
         // Build Rust binary once and reuse across all tests
+        // The fixture is a Cargo project at fixtures/rust/
         let binary_path = RUST_TRADING_BOT_PATH
             .get_or_init(|| {
                 let source_file = std::path::Path::new(source_path);
-                let parent_dir = source_file
-                    .parent()
+                // Go from fixtures/rust/src/main.rs -> fixtures/rust
+                let fixture_dir = source_file
+                    .parent() // src
+                    .and_then(|p| p.parent()) // rust
                     .ok_or_else(|| "Invalid source path".to_string())?;
-                let binary_name = source_file
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .ok_or_else(|| "Invalid file name".to_string())?;
-                let binary_path = parent_dir.join(binary_name);
+                let binary_path = fixture_dir.join("target/debug/detrix_example_app");
 
-                let build_output = Command::new("rustc")
-                    .args([
-                        "-g", // Debug symbols
-                        "-o",
-                        binary_path.to_str().unwrap(),
-                        source_path,
-                    ])
-                    .current_dir(parent_dir)
+                eprintln!("Building Rust fixture at {:?}", fixture_dir);
+
+                let build_output = Command::new("cargo")
+                    .args(["build"])
+                    .current_dir(fixture_dir)
                     .output()
                     .map_err(|e| format!("Failed to build Rust binary: {}", e))?;
 
@@ -1368,11 +1376,29 @@ impl TestExecutor {
                     ));
                 }
 
+                // Verify binary was created
+                if !binary_path.exists() {
+                    return Err(format!(
+                        "Rust build succeeded but binary not found at {:?}. Stdout: {}",
+                        binary_path,
+                        String::from_utf8_lossy(&build_output.stdout)
+                    ));
+                }
+
+                eprintln!("Rust fixture built successfully: {:?}", binary_path);
                 Ok(binary_path)
             })
             .as_ref()
             .map_err(|e| e.clone())?
             .clone();
+
+        // Verify binary still exists (might have been deleted between test runs)
+        if !binary_path.exists() {
+            return Err(format!(
+                "Rust binary not found at {:?}. Run 'cargo build' in fixtures/rust/",
+                binary_path
+            ));
+        }
 
         // Store binary path for use in connection creation
         self.rust_binary_path = Some(binary_path.clone());

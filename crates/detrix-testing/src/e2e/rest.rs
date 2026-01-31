@@ -232,6 +232,7 @@ impl ApiClient for RestClient {
             metadata: None,
             program: program.map(|s| s.to_string()), // Optional program path for launch mode (Rust direct lldb-dap)
             safe_mode: false,                        // Default to false for tests
+            pid: None,                               // Tests don't use AttachPid mode
         };
 
         let response = self

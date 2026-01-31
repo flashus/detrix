@@ -171,10 +171,27 @@ impl DapBroker {
     ///
     /// The channel has bounded capacity to provide backpressure when consumers
     /// are slow. If the channel is full, events will be dropped with a warning.
+    ///
+    /// NOTE: This method cleans up any closed subscribers before adding the new one.
+    /// This prevents accumulation of stale subscribers when called multiple times
+    /// (e.g., on reconnect).
     pub async fn subscribe_events(&self) -> EventReceiver {
         let capacity = self.config.event_channel_capacity;
         let (tx, rx) = mpsc::channel(capacity);
         let mut subscribers = self.event_subscribers.write().await;
+
+        // Clean up any closed subscribers before adding new one
+        // This prevents accumulation of stale subscribers on reconnect
+        let before = subscribers.len();
+        subscribers.retain(|existing_tx| !existing_tx.is_closed());
+        let removed = before - subscribers.len();
+        if removed > 0 {
+            debug!(
+                "Cleaned up {} stale subscriber(s) before new subscription",
+                removed
+            );
+        }
+
         subscribers.push(tx);
         debug!(
             "New event subscriber registered (capacity: {}, total subscribers: {})",
@@ -812,6 +829,76 @@ mod tests {
             broker.pending_request_count().await,
             0,
             "Should have 0 pending requests after cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_events_cleans_up_closed_subscribers() {
+        let (client_stream, _server_stream) = create_test_streams();
+        let (client_read, client_write) = tokio::io::split(client_stream);
+
+        let broker = DapBroker::new(client_read, client_write);
+
+        // Create first subscriber and immediately drop the receiver
+        let sub1 = broker.subscribe_events().await;
+        assert_eq!(broker.subscriber_count().await, 1);
+        drop(sub1);
+
+        // Create second subscriber - should clean up the closed first one
+        let _sub2 = broker.subscribe_events().await;
+
+        // Should only have 1 subscriber (the second one), not 2
+        assert_eq!(
+            broker.subscriber_count().await,
+            1,
+            "Closed subscriber should be cleaned up when new one is added"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_events_multiple_calls_without_cleanup() {
+        let (client_stream, _server_stream) = create_test_streams();
+        let (client_read, client_write) = tokio::io::split(client_stream);
+
+        let broker = DapBroker::new(client_read, client_write);
+
+        // Create multiple subscribers without dropping them
+        let _sub1 = broker.subscribe_events().await;
+        let _sub2 = broker.subscribe_events().await;
+        let _sub3 = broker.subscribe_events().await;
+
+        // All 3 should exist since none are closed
+        assert_eq!(
+            broker.subscriber_count().await,
+            3,
+            "All active subscribers should be kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_events_cleans_up_multiple_closed() {
+        let (client_stream, _server_stream) = create_test_streams();
+        let (client_read, client_write) = tokio::io::split(client_stream);
+
+        let broker = DapBroker::new(client_read, client_write);
+
+        // Create and drop multiple subscribers
+        let sub1 = broker.subscribe_events().await;
+        let sub2 = broker.subscribe_events().await;
+        let sub3 = broker.subscribe_events().await;
+        assert_eq!(broker.subscriber_count().await, 3);
+
+        drop(sub1);
+        drop(sub2);
+        drop(sub3);
+
+        // Create new subscriber - should clean up all 3 closed ones
+        let _sub4 = broker.subscribe_events().await;
+
+        assert_eq!(
+            broker.subscriber_count().await,
+            1,
+            "All closed subscribers should be cleaned up"
         );
     }
 }

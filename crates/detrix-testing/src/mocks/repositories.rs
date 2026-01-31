@@ -218,6 +218,13 @@ impl MetricRepository for MockMetricRepository {
 
         Ok(summaries)
     }
+
+    async fn delete_by_connection_id(&self, connection_id: &ConnectionId) -> Result<u64> {
+        let mut metrics = self.metrics.write().unwrap();
+        let before = metrics.len();
+        metrics.retain(|_, m| m.connection_id != *connection_id);
+        Ok((before - metrics.len()) as u64)
+    }
 }
 
 // ============================================================================

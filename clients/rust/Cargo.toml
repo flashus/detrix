@@ -1,0 +1,65 @@
+[workspace]
+exclude = ["xtask"]
+
+[package]
+name = "detrix-client"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Detrix client library for debug-on-demand observability in Rust applications"
+license = "MIT"
+repository = "https://github.com/flashus/detrix"
+keywords = ["debugging", "observability", "lldb", "dap"]
+categories = ["development-tools::debugging"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["rt-multi-thread", "sync", "net", "time", "process", "io-util", "macros"] }
+
+# HTTP server (control plane)
+hyper = { version = "1.5", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto"] }
+http-body-util = "0.1"
+
+# HTTP client (daemon communication)
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+
+# Security
+subtle = "2.5"
+
+# Utilities
+dirs = "5.0"
+tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal", "process"] }
+
+[dev-dependencies]
+tokio = { version = "1.35", features = ["full", "test-util"] }
+rand = "0.8"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1.10"
+chrono = "0.4"
+
+[lib]
+name = "detrix_client"
+path = "src/lib.rs"
+
+[[example]]
+name = "basic_usage"
+path = "examples/basic_usage.rs"
+
+[[example]]
+name = "trade_bot"
+path = "examples/trade_bot.rs"
+
+[[example]]
+name = "test_wake"
+path = "examples/test_wake.rs"

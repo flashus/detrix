@@ -61,6 +61,7 @@ pub async fn create_connection_impl(
             params.language.clone(),
             params.connection_id,
             params.program,   // Optional program path for Rust direct lldb-dap
+            None,             // MCP doesn't use PID-based attach (client library feature)
             params.safe_mode, // SafeMode: only allow logpoints
         )
         .await

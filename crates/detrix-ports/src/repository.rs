@@ -36,8 +36,11 @@ pub struct MetricFilter {
 pub trait MetricRepository: Send + Sync {
     /// Save a new metric
     ///
-    /// If `upsert` is false (default), fails if metric with same (name, connection_id) exists.
-    /// If `upsert` is true, updates existing metric with same (name, connection_id).
+    /// If `upsert` is false (default), fails if metric with same (location, connection_id) exists.
+    /// If `upsert` is true, updates existing metric with same (location, connection_id).
+    ///
+    /// Note: Uniqueness is based on location (file:line) + connection_id, not name.
+    /// This matches DAP's constraint of one logpoint per line.
     async fn save(&self, metric: &Metric) -> Result<MetricId> {
         self.save_with_options(metric, false).await
     }
@@ -46,7 +49,7 @@ pub trait MetricRepository: Send + Sync {
     ///
     /// # Arguments
     /// * `metric` - The metric to save
-    /// * `upsert` - If true, update on conflict; if false, fail on conflict
+    /// * `upsert` - If true, update on (location, connection_id) conflict; if false, fail on conflict
     async fn save_with_options(&self, metric: &Metric, upsert: bool) -> Result<MetricId>;
 
     /// Find metric by ID
@@ -116,6 +119,15 @@ pub trait MetricRepository: Send + Sync {
     /// Returns aggregated group statistics using a single GROUP BY query.
     /// Much more efficient than loading all metrics and counting in memory.
     async fn get_group_summaries(&self) -> Result<Vec<GroupSummary>>;
+
+    /// Delete all metrics for a connection.
+    ///
+    /// Used when a connection is explicitly deleted (not just disconnected)
+    /// to prevent orphaned metrics.
+    ///
+    /// # Returns
+    /// The number of metrics deleted.
+    async fn delete_by_connection_id(&self, connection_id: &ConnectionId) -> Result<u64>;
 }
 
 /// Repository for metric events

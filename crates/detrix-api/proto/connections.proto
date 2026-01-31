@@ -40,6 +40,7 @@ message CreateConnectionRequest {
   RequestMetadata metadata = 5;
   optional string program = 6;      // Program path for launch mode (Rust direct lldb-dap)
   bool safe_mode = 7;               // SafeMode: only allow logpoints, disable breakpoint-based operations
+  optional uint32 pid = 8;          // Process ID for AttachPid mode (Rust client library)
 }
 
 message CreateConnectionResponse {

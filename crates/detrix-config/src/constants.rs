@@ -325,6 +325,9 @@ pub const DEFAULT_MAX_RECONNECT_ATTEMPTS: u32 = 10;
 /// When nothing is listening on the port, fail quickly instead of waiting for full timeout
 pub const DEFAULT_MAX_CONNECTION_REFUSED_ATTEMPTS: u32 = 3;
 
+/// Maximum retries when starting an adapter (handles race conditions with concurrent start requests)
+pub const DEFAULT_ADAPTER_START_MAX_RETRIES: u32 = 3;
+
 /// Initial delay before first reconnection attempt
 pub const DEFAULT_INITIAL_RECONNECT_DELAY_MS: u64 = 1_000;
 

@@ -104,6 +104,7 @@ impl TestServer {
                 "python".to_string(),
                 Some("default".to_string()), // Use "default" connection ID
                 None,                        // No program path for Python
+                None,                        // No pid (not using AttachPid mode)
                 false,                       // SafeMode disabled for tests
             )
             .await?;

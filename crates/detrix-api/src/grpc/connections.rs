@@ -56,6 +56,7 @@ impl ConnectionService for ConnectionServiceImpl {
                 req.language.clone(),
                 req.connection_id,
                 req.program,   // Optional program path for Rust direct lldb-dap
+                req.pid,       // Optional PID for Rust client AttachPid mode
                 req.safe_mode, // SafeMode: only allow logpoints
             )
             .await

@@ -73,6 +73,7 @@ impl TestFixture {
                 "python".to_string(),
                 Some("test".to_string()),
                 None,  // No program path for Python
+                None,  // No PID (not using AttachPid mode)
                 false, // SafeMode disabled for tests
             )
             .await

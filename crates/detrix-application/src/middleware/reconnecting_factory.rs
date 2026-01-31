@@ -98,9 +98,13 @@ impl DapAdapterFactory for ReconnectingAdapterFactory {
         host: &str,
         port: u16,
         program: Option<&str>,
+        pid: Option<u32>,
     ) -> Result<DapAdapterRef> {
         // Create the base adapter using the inner factory
-        let base_adapter = self.inner.create_rust_adapter(host, port, program).await?;
+        let base_adapter = self
+            .inner
+            .create_rust_adapter(host, port, program, pid)
+            .await?;
 
         // Wrap with reconnection middleware if enabled
         if self.config.enabled {

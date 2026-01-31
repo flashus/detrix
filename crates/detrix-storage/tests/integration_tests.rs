@@ -254,24 +254,45 @@ async fn test_event_time_range_query() {
 // ============================================================
 
 #[tokio::test]
-async fn test_metric_duplicate_name_error() {
+async fn test_metric_duplicate_location_error() {
     let storage = create_storage().await;
 
-    let metric1 = create_metric("duplicate", "@test.py#1", "value");
-    let metric2 = create_metric("duplicate", "@test.py#2", "other");
+    // Two metrics at the SAME location (different names is OK, but same location is not)
+    let metric1 = create_metric("first_metric", "@test.py#100", "value");
+    let metric2 = create_metric("second_metric", "@test.py#100", "other");
 
     // First save succeeds
     MetricRepository::save(&storage, &metric1).await.unwrap();
 
-    // Second save fails with database error
+    // Second save fails with database error (same location)
     let result = MetricRepository::save(&storage, &metric2).await;
     assert!(result.is_err());
 
     // Verify it's a database error
     match result {
         Err(Error::Database(_)) => (),
-        _ => panic!("Expected Database error for duplicate name"),
+        _ => panic!("Expected Database error for duplicate location"),
     }
+}
+
+#[tokio::test]
+async fn test_metric_same_name_different_locations_ok() {
+    let storage = create_storage().await;
+
+    // Same name at different locations should now be allowed
+    let metric1 = create_metric("shared_name", "@test.py#100", "value");
+    let metric2 = create_metric("shared_name", "@test.py#200", "other");
+
+    // Both saves should succeed
+    let id1 = MetricRepository::save(&storage, &metric1).await.unwrap();
+    let id2 = MetricRepository::save(&storage, &metric2).await.unwrap();
+
+    // Should be different metrics
+    assert_ne!(id1, id2);
+
+    // Both should exist
+    let all = MetricRepository::find_all(&storage).await.unwrap();
+    assert_eq!(all.len(), 2);
 }
 
 #[tokio::test]

@@ -115,8 +115,8 @@ pub async fn create_connection(
     Json(payload): Json<CreateConnectionRequest>,
 ) -> Result<(StatusCode, Json<CreateConnectionResponse>), HttpError> {
     info!(
-        "REST: create_connection (host={}, port={}, language={}, program={:?})",
-        payload.host, payload.port, payload.language, payload.program
+        "REST: create_connection (host={}, port={}, language={}, program={:?}, pid={:?})",
+        payload.host, payload.port, payload.language, payload.program, payload.pid
     );
 
     let connection_service = &state.context.connection_service;
@@ -136,6 +136,7 @@ pub async fn create_connection(
             payload.language.clone(),
             payload.connection_id,
             payload.program,   // Optional program path for Rust direct lldb-dap
+            payload.pid,       // Optional PID for Rust client AttachPid mode
             payload.safe_mode, // SafeMode: only allow logpoints
         )
         .await
@@ -163,7 +164,7 @@ pub async fn create_connection(
 
 /// Close and remove a connection.
 ///
-/// Disconnects from the debug adapter, removes all associated metrics' logpoints,
+/// Disconnects from the debug adapter, deletes all associated metrics (cascade delete),
 /// and deletes the connection from storage.
 ///
 /// # Path Parameters

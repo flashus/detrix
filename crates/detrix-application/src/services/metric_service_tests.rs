@@ -238,6 +238,7 @@ mod tests {
             _host: &str,
             _port: u16,
             _program: Option<&str>,
+            _pid: Option<u32>,
         ) -> detrix_core::Result<DapAdapterRef> {
             Ok(Arc::new(MockAdapter::new()) as DapAdapterRef)
         }
@@ -280,6 +281,7 @@ mod tests {
             _host: &str,
             _port: u16,
             _program: Option<&str>,
+            _pid: Option<u32>,
         ) -> detrix_core::Result<DapAdapterRef> {
             // Return a clone of the shared adapter reference
             Ok(Arc::clone(&self.shared_adapter) as DapAdapterRef)
@@ -344,7 +346,8 @@ mod tests {
                 "127.0.0.1",
                 5678,
                 SourceLanguage::Python,
-                None,
+                None,  // program
+                None,  // pid
                 false, // safe_mode = false for normal tests
             )
             .await
@@ -375,7 +378,8 @@ mod tests {
                 "127.0.0.1",
                 5678,
                 SourceLanguage::Python,
-                None,
+                None,  // program
+                None,  // pid
                 false, // safe_mode = false for normal tests
             )
             .await
@@ -941,7 +945,8 @@ mod tests {
                 "127.0.0.1",
                 5678,
                 SourceLanguage::Python,
-                None,
+                None, // program
+                None, // pid
                 true, // safe_mode = true for SafeMode tests
             )
             .await

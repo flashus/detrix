@@ -138,39 +138,85 @@ async fn test_metric_exists_by_name() {
 }
 
 #[tokio::test]
-async fn test_metric_duplicate_name_fails_by_default() {
+async fn test_metric_duplicate_location_fails_by_default() {
     let storage = create_test_storage().await;
-    let metric1 = create_test_metric("duplicate").await;
+
+    // Create first metric at a specific location
+    let metric1 = Metric::new(
+        "first_metric".to_string(),
+        ConnectionId::from("default"),
+        Location {
+            file: "test.py".to_string(),
+            line: 100,
+        },
+        "user.id".to_string(),
+        SourceLanguage::Python,
+    )
+    .unwrap();
 
     // Save first metric
     MetricRepository::save(&storage, &metric1).await.unwrap();
 
-    // Create second metric with same name
-    let metric2 = create_test_metric("duplicate").await;
+    // Create second metric with different name but SAME location
+    let metric2 = Metric::new(
+        "second_metric".to_string(),
+        ConnectionId::from("default"),
+        Location {
+            file: "test.py".to_string(),
+            line: 100, // Same line!
+        },
+        "order.total".to_string(),
+        SourceLanguage::Python,
+    )
+    .unwrap();
 
-    // Default save (upsert=false) should fail due to UNIQUE constraint
+    // Default save (upsert=false) should fail due to location UNIQUE constraint
     let result = MetricRepository::save(&storage, &metric2).await;
-    assert!(result.is_err(), "Duplicate name should fail by default");
+    assert!(result.is_err(), "Duplicate location should fail by default");
 }
 
 #[tokio::test]
-async fn test_metric_duplicate_name_upserts_when_enabled() {
+async fn test_metric_duplicate_location_upserts_when_enabled() {
     let storage = create_test_storage().await;
-    let metric1 = create_test_metric("duplicate").await;
+
+    // Create first metric at a specific location
+    let metric1 = Metric::new(
+        "first_metric".to_string(),
+        ConnectionId::from("default"),
+        Location {
+            file: "test.py".to_string(),
+            line: 200,
+        },
+        "user.id".to_string(),
+        SourceLanguage::Python,
+    )
+    .unwrap();
 
     // Save first metric
     let id1 = MetricRepository::save(&storage, &metric1).await.unwrap();
     assert!(id1.0 > 0);
 
-    // Create second metric with same name but different expression
-    let mut metric2 = create_test_metric("duplicate").await;
-    metric2.expression = "updated.expression".to_string();
+    // Create second metric with different name but SAME location and different expression
+    let metric2 = Metric::new(
+        "second_metric".to_string(),
+        ConnectionId::from("default"),
+        Location {
+            file: "test.py".to_string(),
+            line: 200, // Same line!
+        },
+        "updated.expression".to_string(),
+        SourceLanguage::Python,
+    )
+    .unwrap();
 
     // Explicit upsert should succeed and return same ID
     let id2 = MetricRepository::save_with_options(&storage, &metric2, true)
         .await
         .unwrap();
-    assert_eq!(id1, id2, "Upsert should return same ID for duplicate name");
+    assert_eq!(
+        id1, id2,
+        "Upsert should return same ID for duplicate location"
+    );
 
     // Verify the expression was updated
     let found = MetricRepository::find_by_id(&storage, id1)
@@ -181,10 +227,59 @@ async fn test_metric_duplicate_name_upserts_when_enabled() {
         found.expression, "updated.expression",
         "Expression should be updated by upsert"
     );
+    assert_eq!(
+        found.name, "second_metric",
+        "Name should be updated by upsert"
+    );
 
     // Verify only one metric exists
     let all = MetricRepository::find_all(&storage).await.unwrap();
     assert_eq!(all.len(), 1, "Upsert should not create duplicate entries");
+}
+
+#[tokio::test]
+async fn test_metric_same_name_different_locations_allowed() {
+    let storage = create_test_storage().await;
+
+    // Create first metric
+    let metric1 = Metric::new(
+        "shared_name".to_string(),
+        ConnectionId::from("default"),
+        Location {
+            file: "test.py".to_string(),
+            line: 100,
+        },
+        "user.id".to_string(),
+        SourceLanguage::Python,
+    )
+    .unwrap();
+
+    // Save first metric
+    let id1 = MetricRepository::save(&storage, &metric1).await.unwrap();
+
+    // Create second metric with SAME name but DIFFERENT location
+    let metric2 = Metric::new(
+        "shared_name".to_string(),
+        ConnectionId::from("default"),
+        Location {
+            file: "test.py".to_string(),
+            line: 200, // Different line
+        },
+        "order.total".to_string(),
+        SourceLanguage::Python,
+    )
+    .unwrap();
+
+    // This should succeed - same name at different locations is now allowed
+    let id2 = MetricRepository::save(&storage, &metric2).await.unwrap();
+    assert_ne!(id1, id2, "Should create a new metric with different ID");
+
+    // Verify both metrics exist
+    let all = MetricRepository::find_all(&storage).await.unwrap();
+    assert_eq!(all.len(), 2, "Both metrics should exist");
+
+    // Both have the same name
+    assert!(all.iter().all(|m| m.name == "shared_name"));
 }
 
 #[tokio::test]

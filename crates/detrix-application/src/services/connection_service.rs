@@ -7,13 +7,13 @@
 //! - Is protocol-agnostic (no knowledge of gRPC, REST, MCP, etc.)
 
 use crate::services::AdapterLifecycleManager;
-use crate::ConnectionRepositoryRef;
+use crate::{ConnectionRepositoryRef, MetricRepositoryRef};
 use detrix_core::{
     Connection, ConnectionId, ConnectionStatus, Result, SourceLanguage, SystemEvent,
 };
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::instrument;
+use tracing::{info, instrument};
 
 /// Service for managing debugger connections
 ///
@@ -28,6 +28,9 @@ pub struct ConnectionService {
     /// Repository for persisting connections
     connection_repo: ConnectionRepositoryRef,
 
+    /// Repository for persisting metrics (needed for cascade delete)
+    metric_repo: MetricRepositoryRef,
+
     /// Lifecycle manager for DAP adapters
     adapter_lifecycle_manager: Arc<AdapterLifecycleManager>,
 
@@ -40,15 +43,18 @@ impl ConnectionService {
     ///
     /// # Arguments
     /// * `connection_repo` - Repository for connection persistence
+    /// * `metric_repo` - Repository for metric persistence (for cascade delete)
     /// * `adapter_lifecycle_manager` - Manager for DAP adapter lifecycle
     /// * `system_event_tx` - Broadcast channel for system events
     pub fn new(
         connection_repo: ConnectionRepositoryRef,
+        metric_repo: MetricRepositoryRef,
         adapter_lifecycle_manager: Arc<AdapterLifecycleManager>,
         system_event_tx: broadcast::Sender<SystemEvent>,
     ) -> Self {
         Self {
             connection_repo,
+            metric_repo,
             adapter_lifecycle_manager,
             system_event_tx,
         }
@@ -78,7 +84,7 @@ impl ConnectionService {
     /// - Host must not be empty
     /// - Language must not be empty
     /// - Connection ID must be unique (auto-generated IDs prevent collisions)
-    #[instrument(skip(self), fields(host = %host, port = port, language = %language, safe_mode = safe_mode))]
+    #[instrument(skip(self), fields(host = %host, port = port, language = %language, pid = ?pid, safe_mode = safe_mode))]
     pub async fn create_connection(
         &self,
         host: String,
@@ -86,6 +92,7 @@ impl ConnectionService {
         language: String,
         id: Option<String>,
         program: Option<String>,
+        pid: Option<u32>,
         safe_mode: bool,
     ) -> Result<ConnectionId> {
         use tracing::info;
@@ -139,6 +146,7 @@ impl ConnectionService {
                 port,
                 connection.language,
                 program,
+                pid,
                 connection.safe_mode,
             )
             .await?;
@@ -173,6 +181,7 @@ impl ConnectionService {
     /// - Stops the adapter and cleans up resources
     /// - Updates connection status to Disconnected
     /// - Does NOT delete the connection (keeps history)
+    /// - Does NOT delete metrics (they persist for reconnection)
     #[instrument(skip(self), fields(connection_id = %id.0))]
     pub async fn disconnect(&self, id: &ConnectionId) -> Result<()> {
         // 1. Stop adapter via lifecycle manager
@@ -186,6 +195,48 @@ impl ConnectionService {
         // 3. Emit connection closed event
         let event = SystemEvent::connection_closed(id.clone());
         let _ = self.system_event_tx.send(event);
+
+        Ok(())
+    }
+
+    /// Delete a connection and all associated metrics.
+    ///
+    /// This method:
+    /// 1. Stops the adapter via AdapterLifecycleManager
+    /// 2. Deletes all metrics associated with the connection
+    /// 3. Deletes the connection from repository
+    ///
+    /// Use this for explicit user-requested deletion, not for disconnect/reconnection scenarios.
+    ///
+    /// # Arguments
+    /// * `id` - Connection ID to delete
+    ///
+    /// # Business Rules
+    /// - Stops the adapter and cleans up resources
+    /// - Cascade deletes all associated metrics
+    /// - Removes the connection from storage
+    #[instrument(skip(self), fields(connection_id = %id.0))]
+    pub async fn delete_connection(&self, id: &ConnectionId) -> Result<()> {
+        // 1. Stop adapter via lifecycle manager (ignore error if not running)
+        let _ = self.adapter_lifecycle_manager.stop_adapter(id).await;
+
+        // 2. Delete all associated metrics (cascade delete)
+        let deleted_metrics = self.metric_repo.delete_by_connection_id(id).await?;
+        if deleted_metrics > 0 {
+            info!(
+                "Deleted {} metrics for connection {}",
+                deleted_metrics, id.0
+            );
+        }
+
+        // 3. Delete connection from repository
+        self.connection_repo.delete(id).await?;
+
+        // 4. Emit connection closed event
+        let event = SystemEvent::connection_closed(id.clone());
+        let _ = self.system_event_tx.send(event);
+
+        info!("Deleted connection {}", id.0);
 
         Ok(())
     }
@@ -324,7 +375,7 @@ impl ConnectionService {
             }
 
             // Attempt to start the adapter (port is open, so this should succeed quickly)
-            // Note: restored connections use attach mode (no program path)
+            // Note: restored connections use attach mode (no program path, no PID)
             match self
                 .adapter_lifecycle_manager
                 .start_adapter(
@@ -332,7 +383,8 @@ impl ConnectionService {
                     &conn.host,
                     conn.port,
                     conn.language,
-                    None,
+                    None, // program
+                    None, // pid - restored connections don't use AttachPid mode
                     conn.safe_mode,
                 )
                 .await

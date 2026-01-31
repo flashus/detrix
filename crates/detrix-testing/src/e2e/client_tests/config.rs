@@ -90,17 +90,21 @@ impl ClientTestConfig {
         }
     }
 
-    /// Create configuration for Go client testing (future)
+    /// Create configuration for Go client testing
     ///
-    /// Uses `fixtures/go/detrix_example_app.go` with Detrix client enabled
+    /// Uses `fixtures/go/` with Detrix client enabled.
+    /// The fixture imports the Go client via go.mod replace directive.
     pub fn go() -> Self {
         let mut env_vars = HashMap::new();
         env_vars.insert("DETRIX_CLIENT_ENABLED".to_string(), "1".to_string());
 
         Self {
             language: ClientLanguage::Go,
-            fixture_path: PathBuf::from("fixtures/go/detrix_example_app.go"),
-            working_dir: PathBuf::from("clients/go"),
+            // Use the directory containing go.mod - go run will compile and run the package
+            fixture_path: PathBuf::from("fixtures/go"),
+            // Working dir is fixtures/go where go.mod is located
+            working_dir: PathBuf::from("fixtures/go"),
+            // go run <dir> compiles and runs the package at <dir>
             spawn_args_before: vec!["run".to_string()],
             spawn_args_after: vec![],
             env_vars,
@@ -108,19 +112,23 @@ impl ClientTestConfig {
         }
     }
 
-    /// Create configuration for Rust client testing (future)
+    /// Create configuration for Rust client testing
     ///
-    /// Uses `fixtures/rust/detrix_example_app.rs` with Detrix client enabled
+    /// Uses `fixtures/rust/Cargo.toml` with Detrix client enabled
+    /// The fixture app is a trading bot that prints control plane URL on startup.
     pub fn rust() -> Self {
         let mut env_vars = HashMap::new();
         env_vars.insert("DETRIX_CLIENT_ENABLED".to_string(), "1".to_string());
 
         Self {
             language: ClientLanguage::Rust,
-            fixture_path: PathBuf::from("fixtures/rust/detrix_example_app.rs"),
-            working_dir: PathBuf::from("clients/rust"),
+            // Use Cargo.toml as fixture path since we use --manifest-path
+            fixture_path: PathBuf::from("fixtures/rust/Cargo.toml"),
+            // Working dir is fixtures/rust for cargo commands
+            working_dir: PathBuf::from("fixtures/rust"),
             spawn_args_before: vec!["run".to_string(), "--manifest-path".to_string()],
-            spawn_args_after: vec!["--".to_string()],
+            // Enable the "client" feature to compile Detrix client code
+            spawn_args_after: vec!["--features".to_string(), "client".to_string()],
             env_vars,
             test_name: "Rust Client".to_string(),
         }

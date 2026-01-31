@@ -75,9 +75,7 @@ async fn test_connection_status_updated_on_debugger_crash() {
     reporter.step_success(step, Some("debugpy started"));
 
     // Start Rust debugger (lldb-dap via detrix lldb-serve)
-    let rust_source = executor
-        .workspace_root
-        .join("fixtures/rust/detrix_example_app.rs");
+    let rust_source = executor.workspace_root.join("fixtures/rust/src/main.rs");
     if !rust_source.exists() {
         reporter.warn("detrix_example_app.rs not found, skipping test");
         return;

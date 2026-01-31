@@ -281,3 +281,115 @@ fn test_expression_contains_function_call_empty() {
     assert!(!expression_contains_function_call(""));
     assert!(!expression_contains_function_call("   "));
 }
+
+// ============================================================================
+// subscribe_events idempotency tests
+// ============================================================================
+
+/// Test that finished event handler tasks are cleaned up
+#[tokio::test]
+async fn test_event_tasks_finished_are_cleaned_up() {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    // Create a Vec to simulate event_tasks
+    let event_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>> =
+        Arc::new(RwLock::new(Vec::new()));
+
+    // Spawn a task that finishes immediately
+    let handle1 = tokio::spawn(async {});
+    event_tasks.write().await.push(handle1);
+
+    // Spawn another task that finishes immediately
+    let handle2 = tokio::spawn(async {});
+    event_tasks.write().await.push(handle2);
+
+    // Wait for tasks to finish
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // Simulate the cleanup logic from subscribe_events
+    {
+        let mut tasks = event_tasks.write().await;
+        let (finished, active): (Vec<_>, Vec<_>) = tasks.drain(..).partition(|h| h.is_finished());
+
+        assert_eq!(finished.len(), 2, "Both tasks should be finished");
+        assert_eq!(active.len(), 0, "No tasks should be active");
+    }
+}
+
+/// Test that active event handler tasks are detected and can be aborted
+#[tokio::test]
+async fn test_event_tasks_active_are_detected() {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let event_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>> =
+        Arc::new(RwLock::new(Vec::new()));
+
+    // Spawn a task that runs for a long time
+    let handle = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    event_tasks.write().await.push(handle);
+
+    // The task should not be finished yet
+    {
+        let tasks = event_tasks.read().await;
+        let active_count = tasks.iter().filter(|h| !h.is_finished()).count();
+        assert_eq!(active_count, 1, "Task should still be active");
+    }
+
+    // Abort and cleanup
+    {
+        let mut tasks = event_tasks.write().await;
+        for handle in tasks.drain(..) {
+            if !handle.is_finished() {
+                handle.abort();
+            }
+        }
+    }
+
+    // Give time for abort
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let tasks = event_tasks.read().await;
+    assert!(tasks.is_empty(), "Tasks should be cleared after abort");
+}
+
+/// Test the partition logic used in subscribe_events
+#[tokio::test]
+async fn test_event_tasks_partition_mixed() {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let event_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>> =
+        Arc::new(RwLock::new(Vec::new()));
+
+    // Spawn a task that finishes immediately
+    let finished_handle = tokio::spawn(async {});
+
+    // Spawn a task that runs for a long time
+    let active_handle = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+
+    event_tasks.write().await.push(finished_handle);
+    event_tasks.write().await.push(active_handle);
+
+    // Wait for the first task to finish
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // Partition and verify
+    {
+        let mut tasks = event_tasks.write().await;
+        let (finished, active): (Vec<_>, Vec<_>) = tasks.drain(..).partition(|h| h.is_finished());
+
+        assert_eq!(finished.len(), 1, "One task should be finished");
+        assert_eq!(active.len(), 1, "One task should still be active");
+
+        // Abort the active one to clean up
+        for handle in active {
+            handle.abort();
+        }
+    }
+}

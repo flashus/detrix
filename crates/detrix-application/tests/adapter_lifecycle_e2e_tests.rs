@@ -76,8 +76,12 @@ impl E2eTestFixture {
             Arc::clone(&connection_repo) as ConnectionRepositoryRef,
         ));
 
+        // Create a new metric_repo for ConnectionService since the first one was moved
+        let metric_repo_for_conn_service: MetricRepositoryRef =
+            Arc::new(MockMetricRepository::new());
         let connection_service = Arc::new(ConnectionService::new(
             Arc::clone(&connection_repo) as ConnectionRepositoryRef,
+            metric_repo_for_conn_service,
             Arc::clone(&lifecycle_manager),
             system_event_tx,
         ));
@@ -139,8 +143,9 @@ async fn test_e2e_complete_daemon_workflow() {
             5678,
             "python".to_string(),
             Some("test-trading-bot".to_string()),
-            None,
-            false,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .expect("Should create connection");
@@ -240,8 +245,9 @@ async fn test_e2e_multiple_connections() {
             5678,
             "python".to_string(),
             Some("conn-1".to_string()),
-            None,
-            false,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -253,8 +259,9 @@ async fn test_e2e_multiple_connections() {
             5679,
             "python".to_string(),
             Some("conn-2".to_string()),
-            None,
-            false,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -266,8 +273,9 @@ async fn test_e2e_multiple_connections() {
             5680,
             "python".to_string(),
             Some("conn-3".to_string()),
-            None,
-            false,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -384,8 +392,11 @@ async fn test_e2e_event_broadcast_for_streaming() {
         Arc::clone(&connection_repo) as ConnectionRepositoryRef,
     ));
 
+    // Create a new metric_repo for ConnectionService since the first one was moved
+    let metric_repo_for_conn: MetricRepositoryRef = Arc::new(MockMetricRepository::new());
     let connection_service = Arc::new(ConnectionService::new(
         Arc::clone(&connection_repo) as ConnectionRepositoryRef,
+        metric_repo_for_conn,
         Arc::clone(&lifecycle_manager),
         system_event_tx,
     ));
@@ -397,8 +408,9 @@ async fn test_e2e_event_broadcast_for_streaming() {
             5678,
             "python".to_string(),
             Some("stream-test".to_string()),
-            None,
-            false,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -442,8 +454,9 @@ async fn test_e2e_concurrent_connection_creation() {
                     5700 + i as u16,
                     "python".to_string(),
                     Some(format!("concurrent-conn-{}", i)),
-                    None,
-                    false,
+                    None,  // program
+                    None,  // pid
+                    false, // safe_mode
                 )
                 .await
         });
@@ -490,8 +503,9 @@ async fn test_e2e_connection_recreation() {
             5678,
             "python".to_string(),
             Some("recreate-test".to_string()),
-            None,
-            false,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -527,8 +541,9 @@ async fn test_e2e_connection_recreation() {
             5678,
             "python".to_string(),
             Some("recreate-test".to_string()),
-            None,
-            false,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -574,9 +589,10 @@ async fn test_adapter_lifecycle_manager_broadcasts_events() {
             "localhost".to_string(),
             5678,
             "python".to_string(),
-            None,
-            None,
-            false,
+            None,  // id
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -615,8 +631,9 @@ async fn test_e2e_stop_all_cleanup() {
                 5700 + i as u16,
                 "python".to_string(),
                 Some(format!("stop-all-conn-{}", i)),
-                None,
-                false,
+                None,  // program
+                None,  // pid
+                false, // safe_mode
             )
             .await
             .unwrap();
@@ -652,8 +669,9 @@ async fn test_e2e_high_volume_events() {
             5678,
             "python".to_string(),
             Some("high-volume".to_string()),
-            None,
-            false,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -701,8 +719,9 @@ async fn test_e2e_connection_status_updated_on_crash() {
             5680,
             "python".to_string(),
             Some("python-conn".to_string()),
-            None,
-            false,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -715,8 +734,9 @@ async fn test_e2e_connection_status_updated_on_crash() {
             5681,
             "rust".to_string(),
             Some("rust-conn".to_string()),
-            None,
-            false,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();

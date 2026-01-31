@@ -533,25 +533,20 @@ pub const RUST_IMPURE_FUNCTIONS: &[&str] = &[
     "std::intrinsics::breakpoint",
 ];
 
-/// LLDB type formatter commands for Rust types.
+/// Fallback LLDB type formatter commands for Rust types.
 ///
-/// These commands configure LLDB to display Rust types in a readable format.
-/// Based on the Rust compiler's LLDB formatters (rust-lang/rust/src/etc/lldb_commands)
-/// but simplified to not require Python scripts.
+/// These are used only when the Rust sysroot formatters cannot be loaded.
+/// The preferred approach is to load Rust's built-in formatters from
+/// `{sysroot}/lib/rustlib/etc/lldb_lookup.py` which properly handle all
+/// Rust types including non-null-terminated strings.
 ///
-/// Used by both:
-/// - `lldb-serve` proxy command (injected into launch request)
-/// - Direct lldb-dap connection via `initCommands` in launch request
-///
-/// Note: We don't use "settings set target.language rust" because:
-/// 1. It's not supported on all LLDB versions (especially Windows lldb-dap)
-/// 2. It's not strictly necessary for type formatters to work
+/// These fallback formatters use simple summary strings and may not display
+/// string content correctly (showing length instead of content).
 pub const RUST_LLDB_TYPE_FORMATTERS: &[&str] = &[
-    // String type: show the actual string content
-    // alloc::string::String stores data in vec.buf.inner.ptr.pointer.pointer
-    r#"type summary add -x "^alloc::([a-z_]+::)*String$" --summary-string "${var.vec.buf.inner.ptr.pointer.pointer%s}""#,
-    // &str type: show the string content
-    r#"type summary add -x "^&str$" --summary-string "${var.data_ptr%s}""#,
+    // String type: show length (fallback - prefer Rust's lldb_lookup.py)
+    r#"type summary add -x "^alloc::([a-z_]+::)*String$" --summary-string "String(len=${var.vec.len})""#,
+    // &str type: show length (fallback - prefer Rust's lldb_lookup.py)
+    r#"type summary add -x "^&'?[a-z_]*\s*str$" --summary-string "&str(len=${var.length})""#,
     // Vec<T>: show length and capacity
     r#"type summary add -x "^alloc::([a-z_]+::)*Vec<.+>$" --summary-string "len=${var.len}, cap=${var.buf.inner.cap}""#,
     // Option<T>: show variant

@@ -303,6 +303,7 @@ impl DapAdapterFactory for MockDapAdapterFactory {
         _host: &str,
         _port: u16,
         _program: Option<&str>,
+        _pid: Option<u32>,
     ) -> Result<DapAdapterRef> {
         Ok(Arc::new(MockDapAdapter::new()) as DapAdapterRef)
     }

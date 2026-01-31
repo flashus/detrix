@@ -94,9 +94,9 @@ impl MetricRepository for SqliteStorage {
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
                     ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)
-            ON CONFLICT(name, connection_id) DO UPDATE SET
+            ON CONFLICT(location, connection_id) DO UPDATE SET
+                name = excluded.name,
                 group_name = excluded.group_name,
-                location = excluded.location,
                 expression = excluded.expression,
                 expression_hash = excluded.expression_hash,
                 language = excluded.language,
@@ -583,6 +583,22 @@ impl MetricRepository for SqliteStorage {
         debug!(group_count = summaries.len(), "Group summaries query");
 
         Ok(summaries)
+    }
+
+    async fn delete_by_connection_id(&self, connection_id: &ConnectionId) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM metrics WHERE connection_id = ?")
+            .bind(&connection_id.0)
+            .execute(self.pool())
+            .await?;
+
+        let deleted = result.rows_affected();
+        debug!(
+            connection_id = %connection_id.0,
+            deleted = deleted,
+            "Deleted metrics for connection"
+        );
+
+        Ok(deleted)
     }
 }
 

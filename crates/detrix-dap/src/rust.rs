@@ -271,12 +271,22 @@ impl RustAdapter {
     ///
     /// lldb-dap must be started in server mode: `lldb-dap --connection listen://host:port`
     ///
+    /// Loads Rust's built-in LLDB formatters for proper &str, String, Vec display.
+    ///
     /// # Arguments
     /// * `pid` - Process ID to attach to
     /// * `port` - Port where lldb-dap is listening
     pub fn config_with_pid(pid: u32, port: u16) -> AdapterConfig {
         let config = AdapterConnectionConfig::default();
-        AdapterConfig::new("rust", "lldb-dap").attach_pid(&config.default_host, port, pid)
+        // Use the same init commands as direct launch (loads Rust sysroot formatters)
+        let init_commands = Self::build_init_commands_for_attach();
+
+        AdapterConfig::new("rust", "lldb-dap").attach_pid_with_commands(
+            &config.default_host,
+            port,
+            pid,
+            init_commands,
+        )
     }
 
     /// Create CodeLLDB configuration to attach by program path (find by name).
@@ -414,20 +424,51 @@ impl RustAdapter {
 
     /// Build LLDB init commands for Rust debugging.
     ///
-    /// Includes:
-    /// - Type formatters for readable Rust types
-    /// - Windows-specific symbol search path settings
+    /// Loads Rust's built-in LLDB formatters from the Rust sysroot. These formatters
+    /// properly handle Rust types like &str, String, Vec, etc. by reading exactly
+    /// the correct number of bytes (not relying on null termination).
+    ///
+    /// Falls back to custom formatters if Rust sysroot cannot be found.
     ///
     /// NOTE: initCommands run BEFORE target creation, so only settings work here.
     /// Use build_pre_run_commands() for commands that require a target.
     #[allow(unused_variables, unused_mut)]
     fn build_init_commands(program: &str) -> Vec<String> {
-        use detrix_config::RUST_LLDB_TYPE_FORMATTERS;
+        let mut commands: Vec<String> = Vec::new();
 
-        let mut commands: Vec<String> = RUST_LLDB_TYPE_FORMATTERS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        // Try to find Rust sysroot and load its LLDB formatters
+        if let Some(sysroot) = Self::find_rust_sysroot() {
+            let etc_dir = std::path::Path::new(&sysroot).join("lib/rustlib/etc");
+            let lookup_py = etc_dir.join("lldb_lookup.py");
+            let lldb_commands = etc_dir.join("lldb_commands");
+
+            if lookup_py.exists() && lldb_commands.exists() {
+                tracing::info!(
+                    "[Rust LLDB] Loading formatters from: {}",
+                    etc_dir.display()
+                );
+                // Import the Python lookup module
+                commands.push(format!(
+                    "command script import \"{}\"",
+                    lookup_py.display()
+                ));
+                // Source the type formatter commands
+                commands.push(format!(
+                    "command source -s 0 \"{}\"",
+                    lldb_commands.display()
+                ));
+            } else {
+                tracing::warn!(
+                    "[Rust LLDB] Formatter files not found in sysroot, using fallback formatters"
+                );
+                Self::add_fallback_formatters(&mut commands);
+            }
+        } else {
+            tracing::warn!(
+                "[Rust LLDB] Could not find Rust sysroot, using fallback formatters"
+            );
+            Self::add_fallback_formatters(&mut commands);
+        }
 
         // On Windows, add settings to help LLDB find PDB symbols
         // NOTE: Only SETTINGS can go in initCommands (before target creation)
@@ -462,6 +503,74 @@ impl RustAdapter {
                     ),
                 );
             }
+        }
+
+        commands
+    }
+
+    /// Find the Rust sysroot by running `rustc --print sysroot`.
+    fn find_rust_sysroot() -> Option<String> {
+        std::process::Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .output()
+            .ok()
+            .and_then(|output| {
+                if output.status.success() {
+                    String::from_utf8(output.stdout)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// Add fallback formatters when Rust sysroot is not available.
+    /// These are simpler but don't handle all Rust types as well.
+    fn add_fallback_formatters(commands: &mut Vec<String>) {
+        use detrix_config::RUST_LLDB_TYPE_FORMATTERS;
+        commands.extend(RUST_LLDB_TYPE_FORMATTERS.iter().map(|s| s.to_string()));
+    }
+
+    /// Build LLDB init commands for attach mode (no program path available).
+    ///
+    /// Loads Rust's built-in LLDB formatters from the Rust sysroot.
+    /// Falls back to simple formatters if Rust sysroot cannot be found.
+    fn build_init_commands_for_attach() -> Vec<String> {
+        let mut commands: Vec<String> = Vec::new();
+
+        // Try to find Rust sysroot and load its LLDB formatters
+        if let Some(sysroot) = Self::find_rust_sysroot() {
+            let etc_dir = std::path::Path::new(&sysroot).join("lib/rustlib/etc");
+            let lookup_py = etc_dir.join("lldb_lookup.py");
+            let lldb_commands = etc_dir.join("lldb_commands");
+
+            if lookup_py.exists() && lldb_commands.exists() {
+                tracing::info!(
+                    "[Rust LLDB] Loading formatters from: {}",
+                    etc_dir.display()
+                );
+                // Import the Python lookup module
+                commands.push(format!(
+                    "command script import \"{}\"",
+                    lookup_py.display()
+                ));
+                // Source the type formatter commands
+                commands.push(format!(
+                    "command source -s 0 \"{}\"",
+                    lldb_commands.display()
+                ));
+            } else {
+                tracing::warn!(
+                    "[Rust LLDB] Formatter files not found in sysroot, using fallback formatters"
+                );
+                Self::add_fallback_formatters(&mut commands);
+            }
+        } else {
+            tracing::warn!(
+                "[Rust LLDB] Could not find Rust sysroot, using fallback formatters"
+            );
+            Self::add_fallback_formatters(&mut commands);
         }
 
         commands
@@ -685,16 +794,16 @@ mod tests {
                 assert_eq!(program, "/path/to/binary");
                 assert!(args.is_empty());
                 assert!(!stop_on_entry);
-                // Should include type formatters
+                // Should include type formatters (either Rust sysroot or fallback)
                 assert!(!init_commands.is_empty());
-                // Check for String formatter
-                assert!(init_commands
+                // Check that we have either Rust's formatters or fallbacks
+                let has_rust_formatters = init_commands
                     .iter()
-                    .any(|cmd| cmd.contains("alloc::") && cmd.contains("String")));
-                // Check for Vec formatter
-                assert!(init_commands
+                    .any(|cmd| cmd.contains("lldb_lookup.py"));
+                let has_fallback_formatters = init_commands
                     .iter()
-                    .any(|cmd| cmd.contains("Vec") && cmd.contains("len=")));
+                    .any(|cmd| cmd.contains("type summary add"));
+                assert!(has_rust_formatters || has_fallback_formatters);
             }
             _ => panic!("Expected LaunchProgram mode"),
         }
@@ -731,22 +840,26 @@ mod tests {
     }
 
     #[test]
-    fn test_direct_launch_includes_all_formatters() {
-        use detrix_config::RUST_LLDB_TYPE_FORMATTERS;
-
+    fn test_direct_launch_includes_formatters() {
         let config = RustAdapter::config_direct_launch("/path/to/binary", 4711);
         match config.connection_mode {
             crate::ConnectionMode::LaunchProgram { init_commands, .. } => {
-                // Should include exactly as many formatters as the constant
-                assert_eq!(init_commands.len(), RUST_LLDB_TYPE_FORMATTERS.len());
-                // Each formatter should be present
-                for formatter in RUST_LLDB_TYPE_FORMATTERS {
-                    assert!(
-                        init_commands.contains(&formatter.to_string()),
-                        "Missing formatter: {}",
-                        formatter
-                    );
-                }
+                // Should include either Rust sysroot formatters or fallback formatters
+                assert!(
+                    !init_commands.is_empty(),
+                    "Expected at least some init commands for formatters"
+                );
+                // Check that either we loaded Rust's formatters (script import) or fallbacks
+                let has_rust_formatters = init_commands
+                    .iter()
+                    .any(|cmd| cmd.contains("lldb_lookup.py"));
+                let has_fallback_formatters = init_commands
+                    .iter()
+                    .any(|cmd| cmd.contains("type summary add"));
+                assert!(
+                    has_rust_formatters || has_fallback_formatters,
+                    "Expected either Rust sysroot formatters or fallback formatters"
+                );
             }
             _ => panic!("Expected LaunchProgram mode"),
         }

@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, trace, warn};
 
 // ============================================================================
 // BaseAdapter - Generic adapter with shared logic
@@ -112,13 +112,42 @@ impl<P: OutputParser> BaseAdapter<P> {
     }
 
     /// Stop the adapter and cleanup all resources.
+    ///
+    /// IMPORTANT: This method waits for aborted event tasks to fully complete.
+    /// This ensures their receivers are dropped, which allows the broker to
+    /// clean up stale subscribers. Without this wait, rapid stop/start cycles
+    /// can result in multiple subscribers receiving the same events (triple events bug).
     pub async fn stop(&self) -> Result<()> {
-        // Abort all event parsing tasks
-        let mut tasks = self.event_tasks.write().await;
-        for handle in tasks.drain(..) {
-            handle.abort();
+        let lang = P::language_name();
+
+        // Abort all event parsing tasks and WAIT for them to complete
+        // This is critical to prevent triple events - we must ensure receivers
+        // are dropped before any new subscription can be created
+        let tasks: Vec<_> = {
+            let mut tasks_guard = self.event_tasks.write().await;
+            tasks_guard.drain(..).collect()
+        };
+
+        if !tasks.is_empty() {
+            debug!("[{}] Stopping {} event handler task(s)", lang, tasks.len());
+            for mut handle in tasks {
+                handle.abort();
+                // Wait for task to finish with timeout
+                match tokio::time::timeout(std::time::Duration::from_millis(200), &mut handle).await
+                {
+                    Ok(_) => {
+                        trace!("[{}] Event handler task stopped", lang);
+                    }
+                    Err(_) => {
+                        // Timeout - task will be cleaned up eventually
+                        debug!(
+                            "[{}] Event handler task stop timeout, continuing anyway",
+                            lang
+                        );
+                    }
+                }
+            }
         }
-        drop(tasks);
 
         // Clear active metrics
         self.active_metrics.write().await.clear();
@@ -249,7 +278,64 @@ impl<P: OutputParser> BaseAdapter<P> {
     /// - Captures stack trace via DAP stackTrace request
     /// - Captures variables via DAP scopes/variables requests
     /// - Sends continue to resume execution
+    ///
+    /// NOTE: This method cleans up finished event handler tasks. If there are
+    /// still active handlers (unexpected), it aborts them and WAITS for them
+    /// to finish to ensure their receivers are dropped before creating new
+    /// subscriptions. This prevents duplicate events from multiple subscribers.
     pub async fn subscribe_events(&self) -> Result<tokio::sync::mpsc::Receiver<MetricEvent>> {
+        let lang = P::language_name();
+
+        // Clean up event handler tasks to prevent duplicate events
+        // IMPORTANT: We must wait for aborted tasks to actually finish so their
+        // receivers are dropped and the broker's sender cleanup works correctly.
+        {
+            let mut tasks = self.event_tasks.write().await;
+            if !tasks.is_empty() {
+                // Separate finished tasks from active ones
+                let (finished, mut active): (Vec<_>, Vec<_>) =
+                    tasks.drain(..).partition(|h| h.is_finished());
+
+                if !finished.is_empty() {
+                    debug!(
+                        "[{}] Cleaned up {} finished event handler task(s)",
+                        lang,
+                        finished.len()
+                    );
+                }
+
+                if !active.is_empty() {
+                    // Active handlers shouldn't exist on reconnect (they should have
+                    // exited when the old connection died). This indicates a bug or
+                    // accidental double-call. Abort and WAIT to prevent duplicate events.
+                    warn!(
+                        "[{}] Found {} unexpectedly active event handler task(s) - aborting and waiting",
+                        lang,
+                        active.len()
+                    );
+                    for handle in &mut active {
+                        handle.abort();
+                    }
+                    // Wait for all aborted tasks to actually finish (with timeout)
+                    // This ensures their receivers are dropped before we create new ones
+                    for handle in active {
+                        match tokio::time::timeout(std::time::Duration::from_millis(100), handle)
+                            .await
+                        {
+                            Ok(_) => {
+                                debug!("[{}] Aborted task finished", lang);
+                            }
+                            Err(_) => {
+                                // Task didn't finish in time, but abort was requested
+                                // It will be cleaned up eventually
+                                debug!("[{}] Aborted task timeout, continuing anyway", lang);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let broker = self.adapter.broker().await?;
         let event_rx = broker.subscribe_events().await;
 
@@ -258,7 +344,6 @@ impl<P: OutputParser> BaseAdapter<P> {
         let (tx, rx) = tokio::sync::mpsc::channel(capacity);
         let active_metrics = Arc::clone(&self.active_metrics);
         let adapter = Arc::clone(&self.adapter);
-        let lang = P::language_name();
 
         let handle = tokio::spawn(handle_events::<P>(
             event_rx,

@@ -10,6 +10,9 @@
 //
 // With Detrix client enabled (for client tests):
 //   DETRIX_CLIENT_ENABLED=1 DETRIX_DAEMON_URL=http://127.0.0.1:8090 go run .
+//
+// NOTE: Regular output goes to stderr to avoid SIGPIPE when the test harness
+// closes stdout after reading the control plane URL.
 
 package main
 
@@ -24,6 +27,11 @@ import (
 
 	detrix "github.com/flashus/detrix/clients/go"
 )
+
+// log writes to stderr to avoid SIGPIPE when stdout is closed
+func log(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
 
 var running = true
 
@@ -64,14 +72,14 @@ func getEnvOrDefault(key, defaultValue string) string {
 
 func signalHandler(sigChan chan os.Signal) {
 	<-sigChan
-	fmt.Println("\nReceived shutdown signal, stopping...")
+	log("\nReceived shutdown signal, stopping...")
 	running = false
 }
 
 func placeOrder(symbol string, quantity int, price float64) int {
 	orderID := rand.Intn(9000) + 1000 // 1000-9999
 	total := float64(quantity) * price
-	fmt.Printf("Order #%d: %s x%d @ $%.2f = $%.2f\n", orderID, symbol, quantity, price, total)
+	log("Order #%d: %s x%d @ $%.2f = $%.2f", orderID, symbol, quantity, price, total)
 	return orderID
 }
 
@@ -81,7 +89,10 @@ func calculatePnl(entryPrice, currentPrice float64, quantity int) float64 {
 }
 
 func main() {
-	// Initialize Detrix client if enabled (13 lines added, matches Python offset)
+	// Ignore SIGPIPE to prevent exit when stdout is closed by test harness
+	signal.Ignore(syscall.SIGPIPE)
+
+	// Initialize Detrix client if enabled
 	initDetrixClient()
 	defer detrix.Shutdown()
 
@@ -92,9 +103,9 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 	go signalHandler(sigChan)
 
-	fmt.Println("Trading bot started - runs forever until Ctrl+C")
-	fmt.Println("Add metrics with Detrix to observe values!")
-	fmt.Println()
+	log("Trading bot started - runs forever until Ctrl+C")
+	log("Add metrics with Detrix to observe values!")
+	log("")
 
 	symbols := []string{"BTCUSD", "ETHUSD", "SOLUSD"}
 	iteration := 0
@@ -103,26 +114,26 @@ func main() {
 		iteration++
 		// LINE NUMBERS BELOW ARE CRITICAL FOR E2E TESTS
 		// Do not modify without updating dap_scenarios.rs
-		symbol := symbols[rand.Intn(len(symbols))] // Line 106: symbol
-		quantity := rand.Intn(50) + 1              // Line 107: quantity
-		price := rand.Float64()*900 + 100          // Line 108: price
+		symbol := symbols[rand.Intn(len(symbols))] // Line 117: symbol
+		quantity := rand.Intn(50) + 1              // Line 118: quantity
+		price := rand.Float64()*900 + 100          // Line 119: price
 
-		// Line 111 - place_order call (symbol, quantity, price in scope)
-		orderID := placeOrder(symbol, quantity, price) // Line 111: orderID
+		// Line 122 - place_order call (symbol, quantity, price in scope)
+		orderID := placeOrder(symbol, quantity, price) // Line 122: orderID
 
 		// Calculate pnl
-		entryPrice := price                                     // Line 114: entryPrice
-		currentPrice := price * (0.95 + rand.Float64()*0.1)     // Line 115: currentPrice
-		pnl := calculatePnl(entryPrice, currentPrice, quantity) // Line 116: pnl (all vars in scope)
+		entryPrice := price                                     // Line 125: entryPrice
+		currentPrice := price * (0.95 + rand.Float64()*0.1)     // Line 126: currentPrice
+		pnl := calculatePnl(entryPrice, currentPrice, quantity) // Line 127: pnl (all vars in scope)
 
 		// Suppress unused variable warnings
-		_ = orderID
-		_ = pnl
+		_ = orderID // Line 130
+		_ = pnl     // Line 131
 
-		fmt.Printf("  -> P&L: $%.2f (iteration %d)\n", pnl, iteration) // Line 122: print (all vars in scope)
+		log("  -> P&L: $%.2f (iteration %d)", pnl, iteration) // Line 133: print (all vars in scope)
 
 		time.Sleep(3 * time.Second) // Same as Python - 3 seconds
 	}
 
-	fmt.Println("Trading bot stopped!")
+	log("Trading bot stopped!")
 }

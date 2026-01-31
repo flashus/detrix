@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS connections (
     language TEXT NOT NULL,                    -- Language/adapter type (required, no default)
     auto_reconnect INTEGER NOT NULL DEFAULT 1,  -- Whether to auto-reconnect
     last_connected_at INTEGER DEFAULT NULL,     -- Timestamp of last successful connection
+    safe_mode INTEGER NOT NULL DEFAULT 0,       -- SafeMode: only allow logpoints (non-blocking)
 
     CHECK(port >= 1024),                -- Enforce port >= 1024 (not in reserved range)
     CHECK(host != '')                   -- Host cannot be empty
@@ -28,6 +29,7 @@ CREATE INDEX IF NOT EXISTS idx_connections_last_active ON connections(last_activ
 CREATE INDEX IF NOT EXISTS idx_connections_host_port ON connections(host, port);
 CREATE INDEX IF NOT EXISTS idx_connections_language ON connections(language);
 CREATE INDEX IF NOT EXISTS idx_connections_auto_reconnect ON connections(auto_reconnect, status);
+CREATE INDEX IF NOT EXISTS idx_connections_safe_mode ON connections(safe_mode);
 
 -- ============================================================
 -- METRICS REGISTRY
@@ -71,10 +73,9 @@ CREATE TABLE IF NOT EXISTS metrics (
     anchor_context_after TEXT,          -- 2 lines after metric (~200 bytes max)
     anchor_last_verified INTEGER,       -- Timestamp (microseconds) of last verification
     anchor_original_location TEXT,      -- Original @file#line for audit trail
-    anchor_status TEXT NOT NULL DEFAULT 'unanchored',
-
-    -- Unique constraint: same metric name can exist on different connections
-    UNIQUE(name, connection_id)
+    anchor_status TEXT NOT NULL DEFAULT 'unanchored'
+    -- NOTE: Uniqueness is enforced by idx_metrics_location_connection unique index (location + connection_id)
+    -- This allows same metric name at different locations, matching DAP's one-logpoint-per-line constraint
 );
 
 CREATE INDEX IF NOT EXISTS idx_metrics_name ON metrics(name);

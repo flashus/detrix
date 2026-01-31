@@ -498,28 +498,95 @@ impl AdapterLifecycleManager {
         port: u16,
         language: SourceLanguage,
         program: Option<String>,
+        pid: Option<u32>,
         safe_mode: bool,
     ) -> Result<StartAdapterResult> {
         info!(
-            "Starting {} adapter for connection {} ({}:{}) safe_mode={}",
-            language, connection_id.0, host, port, safe_mode
+            "Starting {} adapter for connection {} ({}:{}) pid={:?} safe_mode={}",
+            language, connection_id.0, host, port, pid, safe_mode
         );
 
-        // Check if another caller is already starting this adapter (prevents race conditions)
-        // This can happen when restore_connections_on_startup and create_connection overlap
-        if self.pending_starts.contains_key(&connection_id) {
-            warn!(
-                "Adapter start already in progress for connection {}, returning early",
+        // Atomically try to mark this connection as being started
+        // If another caller is already starting it, we'll wait for them
+        // This prevents race conditions when restore_connections and create_connection overlap
+        //
+        // We use DashMap's entry API for atomic check-and-insert to prevent TOCTOU race
+        // The entry check is wrapped in a block to ensure lock is released before waiting
+        let max_retries = self.adapter_config.adapter_start_max_retries;
+        let mut retry_count = 0;
+
+        loop {
+            // Atomically try to insert into pending_starts
+            // The block ensures the Entry (and its lock) is dropped before we wait
+            let already_pending = {
+                use dashmap::mapref::entry::Entry;
+                match self.pending_starts.entry(connection_id.clone()) {
+                    Entry::Occupied(_) => true,
+                    Entry::Vacant(entry) => {
+                        entry.insert(());
+                        false
+                    }
+                }
+            }; // Entry is dropped here, lock released
+
+            if !already_pending {
+                // We're the first to start this connection
+                break;
+            }
+
+            // Another caller is starting this connection - wait for them
+            info!(
+                "Adapter start already in progress for connection {}, waiting for it to complete",
                 connection_id.0
             );
-            return Err(detrix_core::Error::InvalidConfig(format!(
-                "Connection {} is already being started by another caller",
-                connection_id.0
-            )));
-        }
 
-        // Mark this connection as being started
-        self.pending_starts.insert(connection_id.clone(), ());
+            // Wait for the pending start to complete (poll with timeout)
+            let max_wait = std::time::Duration::from_secs(30);
+            let poll_interval = std::time::Duration::from_millis(100);
+            let start = std::time::Instant::now();
+
+            while self.pending_starts.contains_key(&connection_id) {
+                if start.elapsed() > max_wait {
+                    warn!(
+                        "Timeout waiting for pending start of connection {}",
+                        connection_id.0
+                    );
+                    return Err(detrix_core::Error::Adapter(format!(
+                        "Timeout waiting for connection {} to be started by another caller",
+                        connection_id.0
+                    )));
+                }
+                tokio::time::sleep(poll_interval).await;
+            }
+
+            // The other caller finished - check if adapter now exists
+            if self.adapters.contains_key(&connection_id) {
+                info!(
+                    "Connection {} was started by another caller, returning success",
+                    connection_id.0
+                );
+                return Ok(StartAdapterResult::default());
+            }
+
+            // Other caller failed - retry if we haven't exceeded limit
+            retry_count += 1;
+            if retry_count >= max_retries {
+                warn!(
+                    "Max retries ({}) exceeded for connection {}",
+                    max_retries, connection_id.0
+                );
+                return Err(detrix_core::Error::Adapter(format!(
+                    "Failed to start connection {} after {} retries",
+                    connection_id.0, max_retries
+                )));
+            }
+
+            info!(
+                "Previous start attempt for {} failed, retrying ({}/{})",
+                connection_id.0, retry_count, max_retries
+            );
+            // continue to retry
+        }
 
         // RAII-style cleanup: ensure pending_starts entry is removed on all exit paths
         struct PendingGuard {
@@ -555,7 +622,7 @@ impl AdapterLifecycleManager {
             }
             SourceLanguage::Rust => {
                 self.adapter_factory
-                    .create_rust_adapter(host, port, program.as_deref())
+                    .create_rust_adapter(host, port, program.as_deref(), pid)
                     .await?
             }
             _ => {

@@ -178,6 +178,7 @@ impl DapAdapterFactory for MockDapAdapterFactory {
         host: &str,
         port: u16,
         _program: Option<&str>,
+        _pid: Option<u32>,
     ) -> Result<DapAdapterRef> {
         // Reuse the same logic as Python adapter for mocking
         self.create_python_adapter(host, port).await
@@ -393,6 +394,10 @@ impl MetricRepository for MockMetricRepository {
     async fn get_group_summaries(&self) -> Result<Vec<crate::ports::GroupSummary>> {
         Ok(Vec::new())
     }
+
+    async fn delete_by_connection_id(&self, _connection_id: &ConnectionId) -> Result<u64> {
+        Ok(0)
+    }
 }
 
 /// Mock connection repository for testing - minimal implementation
@@ -597,7 +602,8 @@ async fn test_start_adapter_creates_and_starts() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None,  // program
+            None,  // pid
             false, // safe_mode
         )
         .await;
@@ -631,7 +637,8 @@ async fn test_stop_adapter_cleans_up() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None,  // program
+            None,  // pid
             false, // safe_mode
         )
         .await
@@ -669,7 +676,8 @@ async fn test_get_adapter_returns_correct_adapter() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None,  // program
+            None,  // pid
             false, // safe_mode
         )
         .await
@@ -699,7 +707,8 @@ async fn test_list_adapters_returns_all() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None,  // program
+            None,  // pid
             false, // safe_mode
         )
         .await
@@ -710,7 +719,8 @@ async fn test_list_adapters_returns_all() {
             "127.0.0.1",
             5679,
             SourceLanguage::Python,
-            None,
+            None,  // program
+            None,  // pid
             false, // safe_mode
         )
         .await
@@ -738,7 +748,8 @@ async fn test_stop_all_stops_all_adapters() {
                 "127.0.0.1",
                 5678 + i as u16,
                 SourceLanguage::Python,
-                None,
+                None,  // program
+                None,  // pid
                 false, // safe_mode
             )
             .await
@@ -771,7 +782,8 @@ async fn test_event_routing_to_capture_service() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None,  // program
+            None,  // pid
             false, // safe_mode
         )
         .await
@@ -826,7 +838,8 @@ async fn test_event_broadcast_to_subscribers() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None,  // program
+            None,  // pid
             false, // safe_mode
         )
         .await
@@ -862,7 +875,8 @@ async fn test_multiple_events_are_captured() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None,  // program
+            None,  // pid
             false, // safe_mode
         )
         .await
@@ -907,7 +921,8 @@ async fn test_starting_existing_adapter_replaces_it() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None,  // program
+            None,  // pid
             false, // safe_mode
         )
         .await
@@ -926,7 +941,8 @@ async fn test_starting_existing_adapter_replaces_it() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None,  // program
+            None,  // pid
             false, // safe_mode
         )
         .await
@@ -964,7 +980,8 @@ async fn test_adapter_status_is_running_after_start() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None,  // program
+            None,  // pid
             false, // safe_mode
         )
         .await
@@ -1025,7 +1042,8 @@ async fn test_is_safe_mode_returns_some_true_for_safe_mode_connection() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None, // program
+            None, // pid
             true, // safe_mode = true
         )
         .await
@@ -1046,7 +1064,8 @@ async fn test_is_safe_mode_returns_some_false_for_normal_connection() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None,  // program
+            None,  // pid
             false, // safe_mode = false
         )
         .await
@@ -1086,7 +1105,8 @@ async fn test_update_safe_mode_updates_both_memory_and_db() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None, // program
+            None, // pid
             false,
         )
         .await
@@ -1129,7 +1149,8 @@ async fn test_update_safe_mode_succeeds_when_not_in_db() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None, // program
+            None, // pid
             false,
         )
         .await
@@ -1170,7 +1191,8 @@ async fn test_update_safe_mode_db_first_ensures_consistency() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None,  // program
+            None,  // pid
             false, // Initial state: safe_mode = false
         )
         .await
@@ -1204,7 +1226,8 @@ async fn test_safe_mode_preserved_in_list_adapters() {
             "127.0.0.1",
             5678,
             SourceLanguage::Python,
-            None,
+            None, // program
+            None, // pid
             true, // safe_mode = true
         )
         .await

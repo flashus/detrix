@@ -85,26 +85,16 @@ tasks:
         fi
 
   # ============================================================================
-  # Code Generation - Rust (future)
+  # Code Generation - Rust
   # ============================================================================
 
-  generate-rust-scaffold:
-    desc: Generate Rust client scaffold from OpenAPI spec
+  generate-rust-types:
+    desc: Generate Rust types from OpenAPI spec
+    dir: rust/xtask
     cmds:
-      - mkdir -p rust/src/generated
-      - |
-        if command -v openapi-generator-cli &> /dev/null; then
-          openapi-generator-cli generate \
-            -i {{.SPEC_FILE}} \
-            -g rust \
-            -o rust/src/generated \
-            --additional-properties=library=reqwest
-          echo "✅ Generated Rust code in rust/src/generated/"
-        else
-          echo "⚠️  openapi-generator-cli not installed. Install with:"
-          echo "    npm install -g @openapitools/openapi-generator-cli"
-          exit 1
-        fi
+      - cargo run --quiet -- generate
+      - cd .. && cargo fmt
+      - echo "✅ Generated Rust types in rust/src/generated.rs"
 
   # ============================================================================
   # All Languages
@@ -117,8 +107,7 @@ tasks:
     cmds:
       - task: generate-python-models
       - task: generate-go-types
-      # Uncomment when Rust client is implemented:
-      # - task: generate-rust-scaffold
+      - task: generate-rust-types
       - echo "✅ All client code generated"
 
   # ============================================================================
@@ -190,21 +179,67 @@ tasks:
       - echo "✅ All Go checks passed"
 
   # ============================================================================
+  # Rust Client Tasks
+  # ============================================================================
+
+  rust-build:
+    desc: Build Rust client
+    dir: rust
+    cmds:
+      - cargo build
+
+  rust-test:
+    desc: Run Rust client tests
+    dir: rust
+    cmds:
+      - cargo test
+
+  rust-lint:
+    desc: Lint Rust client code
+    dir: rust
+    cmds:
+      - cargo clippy --all -- -D warnings
+
+  rust-fmt:
+    desc: Format Rust client code
+    dir: rust
+    cmds:
+      - cargo fmt
+
+  rust-fmt-check:
+    desc: Check Rust client formatting
+    dir: rust
+    cmds:
+      - cargo fmt -- --check
+
+  rust-check:
+    desc: Run all Rust checks (fmt, build, lint, test)
+    dir: rust
+    cmds:
+      - task: rust-fmt-check
+      - task: rust-build
+      - task: rust-lint
+      - task: rust-test
+      - echo "✅ All Rust checks passed"
+
+  # ============================================================================
   # All Clients
   # ============================================================================
 
   test:
-    desc: Run all client tests (Python and Go)
+    desc: Run all client tests (Python, Go, and Rust)
     cmds:
       - task: python-test
       - task: go-test
+      - task: rust-test
       - echo "✅ All client tests passed"
 
   check:
-    desc: Run all client checks (Python and Go)
+    desc: Run all client checks (Python, Go, and Rust)
     cmds:
       - task: python-check
       - task: go-check
+      - task: rust-check
       - echo "✅ All client checks passed"
 
   # ============================================================================
@@ -236,6 +271,21 @@ tasks:
         echo "  - python/detrix/__init__.py (public API)"
         echo ""
         echo "Run 'task python-check' to verify the implementation."
+
+  # ============================================================================
+  # Pre-commit
+  # ============================================================================
+
+  pre-commit:
+    desc: Run all pre-commit checks (generate, format, lint, test)
+    cmds:
+      - task: generate-all
+      - task: check
+      - echo "✅ All pre-commit checks passed"
+
+  # ============================================================================
+  # Clean
+  # ============================================================================
 
   clean:
     desc: Clean generated files
