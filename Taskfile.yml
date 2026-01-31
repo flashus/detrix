@@ -50,11 +50,12 @@ tasks:
 
   # Quick checks before commit
   pre-commit:
-    desc: Run all checks before committing (format, lint, ALL tests including ignored)
+    desc: Run all checks before committing (format, lint, ALL tests including clients)
     cmds:
       - task: format
       - task: lint
       - task: tests:test
+      - task: clients:test
       - echo "✅ All checks passed! Ready to commit."
   
   # Quick access to common test tasks (aliases to Taskfile.tests.yml)

@@ -37,6 +37,7 @@ package detrix
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -306,7 +307,9 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 		SafeMode: safeMode,
 	}, registerTimeout)
 	if err != nil {
-		delveManager.Kill(delveProc)
+		if killErr := delveManager.Kill(delveProc); killErr != nil {
+			log.Printf("detrix: failed to kill Delve process during cleanup: %v", killErr)
+		}
 		s.Lock()
 		s.State = state.StateSleeping
 		s.Unlock()
@@ -350,12 +353,21 @@ func Sleep() (SleepResponse, error) {
 		return SleepResponse{Status: "already_sleeping"}, nil
 	}
 
-	// If waking, wait for wake to complete first
-	if s.State == state.StateWaking {
+	// If waking, wait for wake to complete first.
+	// Use a loop to re-check state after re-acquiring the lock,
+	// since another wake operation could have started in the meantime.
+	for s.State == state.StateWaking {
 		s.Unlock()
 		state.AcquireWakeLock()
 		state.ReleaseWakeLock()
 		s.Lock()
+		// Loop re-checks state in case another wake started
+	}
+
+	// Re-check for sleeping state after waiting for wake
+	if s.State == state.StateSleeping {
+		s.Unlock()
+		return SleepResponse{Status: "already_sleeping"}, nil
 	}
 
 	connID := s.ConnectionID
@@ -371,11 +383,13 @@ func Sleep() (SleepResponse, error) {
 
 	// Kill Delve process (Go advantage: we CAN stop the debugger!)
 	if delveProc != nil {
-		delveManager.Kill(&delve.Process{
+		if err := delveManager.Kill(&delve.Process{
 			Cmd:  delveProc.Cmd,
 			Host: delveProc.Host,
 			Port: delveProc.Port,
-		})
+		}); err != nil {
+			log.Printf("detrix: failed to kill Delve process: %v", err)
+		}
 	}
 
 	// Update state
@@ -400,7 +414,9 @@ func Shutdown() error {
 
 	// Stop control server
 	if controlServer != nil {
-		controlServer.Stop()
+		if err := controlServer.Stop(); err != nil {
+			log.Printf("detrix: failed to stop control server: %v", err)
+		}
 	}
 
 	// Reset state

@@ -36,7 +36,11 @@ func main() {
 		fmt.Printf("Failed to initialize: %v\n", err)
 		return
 	}
-	defer detrix.Shutdown()
+	defer func() {
+		if err := detrix.Shutdown(); err != nil {
+			fmt.Printf("Failed to shutdown Detrix: %v\n", err)
+		}
+	}()
 
 	status := detrix.Status()
 	fmt.Printf("Status after init: %s\n", status.State)
@@ -64,7 +68,9 @@ func main() {
 
 	// Sleep - stop debugger and unregister
 	fmt.Println("\nGoing to sleep...")
-	detrix.Sleep()
+	if _, err := detrix.Sleep(); err != nil {
+		fmt.Printf("Failed to sleep: %v\n", err)
+	}
 	fmt.Printf("Status after sleep: %s\n", detrix.Status().State)
 
 	// Cleanup

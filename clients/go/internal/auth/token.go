@@ -2,6 +2,7 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"net"
 	"net/http"
 	"os"
@@ -93,5 +94,6 @@ func IsAuthorized(r *http.Request, validToken string) bool {
 	}
 
 	token := strings.TrimPrefix(authHeader, prefix)
-	return token == validToken
+	// Use constant-time comparison to prevent timing attacks
+	return subtle.ConstantTimeCompare([]byte(token), []byte(validToken)) == 1
 }

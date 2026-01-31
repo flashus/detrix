@@ -119,7 +119,23 @@ def init(
     resolved_daemon_url = daemon_url or env_config.get("daemon_url") or "http://127.0.0.1:8090"
 
     def resolve_port(param_value: int, env_key: str, env_name: str) -> int:
-        """Resolve port value from parameter or environment variable."""
+        """Resolve port value from parameter or environment variable.
+
+        Port 0 is valid and means "auto-assign an available port".
+        When port is 0, the system will allocate an ephemeral port
+        when the debugger or control server starts.
+
+        Args:
+            param_value: Explicit port value (0 for auto-assign, >0 for specific port)
+            env_key: Key in env_config dict to check for environment override
+            env_name: Environment variable name for error messages
+
+        Returns:
+            Resolved port (0-65535), where 0 means auto-assign
+
+        Raises:
+            ConfigError: If environment variable contains an invalid port value
+        """
         if param_value:
             return param_value
         env_val = env_config.get(env_key)
@@ -144,9 +160,24 @@ def init(
     def resolve_timeout(
         param_value: float, env_key: str, env_name: str, default: float
     ) -> float:
-        """Resolve timeout value from parameter or environment variable."""
+        """Resolve timeout value from parameter or environment variable.
+
+        Args:
+            param_value: Explicit timeout value in seconds (must be positive)
+            env_key: Key in env_config dict to check for environment override
+            env_name: Environment variable name for error messages
+            default: Default timeout value if not specified
+
+        Returns:
+            Resolved timeout in seconds (positive float)
+
+        Raises:
+            ConfigError: If timeout value is not positive
+        """
         # If parameter differs from default, use it (explicit override)
         if param_value != default:
+            if param_value <= 0:
+                raise ConfigError(f"Timeout must be positive, got {param_value}")
             return param_value
         # Otherwise check environment
         env_val = env_config.get(env_key)

@@ -127,9 +127,13 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
                 )
             except DaemonError:
                 # debugpy started but registration failed
+                # Note: sleep_debugger() resets state but cannot stop debugpy server.
+                # This is a known debugpy limitation - the server can only be stopped
+                # on process exit. The port will remain bound until the process restarts.
                 _logger.warning(
                     "Wake failed: debugpy started on port %d but registration failed. "
-                    "Note: debugpy port remains open (limitation of debugpy).",
+                    "The debugpy port remains open until process restart (debugpy limitation). "
+                    "State has been reset to allow retry.",
                     actual_port,
                 )
                 sleep_debugger()

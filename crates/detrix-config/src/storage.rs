@@ -3,10 +3,10 @@
 use crate::constants::{
     DEFAULT_BUSY_TIMEOUT_MS, DEFAULT_DLQ_BATCH_SIZE, DEFAULT_DLQ_BUSY_TIMEOUT_MS,
     DEFAULT_DLQ_MAX_RETRIES, DEFAULT_DLQ_POOL_SIZE, DEFAULT_DLQ_RETRY_INTERVAL_MS,
-    DEFAULT_EVENT_BATCH_SIZE, DEFAULT_EVENT_FLUSH_INTERVAL_MS, DEFAULT_MAX_EVENTS_PER_METRIC,
-    DEFAULT_POOL_SIZE, DEFAULT_RETENTION_HOURS, DEFAULT_STORAGE_TYPE,
-    DEFAULT_SYSTEM_EVENT_CLEANUP_INTERVAL_SECS, DEFAULT_SYSTEM_EVENT_MAX_EVENTS,
-    DEFAULT_SYSTEM_EVENT_RETENTION_HOURS,
+    DEFAULT_EVENT_BATCH_SIZE, DEFAULT_EVENT_FLUSH_INTERVAL_MS, DEFAULT_EVENT_MAX_BUFFER_SIZE,
+    DEFAULT_MAX_EVENTS_PER_METRIC, DEFAULT_POOL_SIZE, DEFAULT_RETENTION_HOURS,
+    DEFAULT_STORAGE_TYPE, DEFAULT_SYSTEM_EVENT_CLEANUP_INTERVAL_SECS,
+    DEFAULT_SYSTEM_EVENT_MAX_EVENTS, DEFAULT_SYSTEM_EVENT_RETENTION_HOURS,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -93,7 +93,8 @@ impl Default for StorageConfig {
 /// Event batching configuration for high-throughput scenarios
 ///
 /// NOTE: Batching is always enabled for optimal performance.
-/// Backpressure is handled via channel capacity, not buffer limits.
+/// When the buffer exceeds `max_buffer_size`, oldest events are dropped
+/// to prevent unbounded memory growth under high load.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventBatchingConfig {
     /// Maximum events to buffer before flushing (default: 100)
@@ -102,6 +103,10 @@ pub struct EventBatchingConfig {
     /// Maximum time to buffer events in milliseconds (default: 100ms)
     #[serde(default = "default_event_flush_interval_ms")]
     pub flush_interval_ms: u64,
+    /// Maximum buffer size before overflow handling (default: 10000)
+    /// When exceeded, oldest events are dropped with a warning log
+    #[serde(default = "default_event_max_buffer_size")]
+    pub max_buffer_size: usize,
     /// Dead-letter queue configuration (PERF-01 audit finding)
     #[serde(default)]
     pub dlq: DlqConfig,
@@ -232,11 +237,16 @@ fn default_event_flush_interval_ms() -> u64 {
     DEFAULT_EVENT_FLUSH_INTERVAL_MS
 }
 
+fn default_event_max_buffer_size() -> usize {
+    DEFAULT_EVENT_MAX_BUFFER_SIZE
+}
+
 impl Default for EventBatchingConfig {
     fn default() -> Self {
         Self {
             batch_size: default_event_batch_size(),
             flush_interval_ms: default_event_flush_interval_ms(),
+            max_buffer_size: default_event_max_buffer_size(),
             dlq: DlqConfig::default(),
         }
     }

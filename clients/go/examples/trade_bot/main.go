@@ -60,7 +60,11 @@ func main() {
 		fmt.Printf("Failed to initialize Detrix: %v\n", err)
 		return
 	}
-	defer detrix.Shutdown()
+	defer func() {
+		if err := detrix.Shutdown(); err != nil {
+			fmt.Printf("Failed to shutdown Detrix: %v\n", err)
+		}
+	}()
 
 	status := detrix.Status()
 	controlURL := fmt.Sprintf("http://127.0.0.1:%d", status.ControlPort)
@@ -76,7 +80,7 @@ func main() {
 	fmt.Println("============================================================")
 	fmt.Println()
 
-	rand.Seed(time.Now().UnixNano())
+	// Note: rand.Seed is deprecated in Go 1.20+ - the global rand is auto-seeded
 	symbols := []string{"BTCUSD", "ETHUSD", "SOLUSD"}
 	iteration := 0
 

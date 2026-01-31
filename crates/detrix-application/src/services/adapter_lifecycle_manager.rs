@@ -783,6 +783,7 @@ impl AdapterLifecycleManager {
         let conn_id = connection_id.clone();
         let event_buffer = Arc::clone(&self.event_buffer);
         let batch_size = self.batching_config.batch_size;
+        let max_buffer_size = self.batching_config.max_buffer_size;
         let flush_tx = self.flush_tx.clone();
         let lang_str = language.to_string();
         let event_output = self.event_output.clone();
@@ -807,6 +808,7 @@ impl AdapterLifecycleManager {
                                     &event,
                                     &event_buffer,
                                     batch_size,
+                                    max_buffer_size,
                                     &flush_tx,
                                     &broadcast_tx,
                                     &conn_id,
@@ -825,6 +827,7 @@ impl AdapterLifecycleManager {
                                     &event,
                                     &event_buffer,
                                     batch_size,
+                                    max_buffer_size,
                                     &flush_tx,
                                     &broadcast_tx,
                                     &conn_id,
@@ -889,13 +892,16 @@ impl AdapterLifecycleManager {
 
     /// Process a single event (helper for spawn_event_listener)
     ///
-    /// Events are always buffered for optimal performance. Backpressure is
-    /// handled by channel capacity, not buffer limits.
+    /// Events are always buffered for optimal performance. When the buffer
+    /// exceeds `max_buffer_size`, oldest events are dropped to prevent
+    /// unbounded memory growth under high load.
     /// Events are also sent to external output (Graylog/GELF) if configured.
+    #[allow(clippy::too_many_arguments)]
     async fn process_event(
         event: &MetricEvent,
         event_buffer: &Arc<Mutex<VecDeque<MetricEvent>>>,
         batch_size: usize,
+        max_buffer_size: usize,
         flush_tx: &mpsc::Sender<()>,
         broadcast_tx: &broadcast::Sender<MetricEvent>,
         conn_id: &ConnectionId,
@@ -907,9 +913,22 @@ impl AdapterLifecycleManager {
         );
 
         // Buffered mode: add to buffer, flush when batch_size reached
-        // Backpressure is handled by channel capacity (bounded channel)
+        // Overflow handling: drop oldest events if buffer exceeds max_buffer_size
         let should_flush = {
             let mut buffer = event_buffer.lock().await;
+
+            // Overflow handling: drop oldest events if buffer is at max capacity
+            if buffer.len() >= max_buffer_size {
+                let to_drop = buffer.len() - max_buffer_size + 1;
+                for _ in 0..to_drop {
+                    buffer.pop_front();
+                }
+                warn!(
+                    "Event buffer overflow for connection {}: dropped {} oldest events (buffer at max {})",
+                    conn_id.0, to_drop, max_buffer_size
+                );
+            }
+
             buffer.push_back(event.clone());
             let current_len = buffer.len();
             debug!(

@@ -163,6 +163,10 @@ pub const DEFAULT_EVENT_BUFFER_CAPACITY: usize = 1_000;
 /// Events per batch for storage operations
 pub const DEFAULT_EVENT_BATCH_SIZE: usize = 100;
 
+/// Maximum event buffer size before overflow handling kicks in
+/// When buffer exceeds this limit, oldest events are dropped with warning
+pub const DEFAULT_EVENT_MAX_BUFFER_SIZE: usize = 10_000;
+
 /// Flush interval for event batching (balance between latency and batch efficiency)
 pub const DEFAULT_EVENT_FLUSH_INTERVAL_MS: u64 = 1_000;
 

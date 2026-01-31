@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 )
@@ -39,7 +40,11 @@ func (c *Client) HealthCheck(daemonURL string, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("daemon not reachable at %s: %w", daemonURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("daemon: failed to close response body: %v", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("daemon health check failed: status %d", resp.StatusCode)
@@ -84,7 +89,11 @@ func (c *Client) Register(daemonURL string, req RegisterRequest, timeout time.Du
 	if err != nil {
 		return "", fmt.Errorf("failed to register with daemon: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("daemon: failed to close response body: %v", err)
+		}
+	}()
 
 	respBody, _ := io.ReadAll(resp.Body)
 
@@ -115,7 +124,11 @@ func (c *Client) Unregister(daemonURL string, connectionID string, timeout time.
 	if err != nil {
 		return fmt.Errorf("failed to unregister: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("daemon: failed to close response body: %v", err)
+		}
+	}()
 
 	// Accept 200, 204, or 404 (already deleted)
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {

@@ -25,9 +25,21 @@ impl ConnectionId {
 
     /// Auto-generate connection ID from host and port
     /// Format: "host_port" (e.g., "127_0_0_1_5678")
+    ///
+    /// If the host is empty or contains only dots/colons (e.g., "...", "::"),
+    /// "localhost" is used as the default to ensure a valid connection ID.
     pub fn from_host_port(host: &str, port: u16) -> Self {
         let normalized_host = host.replace(['.', ':'], "_");
-        Self(format!("{}_{}", normalized_host, port))
+
+        // Handle empty or invalid hosts (e.g., "", "...", "::")
+        // After normalization, these become empty or underscore-only strings
+        let final_host = if normalized_host.trim_matches('_').is_empty() {
+            "localhost"
+        } else {
+            &normalized_host
+        };
+
+        Self(format!("{}_{}", final_host, port))
     }
 }
 
@@ -266,6 +278,37 @@ mod tests {
 
         let id = ConnectionId::from_host_port("localhost", 5678);
         assert_eq!(id.0, "localhost_5678");
+    }
+
+    #[test]
+    fn test_connection_id_from_host_port_edge_cases() {
+        // Empty host should default to localhost
+        let id = ConnectionId::from_host_port("", 5678);
+        assert_eq!(id.0, "localhost_5678");
+
+        // Dots-only host should default to localhost
+        let id = ConnectionId::from_host_port("...", 5678);
+        assert_eq!(id.0, "localhost_5678");
+
+        // Colons-only host (invalid IPv6) should default to localhost
+        let id = ConnectionId::from_host_port("::", 5678);
+        assert_eq!(id.0, "localhost_5678");
+
+        // Mixed dots and colons should default to localhost
+        let id = ConnectionId::from_host_port(".:.:", 5678);
+        assert_eq!(id.0, "localhost_5678");
+
+        // IPv6 loopback with content should work
+        let id = ConnectionId::from_host_port("::1", 5678);
+        assert_eq!(id.0, "__1_5678");
+
+        // Regular hostname should work unchanged
+        let id = ConnectionId::from_host_port("my-server", 5678);
+        assert_eq!(id.0, "my-server_5678");
+
+        // Port 0 should work (auto-assign)
+        let id = ConnectionId::from_host_port("localhost", 0);
+        assert_eq!(id.0, "localhost_0");
     }
 
     #[test]

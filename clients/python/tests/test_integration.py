@@ -108,6 +108,16 @@ class TestClientLifecycle:
         with pytest.raises(ConfigError, match="already initialized"):
             detrix.init(name="test-2")
 
+    def test_init_negative_timeout_raises(self):
+        """Test init with negative timeout raises error."""
+        with pytest.raises(ConfigError, match="Timeout must be positive"):
+            detrix.init(name="test", health_check_timeout=-1.0)
+
+    def test_init_zero_timeout_raises(self):
+        """Test init with zero timeout raises error."""
+        with pytest.raises(ConfigError, match="Timeout must be positive"):
+            detrix.init(name="test", register_timeout=0.0)
+
     def test_shutdown_allows_reinit(self):
         """Test shutdown allows reinit."""
         detrix.init(name="test-1")

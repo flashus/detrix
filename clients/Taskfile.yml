@@ -160,6 +160,55 @@ tasks:
       - echo "✅ All Python checks passed"
 
   # ============================================================================
+  # Go Client Tasks
+  # ============================================================================
+
+  go-test:
+    desc: Run Go client tests
+    dir: go
+    cmds:
+      - go test ./...
+
+  go-build:
+    desc: Build Go client
+    dir: go
+    cmds:
+      - go build ./...
+
+  go-lint:
+    desc: Lint Go client code
+    dir: go
+    cmds:
+      - golangci-lint run
+
+  go-check:
+    desc: Run all Go checks (build, lint, test)
+    dir: go
+    cmds:
+      - task: go-build
+      - task: go-lint
+      - task: go-test
+      - echo "✅ All Go checks passed"
+
+  # ============================================================================
+  # All Clients
+  # ============================================================================
+
+  test:
+    desc: Run all client tests (Python and Go)
+    cmds:
+      - task: python-test
+      - task: go-test
+      - echo "✅ All client tests passed"
+
+  check:
+    desc: Run all client checks (Python and Go)
+    cmds:
+      - task: python-check
+      - task: go-check
+      - echo "✅ All client checks passed"
+
+  # ============================================================================
   # Client Testing
   # ============================================================================
 

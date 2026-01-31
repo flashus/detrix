@@ -3,14 +3,21 @@ package delve
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
+
+// maxPortRetries is the number of times to retry port allocation
+// when the ephemeral port is taken between allocation and Delve startup
+const maxPortRetries = 3
 
 // Process represents a running Delve process.
 type Process struct {
@@ -77,6 +84,10 @@ func FindDelve(delvePath string) (string, error) {
 
 // SpawnAndAttach spawns Delve to attach to the current process.
 // It waits for the DAP server to become ready before returning.
+//
+// When port is 0, an ephemeral port is allocated. Due to a TOCTOU race
+// (the port may be taken between allocation and Delve startup), this
+// operation is retried up to maxPortRetries times.
 func (m *Manager) SpawnAndAttach(host string, port int) (*Process, error) {
 	// Find delve binary
 	delvePath, err := FindDelve(m.DelvePath)
@@ -84,18 +95,47 @@ func (m *Manager) SpawnAndAttach(host string, port int) (*Process, error) {
 		return nil, err
 	}
 
-	pid := os.Getpid()
+	// If port is specified (non-zero), no retries needed
+	if port != 0 {
+		return m.spawnDelve(delvePath, host, port)
+	}
 
-	// Resolve port 0 to an available port
-	actualPort := port
-	if actualPort == 0 {
+	// Port 0: ephemeral port allocation with retry logic
+	// This handles the TOCTOU race where the port may be taken between
+	// net.Listen close and Delve startup
+	var lastErr error
+	for attempt := 0; attempt < maxPortRetries; attempt++ {
+		// Allocate an ephemeral port
 		listener, err := net.Listen("tcp", fmt.Sprintf("%s:0", host))
 		if err != nil {
 			return nil, fmt.Errorf("failed to find available port: %w", err)
 		}
-		actualPort = listener.Addr().(*net.TCPAddr).Port
-		listener.Close()
+		actualPort := listener.Addr().(*net.TCPAddr).Port
+		if err := listener.Close(); err != nil {
+			log.Printf("delve: failed to close port listener: %v", err)
+		} // Release port for Delve to bind
+
+		proc, err := m.spawnDelve(delvePath, host, actualPort)
+		if err == nil {
+			return proc, nil
+		}
+
+		// Check if it's a port bind error (TOCTOU race)
+		if isPortBindError(err) {
+			lastErr = err
+			continue // Retry with a new port
+		}
+
+		// Non-port error, fail immediately
+		return nil, err
 	}
+
+	return nil, fmt.Errorf("failed after %d port allocation retries: %w", maxPortRetries, lastErr)
+}
+
+// spawnDelve spawns a Delve process on the specified port.
+func (m *Manager) spawnDelve(delvePath string, host string, port int) (*Process, error) {
+	pid := os.Getpid()
 
 	// Build command:
 	// dlv attach <pid> --headless --accept-multiclient --api-version=2 --continue --listen=<host>:<port>
@@ -108,7 +148,7 @@ func (m *Manager) SpawnAndAttach(host string, port int) (*Process, error) {
 		"--accept-multiclient",
 		"--api-version=2",
 		"--continue",
-		fmt.Sprintf("--listen=%s:%d", host, actualPort),
+		fmt.Sprintf("--listen=%s:%d", host, port),
 	}
 
 	cmd := exec.Command(delvePath, args...)
@@ -130,19 +170,34 @@ func (m *Manager) SpawnAndAttach(host string, port int) (*Process, error) {
 	proc := &Process{
 		Cmd:    cmd,
 		Host:   host,
-		Port:   actualPort,
+		Port:   port,
 		stdout: &stdout,
 		stderr: &stderr,
 	}
 
 	// Wait for DAP port to accept connections
-	if err := m.waitForReady(host, actualPort, cmd.Process); err != nil {
+	if err := m.waitForReady(host, port, cmd.Process); err != nil {
 		// Kill process if startup failed
-		m.Kill(proc)
+		if killErr := m.Kill(proc); killErr != nil {
+			log.Printf("delve: failed to kill process during cleanup: %v", killErr)
+		}
 		return nil, fmt.Errorf("delve failed to start: %w\nLogs:\n%s", err, proc.Logs())
 	}
 
 	return proc, nil
+}
+
+// isPortBindError checks if the error indicates a port bind failure
+// (address already in use), which suggests a TOCTOU race condition.
+func isPortBindError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	// Common indicators of port bind failure
+	return strings.Contains(errStr, "address already in use") ||
+		strings.Contains(errStr, "bind: address already in use") ||
+		errors.Is(err, syscall.EADDRINUSE)
 }
 
 // waitForReady polls the DAP port until it accepts connections.
@@ -160,7 +215,9 @@ func (m *Manager) waitForReady(host string, port int, proc *os.Process) error {
 		// Try to connect
 		conn, err := net.DialTimeout("tcp", addr, checkInterval)
 		if err == nil {
-			conn.Close()
+			if err := conn.Close(); err != nil {
+				log.Printf("delve: failed to close probe connection: %v", err)
+			}
 			return nil
 		}
 
@@ -204,7 +261,9 @@ func (m *Manager) Kill(proc *Process) error {
 		return nil
 	case <-time.After(2 * time.Second):
 		// Force kill
-		proc.Cmd.Process.Kill()
+		if err := proc.Cmd.Process.Kill(); err != nil {
+			log.Printf("delve: force kill failed: %v", err)
+		}
 		// Wait for it to actually die
 		<-done
 		return nil
@@ -217,6 +276,8 @@ func IsReady(host string, port int) bool {
 	if err != nil {
 		return false
 	}
-	conn.Close()
+	if err := conn.Close(); err != nil {
+		log.Printf("delve: failed to close ready check connection: %v", err)
+	}
 	return true
 }

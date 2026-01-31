@@ -25,6 +25,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"time"
@@ -45,7 +46,11 @@ func main() {
 		fmt.Printf("Failed to connect: %v\n", err)
 		os.Exit(1)
 	}
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			log.Printf("Failed to close connection: %v", err)
+		}
+	}()
 
 	reader := bufio.NewReader(conn)
 
@@ -175,8 +180,12 @@ func sendRequest(conn net.Conn, command string, args map[string]any) {
 
 	data, _ := json.Marshal(msg)
 	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(data))
-	conn.Write([]byte(header))
-	conn.Write(data)
+	if _, err := conn.Write([]byte(header)); err != nil {
+		log.Printf("Failed to write header: %v", err)
+	}
+	if _, err := conn.Write(data); err != nil {
+		log.Printf("Failed to write data: %v", err)
+	}
 }
 
 func readResponse(reader *bufio.Reader) map[string]any {
@@ -190,7 +199,10 @@ func readResponse(reader *bufio.Reader) map[string]any {
 		if line == "\r\n" {
 			break
 		}
-		fmt.Sscanf(line, "Content-Length: %d", &contentLength)
+		if _, err := fmt.Sscanf(line, "Content-Length: %d", &contentLength); err != nil {
+			// Not a Content-Length header, continue
+			continue
+		}
 	}
 
 	if contentLength == 0 {
@@ -205,7 +217,10 @@ func readResponse(reader *bufio.Reader) map[string]any {
 	}
 
 	var result map[string]any
-	json.Unmarshal(body, &result)
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("Failed to parse response: %v", err)
+		return nil
+	}
 
 	return result
 }

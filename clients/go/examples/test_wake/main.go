@@ -29,6 +29,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -145,7 +146,9 @@ func run(fixtureDir string) int {
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		<-sigCh
-		proc.Process.Signal(syscall.SIGTERM)
+		if err := proc.Process.Signal(syscall.SIGTERM); err != nil {
+			log.Printf("Failed to send SIGTERM to process: %v", err)
+		}
 	}()
 
 	// Wait for control plane URL in output
@@ -160,7 +163,9 @@ scanLoop:
 		select {
 		case <-timeout:
 			fmt.Println("   ERROR: Timeout waiting for control plane URL")
-			proc.Process.Kill()
+			if err := proc.Process.Kill(); err != nil {
+				log.Printf("Failed to kill process: %v", err)
+			}
 			return 1
 		default:
 			if !scanner.Scan() {
@@ -178,7 +183,9 @@ scanLoop:
 
 	if controlURL == "" {
 		fmt.Println("   ERROR: Could not find control plane URL in output")
-		proc.Process.Kill()
+		if err := proc.Process.Kill(); err != nil {
+			log.Printf("Failed to kill process: %v", err)
+		}
 		return 1
 	}
 
@@ -187,7 +194,9 @@ scanLoop:
 
 	// Continue reading app output in background
 	go func() {
-		io.Copy(io.Discard, stdout)
+		if _, err := io.Copy(io.Discard, stdout); err != nil {
+			log.Printf("Failed to read stdout: %v", err)
+		}
 	}()
 
 	// Step 3: Wait 3 seconds (simulating agent discovering the app)
@@ -204,14 +213,18 @@ scanLoop:
 	wakeResp, err := apiRequest(controlURL+"/detrix/wake", "POST", nil)
 	if err != nil {
 		fmt.Printf("   ERROR: Failed to wake client: %v\n", err)
-		proc.Process.Kill()
+		if err := proc.Process.Kill(); err != nil {
+			log.Printf("Failed to kill process: %v", err)
+		}
 		return 1
 	}
 
 	wakeResult, ok := wakeResp.(map[string]interface{})
 	if !ok {
 		fmt.Println("   ERROR: Invalid wake response")
-		proc.Process.Kill()
+		if err := proc.Process.Kill(); err != nil {
+			log.Printf("Failed to kill process: %v", err)
+		}
 		return 1
 	}
 
@@ -369,7 +382,9 @@ scanLoop:
 	fmt.Println("8. Cleaning up...")
 
 	// Stop the app
-	proc.Process.Signal(syscall.SIGTERM)
+	if err := proc.Process.Signal(syscall.SIGTERM); err != nil {
+		log.Printf("Failed to send SIGTERM: %v", err)
+	}
 	done := make(chan error)
 	go func() {
 		done <- proc.Wait()
@@ -377,7 +392,9 @@ scanLoop:
 
 	select {
 	case <-time.After(5 * time.Second):
-		proc.Process.Kill()
+		if err := proc.Process.Kill(); err != nil {
+			log.Printf("Failed to kill process: %v", err)
+		}
 		fmt.Println("   App killed (timeout)")
 	case <-done:
 		fmt.Println("   App stopped")
@@ -426,7 +443,11 @@ func apiRequest(url string, method string, data interface{}) (interface{}, error
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Failed to close response body: %v", err)
+		}
+	}()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

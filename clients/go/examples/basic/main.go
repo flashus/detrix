@@ -21,7 +21,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize Detrix: %v", err)
 	}
-	defer detrix.Shutdown()
+	defer func() {
+		if err := detrix.Shutdown(); err != nil {
+			log.Printf("Failed to shutdown Detrix: %v", err)
+		}
+	}()
 
 	// Print control plane URL
 	status := detrix.Status()
