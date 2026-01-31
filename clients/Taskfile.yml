@@ -66,21 +66,21 @@ tasks:
         echo "models. Update it manually if the spec changes significantly."
 
   # ============================================================================
-  # Code Generation - Go (future)
+  # Code Generation - Go
   # ============================================================================
 
-  generate-go-scaffold:
-    desc: Generate Go client scaffold from OpenAPI spec
+  generate-go-types:
+    desc: Generate Go types from OpenAPI spec
     cmds:
       - mkdir -p go/internal/generated
       - |
-        if command -v oapi-codegen &> /dev/null; then
-          oapi-codegen -package generated -generate types {{.SPEC_FILE}} > go/internal/generated/types.go
-          oapi-codegen -package generated -generate chi-server {{.SPEC_FILE}} > go/internal/generated/server.go
-          echo "✅ Generated Go code in go/internal/generated/"
+        OAPI_CODEGEN=$(command -v oapi-codegen || echo "$HOME/go/bin/oapi-codegen")
+        if [ -x "$OAPI_CODEGEN" ]; then
+          $OAPI_CODEGEN -package generated -generate types {{.SPEC_FILE}} > go/internal/generated/types.go
+          echo "✅ Generated Go types in go/internal/generated/types.go"
         else
           echo "⚠️  oapi-codegen not installed. Install with:"
-          echo "    go install github.com/deepmap/oapi-codegen/v2/cmd/oapi-codegen@latest"
+          echo "    go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest"
           exit 1
         fi
 
@@ -111,16 +111,15 @@ tasks:
   # ============================================================================
 
   generate-all:
-    desc: Generate client scaffolds for all languages
+    desc: Generate client code for all languages
     deps:
       - validate-spec
     cmds:
-      - task: generate-python-scaffold
-      # Uncomment when Go client is implemented:
-      # - task: generate-go-scaffold
+      - task: generate-python-models
+      - task: generate-go-types
       # Uncomment when Rust client is implemented:
       # - task: generate-rust-scaffold
-      - echo "✅ All client scaffolds generated"
+      - echo "✅ All client code generated"
 
   # ============================================================================
   # Python Client Tasks

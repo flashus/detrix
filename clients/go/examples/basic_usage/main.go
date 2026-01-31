@@ -55,7 +55,7 @@ func main() {
 	} else {
 		fmt.Printf("Wake result: %+v\n", result)
 		fmt.Printf("Debug port: %d\n", result.DebugPort)
-		fmt.Printf("Connection ID: %s\n", result.ConnectionID)
+		fmt.Printf("Connection ID: %s\n", result.ConnectionId)
 
 		// Now the daemon can set metrics on this process
 		// Simulate some work

@@ -50,8 +50,9 @@ tasks:
 
   # Quick checks before commit
   pre-commit:
-    desc: Run all checks before committing (format, lint, ALL tests including clients)
+    desc: Run all checks before committing (generate, format, lint, ALL tests including clients)
     cmds:
+      - task: clients:generate-all
       - task: format
       - task: lint
       - task: tests:test

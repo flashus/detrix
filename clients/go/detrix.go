@@ -46,6 +46,7 @@ import (
 	"github.com/flashus/detrix/clients/go/internal/control"
 	"github.com/flashus/detrix/clients/go/internal/daemon"
 	"github.com/flashus/detrix/clients/go/internal/delve"
+	"github.com/flashus/detrix/clients/go/internal/generated"
 	"github.com/flashus/detrix/clients/go/internal/state"
 )
 
@@ -91,28 +92,33 @@ type Config struct {
 }
 
 // StatusResponse contains the current client status.
-type StatusResponse struct {
-	State           string  `json:"state"`
-	Name            string  `json:"name"`
-	ControlHost     string  `json:"control_host"`
-	ControlPort     int     `json:"control_port"`
-	DebugPort       int     `json:"debug_port"`
-	DebugPortActive bool    `json:"debug_port_active"`
-	DaemonURL       string  `json:"daemon_url"`
-	ConnectionID    *string `json:"connection_id"`
-}
+// Type alias to generated type for API compatibility.
+type StatusResponse = generated.StatusResponse
 
 // WakeResponse is the response from a wake operation.
-type WakeResponse struct {
-	Status       string `json:"status"`
-	DebugPort    int    `json:"debug_port"`
-	ConnectionID string `json:"connection_id"`
-}
+// Type alias to generated type for API compatibility.
+type WakeResponse = generated.WakeResponse
 
 // SleepResponse is the response from a sleep operation.
-type SleepResponse struct {
-	Status string `json:"status"`
-}
+// Type alias to generated type for API compatibility.
+type SleepResponse = generated.SleepResponse
+
+// WakeStatus represents the status field in WakeResponse.
+type WakeStatus = generated.WakeResponseStatus
+
+// SleepStatus represents the status field in SleepResponse.
+type SleepStatus = generated.SleepResponseStatus
+
+// ClientState represents the client state.
+type ClientState = generated.ClientState
+
+// Re-export status constants for convenience.
+const (
+	WakeStatusAwake        = generated.Awake
+	WakeStatusAlreadyAwake = generated.AlreadyAwake
+	SleepStatusSleeping        = generated.SleepResponseStatusSleeping
+	SleepStatusAlreadySleeping = generated.SleepResponseStatusAlreadySleeping
+)
 
 // Package-level components
 var (
@@ -210,14 +216,14 @@ func Status() StatusResponse {
 	snap := s.Snapshot()
 
 	return StatusResponse{
-		State:           string(snap.State),
+		State:           generated.ClientState(snap.State),
 		Name:            snap.Name,
 		ControlHost:     snap.ControlHost,
-		ControlPort:     snap.ControlPort,
-		DebugPort:       snap.DebugPort,
+		ControlPort:     int32(snap.ControlPort),
+		DebugPort:       int32(snap.DebugPort),
 		DebugPortActive: snap.DebugPortActive,
-		DaemonURL:       snap.DaemonURL,
-		ConnectionID:    snap.ConnectionID,
+		DaemonUrl:       snap.DaemonURL,
+		ConnectionId:    snap.ConnectionID,
 	}
 }
 
@@ -245,12 +251,12 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 	s.Lock()
 	if s.State == state.StateAwake {
 		resp := WakeResponse{
-			Status:       "already_awake",
-			DebugPort:    s.ActualDebugPort,
-			ConnectionID: "",
+			Status:       WakeStatusAlreadyAwake,
+			DebugPort:    int32(s.ActualDebugPort),
+			ConnectionId: "",
 		}
 		if s.ConnectionID != nil {
-			resp.ConnectionID = *s.ConnectionID
+			resp.ConnectionId = *s.ConnectionID
 		}
 		s.Unlock()
 		return resp, nil
@@ -330,9 +336,9 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 	s.Unlock()
 
 	return WakeResponse{
-		Status:       "awake",
-		DebugPort:    delveProc.Port,
-		ConnectionID: connID,
+		Status:       WakeStatusAwake,
+		DebugPort:    int32(delveProc.Port),
+		ConnectionId: connID,
 	}, nil
 }
 
@@ -350,7 +356,7 @@ func Sleep() (SleepResponse, error) {
 	s.Lock()
 	if s.State == state.StateSleeping {
 		s.Unlock()
-		return SleepResponse{Status: "already_sleeping"}, nil
+		return SleepResponse{Status: SleepStatusAlreadySleeping}, nil
 	}
 
 	// If waking, wait for wake to complete first.
@@ -367,7 +373,7 @@ func Sleep() (SleepResponse, error) {
 	// Re-check for sleeping state after waiting for wake
 	if s.State == state.StateSleeping {
 		s.Unlock()
-		return SleepResponse{Status: "already_sleeping"}, nil
+		return SleepResponse{Status: SleepStatusAlreadySleeping}, nil
 	}
 
 	connID := s.ConnectionID
@@ -400,7 +406,7 @@ func Sleep() (SleepResponse, error) {
 	s.DebugPortActive = false
 	s.Unlock()
 
-	return SleepResponse{Status: "sleeping"}, nil
+	return SleepResponse{Status: SleepStatusSleeping}, nil
 }
 
 // Shutdown stops the client and cleans up resources.
@@ -492,8 +498,8 @@ func statusProvider() map[string]any {
 		"control_port":      status.ControlPort,
 		"debug_port":        status.DebugPort,
 		"debug_port_active": status.DebugPortActive,
-		"daemon_url":        status.DaemonURL,
-		"connection_id":     status.ConnectionID,
+		"daemon_url":        status.DaemonUrl,
+		"connection_id":     status.ConnectionId,
 	}
 }
 
@@ -505,7 +511,7 @@ func wakeHandler(daemonURL string) (map[string]any, error) {
 	return map[string]any{
 		"status":        resp.Status,
 		"debug_port":    resp.DebugPort,
-		"connection_id": resp.ConnectionID,
+		"connection_id": resp.ConnectionId,
 	}, nil
 }
 
