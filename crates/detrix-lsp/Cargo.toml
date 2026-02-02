@@ -43,3 +43,6 @@ regex.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 detrix-testing = { path = "../detrix-testing" }
+
+[lints]
+workspace = true

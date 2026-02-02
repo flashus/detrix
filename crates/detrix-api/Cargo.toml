@@ -81,6 +81,9 @@ detrix-testing = { path = "../detrix-testing" }
 detrix-storage = { path = "../detrix-storage" }
 detrix-dap = { path = "../detrix-dap" }
 
+[lints]
+workspace = true
+
 [[test]]
 name = "grpc_integration"
 path = "tests/grpc_integration_tests.rs"

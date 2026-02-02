@@ -63,3 +63,6 @@ tempfile.workspace = true
 proptest = { workspace = true }
 # detrix-testing provides mocks (circular dep broken via detrix-ports extraction)
 detrix-testing = { path = "../detrix-testing" }
+
+[lints]
+workspace = true

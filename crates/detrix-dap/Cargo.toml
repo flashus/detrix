@@ -36,3 +36,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 proptest = { workspace = true }
 detrix-testing = { path = "../detrix-testing" }
 detrix-ports = { path = "../detrix-ports" }
+
+[lints]
+workspace = true

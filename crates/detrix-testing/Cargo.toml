@@ -60,3 +60,6 @@ base64 = "0.22"
 # Unix-specific dependencies (must be last section)
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
+
+[lints]
+workspace = true

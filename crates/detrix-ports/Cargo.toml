@@ -24,3 +24,6 @@ futures.workspace = true
 # For cache fingerprinting
 sha2.workspace = true
 chrono.workspace = true
+
+[lints]
+workspace = true
