@@ -660,7 +660,8 @@ heartbeat_max_failures = 2
                 .get("ports")
                 .and_then(|p| p.get("http"))
                 .and_then(|p| p.as_u64())
-                .unwrap_or(initial_port as u64) as u16;
+                .map(|p| p as u16)
+                .unwrap_or(initial_port);
             // Register daemon for cleanup tracking
             register_e2e_process("mcp_daemon", initial_pid as u32);
             reporter.step_success(
@@ -1664,6 +1665,10 @@ async fn test_mcp_bridge_corrupt_pid_file_handling() {
     let log_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&log_dir).expect("Failed to create log dir");
 
+    // Get an available port using the e2e infrastructure
+    let test_port = detrix_testing::e2e::executor::get_http_port();
+    reporter.info(&format!("Using port: {}", test_port));
+
     // Create config
     let config_content = format!(
         r#"
@@ -1686,14 +1691,15 @@ port_fallback = true
 
 [api.rest]
 host = "127.0.0.1"
-port = 19680
+port = {}
 
 [api.grpc]
 enabled = false
 "#,
         db_path.to_string_lossy().replace('\\', "/"),
         pid_path.to_string_lossy().replace('\\', "/"),
-        log_dir.to_string_lossy().replace('\\', "/")
+        log_dir.to_string_lossy().replace('\\', "/"),
+        test_port
     );
     std::fs::write(&config_path, config_content).expect("Failed to write config");
 
@@ -1735,22 +1741,34 @@ enabled = false
         .expect("Failed to spawn MCP bridge");
     reporter.step_success(step, Some("Bridge process started"));
 
-    // Wait for daemon to spawn
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
     // ========================================================================
     // Verify new daemon spawned with valid PID file
     // ========================================================================
     reporter.section("PHASE 3: VERIFY NEW DAEMON");
 
-    let step = reporter.step_start("Check PID file", "Verify valid PID file was created");
-    let content = std::fs::read_to_string(&pid_path).expect("PID file should exist");
-    let info: serde_json::Value = match serde_json::from_str(&content) {
+    // Wait for valid PID file with retry loop (daemon may take time to start under load)
+    let step = reporter.step_start("Check PID file", "Wait for valid PID file to be created");
+    let pid_check = timeout(Duration::from_secs(30), async {
+        loop {
+            if let Ok(content) = std::fs::read_to_string(&pid_path) {
+                if let Ok(info) = serde_json::from_str::<serde_json::Value>(&content) {
+                    // Verify it has required fields (not corrupt)
+                    if info.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) != 0 {
+                        return info;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await;
+
+    let info: serde_json::Value = match pid_check {
         Ok(v) => v,
-        Err(e) => {
-            reporter.step_failed(step, &format!("PID file still corrupt: {}", e));
+        Err(_) => {
+            reporter.step_failed(step, "Timeout waiting for valid PID file (30s)");
             let _ = bridge_process.kill().await;
-            panic!("PID file should be valid JSON after daemon start");
+            panic!("PID file should be valid JSON after daemon start (timeout 30s)");
         }
     };
 
@@ -1767,7 +1785,8 @@ enabled = false
         .get("ports")
         .and_then(|p| p.get("http"))
         .and_then(|p| p.as_u64())
-        .unwrap_or(19680) as u16;
+        .map(|p| p as u16)
+        .unwrap_or(test_port);
 
     let step = reporter.step_start("Health check", "Verify daemon is responding");
     let client = reqwest::Client::builder()
@@ -1775,16 +1794,25 @@ enabled = false
         .build()
         .unwrap();
 
-    match client
-        .get(&format!("http://127.0.0.1:{}/health", daemon_port))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
+    // Retry health check with timeout (daemon may still be starting)
+    let health_url = format!("http://127.0.0.1:{}/health", daemon_port);
+    let health_check = timeout(Duration::from_secs(10), async {
+        loop {
+            match client.get(&health_url).send().await {
+                Ok(resp) if resp.status().is_success() => return true,
+                _ => {}
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await;
+
+    match health_check {
+        Ok(true) => {
             reporter.step_success(step, Some("Daemon healthy"));
         }
         _ => {
-            reporter.step_failed(step, "Daemon unhealthy");
+            reporter.step_failed(step, "Daemon health check timed out");
             let _ = bridge_process.kill().await;
             panic!("Daemon should be healthy");
         }

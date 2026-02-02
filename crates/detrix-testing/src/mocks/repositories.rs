@@ -296,6 +296,23 @@ impl EventRepository for MockEventRepository {
         Ok(filtered.into_iter().take(limit as usize).collect())
     }
 
+    async fn find_by_metric_id_since(
+        &self,
+        metric_id: MetricId,
+        since_micros: i64,
+        limit: i64,
+    ) -> Result<Vec<MetricEvent>> {
+        let events = self.events.read().unwrap();
+        let mut filtered: Vec<_> = events
+            .iter()
+            .filter(|e| e.metric_id == metric_id && e.timestamp >= since_micros)
+            .cloned()
+            .collect();
+        // Sort by timestamp descending to match real DB behavior
+        filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(filtered.into_iter().take(limit as usize).collect())
+    }
+
     async fn find_by_metric_ids(
         &self,
         metric_ids: &[MetricId],

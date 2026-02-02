@@ -142,6 +142,19 @@ pub trait EventRepository: Send + Sync {
     /// Find events by metric ID
     async fn find_by_metric_id(&self, metric_id: MetricId, limit: i64) -> Result<Vec<MetricEvent>>;
 
+    /// Find events by metric ID with timestamp filter (events since given timestamp)
+    ///
+    /// # Arguments
+    /// * `metric_id` - The metric to query events for
+    /// * `since_micros` - Only return events with timestamp >= this value (microseconds since epoch)
+    /// * `limit` - Maximum number of events to return
+    async fn find_by_metric_id_since(
+        &self,
+        metric_id: MetricId,
+        since_micros: i64,
+        limit: i64,
+    ) -> Result<Vec<MetricEvent>>;
+
     /// Find events by multiple metric IDs (batch query - single DB call)
     async fn find_by_metric_ids(
         &self,

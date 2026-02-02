@@ -132,6 +132,9 @@ pub struct QueryEventsParams {
     pub metric_name: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: i64,
+    /// Optional timestamp filter: only return events with timestamp >= this value
+    /// Value is in microseconds since Unix epoch
+    pub since: Option<i64>,
 }
 
 fn default_limit() -> i64 {
@@ -359,8 +362,8 @@ pub async fn query_events(
     Query(params): Query<QueryEventsParams>,
 ) -> Result<Json<Vec<ProtoMetricEvent>>, HttpError> {
     info!(
-        "REST: query_events (metric_id={:?}, metric_name={:?}, limit={})",
-        params.metric_id, params.metric_name, params.limit
+        "REST: query_events (metric_id={:?}, metric_name={:?}, limit={}, since={:?})",
+        params.metric_id, params.metric_name, params.limit, params.since
     );
 
     // If metric_name provided, look up the metric ID first
@@ -384,11 +387,12 @@ pub async fn query_events(
     let streaming_service = &state.context.streaming_service;
     let events = match metric_id {
         Some(id) => streaming_service
-            .query_metric_events(id, Some(params.limit))
+            .query_metric_events(id, Some(params.limit), params.since)
             .await
             .http_context("Failed to query events")?,
         None => {
             // Return recent events from all metrics
+            // Note: since filter not applied to "all events" query for simplicity
             streaming_service
                 .query_all_events(Some(params.limit))
                 .await

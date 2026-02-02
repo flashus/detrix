@@ -169,6 +169,30 @@ impl EventRepository for SqliteStorage {
         events
     }
 
+    async fn find_by_metric_id_since(
+        &self,
+        metric_id: MetricId,
+        since_micros: i64,
+        limit: i64,
+    ) -> Result<Vec<MetricEvent>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM metric_events
+            WHERE metric_id = ? AND timestamp >= ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(metric_id.0 as i64) // SQLite only supports i64
+        .bind(since_micros)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await?;
+
+        let events: Result<Vec<MetricEvent>> = rows.iter().map(row_to_event).collect();
+        events
+    }
+
     async fn find_by_metric_ids(
         &self,
         metric_ids: &[MetricId],

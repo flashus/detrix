@@ -443,15 +443,9 @@ impl RustAdapter {
             let lldb_commands = etc_dir.join("lldb_commands");
 
             if lookup_py.exists() && lldb_commands.exists() {
-                tracing::info!(
-                    "[Rust LLDB] Loading formatters from: {}",
-                    etc_dir.display()
-                );
+                tracing::info!("[Rust LLDB] Loading formatters from: {}", etc_dir.display());
                 // Import the Python lookup module
-                commands.push(format!(
-                    "command script import \"{}\"",
-                    lookup_py.display()
-                ));
+                commands.push(format!("command script import \"{}\"", lookup_py.display()));
                 // Source the type formatter commands
                 commands.push(format!(
                     "command source -s 0 \"{}\"",
@@ -464,9 +458,7 @@ impl RustAdapter {
                 Self::add_fallback_formatters(&mut commands);
             }
         } else {
-            tracing::warn!(
-                "[Rust LLDB] Could not find Rust sysroot, using fallback formatters"
-            );
+            tracing::warn!("[Rust LLDB] Could not find Rust sysroot, using fallback formatters");
             Self::add_fallback_formatters(&mut commands);
         }
 
@@ -546,15 +538,9 @@ impl RustAdapter {
             let lldb_commands = etc_dir.join("lldb_commands");
 
             if lookup_py.exists() && lldb_commands.exists() {
-                tracing::info!(
-                    "[Rust LLDB] Loading formatters from: {}",
-                    etc_dir.display()
-                );
+                tracing::info!("[Rust LLDB] Loading formatters from: {}", etc_dir.display());
                 // Import the Python lookup module
-                commands.push(format!(
-                    "command script import \"{}\"",
-                    lookup_py.display()
-                ));
+                commands.push(format!("command script import \"{}\"", lookup_py.display()));
                 // Source the type formatter commands
                 commands.push(format!(
                     "command source -s 0 \"{}\"",
@@ -567,9 +553,7 @@ impl RustAdapter {
                 Self::add_fallback_formatters(&mut commands);
             }
         } else {
-            tracing::warn!(
-                "[Rust LLDB] Could not find Rust sysroot, using fallback formatters"
-            );
+            tracing::warn!("[Rust LLDB] Could not find Rust sysroot, using fallback formatters");
             Self::add_fallback_formatters(&mut commands);
         }
 

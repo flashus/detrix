@@ -70,7 +70,7 @@ mod tests {
 
         // Query events
         let events = service
-            .query_metric_events(metric_id, Some(10))
+            .query_metric_events(metric_id, Some(10), None)
             .await
             .unwrap();
 
@@ -90,7 +90,7 @@ mod tests {
 
         // Query with limit of 2
         let events = service
-            .query_metric_events(metric_id, Some(2))
+            .query_metric_events(metric_id, Some(2), None)
             .await
             .unwrap();
 
@@ -133,11 +133,11 @@ mod tests {
 
         // Query each metric
         let events_1 = service
-            .query_metric_events(metric_id_1, Some(10))
+            .query_metric_events(metric_id_1, Some(10), None)
             .await
             .unwrap();
         let events_2 = service
-            .query_metric_events(metric_id_2, Some(10))
+            .query_metric_events(metric_id_2, Some(10), None)
             .await
             .unwrap();
 
@@ -177,7 +177,7 @@ mod tests {
         repository.save(&error_event).await.unwrap();
 
         let events = service
-            .query_metric_events(metric_id, Some(10))
+            .query_metric_events(metric_id, Some(10), None)
             .await
             .unwrap();
 

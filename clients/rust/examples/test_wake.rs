@@ -110,6 +110,12 @@ fn find_fixture_dir() -> PathBuf {
 }
 
 fn run(daemon_url: &str, fixture_dir: &PathBuf) -> i32 {
+    // Capture test start time to filter out old events from previous runs
+    let test_start_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
+
     println!("{}", "=".repeat(70));
     println!("Agent Simulation Test - Wake and Observe a Running Rust Application");
     println!("{}", "=".repeat(70));
@@ -352,7 +358,9 @@ fn run(daemon_url: &str, fixture_dir: &PathBuf) -> i32 {
                 continue;
             }
 
-            if let Some(events) = get_events(&client, daemon_url, *metric_id, 10) {
+            if let Some(events) =
+                get_events(&client, daemon_url, *metric_id, 10, Some(test_start_time))
+            {
                 for event in events.as_array().unwrap_or(&vec![]) {
                     let ts = event.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
                     let event_key = format!("{}-{}", metric_id, ts);
@@ -586,11 +594,20 @@ fn print_metric_result(name: &str, line: i32, result: &Option<Value>) {
     }
 }
 
-fn get_events(client: &Client, daemon_url: &str, metric_id: i64, limit: i32) -> Option<Value> {
-    let url = format!(
+fn get_events(
+    client: &Client,
+    daemon_url: &str,
+    metric_id: i64,
+    limit: i32,
+    since: Option<i64>,
+) -> Option<Value> {
+    let mut url = format!(
         "{}/api/v1/events?metricId={}&limit={}",
         daemon_url, metric_id, limit
     );
+    if let Some(since_ts) = since {
+        url.push_str(&format!("&since={}", since_ts));
+    }
     client.get(&url).send().ok()?.json().ok()
 }
 

@@ -1374,6 +1374,15 @@ impl detrix_application::EventRepository for FailingEventRepository {
         Ok(Vec::new())
     }
 
+    async fn find_by_metric_id_since(
+        &self,
+        _metric_id: MetricId,
+        _since_micros: i64,
+        _limit: i64,
+    ) -> detrix_core::error::Result<Vec<MetricEvent>> {
+        Ok(Vec::new())
+    }
+
     async fn find_by_metric_ids(
         &self,
         _metric_ids: &[MetricId],

@@ -419,10 +419,11 @@ impl<P: OutputParser> BaseAdapter<P> {
                         .get("verified")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
-                    let actual_line =
-                        bp.get("line")
-                            .and_then(|l| l.as_u64())
-                            .unwrap_or(default_line as u64) as u32;
+                    let actual_line = bp
+                        .get("line")
+                        .and_then(|l| l.as_u64())
+                        .map(|l| l as u32)
+                        .unwrap_or(default_line);
                     let message = bp
                         .get("message")
                         .and_then(|m| m.as_str())

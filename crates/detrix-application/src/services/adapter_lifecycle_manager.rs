@@ -151,7 +151,8 @@ pub struct AdapterLifecycleManager {
     /// Connections currently being started (prevents concurrent start attempts)
     /// This prevents race conditions when restore_connections and create_connection
     /// try to start the same adapter simultaneously.
-    pending_starts: Arc<DashMap<ConnectionId, ()>>,
+    /// Maps connection_id -> port being connected to (allows cancellation when port changes)
+    pending_starts: Arc<DashMap<ConnectionId, u16>>,
 }
 
 impl AdapterLifecycleManager {
@@ -518,13 +519,16 @@ impl AdapterLifecycleManager {
         loop {
             // Atomically try to insert into pending_starts
             // The block ensures the Entry (and its lock) is dropped before we wait
-            let already_pending = {
+            let (already_pending, pending_port) = {
                 use dashmap::mapref::entry::Entry;
                 match self.pending_starts.entry(connection_id.clone()) {
-                    Entry::Occupied(_) => true,
+                    Entry::Occupied(entry) => {
+                        let pending_port = *entry.get();
+                        (true, Some(pending_port))
+                    }
                     Entry::Vacant(entry) => {
-                        entry.insert(());
-                        false
+                        entry.insert(port);
+                        (false, None)
                     }
                 }
             }; // Entry is dropped here, lock released
@@ -534,7 +538,24 @@ impl AdapterLifecycleManager {
                 break;
             }
 
-            // Another caller is starting this connection - wait for them
+            // Check if the pending connection is to a DIFFERENT port
+            // If so, cancel the old attempt and take over (new port = new debugger instance)
+            if let Some(old_port) = pending_port {
+                if old_port != port {
+                    warn!(
+                        "Connection {} is being reconnected to new port {} (was {}), cancelling old attempt",
+                        connection_id.0, port, old_port
+                    );
+                    // Remove the old entry to signal cancellation to the old task
+                    self.pending_starts.remove(&connection_id);
+                    // Insert our new entry
+                    self.pending_starts.insert(connection_id.clone(), port);
+                    // Proceed with our connection attempt
+                    break;
+                }
+            }
+
+            // Same port - another caller is starting this connection, wait for them
             info!(
                 "Adapter start already in progress for connection {}, waiting for it to complete",
                 connection_id.0
@@ -589,18 +610,24 @@ impl AdapterLifecycleManager {
         }
 
         // RAII-style cleanup: ensure pending_starts entry is removed on all exit paths
+        // Only removes if the port matches (to avoid cancelling a newer request)
         struct PendingGuard {
-            pending_starts: Arc<DashMap<ConnectionId, ()>>,
+            pending_starts: Arc<DashMap<ConnectionId, u16>>,
             connection_id: ConnectionId,
+            port: u16,
         }
         impl Drop for PendingGuard {
             fn drop(&mut self) {
-                self.pending_starts.remove(&self.connection_id);
+                // Only remove if our port is still the one registered
+                // If a newer request came in with a different port, don't remove their entry
+                self.pending_starts
+                    .remove_if(&self.connection_id, |_, v| *v == self.port);
             }
         }
         let _pending_guard = PendingGuard {
             pending_starts: Arc::clone(&self.pending_starts),
             connection_id: connection_id.clone(),
+            port,
         };
 
         // Check if adapter already exists
@@ -756,6 +783,31 @@ impl AdapterLifecycleManager {
                 );
                 result.resume_failed = true;
             }
+        }
+
+        // Check if we were cancelled (a newer request took over with a different port)
+        // If our port is no longer in pending_starts, stop the adapter and return
+        let was_cancelled = self
+            .pending_starts
+            .get(&connection_id)
+            .map(|entry| *entry != port)
+            .unwrap_or(true); // If entry is gone, we were cancelled
+
+        if was_cancelled {
+            warn!(
+                "Connection {} start was superseded by a newer request, stopping adapter",
+                connection_id.0
+            );
+            // Stop the adapter we just created since a newer request will handle it
+            if let Err(e) = adapter.stop().await {
+                warn!("Failed to stop superseded adapter: {}", e);
+            }
+            // Abort the event listener
+            handle.abort();
+            return Err(detrix_core::Error::Adapter(format!(
+                "Connection {} start was superseded by a newer request",
+                connection_id.0
+            )));
         }
 
         // Store managed adapter

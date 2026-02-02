@@ -280,18 +280,27 @@ impl StreamingService {
     }
 
     /// Query events for a specific metric
+    ///
+    /// # Arguments
+    /// * `metric_id` - The metric to query events for
+    /// * `limit` - Maximum number of events to return (default: from config)
+    /// * `since_micros` - Optional timestamp filter: only return events with timestamp >= this value
     pub async fn query_metric_events(
         &self,
         metric_id: MetricId,
         limit: Option<i64>,
+        since_micros: Option<i64>,
     ) -> Result<Vec<MetricEvent>> {
-        let events = self
-            .event_storage
-            .find_by_metric_id(
-                metric_id,
-                limit.unwrap_or(self.api_config.default_query_limit),
-            )
-            .await?;
+        let limit = limit.unwrap_or(self.api_config.default_query_limit);
+        let events = if let Some(since) = since_micros {
+            self.event_storage
+                .find_by_metric_id_since(metric_id, since, limit)
+                .await?
+        } else {
+            self.event_storage
+                .find_by_metric_id(metric_id, limit)
+                .await?
+        };
         Ok(events)
     }
 
