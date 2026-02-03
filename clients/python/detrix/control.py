@@ -26,6 +26,9 @@ from .errors import DaemonError, DebuggerError
 
 _logger = logging.getLogger("detrix.control")
 
+# Maximum request body size (1MB) to prevent DoS via large payloads
+MAX_BODY_SIZE = 1_048_576
+
 
 class ControlHandler(BaseHTTPRequestHandler):
     """HTTP request handler for client control plane."""
@@ -96,9 +99,22 @@ class ControlHandler(BaseHTTPRequestHandler):
         return False
 
     def _read_json_body(self) -> dict[str, Any] | None:
-        """Read and parse JSON body from request."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length == 0:
+        """Read and parse JSON body from request.
+
+        Returns None for:
+        - Missing/invalid Content-Length header
+        - Negative Content-Length (malformed request)
+        - Content-Length exceeding MAX_BODY_SIZE (DoS protection)
+        - JSON decode errors
+        """
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except (ValueError, TypeError):
+            return None
+
+        if content_length <= 0:
+            return None
+        if content_length > MAX_BODY_SIZE:
             return None
 
         try:

@@ -1,7 +1,8 @@
 //! Thread-safe state management for the Detrix client.
 
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
 
+use crate::error::Error;
 use crate::generated::{ClientState, StatusResponse};
 use crate::lldb::LldbProcess;
 
@@ -145,14 +146,15 @@ pub fn set_initialized(value: bool) {
     }
 }
 
-/// Acquire the wake lock.
+/// Acquire the wake lock to prevent concurrent wake operations.
 ///
-/// This prevents concurrent wake operations.
-pub fn acquire_wake_lock() -> std::sync::MutexGuard<'static, ()> {
-    WAKE_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("Wake lock poisoned")
+/// # Errors
+///
+/// Returns `Error::ControlPlaneError` if the lock is poisoned (a thread panicked
+/// while holding it). Previously this would panic; now callers should handle
+/// the error gracefully.
+pub fn acquire_wake_lock() -> Result<MutexGuard<'static, ()>, Error> {
+    Ok(WAKE_LOCK.get_or_init(|| Mutex::new(())).lock()?)
 }
 
 /// Try to acquire the wake lock without blocking.

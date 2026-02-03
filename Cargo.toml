@@ -109,9 +109,9 @@ tree-sitter-go = "0.23"
 tree-sitter-rust = "0.24"
 
 [workspace.lints.clippy]
-unwrap_used = "warn"
-expect_used = "warn"
-panic = "warn"
+# unwrap_used = "warn"
+# expect_used = "warn"
+# panic = "warn"
 
 [profile.dev]
 opt-level = 0

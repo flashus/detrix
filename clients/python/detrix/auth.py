@@ -1,9 +1,43 @@
 """Token handling for Detrix Python client."""
 
 import os
+import stat
+import sys
+import warnings
 from pathlib import Path
 
 from .config import get_detrix_home, get_token_file_path
+
+
+def _check_token_file_permissions(path: Path) -> bool:
+    """Verify token file has secure permissions (0600 or 0400).
+
+    On Unix systems, checks if group or other has any permissions and issues
+    a warning if so. Token files should only be readable by the owner.
+
+    Args:
+        path: Path to the token file
+
+    Returns:
+        True if permissions check passed or skipped, False on error
+    """
+    # Windows doesn't have Unix-style permissions
+    if sys.platform == "win32":
+        return True  # Skip check on Windows (documented limitation)
+
+    try:
+        mode = path.stat().st_mode
+        # Check if group or other has any permissions
+        if mode & (stat.S_IRWXG | stat.S_IRWXO):
+            warnings.warn(
+                f"Token file {path} has insecure permissions "
+                f"(mode={oct(mode & 0o777)}). Should be 0600 or 0400.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return True
+    except OSError:
+        return False
 
 
 def discover_auth_token(detrix_home: Path | None = None) -> str | None:
@@ -30,6 +64,7 @@ def discover_auth_token(detrix_home: Path | None = None) -> str | None:
 
     try:
         if token_file.exists():
+            _check_token_file_permissions(token_file)
             return token_file.read_text().strip()
     except (OSError, PermissionError):
         pass

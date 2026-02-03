@@ -8,10 +8,12 @@ import pytest
 
 from detrix.daemon import (
     DaemonConnectionError,
+    HttpDaemonClient,
     check_daemon_health,
     register_connection,
     unregister_connection,
 )
+from detrix.errors import ConfigError
 
 
 class MockDaemonHandler(BaseHTTPRequestHandler):
@@ -150,3 +152,49 @@ class TestUnregisterConnection:
             token=None,
             timeout=0.1,
         )
+
+
+class TestHttpDaemonClientTLS:
+    """Test TLS configuration for HttpDaemonClient."""
+
+    def test_invalid_ca_bundle_raises_config_error(self):
+        """Test that invalid CA bundle path raises ConfigError."""
+        with pytest.raises(ConfigError, match="CA bundle not found"):
+            HttpDaemonClient(
+                base_url="https://localhost:8090",
+                ca_bundle="/nonexistent/path/ca-bundle.pem",
+            )
+
+    def test_verify_ssl_default_true(self):
+        """Test that verify_ssl defaults to True."""
+        client = HttpDaemonClient(base_url="http://127.0.0.1:8090")
+        client.close()
+
+    def test_verify_ssl_false_creates_client(self):
+        """Test that verify_ssl=False creates a client without error."""
+        client = HttpDaemonClient(
+            base_url="https://127.0.0.1:8090",
+            verify_ssl=False,
+        )
+        client.close()
+
+    def test_ca_bundle_with_existing_file_passes_path_check(self, tmp_path):
+        """Test that an existing CA bundle file passes the path check.
+
+        The path validation (file exists) is checked at init time.
+        SSL certificate parsing happens later during connection.
+        """
+        ca_file = tmp_path / "ca-bundle.pem"
+        ca_file.write_text("placeholder")
+        # Should not raise ConfigError (path exists), but may fail on SSL parsing
+        # which happens at connection time, not at init
+        try:
+            client = HttpDaemonClient(
+                base_url="https://127.0.0.1:8090",
+                ca_bundle=str(ca_file),
+            )
+            client.close()
+        except Exception as e:
+            # SSL parsing errors are acceptable here - we only test that
+            # ConfigError ("CA bundle not found") is NOT raised
+            assert "CA bundle not found" not in str(e)

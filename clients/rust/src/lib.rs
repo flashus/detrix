@@ -35,6 +35,10 @@
 //! Unlike Python's debugpy, lldb-dap can be fully stopped on sleep,
 //! providing cleaner resource management.
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+#![cfg_attr(not(test), deny(clippy::panic))]
+
 mod auth;
 mod config;
 mod control;
@@ -49,7 +53,7 @@ use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
-pub use config::Config;
+pub use config::{Config, TlsConfig};
 pub use error::{Error, Result};
 pub use generated::{
     ClientState, SleepResponse, SleepResponseStatus, StatusResponse, WakeResponse,
@@ -119,9 +123,7 @@ pub fn init(config: Config) -> Result<()> {
     // Initialize global state
     {
         let state = get();
-        let mut guard = state
-            .write()
-            .map_err(|_| Error::ControlPlaneError("state lock poisoned".to_string()))?;
+        let mut guard = state.write()?;
 
         guard.name = config.connection_name();
         guard.control_host = config.control_host.clone();
@@ -141,7 +143,8 @@ pub fn init(config: Config) -> Result<()> {
     }
 
     // Initialize daemon client
-    let _ = DAEMON_CLIENT.get_or_init(DaemonClient::new);
+    let daemon_client = DaemonClient::new(None)?;
+    let _ = DAEMON_CLIENT.set(daemon_client);
 
     // Initialize LLDB manager
     let _ = LLDB_MANAGER
@@ -326,7 +329,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
     }
 
     // Acquire wake lock
-    let _wake_guard = state::acquire_wake_lock();
+    let _wake_guard = state::acquire_wake_lock()?;
 
     // Read current state
     let (
@@ -341,9 +344,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
         register_timeout,
     ) = {
         let state = get();
-        let guard = state
-            .read()
-            .map_err(|_| Error::ControlPlaneError("state lock poisoned".to_string()))?;
+        let guard = state.read()?;
 
         let target_url = daemon_url.unwrap_or_else(|| guard.daemon_url.clone());
         (
@@ -362,9 +363,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
     // Check if already awake
     if matches!(current_state, ClientState::Awake) {
         let state = get();
-        let guard = state
-            .read()
-            .map_err(|_| Error::ControlPlaneError("state lock poisoned".to_string()))?;
+        let guard = state.read()?;
         return Ok(WakeResponse {
             status: WakeResponseStatus::AlreadyAwake,
             debug_port: guard.actual_debug_port as i32,
@@ -380,9 +379,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
     // Transition to WAKING
     {
         let state = get();
-        let mut guard = state
-            .write()
-            .map_err(|_| Error::ControlPlaneError("state lock poisoned".to_string()))?;
+        let mut guard = state.write()?;
         guard.state = ClientState::Waking;
     }
 
@@ -448,9 +445,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
     // Update state to AWAKE
     {
         let state = get();
-        let mut guard = state
-            .write()
-            .map_err(|_| Error::ControlPlaneError("state lock poisoned".to_string()))?;
+        let mut guard = state.write()?;
         guard.state = ClientState::Awake;
         guard.actual_debug_port = actual_debug_port;
         guard.debug_port_active = true;
@@ -477,9 +472,7 @@ fn sleep_handler() -> Result<SleepResponse> {
     // Read current state
     let (current_state, daemon_url, connection_id, unregister_timeout) = {
         let state = get();
-        let guard = state
-            .read()
-            .map_err(|_| Error::ControlPlaneError("state lock poisoned".to_string()))?;
+        let guard = state.read()?;
 
         (
             guard.state,
@@ -498,7 +491,7 @@ fn sleep_handler() -> Result<SleepResponse> {
 
     // If waking, wait for it to complete
     if matches!(current_state, ClientState::Waking) {
-        let _wake_guard = state::acquire_wake_lock();
+        let _wake_guard = state::acquire_wake_lock()?;
         // Re-check state after acquiring lock
         let state = get();
         if let Ok(guard) = state.read() {
@@ -529,9 +522,7 @@ fn sleep_handler() -> Result<SleepResponse> {
     // Update state to SLEEPING
     {
         let state = get();
-        let mut guard = state
-            .write()
-            .map_err(|_| Error::ControlPlaneError("state lock poisoned".to_string()))?;
+        let mut guard = state.write()?;
         guard.state = ClientState::Sleeping;
         guard.connection_id = None;
         guard.debug_port_active = false;

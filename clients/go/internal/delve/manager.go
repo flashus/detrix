@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -112,7 +112,7 @@ func (m *Manager) SpawnAndAttach(host string, port int) (*Process, error) {
 		}
 		actualPort := listener.Addr().(*net.TCPAddr).Port
 		if err := listener.Close(); err != nil {
-			log.Printf("delve: failed to close port listener: %v", err)
+			slog.Debug("failed to close port listener", "error", err)
 		} // Release port for Delve to bind
 
 		proc, err := m.spawnDelve(delvePath, host, actualPort)
@@ -179,7 +179,7 @@ func (m *Manager) spawnDelve(delvePath string, host string, port int) (*Process,
 	if err := m.waitForReady(host, port, cmd.Process); err != nil {
 		// Kill process if startup failed
 		if killErr := m.Kill(proc); killErr != nil {
-			log.Printf("delve: failed to kill process during cleanup: %v", killErr)
+			slog.Warn("failed to kill delve process during cleanup", "error", killErr)
 		}
 		return nil, fmt.Errorf("delve failed to start: %w\nLogs:\n%s", err, proc.Logs())
 	}
@@ -216,7 +216,7 @@ func (m *Manager) waitForReady(host string, port int, proc *os.Process) error {
 		conn, err := net.DialTimeout("tcp", addr, checkInterval)
 		if err == nil {
 			if err := conn.Close(); err != nil {
-				log.Printf("delve: failed to close probe connection: %v", err)
+				slog.Debug("failed to close probe connection", "error", err)
 			}
 			return nil
 		}
@@ -262,7 +262,7 @@ func (m *Manager) Kill(proc *Process) error {
 	case <-time.After(2 * time.Second):
 		// Force kill
 		if err := proc.Cmd.Process.Kill(); err != nil {
-			log.Printf("delve: force kill failed: %v", err)
+			slog.Warn("delve force kill failed", "error", err)
 		}
 		// Wait for it to actually die
 		<-done
@@ -277,7 +277,7 @@ func IsReady(host string, port int) bool {
 		return false
 	}
 	if err := conn.Close(); err != nil {
-		log.Printf("delve: failed to close ready check connection: %v", err)
+		slog.Debug("failed to close ready check connection", "error", err)
 	}
 	return true
 }

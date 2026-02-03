@@ -22,11 +22,12 @@ Example:
 """
 
 import contextlib
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 import httpx
 
-from .errors import DaemonError
+from .errors import ConfigError, DaemonError
 
 # Backward compatibility: DaemonConnectionError is the historical name
 # New code should use DaemonError from errors.py
@@ -147,6 +148,8 @@ class HttpDaemonClient:
         base_url: str,
         connect_timeout: float = 2.0,
         default_timeout: float = 5.0,
+        verify_ssl: bool = True,
+        ca_bundle: str | None = None,
     ):
         """Initialize the HTTP daemon client.
 
@@ -154,14 +157,28 @@ class HttpDaemonClient:
             base_url: Base URL of the daemon (e.g., "http://127.0.0.1:8090")
             connect_timeout: Timeout for establishing connections
             default_timeout: Default timeout for requests
+            verify_ssl: Whether to verify SSL certificates (default: True)
+            ca_bundle: Path to CA bundle file for SSL verification
+
+        Raises:
+            ConfigError: If ca_bundle is provided but the file doesn't exist
         """
+        # Validate CA bundle if provided (fail fast)
+        if ca_bundle and not Path(ca_bundle).is_file():
+            raise ConfigError(f"CA bundle not found: {ca_bundle}")
+
         self.base_url = base_url.rstrip("/")
         self._connect_timeout = connect_timeout
         self._default_timeout = default_timeout
+
+        # Configure SSL verification
+        verify: bool | str = ca_bundle if ca_bundle else verify_ssl
+
         # Create a client with connection pooling
         self._client = httpx.Client(
             base_url=self.base_url,
             timeout=httpx.Timeout(default_timeout, connect=connect_timeout),
+            verify=verify,
         )
 
     def __enter__(self) -> "HttpDaemonClient":

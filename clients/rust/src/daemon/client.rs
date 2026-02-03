@@ -1,13 +1,13 @@
 //! HTTP client for the Detrix daemon.
 
-use std::error::Error as StdError;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::error::{Error, Result};
+use crate::config::TlsConfig;
+use crate::error::{Error, ReqwestResultExt, Result, ResultExt};
 
 /// Request body for connection registration.
 #[derive(Debug, Serialize)]
@@ -57,33 +57,52 @@ pub struct DaemonClient {
     client: Client,
 }
 
-impl Default for DaemonClient {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl DaemonClient {
-    /// Create a new daemon client.
-    pub fn new() -> Self {
-        Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .expect("Failed to create HTTP client"),
+    /// Create a new daemon client with optional TLS configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `tls_config` - Optional TLS configuration. If None, uses defaults (verify: true).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The CA bundle path doesn't exist (fails fast)
+    /// * The CA bundle file can't be read or parsed
+    /// * Failed to create the HTTP client
+    pub fn new(tls_config: Option<&TlsConfig>) -> Result<Self> {
+        let mut builder = Client::builder().timeout(Duration::from_secs(30));
+
+        if let Some(tls) = tls_config {
+            // Validate configuration first (fail fast)
+            tls.validate()?;
+
+            if !tls.verify {
+                builder = builder.danger_accept_invalid_certs(true);
+            }
+            if let Some(ref ca_path) = tls.ca_bundle {
+                let cert_bytes = std::fs::read(ca_path).config("failed to read CA bundle")?;
+                let cert = reqwest::Certificate::from_pem(&cert_bytes)
+                    .config("failed to parse CA bundle")?;
+                builder = builder.add_root_certificate(cert);
+            }
         }
+
+        Ok(Self {
+            client: builder.build().config("failed to create HTTP client")?,
+        })
     }
 
     /// Check if the daemon is reachable.
     pub fn health_check(&self, daemon_url: &str, timeout: Duration) -> Result<()> {
         let url = format!("{}/health", daemon_url);
 
-        let response = self.client.get(&url).timeout(timeout).send().map_err(|e| {
-            Error::DaemonUnreachable {
-                url: daemon_url.to_string(),
-                message: e.to_string(),
-            }
-        })?;
+        let response = self
+            .client
+            .get(&url)
+            .timeout(timeout)
+            .send()
+            .daemon_unreachable(daemon_url)?;
 
         if !response.status().is_success() {
             return Err(Error::DaemonUnreachable {
@@ -116,18 +135,7 @@ impl DaemonClient {
             .timeout(timeout)
             .json(&request)
             .send()
-            .map_err(|e| {
-                // Get detailed error information
-                let mut details = format!("{}", e);
-                let err: &dyn StdError = &e;
-                if let Some(source) = err.source() {
-                    details.push_str(&format!(" (caused by: {})", source));
-                    if let Some(inner) = source.source() {
-                        details.push_str(&format!(" (inner: {})", inner));
-                    }
-                }
-                Error::RegistrationFailed(details)
-            })?;
+            .registration_context()?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -138,9 +146,8 @@ impl DaemonClient {
             )));
         }
 
-        let reg_response: RegisterResponse = response
-            .json()
-            .map_err(|e| Error::RegistrationFailed(format!("failed to parse response: {}", e)))?;
+        let reg_response: RegisterResponse =
+            response.json().registration("failed to parse response")?;
 
         debug!(
             "Registered with connection ID: {}",

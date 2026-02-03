@@ -3,12 +3,37 @@ package auth
 
 import (
 	"crypto/subtle"
+	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
+
+// checkTokenFilePermissions verifies token file has secure permissions (0600 or 0400).
+// On Unix systems, logs a warning if group or other has any permissions.
+// On Windows, the check is skipped (documented limitation).
+func checkTokenFilePermissions(path string) {
+	// Windows doesn't have Unix-style permissions
+	if runtime.GOOS == "windows" {
+		return // Skip check on Windows (documented limitation)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	mode := info.Mode().Perm()
+	if mode&0077 != 0 {
+		slog.Warn("token file has insecure permissions",
+			"path", path,
+			"mode", fmt.Sprintf("%04o", mode),
+		)
+	}
+}
 
 // DiscoverToken discovers the authentication token from environment or file.
 // Priority:
@@ -24,6 +49,7 @@ func DiscoverToken(detrixHome string) string {
 	// Try ~/detrix/mcp-token
 	if home, err := os.UserHomeDir(); err == nil {
 		tokenPath := filepath.Join(home, "detrix", "mcp-token")
+		checkTokenFilePermissions(tokenPath)
 		if data, err := os.ReadFile(tokenPath); err == nil {
 			return strings.TrimSpace(string(data))
 		}
@@ -32,6 +58,7 @@ func DiscoverToken(detrixHome string) string {
 	// Try custom detrix home
 	if detrixHome != "" {
 		tokenPath := filepath.Join(detrixHome, "mcp-token")
+		checkTokenFilePermissions(tokenPath)
 		if data, err := os.ReadFile(tokenPath); err == nil {
 			return strings.TrimSpace(string(data))
 		}

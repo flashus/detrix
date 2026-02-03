@@ -257,61 +257,65 @@ scanLoop:
 
 	fixtureAppPath := filepath.Join(fixtureDir, "detrix_example_app.go")
 
-	// Metric 1: SIMPLE VARIABLE (line 111) - symbol
+	// Metric 1: SIMPLE VARIABLE (line 118) - symbol
+	// symbol is declared on line 117, so it's in scope from line 118 onward
 	// Tests logpoint-based variable capture (non-blocking, RECOMMENDED)
-	metric1 := addMetric(connectionID, fixtureAppPath, 111,
+	metric1 := addMetric(connectionID, fixtureAppPath, 118,
 		`symbol`,
 		"order_symbol", "go")
 
 	var metric1ID float64
 	if metric1 != nil {
 		metric1ID, _ = metric1["metricId"].(float64)
-		fmt.Printf("   Metric 1 (order_symbol @ line 111): ID=%.0f [SIMPLE VARIABLE - logpoint mode]\n", metric1ID)
+		fmt.Printf("   Metric 1 (order_symbol @ line 118): ID=%.0f [SIMPLE VARIABLE - logpoint mode]\n", metric1ID)
 	} else {
 		fmt.Println("   WARNING: Failed to add metric 1")
 	}
 
-	// Metric 2: SIMPLE VARIABLE (line 122) - pnl
+	// Metric 2: SIMPLE VARIABLE (line 130) - pnl
+	// pnl is declared on line 127, so it's in scope from line 128 onward
 	// Tests logpoint-based variable capture (non-blocking, RECOMMENDED)
-	metric2 := addMetric(connectionID, fixtureAppPath, 122,
+	metric2 := addMetric(connectionID, fixtureAppPath, 130,
 		`pnl`,
 		"pnl_value", "go")
 
 	var metric2ID float64
 	if metric2 != nil {
 		metric2ID, _ = metric2["metricId"].(float64)
-		fmt.Printf("   Metric 2 (pnl_value @ line 122): ID=%.0f [SIMPLE VARIABLE - logpoint mode]\n", metric2ID)
+		fmt.Printf("   Metric 2 (pnl_value @ line 130): ID=%.0f [SIMPLE VARIABLE - logpoint mode]\n", metric2ID)
 	} else {
 		fmt.Println("   WARNING: Failed to add metric 2")
 	}
 
-	// Metric 3: FUNCTION CALL (line 116) - len(symbol)
+	// Metric 3: FUNCTION CALL (line 122) - len(symbol)
+	// symbol is in scope from line 118 onward
 	// Tests breakpoint-based function call (BLOCKING)
 	// Note: Variadic functions (fmt.Sprintf, fmt.Println) are NOT supported by Delve
 	// Only non-variadic functions work: len(), cap(), user methods with fixed args
-	metric3 := addMetric(connectionID, fixtureAppPath, 116,
+	metric3 := addMetric(connectionID, fixtureAppPath, 122,
 		`len(symbol)`,
 		"symbol_length", "go")
 
 	var metric3ID float64
 	if metric3 != nil {
 		metric3ID, _ = metric3["metricId"].(float64)
-		fmt.Printf("   Metric 3 (symbol_length @ line 116): ID=%.0f [FUNCTION CALL - breakpoint mode]\n", metric3ID)
+		fmt.Printf("   Metric 3 (symbol_length @ line 122): ID=%.0f [FUNCTION CALL - breakpoint mode]\n", metric3ID)
 	} else {
 		fmt.Println("   WARNING: Failed to add metric 3 (function call)")
 	}
 
-	// Metric 4: STACK TRACE CAPTURE (line 115) - entryPrice
+	// Metric 4: STACK TRACE CAPTURE (line 126) - entryPrice
+	// entryPrice is declared on line 125, so it's in scope from line 126 onward
 	// Tests introspection with stack trace (BLOCKING)
 	// Uses a simple variable but with captureStackTrace enabled
-	metric4 := addMetricWithIntrospection(connectionID, fixtureAppPath, 115,
+	metric4 := addMetricWithIntrospection(connectionID, fixtureAppPath, 126,
 		`entryPrice`,
 		"entry_price_with_stack", "go")
 
 	var metric4ID float64
 	if metric4 != nil {
 		metric4ID, _ = metric4["metricId"].(float64)
-		fmt.Printf("   Metric 4 (entry_price_with_stack @ line 115): ID=%.0f [WITH STACK TRACE]\n", metric4ID)
+		fmt.Printf("   Metric 4 (entry_price_with_stack @ line 126): ID=%.0f [WITH STACK TRACE]\n", metric4ID)
 	} else {
 		fmt.Println("   WARNING: Failed to add metric 4 (stack trace)")
 	}

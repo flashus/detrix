@@ -5,7 +5,7 @@ use std::sync::Arc;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Method, Request, Response, StatusCode};
-use tracing::debug;
+use tracing::{debug, error};
 
 use crate::auth::is_authorized;
 use crate::generated::{
@@ -209,7 +209,15 @@ fn json_response<T: serde::Serialize>(status: StatusCode, body: &T) -> Response<
         .status(status)
         .header("Content-Type", "application/json")
         .body(Full::new(Bytes::from(json)))
-        .unwrap()
+        .unwrap_or_else(|e| {
+            error!("Failed to build HTTP response: {}", e);
+            let body = r#"{"error":"internal server error"}"#;
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header("Content-Type", "application/json")
+                .body(Full::new(Bytes::from(body)))
+                .unwrap_or_else(|_| Response::new(Full::new(Bytes::from(body))))
+        })
 }
 
 /// Get the Rust version.

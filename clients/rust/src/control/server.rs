@@ -12,7 +12,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info};
 
-use crate::error::{Error, Result};
+use crate::error::{Result, ResultExt};
 
 use super::handlers::{
     handle_request, HandlerContext, SleepCallback, StatusCallback, WakeCallback,
@@ -42,7 +42,7 @@ impl ControlServer {
     ) -> Result<Self> {
         let addr: SocketAddr = format!("{}:{}", host, port)
             .parse()
-            .map_err(|e| Error::ControlPlaneError(format!("invalid address: {}", e)))?;
+            .control_plane("invalid address")?;
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -54,12 +54,11 @@ impl ControlServer {
         });
 
         // Bind on main thread to get the actual port before spawning
-        let std_listener = std::net::TcpListener::bind(addr)
-            .map_err(|e| Error::ControlPlaneError(format!("failed to bind: {}", e)))?;
+        let std_listener = std::net::TcpListener::bind(addr).control_plane("failed to bind")?;
 
         let actual_addr = std_listener
             .local_addr()
-            .map_err(|e| Error::ControlPlaneError(format!("failed to get local addr: {}", e)))?;
+            .control_plane("failed to get local addr")?;
 
         let actual_port = actual_addr.port();
 
@@ -67,12 +66,12 @@ impl ControlServer {
 
         std_listener
             .set_nonblocking(true)
-            .map_err(|e| Error::ControlPlaneError(format!("failed to set non-blocking: {}", e)))?;
+            .control_plane("failed to set non-blocking")?;
 
         let thread_handle = thread::Builder::new()
             .name("detrix-control-plane".to_string())
             .spawn(move || run_server_thread(std_listener, shutdown_rx, ctx))
-            .map_err(|e| Error::ControlPlaneError(format!("failed to spawn thread: {}", e)))?;
+            .control_plane("failed to spawn thread")?;
 
         Ok(Self {
             actual_port,

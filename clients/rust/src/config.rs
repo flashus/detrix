@@ -4,6 +4,8 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::Error;
+
 /// Configuration for the Detrix client.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -160,6 +162,43 @@ impl Config {
     }
 }
 
+/// TLS configuration for daemon communication.
+#[derive(Debug, Clone)]
+pub struct TlsConfig {
+    /// Whether to verify TLS certificates (default: true).
+    pub verify: bool,
+    /// Path to CA bundle file for TLS verification.
+    pub ca_bundle: Option<PathBuf>,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            verify: true,
+            ca_bundle: None,
+        }
+    }
+}
+
+impl TlsConfig {
+    /// Validate the TLS configuration (fail fast on invalid CA bundle).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::ConfigError` if the CA bundle path is specified but doesn't exist.
+    pub fn validate(&self) -> Result<(), Error> {
+        if let Some(ref path) = self.ca_bundle {
+            if !path.is_file() {
+                return Err(Error::ConfigError(format!(
+                    "CA bundle not found: {}",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +237,27 @@ mod tests {
         if let Some(path) = config.detrix_home_path() {
             assert!(path.ends_with("detrix"));
         }
+    }
+
+    #[test]
+    fn test_tls_config_default() {
+        let config = TlsConfig::default();
+        assert!(config.verify);
+        assert!(config.ca_bundle.is_none());
+    }
+
+    #[test]
+    fn test_tls_config_validate_missing_ca_bundle() {
+        let config = TlsConfig {
+            verify: true,
+            ca_bundle: Some(PathBuf::from("/nonexistent/ca.pem")),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_tls_config_validate_no_ca_bundle() {
+        let config = TlsConfig::default();
+        assert!(config.validate().is_ok());
     }
 }

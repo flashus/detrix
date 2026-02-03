@@ -38,23 +38,8 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
     """
     state = get_state()
 
-    # Try to acquire wake_lock (non-blocking)
-    if not state.wake_lock.acquire(blocking=False):
-        # Another thread is waking - wait for it to complete
-        with state.wake_lock:
-            pass  # Just wait for the other thread to finish
-        # Now check the result
-        with state.lock:
-            if state.state == State.AWAKE:
-                return WakeResponse(
-                    status=WakeStatus.already_awake,
-                    debug_port=state.actual_debug_port,
-                    connection_id=state.connection_id or "",
-                )
-            # Wake failed in other thread, let this thread try
-        return do_wake(daemon_url, validate_url)  # Retry
-
-    try:
+    # Acquire wake lock (blocks until available, like Go/Rust clients)
+    with state.wake_lock:
         # Phase 1: Read state and validate (short lock)
         with state.lock:
             if state.state == State.AWAKE:
@@ -158,9 +143,6 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
             debug_port=actual_port,
             connection_id=connection_id,
         )
-
-    finally:
-        state.wake_lock.release()
 
 
 def do_sleep() -> SleepResponse:

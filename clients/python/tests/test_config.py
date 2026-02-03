@@ -139,3 +139,41 @@ class TestGetEnvConfig:
             assert config["health_check_timeout"] is None
             assert config["register_timeout"] is None
             assert config["unregister_timeout"] is None
+
+    def test_verify_ssl_default_true(self):
+        """Test DETRIX_VERIFY_SSL defaults to True."""
+        with mock.patch.dict(os.environ, {}, clear=True):
+            for key in list(os.environ.keys()):
+                if key.startswith("DETRIX"):
+                    del os.environ[key]
+            config = get_env_config()
+            assert config["verify_ssl"] is True
+
+    def test_verify_ssl_false_values(self):
+        """Test DETRIX_VERIFY_SSL recognizes false-like values."""
+        for value in ("false", "0", "no", "off", "False", "FALSE", "NO"):
+            with mock.patch.dict(os.environ, {"DETRIX_VERIFY_SSL": value}):
+                config = get_env_config()
+                assert config["verify_ssl"] is False, f"Expected False for {value!r}"
+
+    def test_verify_ssl_true_values(self):
+        """Test DETRIX_VERIFY_SSL treats other values as True."""
+        for value in ("true", "1", "yes", "True", "anything"):
+            with mock.patch.dict(os.environ, {"DETRIX_VERIFY_SSL": value}):
+                config = get_env_config()
+                assert config["verify_ssl"] is True, f"Expected True for {value!r}"
+
+    def test_ca_bundle_env_var(self):
+        """Test DETRIX_CA_BUNDLE is returned from env."""
+        with mock.patch.dict(os.environ, {"DETRIX_CA_BUNDLE": "/path/to/ca.pem"}):
+            config = get_env_config()
+            assert config["ca_bundle"] == "/path/to/ca.pem"
+
+    def test_ca_bundle_none_when_unset(self):
+        """Test DETRIX_CA_BUNDLE is None when not set."""
+        with mock.patch.dict(os.environ, {}, clear=True):
+            for key in list(os.environ.keys()):
+                if key.startswith("DETRIX"):
+                    del os.environ[key]
+            config = get_env_config()
+            assert config["ca_bundle"] is None

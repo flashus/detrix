@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, trace, warn};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, ResultExt};
 
 /// Maximum number of port allocation retries.
 const MAX_PORT_RETRIES: u32 = 3;
@@ -106,7 +106,7 @@ impl LldbManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| Error::LldbStartFailed(e.to_string()))?;
+            .lldb("failed to start process")?;
 
         // Wait for lldb-dap to accept connections
         if let Err(e) = self.wait_for_ready(host, port, &mut child) {
@@ -164,13 +164,8 @@ impl LldbManager {
 
             // Try to connect
             let addr = format!("{}:{}", host, port);
-            if TcpStream::connect_timeout(
-                &addr
-                    .parse()
-                    .map_err(|e| Error::LldbStartFailed(format!("invalid address: {}", e)))?,
-                check_interval,
-            )
-            .is_ok()
+            if TcpStream::connect_timeout(&addr.parse().lldb("invalid address")?, check_interval)
+                .is_ok()
             {
                 trace!("lldb-dap accepting connections on {}", addr);
                 return Ok(());
@@ -193,8 +188,7 @@ impl LldbManager {
     fn send_attach_request(&self, host: &str, port: u16, pid: u32) -> Result<()> {
         let addr = format!("{}:{}", host, port);
         debug!("Connecting to lldb-dap at {}", addr);
-        let mut stream = TcpStream::connect(&addr)
-            .map_err(|e| Error::LldbStartFailed(format!("failed to connect to lldb-dap: {}", e)))?;
+        let mut stream = TcpStream::connect(&addr).lldb("failed to connect to lldb-dap")?;
         debug!("Connected to lldb-dap");
 
         stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
@@ -337,12 +331,11 @@ fn allocate_port(host: &str) -> Result<u16> {
     use std::net::TcpListener;
 
     let addr = format!("{}:0", host);
-    let listener = TcpListener::bind(&addr)
-        .map_err(|e| Error::PortBindError(format!("failed to bind to {}: {}", addr, e)))?;
+    let listener = TcpListener::bind(&addr).port_bind("failed to bind")?;
 
     let port = listener
         .local_addr()
-        .map_err(|e| Error::PortBindError(e.to_string()))?
+        .port_bind("failed to get local addr")?
         .port();
 
     // Drop listener to release port for lldb-dap
@@ -371,13 +364,11 @@ fn send_dap_message(stream: &mut TcpStream, message: &serde_json::Value) -> Resu
 
     stream
         .write_all(header.as_bytes())
-        .map_err(|e| Error::LldbStartFailed(format!("failed to write header: {}", e)))?;
+        .lldb("failed to write header")?;
     stream
         .write_all(body.as_bytes())
-        .map_err(|e| Error::LldbStartFailed(format!("failed to write body: {}", e)))?;
-    stream
-        .flush()
-        .map_err(|e| Error::LldbStartFailed(format!("failed to flush: {}", e)))?;
+        .lldb("failed to write body")?;
+    stream.flush().lldb("failed to flush")?;
 
     Ok(())
 }
@@ -421,19 +412,13 @@ fn read_dap_response(stream: &mut TcpStream, expected_command: &str) -> Result<s
 fn read_dap_message(stream: &mut TcpStream) -> Result<serde_json::Value> {
     use std::io::{BufRead, BufReader, Read};
 
-    let mut reader = BufReader::new(
-        stream
-            .try_clone()
-            .map_err(|e| Error::LldbStartFailed(format!("failed to clone stream: {}", e)))?,
-    );
+    let mut reader = BufReader::new(stream.try_clone().lldb("failed to clone stream")?);
 
     // Read headers
     let mut content_length: Option<usize> = None;
     loop {
         let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(|e| Error::LldbStartFailed(format!("failed to read header: {}", e)))?;
+        reader.read_line(&mut line).lldb("failed to read header")?;
 
         let line = line.trim();
         if line.is_empty() {
@@ -450,12 +435,9 @@ fn read_dap_message(stream: &mut TcpStream) -> Result<serde_json::Value> {
 
     // Read body
     let mut body = vec![0u8; content_length];
-    reader
-        .read_exact(&mut body)
-        .map_err(|e| Error::LldbStartFailed(format!("failed to read body: {}", e)))?;
+    reader.read_exact(&mut body).lldb("failed to read body")?;
 
-    serde_json::from_slice(&body)
-        .map_err(|e| Error::LldbStartFailed(format!("failed to parse response: {}", e)))
+    serde_json::from_slice(&body).lldb("failed to parse response")
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -93,8 +94,7 @@ func (s *Server) Start(host string, port int) (int, error) {
 	// Start server in background
 	go func() {
 		if err := s.httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
-			// Log error but don't crash
-			fmt.Fprintf(os.Stderr, "Control plane server error: %v\n", err)
+			slog.Error("control plane server error", "error", err)
 		}
 	}()
 
@@ -133,7 +133,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			if err := json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"}); err != nil {
-				fmt.Fprintf(os.Stderr, "control: failed to write auth error response: %v\n", err)
+				slog.Debug("failed to write auth error response", "error", err)
 			}
 			return
 		}
@@ -151,7 +151,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":  "ok",
 		"service": "detrix-client",
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "control: failed to write health response: %v\n", err)
+		slog.Debug("failed to write health response", "error", err)
 	}
 }
 
@@ -164,12 +164,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.statusProvider == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		if err := json.NewEncoder(w).Encode(map[string]string{"error": "status provider not configured"}); err != nil {
-			fmt.Fprintf(os.Stderr, "control: failed to write status error response: %v\n", err)
+			slog.Debug("failed to write status error response", "error", err)
 		}
 		return
 	}
 	if err := json.NewEncoder(w).Encode(s.statusProvider()); err != nil {
-		fmt.Fprintf(os.Stderr, "control: failed to write status response: %v\n", err)
+		slog.Debug("failed to write status response", "error", err)
 	}
 }
 
@@ -188,7 +188,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		"pid":        os.Getpid(),
 		"go_version": runtime.Version(),
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "control: failed to write info response: %v\n", err)
+		slog.Debug("failed to write info response", "error", err)
 	}
 }
 
@@ -202,7 +202,7 @@ func (s *Server) handleWake(w http.ResponseWriter, r *http.Request) {
 	if s.wakeHandler == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		if err := json.NewEncoder(w).Encode(map[string]string{"error": "wake handler not configured"}); err != nil {
-			fmt.Fprintf(os.Stderr, "control: failed to write wake error response: %v\n", err)
+			slog.Debug("failed to write wake error response", "error", err)
 		}
 		return
 	}
@@ -222,13 +222,13 @@ func (s *Server) handleWake(w http.ResponseWriter, r *http.Request) {
 		statusCode := http.StatusServiceUnavailable
 		w.WriteHeader(statusCode)
 		if encErr := json.NewEncoder(w).Encode(map[string]string{"error": err.Error()}); encErr != nil {
-			fmt.Fprintf(os.Stderr, "control: failed to write wake error response: %v\n", encErr)
+			slog.Debug("failed to write wake error response", "error", encErr)
 		}
 		return
 	}
 
 	if err := json.NewEncoder(w).Encode(result); err != nil {
-		fmt.Fprintf(os.Stderr, "control: failed to write wake response: %v\n", err)
+		slog.Debug("failed to write wake response", "error", err)
 	}
 }
 
@@ -242,7 +242,7 @@ func (s *Server) handleSleep(w http.ResponseWriter, r *http.Request) {
 	if s.sleepHandler == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		if err := json.NewEncoder(w).Encode(map[string]string{"error": "sleep handler not configured"}); err != nil {
-			fmt.Fprintf(os.Stderr, "control: failed to write sleep error response: %v\n", err)
+			slog.Debug("failed to write sleep error response", "error", err)
 		}
 		return
 	}
@@ -251,12 +251,12 @@ func (s *Server) handleSleep(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		if encErr := json.NewEncoder(w).Encode(map[string]string{"error": err.Error()}); encErr != nil {
-			fmt.Fprintf(os.Stderr, "control: failed to write sleep error response: %v\n", encErr)
+			slog.Debug("failed to write sleep error response", "error", encErr)
 		}
 		return
 	}
 
 	if err := json.NewEncoder(w).Encode(result); err != nil {
-		fmt.Fprintf(os.Stderr, "control: failed to write sleep response: %v\n", err)
+		slog.Debug("failed to write sleep response", "error", err)
 	}
 }

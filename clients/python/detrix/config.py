@@ -64,7 +64,7 @@ def generate_connection_name(name: str) -> str:
     return f"{base_name}-{pid}"
 
 
-def get_env_config() -> dict[str, str | None]:
+def get_env_config() -> dict[str, str | bool | None]:
     """Get configuration from environment variables.
 
     Supported environment variables:
@@ -77,10 +77,19 @@ def get_env_config() -> dict[str, str | None]:
         DETRIX_HEALTH_CHECK_TIMEOUT: Timeout for daemon health checks (seconds)
         DETRIX_REGISTER_TIMEOUT: Timeout for connection registration (seconds)
         DETRIX_UNREGISTER_TIMEOUT: Timeout for connection unregistration (seconds)
+        DETRIX_VERIFY_SSL: Whether to verify SSL certificates (default: true)
+        DETRIX_CA_BUNDLE: Path to CA bundle file for SSL verification
 
     Returns:
         Dictionary with configuration values from environment
     """
+    # Parse DETRIX_VERIFY_SSL (default: true)
+    verify_ssl_str = os.environ.get("DETRIX_VERIFY_SSL", "true").lower()
+    verify_ssl = verify_ssl_str not in ("false", "0", "no", "off")
+
+    # Get CA bundle path (validated at usage time)
+    ca_bundle = os.environ.get("DETRIX_CA_BUNDLE")
+
     return {
         "name": os.environ.get("DETRIX_NAME"),
         "control_host": os.environ.get("DETRIX_CONTROL_HOST"),
@@ -91,4 +100,6 @@ def get_env_config() -> dict[str, str | None]:
         "health_check_timeout": os.environ.get("DETRIX_HEALTH_CHECK_TIMEOUT"),
         "register_timeout": os.environ.get("DETRIX_REGISTER_TIMEOUT"),
         "unregister_timeout": os.environ.get("DETRIX_UNREGISTER_TIMEOUT"),
+        "verify_ssl": verify_ssl,
+        "ca_bundle": ca_bundle,
     }

@@ -61,7 +61,78 @@ pub enum Error {
     /// Port bind error (address already in use).
     #[error("port bind failed: {0}")]
     PortBindError(String),
+
+    /// Configuration error (invalid paths, missing files, etc.).
+    #[error("configuration error: {0}")]
+    ConfigError(String),
 }
 
 /// Result type alias for Detrix client operations.
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl<T> From<std::sync::PoisonError<T>> for Error {
+    fn from(_: std::sync::PoisonError<T>) -> Self {
+        Error::ControlPlaneError("lock poisoned".to_string())
+    }
+}
+
+/// Extension trait for adding context to any `Result<T, E: Display>`.
+pub(crate) trait ResultExt<T> {
+    fn control_plane(self, msg: &str) -> Result<T>;
+    fn lldb(self, msg: &str) -> Result<T>;
+    fn port_bind(self, msg: &str) -> Result<T>;
+    fn config(self, msg: &str) -> Result<T>;
+    fn registration(self, msg: &str) -> Result<T>;
+}
+
+impl<T, E: std::fmt::Display> ResultExt<T> for std::result::Result<T, E> {
+    fn control_plane(self, msg: &str) -> Result<T> {
+        self.map_err(|e| Error::ControlPlaneError(format!("{}: {}", msg, e)))
+    }
+
+    fn lldb(self, msg: &str) -> Result<T> {
+        self.map_err(|e| Error::LldbStartFailed(format!("{}: {}", msg, e)))
+    }
+
+    fn port_bind(self, msg: &str) -> Result<T> {
+        self.map_err(|e| Error::PortBindError(format!("{}: {}", msg, e)))
+    }
+
+    fn config(self, msg: &str) -> Result<T> {
+        self.map_err(|e| Error::ConfigError(format!("{}: {}", msg, e)))
+    }
+
+    fn registration(self, msg: &str) -> Result<T> {
+        self.map_err(|e| Error::RegistrationFailed(format!("{}: {}", msg, e)))
+    }
+}
+
+/// Extension trait for reqwest errors needing structured error construction.
+pub(crate) trait ReqwestResultExt<T> {
+    fn daemon_unreachable(self, url: &str) -> Result<T>;
+    fn registration_context(self) -> Result<T>;
+}
+
+impl<T> ReqwestResultExt<T> for std::result::Result<T, reqwest::Error> {
+    fn daemon_unreachable(self, url: &str) -> Result<T> {
+        self.map_err(|e| Error::DaemonUnreachable {
+            url: url.to_string(),
+            message: e.to_string(),
+        })
+    }
+
+    fn registration_context(self) -> Result<T> {
+        self.map_err(|e| {
+            use std::error::Error as StdError;
+            let mut details = format!("{}", e);
+            let err: &dyn StdError = &e;
+            if let Some(source) = err.source() {
+                details.push_str(&format!(" (caused by: {})", source));
+                if let Some(inner) = source.source() {
+                    details.push_str(&format!(" (inner: {})", inner));
+                }
+            }
+            Error::RegistrationFailed(details)
+        })
+    }
+}

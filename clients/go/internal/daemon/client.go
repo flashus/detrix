@@ -4,26 +4,68 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"time"
 )
+
+// maxResponseSize is the maximum size of response bodies to read (1MB).
+const maxResponseSize = 1 << 20
 
 // Client is an HTTP client for the Detrix daemon.
 type Client struct {
 	httpClient *http.Client
 }
 
+// ClientOptions configures the daemon client.
+type ClientOptions struct {
+	// VerifyTLS controls whether to verify TLS certificates (default: true).
+	VerifyTLS bool
+	// CABundle is the path to a CA bundle file for TLS verification.
+	CABundle string
+	// Timeout is the request timeout (default: 30s).
+	Timeout time.Duration
+}
+
 // NewClient creates a new daemon client.
-func NewClient() *Client {
+// If opts is nil, defaults are used (VerifyTLS: true, Timeout: 30s).
+func NewClient(opts *ClientOptions) (*Client, error) {
+	if opts == nil {
+		opts = &ClientOptions{VerifyTLS: true, Timeout: 30 * time.Second}
+	}
+	if opts.Timeout == 0 {
+		opts.Timeout = 30 * time.Second
+	}
+
+	transport := &http.Transport{}
+
+	if !opts.VerifyTLS {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // Explicit user opt-out
+	} else if opts.CABundle != "" {
+		// Fail fast if CA bundle doesn't exist or is invalid
+		caCert, err := os.ReadFile(opts.CABundle)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA bundle %s: %w", opts.CABundle, err)
+		}
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA bundle %s: no valid certificates", opts.CABundle)
+		}
+		transport.TLSClientConfig = &tls.Config{RootCAs: caCertPool}
+	}
+
 	return &Client{
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   opts.Timeout,
+			Transport: transport,
 		},
-	}
+	}, nil
 }
 
 // HealthCheck checks if the daemon is reachable.
@@ -42,7 +84,7 @@ func (c *Client) HealthCheck(daemonURL string, timeout time.Duration) error {
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
-			log.Printf("daemon: failed to close response body: %v", err)
+			slog.Debug("failed to close response body", "error", err)
 		}
 	}()
 
@@ -91,11 +133,14 @@ func (c *Client) Register(daemonURL string, req RegisterRequest, timeout time.Du
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
-			log.Printf("daemon: failed to close response body: %v", err)
+			slog.Debug("failed to close response body", "error", err)
 		}
 	}()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+	if err != nil {
+		return "", fmt.Errorf("failed to read response body: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("registration failed: status %d, body: %s", resp.StatusCode, string(respBody))
@@ -126,7 +171,7 @@ func (c *Client) Unregister(daemonURL string, connectionID string, timeout time.
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
-			log.Printf("daemon: failed to close response body: %v", err)
+			slog.Debug("failed to close response body", "error", err)
 		}
 	}()
 

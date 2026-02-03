@@ -37,7 +37,7 @@ package detrix
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strconv"
 	"time"
@@ -181,7 +181,11 @@ func Init(cfg Config) error {
 	s.Unlock()
 
 	// Initialize components
-	daemonClient = daemon.NewClient()
+	var err2 error
+	daemonClient, err2 = daemon.NewClient(nil) // nil = use defaults (VerifyTLS: true)
+	if err2 != nil {
+		return fmt.Errorf("failed to create daemon client: %w", err2)
+	}
 	delveManager = delve.NewManager(delvePath, cfg.DelveStartTimeout)
 
 	// Discover auth token
@@ -314,7 +318,7 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 	}, registerTimeout)
 	if err != nil {
 		if killErr := delveManager.Kill(delveProc); killErr != nil {
-			log.Printf("detrix: failed to kill Delve process during cleanup: %v", killErr)
+			slog.Warn("failed to kill delve process during cleanup", "error", killErr)
 		}
 		s.Lock()
 		s.State = state.StateSleeping
@@ -394,7 +398,7 @@ func Sleep() (SleepResponse, error) {
 			Host: delveProc.Host,
 			Port: delveProc.Port,
 		}); err != nil {
-			log.Printf("detrix: failed to kill Delve process: %v", err)
+			slog.Warn("failed to kill delve process", "error", err)
 		}
 	}
 
@@ -421,7 +425,7 @@ func Shutdown() error {
 	// Stop control server
 	if controlServer != nil {
 		if err := controlServer.Stop(); err != nil {
-			log.Printf("detrix: failed to stop control server: %v", err)
+			slog.Warn("failed to stop control server", "error", err)
 		}
 	}
 
