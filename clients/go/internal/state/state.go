@@ -122,12 +122,6 @@ func ReleaseWakeLock() {
 	globalWakeLock.Unlock()
 }
 
-// TryAcquireWakeLock tries to acquire the wake lock without blocking.
-// Returns true if acquired, false if already held.
-func TryAcquireWakeLock() bool {
-	return globalWakeLock.TryLock()
-}
-
 // StatusSnapshot returns a snapshot of the current status.
 // This is safe to call from any goroutine.
 type StatusSnapshot struct {

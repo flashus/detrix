@@ -106,8 +106,8 @@ pub fn is_localhost(addr: &str) -> bool {
 
 /// Check if a host string is localhost.
 fn check_localhost_host(host: &str) -> bool {
-    let host_lower = host.to_lowercase();
-    if host_lower == "localhost" || host_lower == "127.0.0.1" || host_lower == "::1" {
+    // "localhost" needs case-insensitive check; IP addresses are literal
+    if host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1" {
         return true;
     }
 
@@ -187,6 +187,13 @@ mod tests {
         assert!(is_localhost("localhost:8080"));
         assert!(is_localhost("LOCALHOST"));
         assert!(!is_localhost("example.com"));
+    }
+
+    #[test]
+    fn test_check_localhost_case_insensitive() {
+        assert!(is_localhost("Localhost"));
+        assert!(is_localhost("LOCALHOST"));
+        assert!(is_localhost("LocalHost:9090"));
     }
 
     #[test]

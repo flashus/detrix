@@ -65,6 +65,9 @@ use daemon::{DaemonClient, RegisterRequest};
 use lldb::LldbManager;
 use state::{get, is_initialized, set_initialized};
 
+/// Init/shutdown lock to prevent concurrent initialization races.
+static INIT_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
 /// Global control server instance.
 static CONTROL_SERVER: std::sync::OnceLock<std::sync::Mutex<Option<ControlServer>>> =
     std::sync::OnceLock::new();
@@ -109,6 +112,11 @@ static LLDB_MANAGER: std::sync::OnceLock<LldbManager> = std::sync::OnceLock::new
 /// # Ok::<(), detrix_client::Error>(())
 /// ```
 pub fn init(config: Config) -> Result<()> {
+    let _init_guard = INIT_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .map_err(|_| Error::ControlPlaneError("init lock poisoned".to_string()))?;
+
     if is_initialized() {
         return Err(Error::AlreadyInitialized);
     }
@@ -135,10 +143,26 @@ pub fn init(config: Config) -> Result<()> {
             .detrix_home_path()
             .map(|p| p.to_string_lossy().to_string());
         guard.safe_mode = config.safe_mode;
-        guard.health_check_timeout_ms = config.health_check_timeout.as_millis() as u64;
-        guard.register_timeout_ms = config.register_timeout.as_millis() as u64;
-        guard.unregister_timeout_ms = config.unregister_timeout.as_millis() as u64;
-        guard.lldb_start_timeout_ms = config.lldb_start_timeout.as_millis() as u64;
+        guard.health_check_timeout_ms = config
+            .health_check_timeout
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        guard.register_timeout_ms = config
+            .register_timeout
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        guard.unregister_timeout_ms = config
+            .unregister_timeout
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        guard.lldb_start_timeout_ms = config
+            .lldb_start_timeout
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
         guard.state = ClientState::Sleeping;
     }
 
@@ -293,6 +317,11 @@ pub fn sleep() -> Result<SleepResponse> {
 ///
 /// Returns Ok(()) even if not initialized.
 pub fn shutdown() -> Result<()> {
+    let _init_guard = INIT_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .map_err(|_| Error::ControlPlaneError("init lock poisoned".to_string()))?;
+
     if !is_initialized() {
         return Ok(());
     }
@@ -366,7 +395,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
         let guard = state.read()?;
         return Ok(WakeResponse {
             status: WakeResponseStatus::AlreadyAwake,
-            debug_port: guard.actual_debug_port as i32,
+            debug_port: i32::from(guard.actual_debug_port),
             connection_id: guard.connection_id.clone().unwrap_or_default(),
         });
     }
@@ -459,7 +488,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
 
     Ok(WakeResponse {
         status: WakeResponseStatus::Awake,
-        debug_port: actual_debug_port as i32,
+        debug_port: i32::from(actual_debug_port),
         connection_id,
     })
 }
@@ -557,5 +586,16 @@ mod tests {
 
         let status = status();
         assert!(matches!(status.state, ClientState::Sleeping));
+    }
+
+    #[test]
+    fn test_init_lock_exists() {
+        // Verify that INIT_LOCK can be acquired and prevents concurrent access
+        let lock = INIT_LOCK.get_or_init(|| std::sync::Mutex::new(()));
+        let guard = lock.lock();
+        assert!(guard.is_ok(), "INIT_LOCK should be acquirable");
+        // While held, try_lock should fail
+        let second = lock.try_lock();
+        assert!(second.is_err(), "INIT_LOCK should not be re-entrant");
     }
 }

@@ -93,6 +93,38 @@ def cleanup():
     reset_state()
 
 
+class TestConcurrentInit:
+    """Test concurrent init calls."""
+
+    def test_concurrent_init_only_one_succeeds(self):
+        """Two threads call init() via a barrier; exactly one succeeds."""
+        barrier = threading.Barrier(2)
+        results: list[str] = []
+        lock = threading.Lock()
+
+        def try_init(idx: int):
+            barrier.wait()
+            try:
+                detrix.init(name=f"test-{idx}")
+                with lock:
+                    results.append("ok")
+            except detrix.ConfigError:
+                with lock:
+                    results.append("already_initialized")
+            except Exception as e:
+                with lock:
+                    results.append(f"error: {e}")
+
+        t1 = threading.Thread(target=try_init, args=(1,))
+        t2 = threading.Thread(target=try_init, args=(2,))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert sorted(results) == ["already_initialized", "ok"]
+
+
 class TestConcurrentWakeSleep:
     """Test concurrent wake/sleep operations."""
 

@@ -2,6 +2,8 @@
 
 use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
 
+use tracing::warn;
+
 use crate::error::Error;
 use crate::generated::{ClientState, StatusResponse};
 use crate::lldb::LldbProcess;
@@ -101,8 +103,8 @@ impl InternalState {
             state: self.state,
             name: self.name.clone(),
             control_host: self.control_host.clone(),
-            control_port: self.actual_control_port as i32,
-            debug_port: self.actual_debug_port as i32,
+            control_port: i32::from(self.actual_control_port),
+            debug_port: i32::from(self.actual_debug_port),
             debug_port_active: self.debug_port_active,
             daemon_url: self.daemon_url.clone(),
             connection_id: self.connection_id.clone(),
@@ -118,31 +120,45 @@ pub fn get() -> &'static RwLock<InternalState> {
 /// Reset the global state to initial values.
 pub fn reset() {
     if let Some(state) = GLOBAL_STATE.get() {
-        if let Ok(mut guard) = state.write() {
-            *guard = InternalState::default();
+        match state.write() {
+            Ok(mut guard) => *guard = InternalState::default(),
+            Err(poisoned) => {
+                warn!("Global state lock poisoned during reset, recovering");
+                *poisoned.into_inner() = InternalState::default();
+            }
         }
     }
     if let Some(init) = INITIALIZED.get() {
-        if let Ok(mut guard) = init.write() {
-            *guard = false;
+        match init.write() {
+            Ok(mut guard) => *guard = false,
+            Err(poisoned) => {
+                warn!("Initialized lock poisoned during reset, recovering");
+                *poisoned.into_inner() = false;
+            }
         }
     }
 }
 
 /// Check if the client has been initialized.
 pub fn is_initialized() -> bool {
-    INITIALIZED
+    *INITIALIZED
         .get_or_init(|| RwLock::new(false))
         .read()
-        .map(|guard| *guard)
-        .unwrap_or(false)
+        .unwrap_or_else(|poisoned| {
+            warn!("Initialized lock poisoned during read, recovering");
+            poisoned.into_inner()
+        })
 }
 
 /// Set the initialization flag.
 pub fn set_initialized(value: bool) {
     let init = INITIALIZED.get_or_init(|| RwLock::new(false));
-    if let Ok(mut guard) = init.write() {
-        *guard = value;
+    match init.write() {
+        Ok(mut guard) => *guard = value,
+        Err(poisoned) => {
+            warn!("Initialized lock poisoned during write, recovering");
+            *poisoned.into_inner() = value;
+        }
     }
 }
 
@@ -157,14 +173,6 @@ pub fn acquire_wake_lock() -> Result<MutexGuard<'static, ()>, Error> {
     Ok(WAKE_LOCK.get_or_init(|| Mutex::new(())).lock()?)
 }
 
-/// Try to acquire the wake lock without blocking.
-///
-/// Returns `Some(guard)` if acquired, `None` if already held.
-#[allow(dead_code)]
-pub fn try_acquire_wake_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
-    WAKE_LOCK.get_or_init(|| Mutex::new(())).try_lock().ok()
-}
-
 /// Global lldb-dap process handle.
 static LLDB_PROCESS: OnceLock<Mutex<Option<LldbProcess>>> = OnceLock::new();
 
@@ -175,17 +183,24 @@ pub fn get_lldb_process() -> &'static Mutex<Option<LldbProcess>> {
 
 /// Set the lldb-dap process.
 pub fn set_lldb_process(process: LldbProcess) {
-    if let Ok(mut guard) = get_lldb_process().lock() {
-        *guard = Some(process);
+    match get_lldb_process().lock() {
+        Ok(mut guard) => *guard = Some(process),
+        Err(poisoned) => {
+            warn!("lldb process lock poisoned during set, recovering");
+            *poisoned.into_inner() = Some(process);
+        }
     }
 }
 
 /// Take and clear the lldb-dap process.
 pub fn take_lldb_process() -> Option<LldbProcess> {
-    get_lldb_process()
-        .lock()
-        .ok()
-        .and_then(|mut guard| guard.take())
+    match get_lldb_process().lock() {
+        Ok(mut guard) => guard.take(),
+        Err(poisoned) => {
+            warn!("lldb process lock poisoned during take, recovering");
+            poisoned.into_inner().take()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -208,5 +223,32 @@ mod tests {
         let response = state.to_status_response();
         assert_eq!(response.name, "test-client");
         assert_eq!(response.control_port, 8091);
+    }
+
+    #[test]
+    fn test_set_initialized_roundtrip() {
+        set_initialized(true);
+        assert!(is_initialized());
+        set_initialized(false);
+        assert!(!is_initialized());
+    }
+
+    #[test]
+    fn test_take_lldb_process_returns_none_when_empty() {
+        // Reset any existing process
+        let _ = take_lldb_process();
+        assert!(take_lldb_process().is_none());
+    }
+
+    #[test]
+    fn test_to_status_response_port_cast_safe() {
+        let mut state = InternalState::default();
+        // u16::MAX should safely convert to i32
+        state.actual_control_port = u16::MAX;
+        state.actual_debug_port = u16::MAX;
+
+        let response = state.to_status_response();
+        assert_eq!(response.control_port, i32::from(u16::MAX));
+        assert_eq!(response.debug_port, i32::from(u16::MAX));
     }
 }

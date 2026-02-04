@@ -59,6 +59,8 @@ impl Default for Config {
             detrix_home: None,
             safe_mode: false,
             health_check_timeout: Duration::from_secs(2),
+            // Rust needs more time than Python/Go: lldb-dap spawn + DAP handshake
+            // happens before registration, adding latency to the overall wake flow.
             register_timeout: Duration::from_secs(10),
             unregister_timeout: Duration::from_secs(2),
             lldb_start_timeout: Duration::from_secs(10),
@@ -213,6 +215,12 @@ mod tests {
         assert_eq!(config.daemon_url, "http://127.0.0.1:8090");
         assert!(config.lldb_dap_path.is_none());
         assert!(!config.safe_mode);
+    }
+
+    #[test]
+    fn test_register_timeout_default() {
+        let config = Config::default();
+        assert_eq!(config.register_timeout, Duration::from_secs(10));
     }
 
     #[test]

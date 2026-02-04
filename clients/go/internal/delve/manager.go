@@ -270,14 +270,3 @@ func (m *Manager) Kill(proc *Process) error {
 	}
 }
 
-// IsReady checks if Delve's DAP port is accepting connections.
-func IsReady(host string, port int) bool {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 100*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	if err := conn.Close(); err != nil {
-		slog.Debug("failed to close ready check connection", "error", err)
-	}
-	return true
-}

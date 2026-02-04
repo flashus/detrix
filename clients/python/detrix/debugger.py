@@ -20,10 +20,15 @@ IMPORTANT LIMITATION:
     https://github.com/microsoft/debugpy/issues/895
 """
 
+import logging
 import sys
+import threading
 from typing import Any
 
+_logger = logging.getLogger("detrix.debugger")
+
 # Lazy import to avoid loading debugpy until needed
+_debugger_lock = threading.Lock()
 _debugpy_loaded = False
 _debugpy_listening = False
 _debugpy_port: int | None = None
@@ -52,24 +57,26 @@ def wake_debugger(host: str, port: int) -> tuple[bool, int]:
     """
     global _debugpy_loaded, _debugpy_listening, _debugpy_port
 
-    try:
-        debugpy = _get_debugpy()
-        _debugpy_loaded = True
+    with _debugger_lock:
+        try:
+            debugpy = _get_debugpy()
+            _debugpy_loaded = True
 
-        # Check if already listening (debugpy can only listen once per process)
-        if _debugpy_port is not None:
-            # Already started in this process, just update state
+            # Check if already listening (debugpy can only listen once per process)
+            if _debugpy_port is not None:
+                # Already started in this process, just update state
+                _debugpy_listening = True
+                return True, _debugpy_port
+
+            # Start listening
+            _, actual_port = debugpy.listen((host, port))
             _debugpy_listening = True
-            return True, _debugpy_port
+            _debugpy_port = actual_port
+            return True, actual_port
 
-        # Start listening
-        _, actual_port = debugpy.listen((host, port))
-        _debugpy_listening = True
-        _debugpy_port = actual_port
-        return True, actual_port
-
-    except Exception:
-        return False, 0
+        except Exception:
+            _logger.warning("Failed to start debugpy", exc_info=True)
+            return False, 0
 
 
 def sleep_debugger() -> bool:
@@ -97,7 +104,8 @@ def sleep_debugger() -> bool:
         True (always succeeds since this only changes internal state)
     """
     global _debugpy_listening
-    _debugpy_listening = False
+    with _debugger_lock:
+        _debugpy_listening = False
     return True
 
 
@@ -107,9 +115,10 @@ def reset_debugger_state() -> None:
     Note: This does NOT stop the actual debugpy listener, just resets tracking.
     """
     global _debugpy_loaded, _debugpy_listening, _debugpy_port
-    _debugpy_loaded = False
-    _debugpy_listening = False
-    # Don't reset _debugpy_port since debugpy is still actually listening
+    with _debugger_lock:
+        _debugpy_loaded = False
+        _debugpy_listening = False
+        # Don't reset _debugpy_port since debugpy is still actually listening
 
 
 def is_debugger_loaded() -> bool:
@@ -118,7 +127,8 @@ def is_debugger_loaded() -> bool:
     Returns:
         True if debugpy is loaded in memory
     """
-    return _debugpy_loaded
+    with _debugger_lock:
+        return _debugpy_loaded
 
 
 def is_debugger_listening() -> bool:
@@ -127,7 +137,8 @@ def is_debugger_listening() -> bool:
     Returns:
         True if debugpy is marked as listening
     """
-    return _debugpy_listening
+    with _debugger_lock:
+        return _debugpy_listening
 
 
 def get_python_info() -> dict[str, str]:

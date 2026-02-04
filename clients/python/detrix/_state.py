@@ -67,6 +67,9 @@ class ClientState:
     health_check_timeout: float = 2.0
     register_timeout: float = 5.0
     unregister_timeout: float = 2.0
+    # SSL configuration
+    verify_ssl: bool = True
+    ca_bundle: str | None = None
     lock: threading.RLock = field(default_factory=threading.RLock)
     wake_lock: threading.Lock = field(default_factory=threading.Lock)
 

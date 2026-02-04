@@ -177,3 +177,37 @@ class TestGetEnvConfig:
                     del os.environ[key]
             config = get_env_config()
             assert config["ca_bundle"] is None
+
+
+class TestInitStoresSslFromEnv:
+    """Test that init() stores SSL config from environment."""
+
+    def setup_method(self):
+        """Reset state before each test."""
+        import contextlib
+        import detrix
+        from detrix._state import reset_state
+        with contextlib.suppress(Exception):
+            detrix.shutdown()
+        reset_state()
+
+    def teardown_method(self):
+        """Reset state after each test."""
+        import contextlib
+        import detrix
+        from detrix._state import reset_state
+        with contextlib.suppress(Exception):
+            detrix.shutdown()
+        reset_state()
+
+    def test_init_stores_ssl_from_env(self):
+        """Test that init() reads DETRIX_VERIFY_SSL and DETRIX_CA_BUNDLE into state."""
+        import detrix
+        from detrix._state import get_state
+
+        with mock.patch.dict(os.environ, {"DETRIX_VERIFY_SSL": "false"}):
+            detrix.init(name="ssl-test")
+
+        state = get_state()
+        assert state.verify_ssl is False
+        assert state.ca_bundle is None

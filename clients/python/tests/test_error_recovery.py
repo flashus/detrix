@@ -357,3 +357,36 @@ class TestRecoveryAfterErrors:
         # Finally succeed
         result = detrix.wake(daemon_url=working_daemon)
         assert result["status"] == "awake"
+
+
+class TestExceptionLogging:
+    """Test that broad exception handlers emit log messages."""
+
+    def test_daemon_health_check_logs_on_failure(self, caplog):
+        """Health check logs debug message on failure."""
+        import logging
+        from detrix.daemon import check_daemon_health
+
+        with caplog.at_level(logging.DEBUG, logger="detrix.daemon"):
+            result = check_daemon_health("http://127.0.0.1:1", timeout=0.1)
+
+        assert result is False
+        assert any("Health check failed" in r.message for r in caplog.records)
+
+    def test_debugger_wake_logs_on_failure(self, caplog):
+        """wake_debugger logs warning on failure."""
+        import logging
+        from unittest.mock import patch
+
+        from detrix.debugger import reset_debugger_state, wake_debugger
+
+        reset_debugger_state()
+
+        with (
+            caplog.at_level(logging.WARNING, logger="detrix.debugger"),
+            patch("detrix.debugger._get_debugpy", side_effect=RuntimeError("test")),
+        ):
+            success, port = wake_debugger("127.0.0.1", 0)
+
+        assert success is False
+        assert any("Failed to start debugpy" in r.message for r in caplog.records)

@@ -73,7 +73,12 @@ func (s *Server) Start(host string, port int) (int, error) {
 	}
 
 	s.listener = listener
-	s.actualPort = listener.Addr().(*net.TCPAddr).Port
+	tcpAddr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		listener.Close()
+		return 0, fmt.Errorf("listener address is not *net.TCPAddr: %T", listener.Addr())
+	}
+	s.actualPort = tcpAddr.Port
 
 	// Create router (Go 1.21 compatible - no method patterns)
 	mux := http.NewServeMux()
@@ -211,10 +216,8 @@ func (s *Server) handleWake(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DaemonURL string `json:"daemon_url,omitempty"`
 	}
-	if r.Body != nil {
-		// Ignore decode errors - daemon_url is optional
-		_ = json.NewDecoder(r.Body).Decode(&req)
-	}
+	// Ignore decode errors - daemon_url is optional
+	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	result, err := s.wakeHandler(req.DaemonURL)
 	if err != nil {

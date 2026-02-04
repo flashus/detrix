@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -204,6 +205,36 @@ func TestNewClient_CustomTimeout(t *testing.T) {
 	}
 	if client == nil {
 		t.Error("expected non-nil client")
+	}
+}
+
+func TestRegisterRequestConnectionIdField(t *testing.T) {
+	req := RegisterRequest{
+		Host:     "127.0.0.1",
+		Port:     5678,
+		Language: "go",
+		Name:     "test-client",
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("failed to marshal RegisterRequest: %v", err)
+	}
+
+	jsonStr := string(data)
+
+	// Must use "connectionId" field name, not "name"
+	if !strings.Contains(jsonStr, `"connectionId"`) {
+		t.Errorf("expected JSON to contain \"connectionId\", got: %s", jsonStr)
+	}
+
+	// Verify "name" key is not present (it should be "connectionId")
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+	if _, ok := raw["name"]; ok {
+		t.Errorf("JSON should not contain \"name\" key, got: %s", jsonStr)
 	}
 }
 

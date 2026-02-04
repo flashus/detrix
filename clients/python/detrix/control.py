@@ -211,6 +211,7 @@ class ControlHandler(BaseHTTPRequestHandler):
         except DebuggerError as e:
             self._send_error_response(str(e), 500)
         except Exception as e:
+            _logger.exception("Wake failed")
             self._send_error_response(f"Wake failed: {e}", 500)
 
     def _handle_sleep(self) -> None:

@@ -100,7 +100,7 @@ type RegisterRequest struct {
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
 	Language string `json:"language"`
-	Name     string `json:"name"`
+	Name     string `json:"connectionId"`
 	Token    string `json:"token,omitempty"`
 	SafeMode bool   `json:"safe_mode,omitempty"`
 }

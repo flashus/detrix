@@ -154,6 +154,31 @@ class TestUnregisterConnection:
         )
 
 
+class TestConvenienceFunctionsAcceptSslParams:
+    """Test that convenience functions accept verify_ssl and ca_bundle params."""
+
+    def test_check_daemon_health_accepts_ssl_params(self):
+        """Verify check_daemon_health signature includes SSL params."""
+        import inspect
+        sig = inspect.signature(check_daemon_health)
+        assert "verify_ssl" in sig.parameters
+        assert "ca_bundle" in sig.parameters
+
+    def test_register_connection_accepts_ssl_params(self):
+        """Verify register_connection signature includes SSL params."""
+        import inspect
+        sig = inspect.signature(register_connection)
+        assert "verify_ssl" in sig.parameters
+        assert "ca_bundle" in sig.parameters
+
+    def test_unregister_connection_accepts_ssl_params(self):
+        """Verify unregister_connection signature includes SSL params."""
+        import inspect
+        sig = inspect.signature(unregister_connection)
+        assert "verify_ssl" in sig.parameters
+        assert "ca_bundle" in sig.parameters
+
+
 class TestHttpDaemonClientTLS:
     """Test TLS configuration for HttpDaemonClient."""
 

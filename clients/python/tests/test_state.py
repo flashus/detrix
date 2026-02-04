@@ -52,6 +52,12 @@ class TestClientState:
         assert acquired
         state.wake_lock.release()
 
+    def test_state_has_ssl_fields(self):
+        """Test that ClientState has SSL configuration fields."""
+        state = ClientState()
+        assert state.verify_ssl is True
+        assert state.ca_bundle is None
+
 
 class TestGlobalState:
     """Test global state management."""

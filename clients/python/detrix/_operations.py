@@ -82,11 +82,18 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
             detrix_home_path = state.detrix_home
             health_timeout = state.health_check_timeout
             reg_timeout = state.register_timeout
+            verify_ssl = state.verify_ssl
+            ca_bundle = state.ca_bundle
 
         # Phase 2: Network I/O (no lock held - status() won't block)
         try:
             # Check daemon health
-            if not check_daemon_health(effective_daemon_url, timeout=health_timeout):
+            if not check_daemon_health(
+                effective_daemon_url,
+                timeout=health_timeout,
+                verify_ssl=verify_ssl,
+                ca_bundle=ca_bundle,
+            ):
                 raise DaemonError(
                     f"Cannot connect to daemon at {effective_daemon_url}"
                 )
@@ -109,6 +116,8 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
                     connection_id=connection_name,
                     token=token,
                     timeout=reg_timeout,
+                    verify_ssl=verify_ssl,
+                    ca_bundle=ca_bundle,
                 )
             except DaemonError:
                 # debugpy started but registration failed
@@ -167,6 +176,8 @@ def do_sleep() -> SleepResponse:
         daemon_url_for_unreg = state.daemon_url
         detrix_home_str = state.detrix_home
         unreg_timeout = state.unregister_timeout
+        verify_ssl = state.verify_ssl
+        ca_bundle = state.ca_bundle
 
     # If waking, wait for wake to complete first
     if is_waking:
@@ -182,6 +193,8 @@ def do_sleep() -> SleepResponse:
             connection_id=connection_id,
             token=token,
             timeout=unreg_timeout,
+            verify_ssl=verify_ssl,
+            ca_bundle=ca_bundle,
         )
 
     # Mark debugger as stopped (note: port remains open due to debugpy limitation)

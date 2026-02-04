@@ -26,6 +26,7 @@ Known Limitations:
 """
 
 import contextlib
+import threading
 from typing import Any
 
 from ._generated import StatusResponse
@@ -64,6 +65,7 @@ __all__ = [
 
 
 _initialized = False
+_init_lock = threading.Lock()
 
 
 def init(
@@ -107,9 +109,37 @@ def init(
     """
     global _initialized
 
-    if _initialized:
-        raise ConfigError("Detrix client is already initialized. Call shutdown() first.")
+    with _init_lock:
+        if _initialized:
+            raise ConfigError("Detrix client is already initialized. Call shutdown() first.")
 
+        _init_inner(
+            name=name,
+            control_host=control_host,
+            control_port=control_port,
+            debug_port=debug_port,
+            daemon_url=daemon_url,
+            detrix_home=detrix_home,
+            health_check_timeout=health_check_timeout,
+            register_timeout=register_timeout,
+            unregister_timeout=unregister_timeout,
+        )
+        _initialized = True
+
+
+def _init_inner(
+    *,
+    name: str,
+    control_host: str,
+    control_port: int,
+    debug_port: int,
+    daemon_url: str,
+    detrix_home: str | None,
+    health_check_timeout: float,
+    register_timeout: float,
+    unregister_timeout: float,
+) -> None:
+    """Internal init implementation (called under _init_lock)."""
     # Get environment config as fallbacks
     env_config = get_env_config()
 
@@ -216,14 +246,14 @@ def init(
         state.health_check_timeout = resolved_health_timeout
         state.register_timeout = resolved_register_timeout
         state.unregister_timeout = resolved_unregister_timeout
+        state.verify_ssl = env_config.get("verify_ssl", True)  # type: ignore[assignment]
+        state.ca_bundle = env_config.get("ca_bundle")  # type: ignore[assignment]
         state.state = State.SLEEPING
 
     # Start control server
     actual_port = start_control_server(resolved_control_host, resolved_control_port)
     with state.lock:
         state.actual_control_port = actual_port
-
-    _initialized = True
 
 
 def status() -> dict[str, Any]:
@@ -296,14 +326,15 @@ def shutdown() -> None:
     """
     global _initialized
 
-    # Sleep first to unregister
-    with contextlib.suppress(Exception):
-        sleep()
+    with _init_lock:
+        # Sleep first to unregister
+        with contextlib.suppress(Exception):
+            sleep()
 
-    # Stop control server
-    stop_control_server()
+        # Stop control server
+        stop_control_server()
 
-    # Reset state
-    reset_state()
+        # Reset state
+        reset_state()
 
-    _initialized = False
+        _initialized = False

@@ -128,9 +128,10 @@ async fn handle_wake(
     // Parse optional daemon_url from request body
     let daemon_url = parse_wake_request(req).await;
 
-    // Run the blocking callback in a completely separate thread (not tokio's thread pool)
+    // Run the blocking callback in a completely separate OS thread (not tokio's thread pool)
     // because reqwest::blocking::Client checks Handle::try_current() and fails if it
-    // thinks it's inside a tokio context (spawn_blocking still exposes the Handle)
+    // thinks it's inside a tokio context (spawn_blocking still exposes the Handle).
+    // This is acceptable for infrequent wake operations.
     let wake_callback = ctx.wake_callback.clone();
     let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -158,7 +159,9 @@ async fn handle_wake(
 
 /// Handle POST /detrix/sleep.
 async fn handle_sleep(ctx: &HandlerContext) -> Response<Full<Bytes>> {
-    // Run the blocking callback in a completely separate thread (not tokio's thread pool)
+    // Run the blocking callback in a completely separate OS thread (not tokio's thread pool)
+    // for the same reason as handle_wake: reqwest::blocking can't run inside tokio.
+    // This is acceptable for infrequent sleep operations.
     let sleep_callback = ctx.sleep_callback.clone();
     let (tx, rx) = tokio::sync::oneshot::channel();
 

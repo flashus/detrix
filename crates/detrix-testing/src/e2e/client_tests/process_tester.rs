@@ -87,6 +87,34 @@ impl ClientProcessTester {
             .try_clone()
             .map_err(|e| format!("Failed to clone log: {}", e))?;
 
+        // Pre-build compiled languages so compilation time doesn't eat
+        // into the control plane URL detection timeout
+        if let Some((build_cmd, build_args)) = config.build_prebuild_args(&fixture_full_path) {
+            let build_status = Command::new(&build_cmd)
+                .args(&build_args)
+                .current_dir(&working_dir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .status()
+                .map_err(|e| {
+                    format!(
+                        "Failed to run pre-build for {} client: {}",
+                        config.language.display_name(),
+                        e
+                    )
+                })?;
+
+            if !build_status.success() {
+                return Err(format!(
+                    "{} client pre-build failed with {}. Run manually: {} {}",
+                    config.language.display_name(),
+                    build_status,
+                    build_cmd,
+                    build_args.join(" ")
+                ));
+            }
+        }
+
         // Spawn the process
         let mut command = Command::new(&cmd);
         command

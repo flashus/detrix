@@ -22,12 +22,15 @@ Example:
 """
 
 import contextlib
+import logging
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 import httpx
 
 from .errors import ConfigError, DaemonError
+
+_logger = logging.getLogger("detrix.daemon")
 
 # Backward compatibility: DaemonConnectionError is the historical name
 # New code should use DaemonError from errors.py
@@ -207,9 +210,8 @@ class HttpDaemonClient:
             if response.status_code == 200:
                 data = response.json()
                 return bool(data.get("service") == "detrix")
-        except (httpx.HTTPError, ValueError):
-            # ValueError from json parsing, HTTPError from network issues
-            pass
+        except (httpx.HTTPError, ValueError) as e:
+            _logger.debug("Health check failed: %s", e)
         return False
 
     def register(
@@ -306,7 +308,12 @@ class HttpDaemonClient:
 # prefer using HttpDaemonClient directly for connection reuse.
 
 
-def check_daemon_health(daemon_url: str, timeout: float = 2.0) -> bool:
+def check_daemon_health(
+    daemon_url: str,
+    timeout: float = 2.0,
+    verify_ssl: bool = True,
+    ca_bundle: str | None = None,
+) -> bool:
     """Check if daemon is reachable and healthy.
 
     This is a convenience wrapper around HttpDaemonClient.health_check().
@@ -314,11 +321,13 @@ def check_daemon_health(daemon_url: str, timeout: float = 2.0) -> bool:
     Args:
         daemon_url: Base URL of the daemon (e.g., http://127.0.0.1:8090)
         timeout: Request timeout in seconds
+        verify_ssl: Whether to verify SSL certificates (default: True)
+        ca_bundle: Path to CA bundle file for SSL verification
 
     Returns:
         True if daemon is healthy, False otherwise
     """
-    with HttpDaemonClient(daemon_url) as client:
+    with HttpDaemonClient(daemon_url, verify_ssl=verify_ssl, ca_bundle=ca_bundle) as client:
         return client.health_check(timeout=timeout)
 
 
@@ -329,6 +338,8 @@ def register_connection(
     connection_id: str,
     token: str | None,
     timeout: float = 5.0,
+    verify_ssl: bool = True,
+    ca_bundle: str | None = None,
 ) -> str:
     """Register a DAP connection with the daemon.
 
@@ -341,6 +352,8 @@ def register_connection(
         connection_id: Unique connection identifier
         token: Optional authentication token
         timeout: Request timeout in seconds
+        verify_ssl: Whether to verify SSL certificates (default: True)
+        ca_bundle: Path to CA bundle file for SSL verification
 
     Raises:
         DaemonError: If daemon is not reachable or registration fails
@@ -348,7 +361,7 @@ def register_connection(
     Returns:
         Connection ID from daemon response
     """
-    with HttpDaemonClient(daemon_url) as client:
+    with HttpDaemonClient(daemon_url, verify_ssl=verify_ssl, ca_bundle=ca_bundle) as client:
         return client.register(host, port, connection_id, token, timeout)
 
 
@@ -357,6 +370,8 @@ def unregister_connection(
     connection_id: str,
     token: str | None,
     timeout: float = 2.0,
+    verify_ssl: bool = True,
+    ca_bundle: str | None = None,
 ) -> None:
     """Unregister connection from daemon.
 
@@ -367,9 +382,11 @@ def unregister_connection(
         connection_id: Connection ID to unregister
         token: Optional authentication token
         timeout: Request timeout in seconds
+        verify_ssl: Whether to verify SSL certificates (default: True)
+        ca_bundle: Path to CA bundle file for SSL verification
 
     Note:
         Errors are ignored (best effort cleanup).
     """
-    with HttpDaemonClient(daemon_url) as client:
+    with HttpDaemonClient(daemon_url, verify_ssl=verify_ssl, ca_bundle=ca_bundle) as client:
         client.unregister(connection_id, token, timeout)

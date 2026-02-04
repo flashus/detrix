@@ -143,6 +143,34 @@ impl ClientTestConfig {
         env
     }
 
+    /// Build a pre-build command for compiled languages (Rust, Go).
+    ///
+    /// Returns `Some((command, args))` if the language requires compilation,
+    /// or `None` for interpreted languages (Python). Running the build step
+    /// separately ensures compilation time doesn't eat into the control plane
+    /// URL detection timeout.
+    pub fn build_prebuild_args(
+        &self,
+        fixture_full_path: &std::path::Path,
+    ) -> Option<(String, Vec<String>)> {
+        match self.language {
+            ClientLanguage::Rust => {
+                // cargo build --manifest-path <path> --features client
+                let mut args = vec!["build".to_string(), "--manifest-path".to_string()];
+                args.push(fixture_full_path.to_string_lossy().to_string());
+                args.extend(self.spawn_args_after.clone());
+                Some((self.language.spawn_command().to_string(), args))
+            }
+            ClientLanguage::Go => {
+                // go build <fixture_path>
+                let mut args = vec!["build".to_string()];
+                args.push(fixture_full_path.to_string_lossy().to_string());
+                Some((self.language.spawn_command().to_string(), args))
+            }
+            ClientLanguage::Python => None,
+        }
+    }
+
     /// Build the full command arguments for spawning
     ///
     /// Returns (command, args) where args includes:
