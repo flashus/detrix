@@ -6,9 +6,9 @@
 mod tests {
     use super::super::*;
     use crate::ports::{EventOutput, EventOutputRef, NullOutput, OutputStats};
-    use crate::{EventRepository, EventRepositoryRef, MetricRepositoryRef};
+    use crate::{EventRepository, EventRepositoryRef, MetricRepository, MetricRepositoryRef};
     use async_trait::async_trait;
-    use detrix_core::{MetricEvent, MetricId};
+    use detrix_core::{Metric, MetricEvent, MetricId};
     use detrix_testing::{MockEventRepository, MockMetricRepository};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -184,6 +184,250 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(events[0].is_error);
         assert_eq!(events[0].error_type, Some("NameError".to_string()));
+    }
+
+    // ==================== Default Since (metric created_at) Tests ====================
+
+    /// Helper that exposes both event and metric repositories
+    async fn create_test_service_with_metric_repo() -> (
+        StreamingService,
+        Arc<MockEventRepository>,
+        Arc<MockMetricRepository>,
+    ) {
+        let event_repository = Arc::new(MockEventRepository::new());
+        let metric_repository = Arc::new(MockMetricRepository::new());
+        let service = StreamingService::builder(
+            Arc::clone(&event_repository) as EventRepositoryRef,
+            Arc::clone(&metric_repository) as MetricRepositoryRef,
+        )
+        .build();
+        (service, event_repository, metric_repository)
+    }
+
+    #[tokio::test]
+    async fn test_query_events_without_since_defaults_to_metric_created_at() {
+        let (service, event_repo, metric_repo) = create_test_service_with_metric_repo().await;
+
+        let metric_id = MetricId(1);
+        let created_at: i64 = 1_000_000_000_000; // arbitrary: 1M seconds in micros
+
+        // Store a metric with a known created_at
+        let metric = Metric {
+            id: Some(metric_id),
+            name: "test_metric".to_string(),
+            connection_id: detrix_core::ConnectionId::from("conn-1"),
+            group: None,
+            location: detrix_core::Location {
+                file: "test.py".to_string(),
+                line: 10,
+            },
+            expression: "x".to_string(),
+            language: detrix_core::SourceLanguage::Python,
+            enabled: true,
+            mode: detrix_core::MetricMode::default(),
+            condition: None,
+            safety_level: detrix_core::SafetyLevel::default(),
+            created_at: Some(created_at),
+            capture_stack_trace: false,
+            stack_trace_ttl: None,
+            stack_trace_slice: None,
+            capture_memory_snapshot: false,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+            anchor: None,
+            anchor_status: detrix_core::AnchorStatus::default(),
+        };
+        metric_repo.save_with_options(&metric, false).await.unwrap();
+
+        // Create a stale event (before created_at)
+        let stale_event = MetricEvent {
+            id: None,
+            metric_id,
+            metric_name: "test_metric".to_string(),
+            connection_id: detrix_core::ConnectionId::from("conn-1"),
+            timestamp: created_at - 500_000, // 0.5s before metric creation
+            thread_name: None,
+            thread_id: None,
+            value_json: r#"{"stale": true}"#.to_string(),
+            value_numeric: None,
+            value_string: None,
+            value_boolean: None,
+            is_error: false,
+            error_type: None,
+            error_message: None,
+            request_id: None,
+            session_id: None,
+            stack_trace: None,
+            memory_snapshot: None,
+        };
+        event_repo.save(&stale_event).await.unwrap();
+
+        // Create a fresh event (after created_at)
+        let fresh_event = MetricEvent {
+            id: None,
+            metric_id,
+            metric_name: "test_metric".to_string(),
+            connection_id: detrix_core::ConnectionId::from("conn-1"),
+            timestamp: created_at + 500_000, // 0.5s after metric creation
+            thread_name: None,
+            thread_id: None,
+            value_json: r#"{"fresh": true}"#.to_string(),
+            value_numeric: None,
+            value_string: None,
+            value_boolean: None,
+            is_error: false,
+            error_type: None,
+            error_message: None,
+            request_id: None,
+            session_id: None,
+            stack_trace: None,
+            memory_snapshot: None,
+        };
+        event_repo.save(&fresh_event).await.unwrap();
+
+        // Query without since — should only return fresh event (not stale)
+        let events = service
+            .query_metric_events(metric_id, Some(10), None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            events.len(),
+            1,
+            "Should filter out stale events from before metric creation"
+        );
+        assert_eq!(events[0].value_json, r#"{"fresh": true}"#);
+    }
+
+    #[tokio::test]
+    async fn test_query_events_explicit_since_overrides_created_at() {
+        let (service, event_repo, metric_repo) = create_test_service_with_metric_repo().await;
+
+        let metric_id = MetricId(1);
+        let created_at: i64 = 1_000_000_000_000;
+
+        // Store metric
+        let metric = Metric {
+            id: Some(metric_id),
+            name: "test_metric".to_string(),
+            connection_id: detrix_core::ConnectionId::from("conn-1"),
+            group: None,
+            location: detrix_core::Location {
+                file: "test.py".to_string(),
+                line: 10,
+            },
+            expression: "x".to_string(),
+            language: detrix_core::SourceLanguage::Python,
+            enabled: true,
+            mode: detrix_core::MetricMode::default(),
+            condition: None,
+            safety_level: detrix_core::SafetyLevel::default(),
+            created_at: Some(created_at),
+            capture_stack_trace: false,
+            stack_trace_ttl: None,
+            stack_trace_slice: None,
+            capture_memory_snapshot: false,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+            anchor: None,
+            anchor_status: detrix_core::AnchorStatus::default(),
+        };
+        metric_repo.save_with_options(&metric, false).await.unwrap();
+
+        // Create events before and after created_at
+        let before_event = MetricEvent {
+            id: None,
+            metric_id,
+            metric_name: "test_metric".to_string(),
+            connection_id: detrix_core::ConnectionId::from("conn-1"),
+            timestamp: created_at - 500_000,
+            thread_name: None,
+            thread_id: None,
+            value_json: r#"{"before": true}"#.to_string(),
+            value_numeric: None,
+            value_string: None,
+            value_boolean: None,
+            is_error: false,
+            error_type: None,
+            error_message: None,
+            request_id: None,
+            session_id: None,
+            stack_trace: None,
+            memory_snapshot: None,
+        };
+        event_repo.save(&before_event).await.unwrap();
+
+        let after_event = MetricEvent {
+            id: None,
+            metric_id,
+            metric_name: "test_metric".to_string(),
+            connection_id: detrix_core::ConnectionId::from("conn-1"),
+            timestamp: created_at + 500_000,
+            thread_name: None,
+            thread_id: None,
+            value_json: r#"{"after": true}"#.to_string(),
+            value_numeric: None,
+            value_string: None,
+            value_boolean: None,
+            is_error: false,
+            error_type: None,
+            error_message: None,
+            request_id: None,
+            session_id: None,
+            stack_trace: None,
+            memory_snapshot: None,
+        };
+        event_repo.save(&after_event).await.unwrap();
+
+        // Query with explicit since=0 — should return BOTH events (overrides created_at default)
+        let events = service
+            .query_metric_events(metric_id, Some(10), Some(0))
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 2, "Explicit since=0 should return all events");
+    }
+
+    #[tokio::test]
+    async fn test_query_events_metric_not_found_returns_all() {
+        let (service, event_repo, _metric_repo) = create_test_service_with_metric_repo().await;
+
+        let metric_id = MetricId(999); // Not stored in metric repo
+
+        // Create an event for this metric_id (orphan - metric not in repo)
+        let event = MetricEvent {
+            id: None,
+            metric_id,
+            metric_name: "orphan".to_string(),
+            connection_id: detrix_core::ConnectionId::from("conn-1"),
+            timestamp: 100,
+            thread_name: None,
+            thread_id: None,
+            value_json: r#"{"orphan": true}"#.to_string(),
+            value_numeric: None,
+            value_string: None,
+            value_boolean: None,
+            is_error: false,
+            error_type: None,
+            error_message: None,
+            request_id: None,
+            session_id: None,
+            stack_trace: None,
+            memory_snapshot: None,
+        };
+        event_repo.save(&event).await.unwrap();
+
+        // Should gracefully return all events (no filtering) since metric not found
+        let events = service
+            .query_metric_events(metric_id, Some(10), None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            events.len(),
+            1,
+            "Should return events even if metric not in repo"
+        );
     }
 
     // ==================== Output Tests ====================

@@ -114,7 +114,7 @@ impl MetricsClient {
                 line,
             }),
             expression: params.expression,
-            language,
+            language: Some(language), // Optional - can be derived from connection
             enabled: params.enabled,
             mode: Some(default_mode),
             condition: None,

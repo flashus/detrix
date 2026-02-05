@@ -390,9 +390,9 @@ pub struct AddMetricRequest {
     pub location: ::core::option::Option<Location>,
     #[prost(string, tag = "4")]
     pub expression: ::prost::alloc::string::String,
-    /// "python", "go", "rust"
-    #[prost(string, tag = "5")]
-    pub language: ::prost::alloc::string::String,
+    /// DEPRECATED: Derived from connection if not provided
+    #[prost(string, optional, tag = "5")]
+    pub language: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(bool, tag = "6")]
     #[serde(default)]
     pub enabled: bool,

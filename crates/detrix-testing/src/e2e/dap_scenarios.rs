@@ -226,9 +226,11 @@ impl DapWorkflowConfig {
             ],
             // Introspection metrics: stack trace and memory snapshot capture
             // Each metric MUST be on a different line (Detrix allows only one metric per line)
-            // - Line 130: `_ = orderID` - all vars in scope
-            // - Line 131: `_ = pnl` - all vars in scope
-            // - Line 133: `log(...)` - all vars in scope
+            // Lines must be REAL executable statements (not `_ = x` dead assignments).
+            // Delve requires actual code at the line to set a verified breakpoint.
+            // - Line 130: `totalPnl = totalPnl + pnl` - real assignment
+            // - Line 131: `lastOrderID := orderID` - real assignment
+            // - Line 133: `log(...)` - function call
             introspection_metrics: vec![
                 MetricPoint::new("stack_trace_metric", 130, "orderID")
                     .with_group("go_introspection")

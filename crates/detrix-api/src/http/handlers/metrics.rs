@@ -61,8 +61,10 @@ pub struct CreateMetricRequest {
     pub group: Option<String>,
     pub location: Location,
     pub expression: String,
-    /// Language/adapter type. Required. Supported values: 'python', 'go', 'rust'
-    pub language: String,
+    /// Language/adapter type. DEPRECATED: Now derived from connection.
+    /// This field is ignored - language is always taken from the connection configuration.
+    #[serde(default)]
+    pub language: Option<String>,
     /// Whether the metric is enabled. Required - explicitly specify true or false.
     pub enabled: bool,
     #[serde(default = "default_mode")]
@@ -245,7 +247,7 @@ pub async fn get_metric(
 /// - `connectionId`: Connection ID for the target process (required)
 /// - `location`: `{ file, line }` - Source file and line number
 /// - `expression`: Expression to evaluate at the observation point
-/// - `language`: Language type ('python', 'go', 'rust')
+/// - `language`: DEPRECATED - Language is now derived from the connection
 /// - `enabled`: Whether to enable immediately (required, no default)
 /// - `mode`: Capture mode ('stream', 'first', 'throttle', 'sample') - default: 'stream'
 /// - `safetyLevel`: Expression safety level ('strict', 'trusted') - default: from SafetyConfig
@@ -272,6 +274,16 @@ pub async fn add_metric(
         payload.name, payload.location.file, payload.location.line
     );
 
+    // Get connection to derive language (same pattern as MCP)
+    let conn_id = detrix_core::ConnectionId(payload.connection_id.clone());
+    let connection = state
+        .context
+        .connection_service
+        .get_connection(&conn_id)
+        .await
+        .http_context("Failed to get connection")?
+        .http_not_found("Connection")?;
+
     // Resolve safety level: use provided value or default from config
     let safety_level = match &payload.safety_level {
         Some(level) => level.clone(),
@@ -282,7 +294,9 @@ pub async fn add_metric(
     };
 
     // 1. Convert REST DTO → Proto AddMetricRequest (thin adapter)
-    let proto_request = rest_request_to_add_metric_request(&payload, &safety_level);
+    // Use connection's language (ignore payload.language for consistency with MCP)
+    let proto_request =
+        rest_request_to_add_metric_request(&payload, &safety_level, connection.language);
 
     // 2. Convert Proto → Core Metric (shared conversion from grpc/conversions.rs)
     let metric =
@@ -357,6 +371,10 @@ pub async fn delete_metric(
 /// Query captured metric events. Filter by metric_id or metric_name.
 /// Returns recent events if no filter specified.
 /// Returns proto MetricEvent which includes introspection data (stack_trace, memory_snapshot).
+///
+/// When `since` is not provided and a specific metric is queried, events are
+/// automatically scoped to the metric's creation time to avoid returning stale
+/// data from previous sessions. Pass `since=0` to explicitly request all events.
 pub async fn query_events(
     State(state): State<Arc<ApiState>>,
     Query(params): Query<QueryEventsParams>,

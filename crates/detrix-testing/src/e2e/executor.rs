@@ -1022,6 +1022,19 @@ impl TestExecutor {
     }
 
     /// Print daemon logs (for debugging test failures)
+    /// Read the last N lines of daemon logs as a String.
+    /// Returns empty string if log file is not available.
+    pub fn get_daemon_logs(&self, last_n_lines: usize) -> String {
+        if let Some(ref log_path) = self.daemon_log_path {
+            if let Ok(content) = std::fs::read_to_string(log_path) {
+                let lines: Vec<&str> = content.lines().collect();
+                let start = lines.len().saturating_sub(last_n_lines);
+                return lines[start..].join("\n");
+            }
+        }
+        String::new()
+    }
+
     pub fn print_daemon_logs(&self, last_n_lines: usize) {
         if let Some(ref log_path) = self.daemon_log_path {
             println!("\n=== DAEMON LOG (last {} lines) ===", last_n_lines);
@@ -1064,10 +1077,14 @@ impl TestExecutor {
         }
     }
 
-    /// Kill delve process and unregister from cleanup tracking.
+    /// Kill delve process and its traced children, then unregister from cleanup tracking.
     ///
-    /// Use this instead of directly killing `delve_process` to ensure
-    /// the PID file is properly cleaned up.
+    /// On macOS, Delve uses ptrace to control the debugged process. If we SIGKILL
+    /// Delve without letting it detach, the child process gets stuck in TX (traced)
+    /// state permanently. The correct sequence is:
+    /// 1. SIGTERM Delve (triggers graceful shutdown and ptrace detach)
+    /// 2. Wait for Delve to exit (up to 3s)
+    /// 3. Kill any remaining children that are now free from ptrace
     pub fn kill_delve(&mut self) {
         if let Some(mut p) = self.delve_process.take() {
             let pid = p.id();
@@ -1077,10 +1094,38 @@ impl TestExecutor {
 
             if delve_alive {
                 self.track_child_pids(pid);
+
+                // Step 1: SIGTERM Delve first — this triggers ptrace detach from children.
+                // Do NOT kill children first (they're in TX state and can't receive signals
+                // while being traced).
+                #[cfg(unix)]
+                {
+                    use nix::sys::signal::{kill, Signal};
+                    use nix::unistd::Pid;
+                    let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                }
+
+                // Step 2: Wait for Delve to exit gracefully (ptrace detach needs time).
+                // Poll for up to 3 seconds before resorting to SIGKILL.
+                let mut exited = false;
+                for _ in 0..30 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    if matches!(p.try_wait(), Ok(Some(_))) {
+                        exited = true;
+                        break;
+                    }
+                }
+
+                if !exited {
+                    // Delve didn't exit gracefully — force kill
+                    let _ = p.kill();
+                    let _ = p.wait();
+                }
+
+                // Step 3: Now children are free from ptrace — kill any that remain.
+                // Give a brief moment for children to become killable after ptrace detach.
+                std::thread::sleep(std::time::Duration::from_millis(200));
                 self.kill_tracked_children();
-                Self::kill_process_tree(pid);
-                let _ = p.kill();
-                let _ = p.wait();
             }
             unregister_e2e_process("delve", pid);
         }
@@ -1759,7 +1804,9 @@ enable_ast_analysis = false
         }
 
         // Kill delve process and its children (detrix_example_app)
-        // Delve spawns the debugged binary as a child process
+        // Delve spawns the debugged binary as a child process.
+        // On macOS, Delve uses ptrace — must SIGTERM Delve first to trigger detach,
+        // otherwise children get stuck in TX (traced) state permanently.
         if let Some(mut p) = self.delve_process.take() {
             let pid = p.id();
 
@@ -1770,21 +1817,36 @@ enable_ast_analysis = false
             };
 
             if delve_alive {
-                // Track children NOW (detrix_example_app is only spawned after DAP connect)
                 self.track_child_pids(pid);
-                // Kill tracked children first
+
+                // SIGTERM Delve first — triggers ptrace detach from children
+                #[cfg(unix)]
+                {
+                    use nix::sys::signal::{kill, Signal};
+                    use nix::unistd::Pid;
+                    let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                }
+
+                // Wait for Delve to exit (up to 3s) so ptrace detach completes
+                let mut exited = false;
+                for _ in 0..30 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    if matches!(p.try_wait(), Ok(Some(_))) {
+                        exited = true;
+                        break;
+                    }
+                }
+
+                if !exited {
+                    let _ = p.kill();
+                    let _ = p.wait();
+                }
+
+                // Now children are free from ptrace — kill any remaining
+                std::thread::sleep(std::time::Duration::from_millis(200));
                 self.kill_tracked_children();
-                // Then kill delve process tree
-                Self::kill_process_tree(pid);
-                let _ = p.kill();
-                let _ = p.wait();
             }
-            // Unregister from E2E cleanup tracking
             unregister_e2e_process("delve", pid);
-            // Note: If delve already exited, detrix_example_app becomes orphaned.
-            // We don't use pkill here because it would kill detrix_example_app from
-            // other parallel tests. The orphaned process will be cleaned up
-            // when the test suite finishes.
         }
 
         // Kill lldb-dap process and its children

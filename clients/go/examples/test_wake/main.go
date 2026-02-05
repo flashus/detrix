@@ -255,6 +255,9 @@ scanLoop:
 	// Step 6: Add metrics
 	fmt.Println("6. Adding metrics to observe the running application...")
 
+	// Record session start so we only query events from this run
+	sessionStartMicros := time.Now().UnixMicro()
+
 	fixtureAppPath := filepath.Join(fixtureDir, "detrix_example_app.go")
 
 	// Metric 1: SIMPLE VARIABLE (line 118) - symbol
@@ -333,7 +336,7 @@ scanLoop:
 		if metricID <= 0 {
 			return
 		}
-		events := getEvents(int(metricID), 10)
+		events := getEvents(int(metricID), 10, sessionStartMicros)
 		for _, event := range events {
 			eventID := fmt.Sprintf("%.0f-%v", metricID, event["timestamp"])
 			if seenEvents[eventID] {
@@ -384,6 +387,9 @@ scanLoop:
 
 	// Step 8: Cleanup
 	fmt.Println("8. Cleaning up...")
+
+	// Sleep the client first to unregister from daemon and clean up metrics/events
+	_, _ = apiRequest(controlURL+"/detrix/sleep", "POST", nil)
 
 	// Stop the app
 	if err := proc.Process.Signal(syscall.SIGTERM); err != nil {
@@ -556,8 +562,8 @@ func addMetricWithIntrospection(connectionID, filePath string, line int, express
 	return result
 }
 
-func getEvents(metricID int, limit int) []map[string]interface{} {
-	url := fmt.Sprintf("%s/api/v1/events?metricId=%d&limit=%d", daemonURL, metricID, limit)
+func getEvents(metricID int, limit int, sinceMicros int64) []map[string]interface{} {
+	url := fmt.Sprintf("%s/api/v1/events?metricId=%d&limit=%d&since=%d", daemonURL, metricID, limit, sinceMicros)
 	resp, err := apiRequest(url, "GET", nil)
 	if err != nil {
 		return nil

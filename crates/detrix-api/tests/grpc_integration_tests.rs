@@ -194,7 +194,7 @@ fn create_add_metric_request(
             line,
         }),
         expression: "x.value".to_string(),
-        language: "python".to_string(),
+        language: Some("python".to_string()),
         enabled: true,
         mode: Some(MetricMode {
             mode: Some(detrix_api::generated::detrix::v1::metric_mode::Mode::Stream(StreamMode {})),

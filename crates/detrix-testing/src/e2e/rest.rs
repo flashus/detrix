@@ -478,7 +478,7 @@ impl ApiClient for RestClient {
             group: request.group,
             location: ProtoLocation { file, line },
             expression: request.expression,
-            language: "python".to_string(), // Default to python
+            language: None, // Language derived from connection, not from request
             enabled: request.enabled.unwrap_or(true), // Default to enabled if not specified
             mode,
             safety_level: Some("strict".to_string()),
@@ -1071,7 +1071,7 @@ mod tests {
                 line: 42,
             },
             expression: "x + y".to_string(),
-            language: "python".to_string(),
+            language: None, // Derived from connection
             enabled: true,
             mode: "stream".to_string(),
             safety_level: Some("strict".to_string()),
@@ -1112,7 +1112,7 @@ mod tests {
                 line: 42,
             },
             expression: "x".to_string(),
-            language: "python".to_string(),
+            language: None, // Derived from connection
             enabled: true,
             mode: "stream".to_string(),
             safety_level: None,

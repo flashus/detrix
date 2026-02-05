@@ -420,6 +420,10 @@ fn run(daemon_url: &str, fixture_dir: &PathBuf) -> i32 {
 
     // Step 8: Cleanup
     println!("8. Cleaning up...");
+
+    // Sleep the client first to unregister from daemon and clean up metrics/events
+    let _ = api_post(&client, &format!("{}/detrix/sleep", control_url), json!({}));
+
     let _ = child.kill();
     let _ = child.wait();
     println!("   App stopped");

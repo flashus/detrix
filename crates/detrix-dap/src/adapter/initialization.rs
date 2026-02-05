@@ -6,7 +6,7 @@ use super::config::{AdapterConfig, ConnectionMode};
 use crate::{Capabilities, DapBroker, Error, InitializeRequestArguments, Result};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Initialize DAP connection (handshake)
 pub async fn initialize_dap(
@@ -231,14 +231,28 @@ pub async fn initialize_dap(
     }
 
     // For AttachRemote mode (e.g., Delve headless), the program is paused after attach.
-    // We do NOT auto-continue here - logpoints should be set first via set_metric(),
-    // then the caller should use continue_execution() to resume the program.
-    // This ensures logpoints are active before the program starts running.
-    // See: https://github.com/go-delve/delve/blob/master/Documentation/api/dap/README.md
+    // We must send a continue request to resume execution, otherwise logpoints won't fire.
+    // Note: For languages like Go (Delve), the debugger pauses the program when DAP connects,
+    // even if the process was started with `dlv attach --continue`. We need to explicitly
+    // resume it via DAP continue request after initialization.
     if matches!(config.connection_mode, ConnectionMode::AttachRemote { .. }) {
-        debug!(
-            "AttachRemote mode: program is paused, waiting for logpoints to be set before continue"
-        );
+        debug!("AttachRemote mode: sending continue request to resume program execution");
+
+        let continue_args = serde_json::json!({
+            "threadId": 1  // Use main thread
+        });
+
+        let continue_response = broker.send_request("continue", Some(continue_args)).await?;
+
+        if continue_response.success {
+            info!("Program execution resumed after attach (required for logpoints to fire)");
+        } else {
+            // Don't fail initialization if continue fails - the program might already be running
+            debug!(
+                "Continue request failed (program may already be running): {:?}",
+                continue_response.message
+            );
+        }
     }
 
     debug!("DAP connection initialized for {}", config.adapter_id);

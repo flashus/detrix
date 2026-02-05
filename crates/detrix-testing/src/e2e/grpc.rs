@@ -437,10 +437,7 @@ impl ApiClient for GrpcClient {
                 group: request.group,
                 location: Some(Location { file, line }),
                 expression: request.expression,
-                language: request
-                    .language
-                    .clone()
-                    .unwrap_or_else(|| "python".to_string()),
+                language: request.language.clone(), // Optional - will be derived from connection if None
                 enabled: request.enabled.unwrap_or(true), // Default to enabled if not specified
                 mode: Some(MetricMode {
                     mode: Some(Mode::Stream(StreamMode {})),

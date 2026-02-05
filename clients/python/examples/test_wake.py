@@ -100,9 +100,14 @@ def add_metric(
     return api_request(f"{DAEMON_URL}/api/v1/metrics", method="POST", data=data)
 
 
-def get_events(metric_id: int, limit: int = 10) -> list[dict[str, Any]]:
+def get_events(
+    metric_id: int, limit: int = 10, since_micros: int | None = None
+) -> list[dict[str, Any]]:
     """Get events for a metric."""
-    result = api_request(f"{DAEMON_URL}/api/v1/events?metricId={metric_id}&limit={limit}")
+    url = f"{DAEMON_URL}/api/v1/events?metricId={metric_id}&limit={limit}"
+    if since_micros is not None:
+        url += f"&since={since_micros}"
+    result = api_request(url)
     return result if isinstance(result, list) else []
 
 
@@ -222,6 +227,11 @@ def main() -> int:
     # Step 6: Add metrics
     print("6. Adding metrics to observe the running application...")
 
+    # Record session start so we only query events from this run
+    import time as _time
+
+    session_start_micros = int(_time.time() * 1_000_000)
+
     # Metric 1: Observe order placement (line 103 in trade_bot - place_order call)
     # Available vars at line 103: symbol, quantity, price, iteration
     metric1 = add_metric(
@@ -268,7 +278,7 @@ def main() -> int:
 
         # Check for events on metric 1
         if metric1_id:
-            events = get_events(metric1_id, limit=10)
+            events = get_events(metric1_id, limit=10, since_micros=session_start_micros)
             for event in events:
                 event_id = event.get("metricId", 0) * 1000000 + event.get("timestamp", 0)
                 if event_id in seen_events:
@@ -289,7 +299,7 @@ def main() -> int:
 
         # Check for events on metric 2
         if metric2_id:
-            events = get_events(metric2_id, limit=10)
+            events = get_events(metric2_id, limit=10, since_micros=session_start_micros)
             for event in events:
                 event_id = event.get("metricId", 0) * 1000000 + event.get("timestamp", 0)
                 if event_id in seen_events:
@@ -314,6 +324,12 @@ def main() -> int:
 
     # Step 8: Cleanup
     print("8. Cleaning up...")
+
+    # Sleep the client first to unregister from daemon and clean up metrics/events
+    try:
+        api_request(f"{control_url}/detrix/sleep", method="POST")
+    except Exception:
+        pass
 
     # Stop the trade bot
     proc.send_signal(signal.SIGTERM)

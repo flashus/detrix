@@ -108,7 +108,7 @@ func main() {
 	log("")
 
 	symbols := []string{"BTCUSD", "ETHUSD", "SOLUSD"}
-	iteration := 0
+	iteration, totalPnl := 0, 0.0
 
 	for running {
 		iteration++
@@ -126,14 +126,14 @@ func main() {
 		currentPrice := price * (0.95 + rand.Float64()*0.1)     // Line 126: currentPrice
 		pnl := calculatePnl(entryPrice, currentPrice, quantity) // Line 127: pnl (all vars in scope)
 
-		// Suppress unused variable warnings
-		_ = orderID // Line 130
-		_ = pnl     // Line 131
-
-		log("  -> P&L: $%.2f (iteration %d)", pnl, iteration) // Line 133: print (all vars in scope)
+		// Introspection breakpoint targets (must be real statements, not `_ = x`)
+		totalPnl = totalPnl + pnl                                 // Line 130: real assignment (all vars in scope)
+		lastOrderID := orderID                                    // Line 131: real assignment (all vars in scope)
+		_ = lastOrderID                                           // suppress unused (line 132)
+		log("  -> P&L: $%.2f (iteration %d)", pnl, iteration)    // Line 133: print (all vars in scope)
 
 		time.Sleep(3 * time.Second) // Same as Python - 3 seconds
 	}
 
-	log("Trading bot stopped!")
+	log("Trading bot stopped! Total P&L: $%.2f", totalPnl)
 }

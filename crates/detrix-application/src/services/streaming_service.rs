@@ -284,7 +284,9 @@ impl StreamingService {
     /// # Arguments
     /// * `metric_id` - The metric to query events for
     /// * `limit` - Maximum number of events to return (default: from config)
-    /// * `since_micros` - Optional timestamp filter: only return events with timestamp >= this value
+    /// * `since_micros` - Optional timestamp filter: only return events with timestamp >= this value.
+    ///   When `None`, defaults to the metric's `created_at` timestamp to avoid returning
+    ///   stale events from previous sessions. Pass `Some(0)` to explicitly request all events.
     pub async fn query_metric_events(
         &self,
         metric_id: MetricId,
@@ -292,7 +294,20 @@ impl StreamingService {
         since_micros: Option<i64>,
     ) -> Result<Vec<MetricEvent>> {
         let limit = limit.unwrap_or(self.api_config.default_query_limit);
-        let events = if let Some(since) = since_micros {
+
+        // When since is not provided, default to metric's created_at to scope
+        // events to the current session and avoid returning stale data.
+        let effective_since = match since_micros {
+            Some(since) => Some(since),
+            None => {
+                match self.metric_storage.find_by_id(metric_id).await {
+                    Ok(Some(metric)) => metric.created_at,
+                    _ => None, // Metric not found or error — no filtering
+                }
+            }
+        };
+
+        let events = if let Some(since) = effective_since {
             self.event_storage
                 .find_by_metric_id_since(metric_id, since, limit)
                 .await?

@@ -149,6 +149,7 @@ port = 19080
 
 [api.grpc]
 enabled = false
+port = 59999
 "#,
         db_path.to_string_lossy().replace('\\', "/"),
         pid_path.to_string_lossy().replace('\\', "/"),
@@ -337,6 +338,18 @@ enabled = false
         .output();
     unregister_e2e_process("mcp_daemon", daemon_pid as u32);
 
+    // Wait for daemon to fully exit (avoid port conflicts with next test)
+    for _ in 0..20 {
+        let check = Command::new("kill")
+            .args(["-0", &daemon_pid.to_string()])
+            .output();
+        match check {
+            Ok(output) if !output.status.success() => break,
+            Err(_) => break,
+            _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+
     reporter.step_success(step, Some("Processes terminated"));
 
     // ========================================================================
@@ -407,6 +420,7 @@ port = 19180
 
 [api.grpc]
 enabled = false
+port = 59999
 
 [mcp]
 heartbeat_interval_secs = 2
@@ -517,6 +531,18 @@ heartbeat_max_failures = 2
         .output();
     unregister_e2e_process("mcp_daemon", new_pid as u32);
 
+    // Wait for daemon to fully exit (avoid port conflicts with next test)
+    for _ in 0..20 {
+        let check = Command::new("kill")
+            .args(["-0", &new_pid.to_string()])
+            .output();
+        match check {
+            Ok(output) if !output.status.success() => break,
+            Err(_) => break,
+            _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+
     reporter.info("✅ MCP bridge daemon restart test PASSED");
 }
 
@@ -596,6 +622,7 @@ port = {}
 
 [api.grpc]
 enabled = false
+port = 59999
 
 [mcp]
 heartbeat_interval_secs = 2
@@ -674,11 +701,13 @@ heartbeat_max_failures = 2
         } else {
             reporter.step_failed(step, "Failed to parse PID file");
             let _ = bridge_process.kill().await;
+            stderr_task.abort();
             return;
         }
     } else {
         reporter.step_failed(step, "PID file not found");
         let _ = bridge_process.kill().await;
+        stderr_task.abort();
         return;
     }
 
@@ -697,6 +726,7 @@ heartbeat_max_failures = 2
         _ => {
             reporter.step_failed(step, "Daemon unhealthy");
             let _ = bridge_process.kill().await;
+            stderr_task.abort();
             return;
         }
     }
@@ -1017,11 +1047,26 @@ heartbeat_max_failures = 2
     drop(port_blocker); // Release blocked port
     let _ = bridge_process.kill().await;
     stderr_task.abort(); // Stop the stderr reader
+
+    // Kill daemon and wait for it to fully terminate before returning.
+    // This prevents orphaned daemons from interfering with subsequent tests.
     let _ = Command::new("kill")
         .args(["-9", &new_pid.to_string()])
         .output();
     // Unregister daemon from cleanup tracking
     unregister_e2e_process("mcp_daemon", new_pid as u32);
+
+    // Wait for daemon to fully exit (avoid TIME_WAIT / port conflicts with next test)
+    for _ in 0..20 {
+        let check = Command::new("kill")
+            .args(["-0", &new_pid.to_string()])
+            .output();
+        match check {
+            Ok(output) if !output.status.success() => break,
+            Err(_) => break,
+            _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
 
     reporter.info("✅ MCP bridge daemon restart with port conflict test PASSED");
     reporter.info(&format!("   Initial PID: {}", initial_pid));
@@ -1096,6 +1141,7 @@ port = 19380
 
 [api.grpc]
 enabled = false
+port = 59999
 "#,
         db_path.to_string_lossy().replace('\\', "/"),
         pid_path.to_string_lossy().replace('\\', "/"),
@@ -1268,6 +1314,7 @@ port = 19480
 
 [api.grpc]
 enabled = false
+port = 59999
 "#,
         db_path.to_string_lossy().replace('\\', "/"),
         pid_path.to_string_lossy().replace('\\', "/"),
@@ -1464,6 +1511,7 @@ port = 19580
 
 [api.grpc]
 enabled = false
+port = 59999
 
 [mcp]
 heartbeat_interval_secs = 2
@@ -1695,6 +1743,7 @@ port = {}
 
 [api.grpc]
 enabled = false
+port = 59999
 "#,
         db_path.to_string_lossy().replace('\\', "/"),
         pid_path.to_string_lossy().replace('\\', "/"),
@@ -1890,6 +1939,7 @@ port = 19780
 
 [api.grpc]
 enabled = false
+port = 59999
 
 [mcp]
 shutdown_grace_period_secs = 30
@@ -2103,6 +2153,7 @@ port = 19880
 
 [api.grpc]
 enabled = false
+port = 59999
 "#,
         db_path.to_string_lossy().replace('\\', "/"),
         pid_path.to_string_lossy().replace('\\', "/"),
@@ -2307,6 +2358,7 @@ port = 19980
 
 [api.grpc]
 enabled = false
+port = 59999
 
 [mcp]
 heartbeat_interval_secs = 2
@@ -2504,6 +2556,7 @@ port = 20080
 
 [api.grpc]
 enabled = false
+port = 59999
 
 [mcp]
 heartbeat_interval_secs = 2
@@ -2671,6 +2724,7 @@ port = 20180
 
 [api.grpc]
 enabled = false
+port = 59999
 "#,
         db_path.to_string_lossy().replace('\\', "/"),
         pid_path.to_string_lossy().replace('\\', "/"),
@@ -2861,6 +2915,7 @@ port = 20280
 
 [api.grpc]
 enabled = false
+port = 59999
 
 [mcp]
 heartbeat_timeout_secs = 5
@@ -3085,6 +3140,7 @@ port = 20380
 
 [api.grpc]
 enabled = false
+port = 59999
 
 [mcp]
 shutdown_grace_period_secs = 3
@@ -3467,6 +3523,7 @@ port = {}
 
 [api.grpc]
 enabled = false
+port = 59999
 "#,
         db_path.to_string_lossy().replace('\\', "/"),
         pid_path.to_string_lossy().replace('\\', "/"),

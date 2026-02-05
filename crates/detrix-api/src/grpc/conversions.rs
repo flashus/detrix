@@ -126,6 +126,11 @@ pub fn add_request_to_metric(req: &AddMetricRequest) -> Result<Metric, Error> {
         _ => None,
     });
 
+    // Language should be filled in by handler (derived from connection if not provided)
+    let language_str = req.language.as_ref().ok_or_else(|| {
+        Error::InvalidRequest("Missing language (should be derived from connection)".to_string())
+    })?;
+
     Ok(Metric {
         id: None,
         name: req.name.clone(),
@@ -133,7 +138,7 @@ pub fn add_request_to_metric(req: &AddMetricRequest) -> Result<Metric, Error> {
         group: req.group.clone(),
         location: proto_to_core_location(location),
         expression: req.expression.clone(),
-        language: req.language.clone().try_into()?,
+        language: language_str.clone().try_into()?,
         mode: proto_to_core_mode(mode)?,
         enabled: req.enabled,
         condition: req.condition.clone(),
