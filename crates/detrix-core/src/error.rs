@@ -1,6 +1,7 @@
 //! Error types for Detrix core domain
 
 use serde::Serialize;
+use std::borrow::Cow;
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -391,7 +392,7 @@ impl From<std::string::FromUtf8Error> for Error {
 
 impl From<crate::ParseLanguageError> for Error {
     fn from(err: crate::ParseLanguageError) -> Self {
-        Error::InvalidConfig(err.to_string())
+        Error::InvalidConfig(err.to_string().into())
     }
 }
 
@@ -448,7 +449,7 @@ pub enum Error {
 
     // Configuration errors
     #[error("Invalid configuration: {0}")]
-    InvalidConfig(String),
+    InvalidConfig(Cow<'static, str>),
 
     // Expression errors
     #[error("Invalid expression: {0}")]

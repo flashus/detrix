@@ -738,44 +738,6 @@ pub fn proto_to_core_connection(
     })
 }
 
-/// Convert core ConnectionStatus to proto ConnectionStatus (i32)
-///
-/// Used by gRPC servers to convert connection status for responses.
-pub fn core_status_to_proto(status: &detrix_core::ConnectionStatus) -> i32 {
-    use crate::generated::detrix::v1::ConnectionStatus;
-    match status {
-        detrix_core::ConnectionStatus::Disconnected => ConnectionStatus::Disconnected as i32,
-        detrix_core::ConnectionStatus::Connecting => ConnectionStatus::Connecting as i32,
-        detrix_core::ConnectionStatus::Connected => ConnectionStatus::Connected as i32,
-        detrix_core::ConnectionStatus::Reconnecting => ConnectionStatus::Connecting as i32, // Map reconnecting to connecting
-        detrix_core::ConnectionStatus::Failed(_) => ConnectionStatus::Failed as i32,
-    }
-}
-
-/// Convert core Connection to proto ConnectionInfo
-///
-/// Used by gRPC servers to convert connection data for responses.
-pub fn core_to_proto_connection_info(conn: &detrix_core::Connection) -> ConnectionInfo {
-    ConnectionInfo {
-        connection_id: conn.id.0.clone(),
-        host: conn.host.clone(),
-        port: conn.port as u32,
-        language: conn.language.to_string(),
-        status: core_status_to_proto(&conn.status),
-        created_at: conn.created_at,
-        connected_at: conn.last_connected_at,
-        last_active_at: Some(conn.last_active),
-        auto_reconnect: conn.auto_reconnect,
-        reconnect_attempts: 0,     // Not tracked in current Connection struct
-        max_reconnect_attempts: 0, // Not tracked in current Connection struct
-        safe_mode: conn.safe_mode,
-        // Identity fields
-        name: conn.name.clone(),
-        workspace_root: conn.workspace_root.clone(),
-        hostname: conn.hostname.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

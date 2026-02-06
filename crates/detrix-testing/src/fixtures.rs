@@ -19,7 +19,8 @@
 
 use detrix_core::{
     system_event::{SystemEvent, SystemEventType},
-    ConnectionId, Location, Metric, MetricEvent, MetricId, MetricMode, SafetyLevel, SourceLanguage,
+    ConnectionId, ConnectionIdentity, Location, Metric, MetricEvent, MetricId, MetricMode,
+    SafetyLevel, SourceLanguage,
 };
 use std::path::PathBuf;
 
@@ -293,6 +294,16 @@ pub fn sample_event_for_metric(metric_id: u64, name: &str) -> MetricEvent {
         stack_trace: None,
         memory_snapshot: None,
     }
+}
+
+/// Create a sample connection identity with sensible test defaults
+pub fn sample_connection_identity() -> ConnectionIdentity {
+    ConnectionIdentity::new(
+        "test-app",
+        SourceLanguage::Python,
+        "/workspace",
+        "test-host",
+    )
 }
 
 /// Create a sample system event for testing

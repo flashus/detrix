@@ -18,7 +18,6 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
-hex = "0.4"
 # sqlx is optional - only needed for error conversion in storage layer
 sqlx = { workspace = true, optional = true }
 

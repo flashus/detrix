@@ -246,13 +246,23 @@ class HttpDaemonClient:
         import socket
 
         # Build identity fields for UUID-based connection tracking
+        try:
+            workspace_root = os.getcwd()
+        except OSError:
+            workspace_root = ""
+
+        try:
+            hostname = socket.gethostname()
+        except OSError:
+            hostname = "unknown"
+
         payload = {
             "host": host,
             "port": port,
             "language": "python",
             "name": connection_id,  # User-facing name
-            "workspaceRoot": os.getcwd(),  # Current working directory
-            "hostname": socket.gethostname(),  # Machine hostname
+            "workspaceRoot": workspace_root,
+            "hostname": hostname,
         }
 
         headers = {}

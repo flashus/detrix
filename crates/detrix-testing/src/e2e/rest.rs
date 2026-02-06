@@ -312,10 +312,7 @@ impl ApiClient for RestClient {
             // Identity fields for UUID-based connection tracking
             name: format!("e2e-test-{}-{}", language, port),
             workspace_root: "/e2e-test".to_string(),
-            hostname: hostname::get()
-                .ok()
-                .and_then(|h| h.into_string().ok())
-                .unwrap_or_else(|| "test-host".to_string()),
+            hostname: detrix_api::common::resolve_hostname(),
             metadata: None,
             program: program.map(|s| s.to_string()), // Optional program path for launch mode (Rust direct lldb-dap)
             safe_mode: false,                        // Default to false for tests

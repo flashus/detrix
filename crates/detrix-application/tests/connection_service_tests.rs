@@ -7,8 +7,10 @@ use detrix_application::{
     EventCaptureService, MetricRepositoryRef,
 };
 use detrix_core::{
-    ConnectionId, ConnectionIdentity, ConnectionStatus, Error, MetricEvent, SystemEvent,
+    ConnectionId, ConnectionIdentity, ConnectionStatus, Error, MetricEvent, SourceLanguage,
+    SystemEvent,
 };
+use detrix_testing::fixtures::sample_connection_identity;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -78,7 +80,7 @@ async fn test_create_connection_with_auto_generated_id() {
     );
 
     // Create identity (UUID will be deterministic)
-    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+    let identity = sample_connection_identity();
 
     // Act
     let result = service
@@ -97,8 +99,7 @@ async fn test_create_connection_with_auto_generated_id() {
     let connection_id = result.unwrap();
 
     // ID should be deterministic UUID from identity
-    let expected_uuid =
-        ConnectionIdentity::new("test-app", "python", "/workspace", "test-host").to_uuid();
+    let expected_uuid = sample_connection_identity().to_uuid();
     assert_eq!(connection_id.0, expected_uuid);
 
     // Connection should be saved in repository
@@ -126,8 +127,12 @@ async fn test_create_connection_with_identity() {
     );
 
     // Create identity with custom name
-    let identity =
-        ConnectionIdentity::new("my-custom-connection", "python", "/my/workspace", "my-host");
+    let identity = ConnectionIdentity::new(
+        "my-custom-connection",
+        SourceLanguage::Python,
+        "/my/workspace",
+        "my-host",
+    );
     let expected_uuid = identity.to_uuid();
 
     // Act
@@ -169,7 +174,7 @@ async fn test_create_connection_validates_port_range() {
         system_event_tx,
     );
 
-    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+    let identity = sample_connection_identity();
 
     // Act - Port below 1024 should fail
     let result = service
@@ -205,7 +210,7 @@ async fn test_create_connection_validates_host() {
         system_event_tx,
     );
 
-    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+    let identity = sample_connection_identity();
 
     // Act - Empty host should fail
     let result = service
@@ -231,7 +236,7 @@ async fn test_create_connection_starts_adapter() {
         system_event_tx,
     );
 
-    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+    let identity = sample_connection_identity();
 
     // Act
     let result = service
@@ -268,7 +273,7 @@ async fn test_disconnect_stops_adapter_and_updates_status() {
         system_event_tx,
     );
 
-    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+    let identity = sample_connection_identity();
 
     // First create a connection
     let connection_id = service
@@ -327,7 +332,7 @@ async fn test_list_connections_returns_all() {
     );
 
     // Create multiple connections with different identities
-    let identity1 = ConnectionIdentity::new("app1", "python", "/workspace1", "host1");
+    let identity1 = ConnectionIdentity::new("app1", SourceLanguage::Python, "/workspace1", "host1");
     service
         .create_connection(
             "127.0.0.1".to_string(),
@@ -340,7 +345,7 @@ async fn test_list_connections_returns_all() {
         .await
         .unwrap();
 
-    let identity2 = ConnectionIdentity::new("app2", "python", "/workspace2", "host2");
+    let identity2 = ConnectionIdentity::new("app2", SourceLanguage::Python, "/workspace2", "host2");
     service
         .create_connection(
             "127.0.0.1".to_string(),
@@ -353,7 +358,7 @@ async fn test_list_connections_returns_all() {
         .await
         .unwrap();
 
-    let identity3 = ConnectionIdentity::new("app3", "python", "/workspace3", "host3");
+    let identity3 = ConnectionIdentity::new("app3", SourceLanguage::Python, "/workspace3", "host3");
     service
         .create_connection(
             "localhost".to_string(),
@@ -401,7 +406,12 @@ async fn test_get_connection_by_id() {
     let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
     let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
 
-    let identity = ConnectionIdentity::new("test-conn", "python", "/workspace", "test-host");
+    let identity = ConnectionIdentity::new(
+        "test-conn",
+        SourceLanguage::Python,
+        "/workspace",
+        "test-host",
+    );
     let expected_uuid = identity.to_uuid();
 
     let connection_id = service
@@ -451,7 +461,7 @@ async fn test_get_adapter_returns_adapter_for_active_connection() {
     let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
     let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
 
-    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+    let identity = sample_connection_identity();
 
     let connection_id = service
         .create_connection(
@@ -480,7 +490,7 @@ async fn test_get_adapter_returns_none_after_disconnect() {
     let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
     let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
 
-    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+    let identity = sample_connection_identity();
 
     let connection_id = service
         .create_connection(
@@ -518,7 +528,12 @@ async fn test_create_connection_returns_existing_when_connected() {
     );
 
     // Create identity (same identity for both calls)
-    let identity = ConnectionIdentity::new("test-existing", "python", "/workspace", "test-host");
+    let identity = ConnectionIdentity::new(
+        "test-existing",
+        SourceLanguage::Python,
+        "/workspace",
+        "test-host",
+    );
 
     // First, create a connection normally
     let connection_id = service

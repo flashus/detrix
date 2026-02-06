@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use detrix_core::system_event::{SystemEvent, SystemEventType};
 use detrix_core::{
-    Connection, ConnectionId, ConnectionStatus, Metric, MetricEvent, MetricId, Result,
+    Connection, ConnectionId, ConnectionStatus, Error, Metric, MetricEvent, MetricId, Result,
 };
 use detrix_ports::{
     ConnectionRepository, DlqEntry, DlqEntryStatus, DlqRepository, EventRepository,
@@ -633,16 +633,20 @@ impl ConnectionRepository for MockConnectionRepository {
         let mut connections = self.connections.lock().await;
         if let Some(conn) = connections.get_mut(id) {
             conn.status = status;
+            Ok(())
+        } else {
+            Err(Error::Database(format!("Connection {} not found", id.0)))
         }
-        Ok(())
     }
 
     async fn touch(&self, id: &ConnectionId) -> Result<()> {
         let mut connections = self.connections.lock().await;
         if let Some(conn) = connections.get_mut(id) {
             conn.touch();
+            Ok(())
+        } else {
+            Err(Error::Database(format!("Connection {} not found", id.0)))
         }
-        Ok(())
     }
 
     async fn delete(&self, id: &ConnectionId) -> Result<()> {

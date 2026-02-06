@@ -12,9 +12,9 @@ use crate::services::EventCaptureService;
 use async_trait::async_trait;
 use detrix_config::constants::DEFAULT_EVENT_FLUSH_INTERVAL_MS;
 use detrix_core::{
-    Connection, ConnectionId, ConnectionStatus, Metric, MetricEvent, MetricId, Result,
-    SourceLanguage, SystemEvent,
+    Connection, ConnectionId, Metric, MetricEvent, MetricId, Result, SourceLanguage, SystemEvent,
 };
+use detrix_testing::MockConnectionRepository;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -412,115 +412,6 @@ impl MetricRepository for MockMetricRepository {
 
     async fn delete_by_connection_id(&self, _connection_id: &ConnectionId) -> Result<u64> {
         Ok(0)
-    }
-}
-
-/// Mock connection repository for testing - minimal implementation
-pub struct MockConnectionRepository {
-    connections: Mutex<HashMap<ConnectionId, Connection>>,
-}
-
-impl MockConnectionRepository {
-    pub fn new() -> Self {
-        Self {
-            connections: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-impl Default for MockConnectionRepository {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl ConnectionRepository for MockConnectionRepository {
-    async fn save(&self, connection: &Connection) -> Result<ConnectionId> {
-        let mut conns = self.connections.lock().await;
-        conns.insert(connection.id.clone(), connection.clone());
-        Ok(connection.id.clone())
-    }
-
-    async fn find_by_id(&self, id: &ConnectionId) -> Result<Option<Connection>> {
-        let conns = self.connections.lock().await;
-        Ok(conns.get(id).cloned())
-    }
-
-    async fn find_by_address(&self, _host: &str, _port: u16) -> Result<Option<Connection>> {
-        Ok(None)
-    }
-
-    async fn find_by_identity(
-        &self,
-        _name: &str,
-        _language: &str,
-        _workspace_root: &str,
-        _hostname: &str,
-    ) -> Result<Option<Connection>> {
-        Ok(None)
-    }
-
-    async fn list_all(&self) -> Result<Vec<Connection>> {
-        let conns = self.connections.lock().await;
-        Ok(conns.values().cloned().collect())
-    }
-
-    async fn update(&self, connection: &Connection) -> Result<()> {
-        let mut conns = self.connections.lock().await;
-        conns.insert(connection.id.clone(), connection.clone());
-        Ok(())
-    }
-
-    async fn update_status(&self, id: &ConnectionId, status: ConnectionStatus) -> Result<()> {
-        let mut conns = self.connections.lock().await;
-        if let Some(conn) = conns.get_mut(id) {
-            conn.status = status;
-        }
-        Ok(())
-    }
-
-    async fn touch(&self, _id: &ConnectionId) -> Result<()> {
-        Ok(())
-    }
-
-    async fn delete(&self, id: &ConnectionId) -> Result<()> {
-        let mut conns = self.connections.lock().await;
-        conns.remove(id);
-        Ok(())
-    }
-
-    async fn find_active(&self) -> Result<Vec<Connection>> {
-        let conns = self.connections.lock().await;
-        Ok(conns
-            .values()
-            .filter(|c| matches!(c.status, ConnectionStatus::Connected))
-            .cloned()
-            .collect())
-    }
-
-    async fn find_for_reconnect(&self) -> Result<Vec<Connection>> {
-        Ok(Vec::new())
-    }
-
-    async fn exists(&self, id: &ConnectionId) -> Result<bool> {
-        Ok(self.connections.lock().await.contains_key(id))
-    }
-
-    async fn find_by_language(&self, _language: &str) -> Result<Vec<Connection>> {
-        Ok(Vec::new())
-    }
-
-    async fn delete_disconnected(&self) -> Result<u64> {
-        let mut conns = self.connections.lock().await;
-        let initial_count = conns.len();
-        conns.retain(|_, c| {
-            !matches!(
-                c.status,
-                ConnectionStatus::Disconnected | ConnectionStatus::Failed(_)
-            )
-        });
-        Ok((initial_count - conns.len()) as u64)
     }
 }
 

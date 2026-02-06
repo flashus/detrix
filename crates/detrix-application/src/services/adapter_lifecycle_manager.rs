@@ -654,7 +654,7 @@ impl AdapterLifecycleManager {
             }
             _ => {
                 return Err(detrix_core::Error::InvalidConfig(
-                    SourceLanguage::language_error(language.as_str()),
+                    SourceLanguage::language_error(language.as_str()).into(),
                 ));
             }
         };

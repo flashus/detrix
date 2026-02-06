@@ -311,7 +311,7 @@ impl MetricRepository for SqliteStorage {
 
         let id = metric
             .id
-            .ok_or_else(|| Error::InvalidConfig("Metric must have ID to update".to_string()))?;
+            .ok_or_else(|| Error::InvalidConfig("Metric must have ID to update".into()))?;
 
         let now = now_micros();
         let mode_type = mode_to_string(&metric.mode);

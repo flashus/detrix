@@ -52,10 +52,7 @@ impl ConnectionsClient {
             .and_then(|p| p.to_str().map(String::from))
             .unwrap_or_else(|| "/unknown".to_string());
 
-        let hostname = hostname::get()
-            .ok()
-            .and_then(|h| h.into_string().ok())
-            .unwrap_or_else(|| "unknown".to_string());
+        let hostname = detrix_api::common::resolve_hostname();
 
         let request = CreateConnectionRequest {
             host: host.to_string(),

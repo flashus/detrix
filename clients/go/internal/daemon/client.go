@@ -104,7 +104,7 @@ type RegisterRequest struct {
 	WorkspaceRoot string `json:"workspaceRoot"`
 	Hostname      string `json:"hostname"`
 	Token         string `json:"token,omitempty"`
-	SafeMode      bool   `json:"safe_mode,omitempty"`
+	SafeMode      bool   `json:"safeMode,omitempty"`
 }
 
 // RegisterResponse is the response from connection registration.

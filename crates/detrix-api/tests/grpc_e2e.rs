@@ -176,7 +176,7 @@ impl E2ETestServer {
         // Connect to debugpy using ConnectionService
         let identity = detrix_core::ConnectionIdentity::new(
             format!("grpc-e2e-{}", debugpy_port),
-            "python",
+            detrix_core::SourceLanguage::Python,
             "/test-workspace",
             "test-host",
         );

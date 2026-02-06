@@ -155,9 +155,9 @@ impl DefaultAnchorService {
 
     /// Read all lines from a file
     async fn read_file_lines(&self, file: &str) -> Result<Vec<String>> {
-        let content = fs::read_to_string(file)
-            .await
-            .map_err(|e| Error::InvalidConfig(format!("Failed to read file '{}': {}", file, e)))?;
+        let content = fs::read_to_string(file).await.map_err(|e| {
+            Error::InvalidConfig(format!("Failed to read file '{}': {}", file, e).into())
+        })?;
         Ok(content.lines().map(|l| l.to_string()).collect())
     }
 
@@ -680,11 +680,14 @@ impl AnchorService for DefaultAnchorService {
         let line_idx = (line as usize).saturating_sub(1);
 
         if line_idx >= lines.len() {
-            return Err(Error::InvalidConfig(format!(
-                "Line {} out of range (file has {} lines)",
-                line,
-                lines.len()
-            )));
+            return Err(Error::InvalidConfig(
+                format!(
+                    "Line {} out of range (file has {} lines)",
+                    line,
+                    lines.len()
+                )
+                .into(),
+            ));
         }
 
         // Get the target line

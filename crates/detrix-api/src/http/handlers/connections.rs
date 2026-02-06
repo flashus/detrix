@@ -123,25 +123,19 @@ pub async fn create_connection(
 
     // Build connection identity from request
     // Note: name, workspace_root, hostname are required fields
+    let port = crate::common::validate_port(payload.port).map_err(HttpError::bad_request)?;
+    let language =
+        crate::common::parse_language(&payload.language).map_err(HttpError::bad_request)?;
     let identity = detrix_core::ConnectionIdentity::new(
         payload.name,
-        payload.language.clone(),
+        language,
         payload.workspace_root,
         payload.hostname,
     );
 
-    // ConnectionService.create_connection now handles:
-    // 1. Validating identity and generating UUID
-    // 2. Saving connection to repository
-    // 3. Starting adapter via AdapterLifecycleManager
-    // 4. Setting up event listeners
-    // 5. Updating connection status
-    // Proto uses u32 for port, service expects u16
-    let port = payload.port as u16;
-
     let connection_id = connection_service
         .create_connection(
-            payload.host.clone(),
+            payload.host,
             port,
             identity,
             payload.program,   // Optional program path for Rust direct lldb-dap

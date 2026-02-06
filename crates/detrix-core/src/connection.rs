@@ -193,35 +193,22 @@ impl Connection {
         port: u16,
     ) -> Result<Self> {
         // Validate identity
-        identity
-            .validate()
-            .map_err(|e| Error::InvalidConfig(e.to_string()))?;
+        identity.validate()?;
 
         // Validate port range (MIN_UNRESERVED_PORT-65535)
         if port < MIN_UNRESERVED_PORT {
-            return Err(Error::InvalidConfig(format!(
-                "Port {} is below {} (reserved range)",
-                port, MIN_UNRESERVED_PORT
-            )));
+            return Err(Error::InvalidConfig(
+                format!(
+                    "Port {} is below {} (reserved range)",
+                    port, MIN_UNRESERVED_PORT
+                )
+                .into(),
+            ));
         }
 
         // Validate host is not empty
         if host.is_empty() {
-            return Err(Error::InvalidConfig("Host cannot be empty".to_string()));
-        }
-
-        // Parse language
-        let language: SourceLanguage = identity
-            .language
-            .as_str()
-            .try_into()
-            .map_err(|e| Error::InvalidConfig(format!("Invalid language: {}", e)))?;
-
-        // Validate language is known
-        if language == SourceLanguage::Unknown {
-            return Err(Error::InvalidConfig(
-                "Unknown language is not allowed for connections. Specify a valid language: python, go, rust, javascript, typescript, java, cpp, c, ruby, php".to_string()
-            ));
+            return Err(Error::InvalidConfig("Host cannot be empty".into()));
         }
 
         // Generate UUID from identity and use it as ConnectionId
@@ -236,7 +223,7 @@ impl Connection {
             hostname: identity.hostname,
             host,
             port,
-            language,
+            language: identity.language,
             status: ConnectionStatus::Disconnected,
             auto_reconnect: true,
             safe_mode: false,
@@ -256,21 +243,24 @@ impl Connection {
     ) -> Result<Self> {
         // Validate port range (MIN_UNRESERVED_PORT-65535)
         if port < MIN_UNRESERVED_PORT {
-            return Err(Error::InvalidConfig(format!(
-                "Port {} is below {} (reserved range)",
-                port, MIN_UNRESERVED_PORT
-            )));
+            return Err(Error::InvalidConfig(
+                format!(
+                    "Port {} is below {} (reserved range)",
+                    port, MIN_UNRESERVED_PORT
+                )
+                .into(),
+            ));
         }
 
         // Validate host is not empty
         if host.is_empty() {
-            return Err(Error::InvalidConfig("Host cannot be empty".to_string()));
+            return Err(Error::InvalidConfig("Host cannot be empty".into()));
         }
 
         // Validate language is known - connections require a specific language adapter
         if language == SourceLanguage::Unknown {
             return Err(Error::InvalidConfig(
-                "Unknown language is not allowed for connections. Specify a valid language: python, go, rust, javascript, typescript, java, cpp, c, ruby, php".to_string()
+                "Unknown language is not allowed for connections. Specify a valid language: python, go, rust, javascript, typescript, java, cpp, c, ruby, php".into()
             ));
         }
 
@@ -656,8 +646,12 @@ mod tests {
 
     #[test]
     fn test_connection_new_with_identity() {
-        let identity =
-            ConnectionIdentity::new("trade-bot", "python", "/workspace/project", "host1");
+        let identity = ConnectionIdentity::new(
+            "trade-bot",
+            SourceLanguage::Python,
+            "/workspace/project",
+            "host1",
+        );
         let conn =
             Connection::new_with_identity(identity.clone(), "127.0.0.1".to_string(), 5678).unwrap();
 
@@ -678,11 +672,11 @@ mod tests {
 
     #[test]
     fn test_connection_identity_different_workspace_different_uuid() {
-        let identity1 = ConnectionIdentity::new("app", "go", "/workspace1", "host");
+        let identity1 = ConnectionIdentity::new("app", SourceLanguage::Go, "/workspace1", "host");
         let conn1 =
             Connection::new_with_identity(identity1, "127.0.0.1".to_string(), 5678).unwrap();
 
-        let identity2 = ConnectionIdentity::new("app", "go", "/workspace2", "host");
+        let identity2 = ConnectionIdentity::new("app", SourceLanguage::Go, "/workspace2", "host");
         let conn2 =
             Connection::new_with_identity(identity2, "127.0.0.1".to_string(), 5678).unwrap();
 
@@ -692,11 +686,12 @@ mod tests {
 
     #[test]
     fn test_connection_identity_different_language_different_uuid() {
-        let identity1 = ConnectionIdentity::new("app", "python", "/workspace", "host");
+        let identity1 =
+            ConnectionIdentity::new("app", SourceLanguage::Python, "/workspace", "host");
         let conn1 =
             Connection::new_with_identity(identity1, "127.0.0.1".to_string(), 5678).unwrap();
 
-        let identity2 = ConnectionIdentity::new("app", "rust", "/workspace", "host");
+        let identity2 = ConnectionIdentity::new("app", SourceLanguage::Rust, "/workspace", "host");
         let conn2 =
             Connection::new_with_identity(identity2, "127.0.0.1".to_string(), 5678).unwrap();
 
@@ -706,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_connection_identity_validation_failure() {
-        let identity = ConnectionIdentity::new("", "python", "/workspace", "host");
+        let identity = ConnectionIdentity::new("", SourceLanguage::Python, "/workspace", "host");
         let result = Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5678);
 
         assert!(result.is_err());

@@ -97,7 +97,7 @@ impl TestServer {
         // UUID is generated deterministically from identity fields
         let identity = detrix_core::ConnectionIdentity::new(
             "default",
-            "python",
+            detrix_core::SourceLanguage::Python,
             "/test-workspace",
             "test-host",
         );

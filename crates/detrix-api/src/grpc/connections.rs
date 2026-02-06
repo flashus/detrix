@@ -5,7 +5,7 @@
 
 use crate::constants::status;
 use crate::generated::detrix::v1::{connection_service_server::ConnectionService, *};
-use crate::grpc::conversions::core_to_proto_connection_info;
+use crate::grpc::conversions::connection_to_info;
 use crate::state::ApiState;
 use detrix_core::ConnectionId;
 use std::sync::Arc;
@@ -48,9 +48,12 @@ impl ConnectionService for ConnectionServiceImpl {
         let connection_service = self.get_connection_service();
 
         // Build connection identity from request
+        let port = crate::common::validate_port(req.port).map_err(Status::invalid_argument)?;
+        let language =
+            crate::common::parse_language(&req.language).map_err(Status::invalid_argument)?;
         let identity = detrix_core::ConnectionIdentity::new(
             req.name,
-            req.language.clone(),
+            language,
             req.workspace_root,
             req.hostname,
         );
@@ -59,8 +62,8 @@ impl ConnectionService for ConnectionServiceImpl {
         // ConnectionService.create_connection now handles adapter lifecycle internally
         let connection_id = connection_service
             .create_connection(
-                req.host.clone(),
-                req.port as u16,
+                req.host,
+                port,
                 identity,
                 req.program,   // Optional program path for Rust direct lldb-dap
                 req.pid,       // Optional PID for Rust client AttachPid mode
@@ -79,7 +82,7 @@ impl ConnectionService for ConnectionServiceImpl {
         Ok(Response::new(CreateConnectionResponse {
             connection_id: connection.id.0.clone(),
             status: status::CREATED.to_string(),
-            connection: Some(core_to_proto_connection_info(&connection)),
+            connection: Some(connection_to_info(&connection)),
             metadata: None,
         }))
     }
@@ -123,7 +126,7 @@ impl ConnectionService for ConnectionServiceImpl {
             })?;
 
         Ok(Response::new(ConnectionResponse {
-            connection: Some(core_to_proto_connection_info(&connection)),
+            connection: Some(connection_to_info(&connection)),
             metadata: None,
         }))
     }
@@ -136,10 +139,7 @@ impl ConnectionService for ConnectionServiceImpl {
 
         let connections = connection_service.list_connections().await.to_status()?;
 
-        let connection_infos: Vec<_> = connections
-            .iter()
-            .map(core_to_proto_connection_info)
-            .collect();
+        let connection_infos: Vec<_> = connections.iter().map(connection_to_info).collect();
 
         Ok(Response::new(ListConnectionsResponse {
             connections: connection_infos,
@@ -158,10 +158,7 @@ impl ConnectionService for ConnectionServiceImpl {
             .await
             .to_status()?;
 
-        let connection_infos: Vec<_> = connections
-            .iter()
-            .map(core_to_proto_connection_info)
-            .collect();
+        let connection_infos: Vec<_> = connections.iter().map(connection_to_info).collect();
 
         Ok(Response::new(ListConnectionsResponse {
             connections: connection_infos,

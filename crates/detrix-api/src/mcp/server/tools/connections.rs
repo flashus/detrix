@@ -61,24 +61,21 @@ pub async fn create_connection_impl(
     let workspace_root = params
         .workspace_root
         .unwrap_or_else(|| "/unknown".to_string());
-    let hostname = params.hostname.unwrap_or_else(|| {
-        hostname::get()
-            .ok()
-            .and_then(|h| h.into_string().ok())
-            .unwrap_or_else(|| "unknown".to_string())
-    });
+    let hostname = params
+        .hostname
+        .unwrap_or_else(crate::common::resolve_hostname);
 
-    let identity = detrix_core::ConnectionIdentity::new(
-        name,
-        params.language.clone(),
-        workspace_root,
-        hostname,
-    );
+    let language = crate::common::parse_language(&params.language)
+        .map_err(|e| McpError::invalid_params(e, None))?;
+    let identity = detrix_core::ConnectionIdentity::new(name, language, workspace_root, hostname);
+
+    let port =
+        crate::common::validate_port(params.port).map_err(|e| McpError::invalid_params(e, None))?;
 
     match connection_service
         .create_connection(
             params.host.clone(),
-            params.port as u16,
+            port,
             identity,
             params.program,   // Optional program path for Rust direct lldb-dap
             None,             // MCP doesn't use PID-based attach (client library feature)

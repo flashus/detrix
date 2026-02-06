@@ -97,28 +97,15 @@ impl ConnectionService {
         pid: Option<u32>,
         safe_mode: bool,
     ) -> Result<ConnectionId> {
-        use detrix_core::Error;
-        use tracing::info;
+        // 1. Create Connection entity from identity (validates identity, host, port, language + generates UUID)
+        let mut connection = Connection::new_with_identity(identity, host, port)?;
+        connection.safe_mode = safe_mode;
+        let connection_id = connection.id.clone();
 
-        // 1. Validate identity
-        identity.validate().map_err(Error::InvalidConfig)?;
-
-        // 2. Generate deterministic UUID from identity
-        let uuid = identity.to_uuid();
-        let connection_id = ConnectionId::new(&uuid);
-
-        // 3. Check if connection with same identity already exists and is connected
+        // 2. Check if connection with same UUID already exists and is connected
+        //    UUID is deterministic from identity, so find_by_id is equivalent to find_by_identity
         //    This handles idempotency and the case where restore_connections is running
-        if let Ok(Some(existing)) = self
-            .connection_repo
-            .find_by_identity(
-                &identity.name,
-                &identity.language,
-                &identity.workspace_root,
-                &identity.hostname,
-            )
-            .await
-        {
+        if let Ok(Some(existing)) = self.connection_repo.find_by_id(&connection_id).await {
             if existing.status == ConnectionStatus::Connected
                 && self
                     .adapter_lifecycle_manager
@@ -126,34 +113,29 @@ impl ConnectionService {
                     .await
             {
                 info!(
-                    "Connection with identity {:?} already exists and is connected (UUID={}), returning existing",
-                    identity, uuid
+                    "Connection already exists and is connected (UUID={}), returning existing",
+                    connection_id.0
                 );
                 return Ok(existing.id);
             }
             // Connection exists but not connected - will be restarted below
             info!(
-                "Connection with identity exists but not connected (UUID={}), will restart adapter",
-                uuid
+                "Connection exists but not connected (UUID={}), will restart adapter",
+                connection_id.0
             );
         }
 
-        // 4. Create Connection entity from identity (validates host, port, and rejects Unknown language)
-        // The language validation happens inside new_with_identity
-        let mut connection = Connection::new_with_identity(identity, host.clone(), port)?;
-        connection.safe_mode = safe_mode;
-
-        // 5. Save connection to repository (initially Disconnected)
+        // 3. Save connection to repository (initially Disconnected, ON CONFLICT upserts)
         self.connection_repo.save(&connection).await?;
 
-        // 6. Start adapter via lifecycle manager (handles everything: start, subscribe, route events)
+        // 4. Start adapter via lifecycle manager (handles everything: start, subscribe, route events)
         //    Note: start_adapter returns degradation info (sync_failed, resume_failed) which is logged internally
         let _start_result = self
             .adapter_lifecycle_manager
             .start_adapter(
                 connection_id.clone(),
-                &host,
-                port,
+                &connection.host,
+                connection.port,
                 connection.language,
                 program,
                 pid,
@@ -161,16 +143,16 @@ impl ConnectionService {
             )
             .await?;
 
-        // 7. Update connection status to Connected
+        // 5. Update connection status to Connected
         self.connection_repo
             .update_status(&connection_id, ConnectionStatus::Connected)
             .await?;
 
-        // 8. Emit connection created event
+        // 6. Emit connection created event
         let event = SystemEvent::connection_created(
             connection_id.clone(),
-            &host,
-            port,
+            &connection.host,
+            connection.port,
             connection.language.as_str(),
         );
         let _ = self.system_event_tx.send(event);

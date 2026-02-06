@@ -14,7 +14,7 @@
 //! - Pure identity tests (fast, no daemon)
 //! - Full E2E tests for Python, Go, and Rust (daemon + real debuggers)
 
-use detrix_core::ConnectionIdentity;
+use detrix_core::{ConnectionIdentity, SourceLanguage};
 
 // ============================================================================
 // Helper: create connection with identity via REST API
@@ -72,8 +72,18 @@ async fn create_connection_with_identity(
 /// Same identity → same UUID (stable across restarts)
 #[test]
 fn test_same_identity_same_uuid() {
-    let id1 = ConnectionIdentity::new("test-app", "python", "/workspace1", "test-host");
-    let id2 = ConnectionIdentity::new("test-app", "python", "/workspace1", "test-host");
+    let id1 = ConnectionIdentity::new(
+        "test-app",
+        SourceLanguage::Python,
+        "/workspace1",
+        "test-host",
+    );
+    let id2 = ConnectionIdentity::new(
+        "test-app",
+        SourceLanguage::Python,
+        "/workspace1",
+        "test-host",
+    );
     assert_eq!(
         id1.to_uuid(),
         id2.to_uuid(),
@@ -84,8 +94,20 @@ fn test_same_identity_same_uuid() {
 /// Different workspace → different UUID
 #[test]
 fn test_different_workspace_different_uuid() {
-    let uuid1 = ConnectionIdentity::new("test-app", "python", "/workspace1", "test-host").to_uuid();
-    let uuid2 = ConnectionIdentity::new("test-app", "python", "/workspace2", "test-host").to_uuid();
+    let uuid1 = ConnectionIdentity::new(
+        "test-app",
+        SourceLanguage::Python,
+        "/workspace1",
+        "test-host",
+    )
+    .to_uuid();
+    let uuid2 = ConnectionIdentity::new(
+        "test-app",
+        SourceLanguage::Python,
+        "/workspace2",
+        "test-host",
+    )
+    .to_uuid();
     assert_ne!(
         uuid1, uuid2,
         "Different workspaces must produce different UUIDs"
@@ -95,9 +117,12 @@ fn test_different_workspace_different_uuid() {
 /// Different language → different UUID (cross-contamination prevention)
 #[test]
 fn test_different_language_different_uuid() {
-    let py = ConnectionIdentity::new("trade-bot", "python", "/workspace", "host").to_uuid();
-    let go = ConnectionIdentity::new("trade-bot", "go", "/workspace", "host").to_uuid();
-    let rs = ConnectionIdentity::new("trade-bot", "rust", "/workspace", "host").to_uuid();
+    let py = ConnectionIdentity::new("trade-bot", SourceLanguage::Python, "/workspace", "host")
+        .to_uuid();
+    let go =
+        ConnectionIdentity::new("trade-bot", SourceLanguage::Go, "/workspace", "host").to_uuid();
+    let rs =
+        ConnectionIdentity::new("trade-bot", SourceLanguage::Rust, "/workspace", "host").to_uuid();
     assert_ne!(py, go, "Python and Go must have different UUIDs");
     assert_ne!(py, rs, "Python and Rust must have different UUIDs");
     assert_ne!(go, rs, "Go and Rust must have different UUIDs");
@@ -106,8 +131,10 @@ fn test_different_language_different_uuid() {
 /// Different hostname → different UUID
 #[test]
 fn test_different_hostname_different_uuid() {
-    let uuid1 = ConnectionIdentity::new("app", "python", "/workspace", "host1").to_uuid();
-    let uuid2 = ConnectionIdentity::new("app", "python", "/workspace", "host2").to_uuid();
+    let uuid1 =
+        ConnectionIdentity::new("app", SourceLanguage::Python, "/workspace", "host1").to_uuid();
+    let uuid2 =
+        ConnectionIdentity::new("app", SourceLanguage::Python, "/workspace", "host2").to_uuid();
     assert_ne!(
         uuid1, uuid2,
         "Different hostnames must produce different UUIDs"
@@ -117,7 +144,12 @@ fn test_different_hostname_different_uuid() {
 /// UUID determinism and format
 #[test]
 fn test_uuid_determinism() {
-    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+    let identity = ConnectionIdentity::new(
+        "test-app",
+        SourceLanguage::Python,
+        "/workspace",
+        "test-host",
+    );
     let uuid1 = identity.to_uuid();
     let uuid2 = identity.to_uuid();
     let uuid3 = identity.to_uuid();
@@ -130,7 +162,12 @@ fn test_uuid_determinism() {
 /// Connection.id is the UUID (primary key = UUID)
 #[test]
 fn test_connection_id_is_uuid() {
-    let identity = ConnectionIdentity::new("trade-bot", "python", "/workspace/project", "host1");
+    let identity = ConnectionIdentity::new(
+        "trade-bot",
+        SourceLanguage::Python,
+        "/workspace/project",
+        "host1",
+    );
     let expected_uuid = identity.to_uuid();
     let connection =
         detrix_core::Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5678)
@@ -144,18 +181,26 @@ fn test_connection_id_is_uuid() {
 /// Validation rejects empty identity fields
 #[test]
 fn test_identity_validation() {
-    assert!(ConnectionIdentity::new("", "python", "/ws", "host")
-        .validate()
-        .is_err());
-    assert!(ConnectionIdentity::new("app", "", "/ws", "host")
-        .validate()
-        .is_err());
-    assert!(ConnectionIdentity::new("app", "python", "", "host")
-        .validate()
-        .is_err());
-    assert!(ConnectionIdentity::new("app", "python", "/ws", "")
-        .validate()
-        .is_err());
+    assert!(
+        ConnectionIdentity::new("", SourceLanguage::Python, "/ws", "host")
+            .validate()
+            .is_err()
+    );
+    assert!(
+        ConnectionIdentity::new("app", SourceLanguage::Unknown, "/ws", "host")
+            .validate()
+            .is_err()
+    );
+    assert!(
+        ConnectionIdentity::new("app", SourceLanguage::Python, "", "host")
+            .validate()
+            .is_err()
+    );
+    assert!(
+        ConnectionIdentity::new("app", SourceLanguage::Python, "/ws", "")
+            .validate()
+            .is_err()
+    );
 }
 
 // ============================================================================
@@ -202,7 +247,7 @@ async fn test_e2e_python_uuid() {
     // Compute expected UUID
     let identity = ConnectionIdentity::new(
         "py-uuid-test",
-        "python",
+        SourceLanguage::Python,
         "/e2e/python-workspace",
         "e2e-host",
     );
@@ -298,7 +343,12 @@ async fn test_e2e_go_uuid() {
     reporter.step_success(step, Some(&format!("Port: {}", executor.delve_port)));
 
     // Compute expected UUID
-    let identity = ConnectionIdentity::new("go-uuid-test", "go", "/e2e/go-workspace", "e2e-host");
+    let identity = ConnectionIdentity::new(
+        "go-uuid-test",
+        SourceLanguage::Go,
+        "/e2e/go-workspace",
+        "e2e-host",
+    );
     let expected_uuid = identity.to_uuid();
 
     // Create connection
@@ -399,8 +449,12 @@ async fn test_e2e_rust_uuid() {
         .map(|p| p.to_str().unwrap());
 
     // Compute expected UUID
-    let identity =
-        ConnectionIdentity::new("rust-uuid-test", "rust", "/e2e/rust-workspace", "e2e-host");
+    let identity = ConnectionIdentity::new(
+        "rust-uuid-test",
+        SourceLanguage::Rust,
+        "/e2e/rust-workspace",
+        "e2e-host",
+    );
     let expected_uuid = identity.to_uuid();
 
     // Create connection (Rust needs program path for launch mode)
@@ -582,10 +636,20 @@ async fn test_e2e_workspace_isolation() {
     reporter.step_success(step, Some(&format!("Isolated: {} vs {}", uuid1, uuid2)));
 
     // Verify UUIDs match computed values
-    let expected1 =
-        ConnectionIdentity::new("test-app", "python", "/workspace/dir1", "e2e-host").to_uuid();
-    let expected2 =
-        ConnectionIdentity::new("test-app", "python", "/workspace/dir2", "e2e-host").to_uuid();
+    let expected1 = ConnectionIdentity::new(
+        "test-app",
+        SourceLanguage::Python,
+        "/workspace/dir1",
+        "e2e-host",
+    )
+    .to_uuid();
+    let expected2 = ConnectionIdentity::new(
+        "test-app",
+        SourceLanguage::Python,
+        "/workspace/dir2",
+        "e2e-host",
+    )
+    .to_uuid();
     assert_eq!(uuid1, expected1, "UUID1 must match computed value");
     assert_eq!(uuid2, expected2, "UUID2 must match computed value");
 
@@ -776,9 +840,12 @@ async fn test_e2e_language_isolation() {
 
     // Verify UUIDs match computed values
     let step = reporter.step_start("Verify correctness", "UUIDs match computed values");
-    let expected_py = ConnectionIdentity::new(app_name, "python", workspace, hostname).to_uuid();
-    let expected_go = ConnectionIdentity::new(app_name, "go", workspace, hostname).to_uuid();
-    let expected_rs = ConnectionIdentity::new(app_name, "rust", workspace, hostname).to_uuid();
+    let expected_py =
+        ConnectionIdentity::new(app_name, SourceLanguage::Python, workspace, hostname).to_uuid();
+    let expected_go =
+        ConnectionIdentity::new(app_name, SourceLanguage::Go, workspace, hostname).to_uuid();
+    let expected_rs =
+        ConnectionIdentity::new(app_name, SourceLanguage::Rust, workspace, hostname).to_uuid();
     assert_eq!(py_uuid, expected_py, "Python UUID must match computed");
     assert_eq!(go_uuid, expected_go, "Go UUID must match computed");
     assert_eq!(rust_uuid, expected_rs, "Rust UUID must match computed");

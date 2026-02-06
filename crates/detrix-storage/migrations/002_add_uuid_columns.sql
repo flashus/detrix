@@ -43,17 +43,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_identity
 -- Step 5: Future migration - Make columns NOT NULL (run after 6 months)
 -- =============================================================================
 
--- NOTE: After all clients are updated to send UUID/workspace_root/hostname,
+-- NOTE: After all clients are updated to send identity fields (workspace_root/hostname),
 -- run this migration in a separate file to enforce NOT NULL constraints:
 --
--- -- migration 003_enforce_uuid_not_null.sql
+-- -- migration 003_enforce_identity_not_null.sql
 -- -- Step 1: Verify all rows have values
--- -- SELECT COUNT(*) FROM connections WHERE uuid IS NULL; -- Should be 0
+-- -- SELECT COUNT(*) FROM connections WHERE workspace_root IS NULL; -- Should be 0
 -- --
 -- -- Step 2: Create new table with NOT NULL constraints
 -- -- CREATE TABLE connections_new (
--- --     id TEXT PRIMARY KEY,
--- --     uuid TEXT NOT NULL,
+-- --     id TEXT PRIMARY KEY,  -- connection_id (deterministic UUID from identity)
 -- --     name TEXT DEFAULT NULL,
 -- --     workspace_root TEXT NOT NULL,
 -- --     hostname TEXT NOT NULL,
@@ -74,9 +73,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_identity
 -- Verification queries (for testing)
 -- =============================================================================
 
--- Check all connections have UUID populated:
--- SELECT COUNT(*) FROM connections WHERE uuid IS NULL; -- Should be 0
-
 -- Check all connections have workspace_root:
 -- SELECT COUNT(*) FROM connections WHERE workspace_root IS NULL; -- Should be 0
 
@@ -84,4 +80,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_identity
 -- SELECT COUNT(*) FROM connections WHERE hostname IS NULL; -- Should be 0
 
 -- View sample connections with new fields:
--- SELECT id, uuid, name, workspace_root, hostname, language FROM connections LIMIT 5;
+-- SELECT id, name, workspace_root, hostname, language FROM connections LIMIT 5;
