@@ -6,7 +6,9 @@ use detrix_application::{
     AdapterLifecycleManager, ConnectionRepositoryRef, ConnectionService, DapAdapterFactoryRef,
     EventCaptureService, MetricRepositoryRef,
 };
-use detrix_core::{ConnectionId, ConnectionStatus, Error, MetricEvent, SystemEvent};
+use detrix_core::{
+    ConnectionId, ConnectionIdentity, ConnectionStatus, Error, MetricEvent, SystemEvent,
+};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -75,13 +77,15 @@ async fn test_create_connection_with_auto_generated_id() {
         system_event_tx,
     );
 
+    // Create identity (UUID will be deterministic)
+    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+
     // Act
     let result = service
         .create_connection(
             "127.0.0.1".to_string(),
             5678,
-            "python".to_string(),
-            None,  // id
+            identity,
             None,  // program
             None,  // pid
             false, // safe_mode
@@ -92,8 +96,10 @@ async fn test_create_connection_with_auto_generated_id() {
     assert!(result.is_ok());
     let connection_id = result.unwrap();
 
-    // ID should be auto-generated from host:port
-    assert_eq!(connection_id.0, "127_0_0_1_5678");
+    // ID should be deterministic UUID from identity
+    let expected_uuid =
+        ConnectionIdentity::new("test-app", "python", "/workspace", "test-host").to_uuid();
+    assert_eq!(connection_id.0, expected_uuid);
 
     // Connection should be saved in repository
     let saved_conn = repo.get_connection(&connection_id).await;
@@ -101,12 +107,15 @@ async fn test_create_connection_with_auto_generated_id() {
     let conn = saved_conn.unwrap();
     assert_eq!(conn.host, "127.0.0.1");
     assert_eq!(conn.port, 5678);
+    assert_eq!(conn.name, Some("test-app".to_string()));
+    assert_eq!(conn.workspace_root, "/workspace");
+    assert_eq!(conn.hostname, "test-host");
     // After successful creation, status should be Connected
     assert_eq!(conn.status, ConnectionStatus::Connected);
 }
 
 #[tokio::test]
-async fn test_create_connection_with_custom_id() {
+async fn test_create_connection_with_identity() {
     // Arrange
     let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
     let service = ConnectionService::new(
@@ -116,16 +125,20 @@ async fn test_create_connection_with_custom_id() {
         system_event_tx,
     );
 
+    // Create identity with custom name
+    let identity =
+        ConnectionIdentity::new("my-custom-connection", "python", "/my/workspace", "my-host");
+    let expected_uuid = identity.to_uuid();
+
     // Act
     let result = service
         .create_connection(
             "127.0.0.1".to_string(),
             5678,
-            "python".to_string(),
-            Some("my-custom-connection".to_string()), // id
-            None,                                     // program
-            None,                                     // pid
-            false,                                    // safe_mode
+            identity,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await;
 
@@ -133,12 +146,16 @@ async fn test_create_connection_with_custom_id() {
     assert!(result.is_ok());
     let connection_id = result.unwrap();
 
-    // ID should be the custom one
-    assert_eq!(connection_id.0, "my-custom-connection");
+    // ID should be deterministic UUID from identity
+    assert_eq!(connection_id.0, expected_uuid);
 
-    // Connection should be saved
+    // Connection should be saved with identity fields
     let saved_conn = repo.get_connection(&connection_id).await;
     assert!(saved_conn.is_some());
+    let conn = saved_conn.unwrap();
+    assert_eq!(conn.name, Some("my-custom-connection".to_string()));
+    assert_eq!(conn.workspace_root, "/my/workspace");
+    assert_eq!(conn.hostname, "my-host");
 }
 
 #[tokio::test]
@@ -152,13 +169,14 @@ async fn test_create_connection_validates_port_range() {
         system_event_tx,
     );
 
+    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+
     // Act - Port below 1024 should fail
     let result = service
         .create_connection(
             "127.0.0.1".to_string(),
             80,
-            "python".to_string(),
-            None,  // id
+            identity,
             None,  // program
             None,  // pid
             false, // safe_mode
@@ -187,17 +205,11 @@ async fn test_create_connection_validates_host() {
         system_event_tx,
     );
 
+    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+
     // Act - Empty host should fail
     let result = service
-        .create_connection(
-            String::new(),
-            5678,
-            "python".to_string(),
-            None,
-            None,
-            None,
-            false,
-        )
+        .create_connection(String::new(), 5678, identity, None, None, false)
         .await;
 
     // Assert
@@ -219,13 +231,14 @@ async fn test_create_connection_starts_adapter() {
         system_event_tx,
     );
 
+    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+
     // Act
     let result = service
         .create_connection(
             "localhost".to_string(),
             5679,
-            "python".to_string(),
-            None,  // id
+            identity,
             None,  // program
             None,  // pid
             false, // safe_mode
@@ -255,13 +268,14 @@ async fn test_disconnect_stops_adapter_and_updates_status() {
         system_event_tx,
     );
 
+    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+
     // First create a connection
     let connection_id = service
         .create_connection(
             "127.0.0.1".to_string(),
             5678,
-            "python".to_string(),
-            None,  // id
+            identity,
             None,  // program
             None,  // pid
             false, // safe_mode
@@ -312,37 +326,39 @@ async fn test_list_connections_returns_all() {
         system_event_tx,
     );
 
-    // Create multiple connections
+    // Create multiple connections with different identities
+    let identity1 = ConnectionIdentity::new("app1", "python", "/workspace1", "host1");
     service
         .create_connection(
             "127.0.0.1".to_string(),
             5678,
-            "python".to_string(),
-            None,  // id
+            identity1,
             None,  // program
             None,  // pid
             false, // safe_mode
         )
         .await
         .unwrap();
+
+    let identity2 = ConnectionIdentity::new("app2", "python", "/workspace2", "host2");
     service
         .create_connection(
             "127.0.0.1".to_string(),
             5679,
-            "python".to_string(),
-            None,  // id
+            identity2,
             None,  // program
             None,  // pid
             false, // safe_mode
         )
         .await
         .unwrap();
+
+    let identity3 = ConnectionIdentity::new("app3", "python", "/workspace3", "host3");
     service
         .create_connection(
             "localhost".to_string(),
             5680,
-            "python".to_string(),
-            None,  // id
+            identity3,
             None,  // program
             None,  // pid
             false, // safe_mode
@@ -385,15 +401,17 @@ async fn test_get_connection_by_id() {
     let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
     let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
 
+    let identity = ConnectionIdentity::new("test-conn", "python", "/workspace", "test-host");
+    let expected_uuid = identity.to_uuid();
+
     let connection_id = service
         .create_connection(
             "127.0.0.1".to_string(),
             5678,
-            "python".to_string(),
-            Some("test-conn".to_string()), // id
-            None,                          // program
-            None,                          // pid
-            false,                         // safe_mode
+            identity,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -406,7 +424,8 @@ async fn test_get_connection_by_id() {
     let conn = result.unwrap();
     assert!(conn.is_some());
     let conn = conn.unwrap();
-    assert_eq!(conn.id.0, "test-conn");
+    assert_eq!(conn.id.0, expected_uuid);
+    assert_eq!(conn.name, Some("test-conn".to_string()));
     assert_eq!(conn.host, "127.0.0.1");
     assert_eq!(conn.port, 5678);
 }
@@ -432,12 +451,13 @@ async fn test_get_adapter_returns_adapter_for_active_connection() {
     let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
     let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
 
+    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+
     let connection_id = service
         .create_connection(
             "127.0.0.1".to_string(),
             5678,
-            "python".to_string(),
-            None,  // id
+            identity,
             None,  // program
             None,  // pid
             false, // safe_mode
@@ -460,12 +480,13 @@ async fn test_get_adapter_returns_none_after_disconnect() {
     let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
     let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
 
+    let identity = ConnectionIdentity::new("test-app", "python", "/workspace", "test-host");
+
     let connection_id = service
         .create_connection(
             "127.0.0.1".to_string(),
             5678,
-            "python".to_string(),
-            None,  // id
+            identity,
             None,  // program
             None,  // pid
             false, // safe_mode
@@ -496,13 +517,15 @@ async fn test_create_connection_returns_existing_when_connected() {
         system_event_tx,
     );
 
+    // Create identity (same identity for both calls)
+    let identity = ConnectionIdentity::new("test-existing", "python", "/workspace", "test-host");
+
     // First, create a connection normally
     let connection_id = service
         .create_connection(
             "127.0.0.1".to_string(),
             9997,
-            "python".to_string(),
-            Some("test-existing".to_string()),
+            identity.clone(),
             None,
             None,
             false,
@@ -515,17 +538,9 @@ async fn test_create_connection_returns_existing_when_connected() {
     assert_eq!(conn.status, ConnectionStatus::Connected);
     assert!(service.has_running_adapter(&connection_id).await);
 
-    // Act - Call create_connection again with the same ID
+    // Act - Call create_connection again with the same identity (idempotency)
     let result = service
-        .create_connection(
-            "127.0.0.1".to_string(),
-            9997,
-            "python".to_string(),
-            Some("test-existing".to_string()),
-            None,
-            None,
-            false,
-        )
+        .create_connection("127.0.0.1".to_string(), 9997, identity, None, None, false)
         .await;
 
     // Assert - Should return the existing connection without error

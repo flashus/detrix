@@ -11,5 +11,6 @@ pub use expression_extractor::{
 };
 pub use parsing::{
     extract_variable_names, generate_metric_name, generate_metric_name_with_prefix, parse_location,
-    parse_location_flexible, parse_location_with_expression, ParsedLocationWithExpression,
+    parse_location_flexible, parse_location_str, parse_location_with_expression,
+    ParsedLocationWithExpression,
 };

@@ -8,6 +8,7 @@
 //! - `entities` - Domain entities (Metric, MetricEvent, etc.)
 //! - `error` - Domain error types
 //! - `connection` - Connection entities and types
+//! - `connection_identity` - Connection identity for stable UUID generation
 //! - `system_event` - System events for real-time streaming
 //!
 //! # Related Crates
@@ -18,6 +19,7 @@
 //!   per Clean Architecture (output ports belong in the Application layer)
 
 pub mod connection;
+pub mod connection_identity;
 pub mod entities;
 pub mod error;
 pub mod expressions;
@@ -25,6 +27,7 @@ pub mod formatting;
 pub mod system_event;
 
 pub use connection::{Connection, ConnectionId, ConnectionStatus, MIN_UNRESERVED_PORT};
+pub use connection_identity::ConnectionIdentity;
 pub use entities::{
     AnchorStatus,
     CapturedStackTrace,

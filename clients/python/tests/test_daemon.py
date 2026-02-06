@@ -45,7 +45,7 @@ class MockDaemonHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({
-                "connectionId": data.get("connectionId", "test-conn"),
+                "connectionId": data.get("name", data.get("connectionId", "test-conn")),
                 "host": data.get("host"),
                 "port": data.get("port"),
             }).encode())

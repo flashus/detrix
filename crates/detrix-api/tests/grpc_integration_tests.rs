@@ -44,10 +44,6 @@ use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Channel, Server};
 
-/// Test connection ID for mocked tests (no real DAP connection)
-/// Must match the connection ID created in TestServer::start() (line 98)
-const TEST_CONNECTION_ID: &str = "default";
-
 // ============================================================================
 // Test Infrastructure
 // ============================================================================
@@ -57,6 +53,8 @@ struct TestServer {
     addr: SocketAddr,
     shutdown_tx: oneshot::Sender<()>,
     _temp_dir: TempDir,
+    /// Connection ID (UUID generated from identity at test start)
+    connection_id: String,
 }
 
 impl TestServer {
@@ -96,16 +94,22 @@ impl TestServer {
 
         // Create a mock connection so metrics can be added
         // This creates a mock adapter via MockDapAdapterFactory
-        context
+        // UUID is generated deterministically from identity fields
+        let identity = detrix_core::ConnectionIdentity::new(
+            "default",
+            "python",
+            "/test-workspace",
+            "test-host",
+        );
+        let connection_id = context
             .connection_service
             .create_connection(
                 "127.0.0.1".to_string(),
                 5678, // Arbitrary port (mock doesn't actually connect)
-                "python".to_string(),
-                Some("default".to_string()), // Use "default" connection ID
-                None,                        // No program path for Python
-                None,                        // No pid (not using AttachPid mode)
-                false,                       // SafeMode disabled for tests
+                identity,
+                None,  // No program path for Python
+                None,  // No pid (not using AttachPid mode)
+                false, // SafeMode disabled for tests
             )
             .await?;
 
@@ -145,6 +149,7 @@ impl TestServer {
             addr,
             shutdown_tx,
             _temp_dir: temp_dir,
+            connection_id: connection_id.to_string(),
         })
     }
 
@@ -227,7 +232,7 @@ async fn test_metric_add_and_get() {
         .expect("Failed to create client");
 
     // Add a metric
-    let request = create_add_metric_request("test_metric", "test.py", 10, TEST_CONNECTION_ID);
+    let request = create_add_metric_request("test_metric", "test.py", 10, &server.connection_id);
     let response = client.add_metric(request).await.expect("AddMetric failed");
     let metric = response.into_inner();
 
@@ -265,7 +270,7 @@ async fn test_metric_add_and_get_by_name() {
         .expect("Failed to create client");
 
     // Add a metric
-    let request = create_add_metric_request("named_metric", "app.py", 42, TEST_CONNECTION_ID);
+    let request = create_add_metric_request("named_metric", "app.py", 42, &server.connection_id);
     client.add_metric(request).await.expect("AddMetric failed");
 
     // Get the metric by name
@@ -297,7 +302,7 @@ async fn test_metric_update() {
         .expect("Failed to create client");
 
     // Add a metric
-    let request = create_add_metric_request("update_test", "test.py", 10, TEST_CONNECTION_ID);
+    let request = create_add_metric_request("update_test", "test.py", 10, &server.connection_id);
     let response = client.add_metric(request).await.expect("AddMetric failed");
     let metric_id = response.into_inner().metric_id;
 
@@ -331,7 +336,7 @@ async fn test_metric_toggle() {
         .expect("Failed to create client");
 
     // Add a metric (enabled by default)
-    let request = create_add_metric_request("toggle_test", "test.py", 10, TEST_CONNECTION_ID);
+    let request = create_add_metric_request("toggle_test", "test.py", 10, &server.connection_id);
     let response = client.add_metric(request).await.expect("AddMetric failed");
     let metric_id = response.into_inner().metric_id;
 
@@ -377,7 +382,7 @@ async fn test_metric_remove_by_id() {
         .expect("Failed to create client");
 
     // Add a metric
-    let request = create_add_metric_request("remove_test", "test.py", 10, TEST_CONNECTION_ID);
+    let request = create_add_metric_request("remove_test", "test.py", 10, &server.connection_id);
     let response = client.add_metric(request).await.expect("AddMetric failed");
     let metric_id = response.into_inner().metric_id;
 
@@ -420,7 +425,7 @@ async fn test_metric_remove_by_name() {
         .expect("Failed to create client");
 
     // Add a metric
-    let request = create_add_metric_request("remove_by_name", "test.py", 10, TEST_CONNECTION_ID);
+    let request = create_add_metric_request("remove_by_name", "test.py", 10, &server.connection_id);
     client.add_metric(request).await.expect("AddMetric failed");
 
     // Remove the metric by name
@@ -456,7 +461,7 @@ async fn test_list_metrics() {
             &format!("list_metric_{}", i),
             "test.py",
             i * 10,
-            TEST_CONNECTION_ID,
+            &server.connection_id,
         );
         client.add_metric(request).await.expect("AddMetric failed");
     }
@@ -489,12 +494,12 @@ async fn test_list_metrics_by_group() {
 
     // Add metrics to different groups
     let mut request1 =
-        create_add_metric_request("group_a_metric", "test.py", 10, TEST_CONNECTION_ID);
+        create_add_metric_request("group_a_metric", "test.py", 10, &server.connection_id);
     request1.group = Some("group_a".to_string());
     client.add_metric(request1).await.expect("AddMetric failed");
 
     let mut request2 =
-        create_add_metric_request("group_b_metric", "test.py", 20, TEST_CONNECTION_ID);
+        create_add_metric_request("group_b_metric", "test.py", 20, &server.connection_id);
     request2.group = Some("group_b".to_string());
     client.add_metric(request2).await.expect("AddMetric failed");
 
@@ -526,12 +531,13 @@ async fn test_list_metrics_enabled_only() {
         .expect("Failed to create client");
 
     // Add enabled metric
-    let request1 = create_add_metric_request("enabled_metric", "test.py", 10, TEST_CONNECTION_ID);
+    let request1 =
+        create_add_metric_request("enabled_metric", "test.py", 10, &server.connection_id);
     client.add_metric(request1).await.expect("AddMetric failed");
 
     // Add disabled metric
     let mut request2 =
-        create_add_metric_request("disabled_metric", "test.py", 20, TEST_CONNECTION_ID);
+        create_add_metric_request("disabled_metric", "test.py", 20, &server.connection_id);
     request2.enabled = false;
     client.add_metric(request2).await.expect("AddMetric failed");
 
@@ -572,7 +578,7 @@ async fn test_enable_group() {
             &format!("enable_group_metric_{}", i),
             "test.py",
             i * 10,
-            TEST_CONNECTION_ID,
+            &server.connection_id,
         );
         request.group = Some("enable_test_group".to_string());
         request.enabled = false;
@@ -609,7 +615,7 @@ async fn test_disable_group() {
             &format!("disable_group_metric_{}", i),
             "test.py",
             i * 10,
-            TEST_CONNECTION_ID,
+            &server.connection_id,
         );
         request.group = Some("disable_test_group".to_string());
         request.enabled = true;
@@ -673,7 +679,7 @@ async fn test_enable_group_actually_enables_metrics() {
             &format!("actual_enable_metric_{}", i),
             "test.py",
             i * 10,
-            TEST_CONNECTION_ID,
+            &server.connection_id,
         );
         request.group = Some("actual_enable_group".to_string());
         request.enabled = false; // Start disabled
@@ -745,7 +751,7 @@ async fn test_disable_group_actually_disables_metrics() {
             &format!("actual_disable_metric_{}", i),
             "test.py",
             i * 10,
-            TEST_CONNECTION_ID,
+            &server.connection_id,
         );
         request.group = Some("actual_disable_group".to_string());
         request.enabled = true; // Start enabled
@@ -1029,7 +1035,8 @@ async fn test_query_metrics_with_events() {
         .expect("Failed to create streaming client");
 
     // Add a metric
-    let request = create_add_metric_request("query_test_metric", "test.py", 10, TEST_CONNECTION_ID);
+    let request =
+        create_add_metric_request("query_test_metric", "test.py", 10, &server.connection_id);
     let response = metrics_client
         .add_metric(request)
         .await
@@ -1143,7 +1150,7 @@ async fn test_stream_all_with_metric() {
 
     // Add a metric first
     let request =
-        create_add_metric_request("stream_test_metric", "test.py", 10, TEST_CONNECTION_ID);
+        create_add_metric_request("stream_test_metric", "test.py", 10, &server.connection_id);
     metrics_client
         .add_metric(request)
         .await
@@ -1180,6 +1187,7 @@ async fn test_concurrent_metric_creation() {
     let mut handles = vec![];
     for i in 0..5 {
         let uri = server.uri();
+        let conn_id = server.connection_id.clone();
         handles.push(tokio::spawn(async move {
             let channel = Channel::from_shared(uri)
                 .expect("Invalid URI")
@@ -1192,7 +1200,7 @@ async fn test_concurrent_metric_creation() {
                 &format!("concurrent_metric_{}", i),
                 "test.py",
                 (i + 1) * 10,
-                TEST_CONNECTION_ID,
+                &conn_id,
             );
             client.add_metric(request).await
         }));
@@ -1239,7 +1247,7 @@ async fn test_concurrent_read_write() {
 
     // Add initial metric
     let request =
-        create_add_metric_request("concurrent_rw_metric", "test.py", 10, TEST_CONNECTION_ID);
+        create_add_metric_request("concurrent_rw_metric", "test.py", 10, &server.connection_id);
     let response = client.add_metric(request).await.expect("AddMetric failed");
     let metric_id = response.into_inner().metric_id;
 
@@ -1319,7 +1327,8 @@ async fn test_full_metric_lifecycle() {
         .expect("Failed to create client");
 
     // 1. Add metric
-    let request = create_add_metric_request("lifecycle_metric", "app.py", 100, TEST_CONNECTION_ID);
+    let request =
+        create_add_metric_request("lifecycle_metric", "app.py", 100, &server.connection_id);
     let response = client.add_metric(request).await.expect("AddMetric failed");
     let metric_id = response.into_inner().metric_id;
     assert!(metric_id > 0);

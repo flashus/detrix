@@ -64,14 +64,15 @@ impl TestFixture {
     async fn with_mock_connection(&self) -> ConnectionId {
         // Use the connection_service to create a connection (saves to DB and starts adapter)
         // MockDapAdapterFactory will create a MockDapAdapter
+        let identity =
+            detrix_core::ConnectionIdentity::new("test", "python", "/test-workspace", "test-host");
         self.state
             .context
             .connection_service
             .create_connection(
                 "127.0.0.1".to_string(),
                 5678,
-                "python".to_string(),
-                Some("test".to_string()),
+                identity,
                 None,  // No program path for Python
                 None,  // No PID (not using AttachPid mode)
                 false, // SafeMode disabled for tests

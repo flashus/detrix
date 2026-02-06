@@ -458,7 +458,9 @@ pub fn connection_to_info(
     // Exhaustive destructuring - compiler will error if new fields are added to Connection
     let detrix_core::Connection {
         id,
-        name: _, // Not in proto ConnectionInfo
+        name,
+        workspace_root,
+        hostname,
         host,
         port,
         language,
@@ -493,6 +495,10 @@ pub fn connection_to_info(
         // Runtime state not tracked in core Connection - use defaults
         reconnect_attempts: 0,
         max_reconnect_attempts: 0, // 0 = unlimited retries
+        // Identity fields
+        name: name.clone(),
+        workspace_root: workspace_root.clone(),
+        hostname: hostname.clone(),
     }
 }
 
@@ -717,7 +723,9 @@ pub fn proto_to_core_connection(
 
     Ok(Connection {
         id: ConnectionId::from(proto.connection_id.as_str()),
-        name: None,
+        name: proto.name.clone(),
+        workspace_root: proto.workspace_root.clone(),
+        hostname: proto.hostname.clone(),
         host: proto.host.clone(),
         port: proto.port as u16,
         language,
@@ -761,6 +769,10 @@ pub fn core_to_proto_connection_info(conn: &detrix_core::Connection) -> Connecti
         reconnect_attempts: 0,     // Not tracked in current Connection struct
         max_reconnect_attempts: 0, // Not tracked in current Connection struct
         safe_mode: conn.safe_mode,
+        // Identity fields
+        name: conn.name.clone(),
+        workspace_root: conn.workspace_root.clone(),
+        hostname: conn.hostname.clone(),
     }
 }
 

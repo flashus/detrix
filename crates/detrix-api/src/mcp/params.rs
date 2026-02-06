@@ -251,8 +251,19 @@ pub struct CreateConnectionParams {
         description = "Language/adapter type. Required. Supported values: 'python', 'go', 'rust'"
     )]
     pub language: String,
-    #[schemars(description = "Optional custom connection ID")]
-    pub connection_id: Option<String>,
+
+    // Identity fields for UUID-based connection tracking
+    #[schemars(
+        description = "Connection name (user-facing label, e.g., 'my-app'). If not provided, defaults to 'mcp-<language>-<host>:<port>'"
+    )]
+    pub name: Option<String>,
+    #[schemars(
+        description = "Workspace root directory (absolute path). If not provided, defaults to '/unknown'"
+    )]
+    pub workspace_root: Option<String>,
+    #[schemars(description = "Machine hostname. If not provided, defaults to local hostname")]
+    pub hostname: Option<String>,
+
     #[schemars(
         description = "Program path to launch (for Rust/lldb-dap only). REQUIRED for Rust: First start lldb-dap with `lldb-dap --connection listen://HOST:PORT`, then specify the debug binary path here. Binary must have debug symbols (cargo build, NOT --release)."
     )]

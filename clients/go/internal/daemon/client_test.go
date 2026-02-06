@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
@@ -208,12 +207,14 @@ func TestNewClient_CustomTimeout(t *testing.T) {
 	}
 }
 
-func TestRegisterRequestConnectionIdField(t *testing.T) {
+func TestRegisterRequestIdentityFields(t *testing.T) {
 	req := RegisterRequest{
-		Host:     "127.0.0.1",
-		Port:     5678,
-		Language: "go",
-		Name:     "test-client",
+		Host:          "127.0.0.1",
+		Port:          5678,
+		Language:      "go",
+		Name:          "test-client",
+		WorkspaceRoot: "/workspace",
+		Hostname:      "test-host",
 	}
 
 	data, err := json.Marshal(req)
@@ -221,20 +222,25 @@ func TestRegisterRequestConnectionIdField(t *testing.T) {
 		t.Fatalf("failed to marshal RegisterRequest: %v", err)
 	}
 
-	jsonStr := string(data)
-
-	// Must use "connectionId" field name, not "name"
-	if !strings.Contains(jsonStr, `"connectionId"`) {
-		t.Errorf("expected JSON to contain \"connectionId\", got: %s", jsonStr)
-	}
-
-	// Verify "name" key is not present (it should be "connectionId")
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatalf("failed to unmarshal JSON: %v", err)
 	}
-	if _, ok := raw["name"]; ok {
-		t.Errorf("JSON should not contain \"name\" key, got: %s", jsonStr)
+
+	// Must use "name" field (UUID identity system)
+	if _, ok := raw["name"]; !ok {
+		t.Errorf("JSON must contain \"name\" key, got: %s", string(data))
+	}
+	if raw["name"] != "test-client" {
+		t.Errorf("expected name=test-client, got %v", raw["name"])
+	}
+
+	// Must include identity fields for UUID generation
+	if _, ok := raw["workspaceRoot"]; !ok {
+		t.Errorf("JSON must contain \"workspaceRoot\" key, got: %s", string(data))
+	}
+	if _, ok := raw["hostname"]; !ok {
+		t.Errorf("JSON must contain \"hostname\" key, got: %s", string(data))
 	}
 }
 

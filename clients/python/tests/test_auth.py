@@ -23,6 +23,7 @@ class TestDiscoverAuthToken:
         """Test reads token from file when env not set."""
         token_file = tmp_path / "mcp-token"
         token_file.write_text("file-token\n")
+        token_file.chmod(0o600)
 
         with mock.patch.dict(os.environ, {}, clear=True):
             os.environ.pop("DETRIX_TOKEN", None)

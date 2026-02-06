@@ -69,6 +69,9 @@ uuid.workspace = true
 # Table formatting for CLI output
 comfy-table = "7.1"
 
+# System utilities
+hostname = "0.4"  # Get machine hostname for connection identity
+
 # Unix process management (for daemon commands)
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true

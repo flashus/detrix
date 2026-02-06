@@ -23,6 +23,7 @@ Example:
 
 import contextlib
 import logging
+import ssl
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -175,7 +176,11 @@ class HttpDaemonClient:
         self._default_timeout = default_timeout
 
         # Configure SSL verification
-        verify: bool | str = ca_bundle if ca_bundle else verify_ssl
+        if ca_bundle:
+            ssl_context = ssl.create_default_context(cafile=ca_bundle)
+            verify: ssl.SSLContext | bool = ssl_context
+        else:
+            verify = verify_ssl
 
         # Create a client with connection pooling
         self._client = httpx.Client(
@@ -227,7 +232,7 @@ class HttpDaemonClient:
         Args:
             host: Host where debugpy is listening
             port: Port where debugpy is listening
-            connection_id: Unique connection identifier
+            connection_id: Unique connection identifier (user-facing name)
             token: Optional authentication token
             timeout: Request timeout in seconds
 
@@ -235,13 +240,19 @@ class HttpDaemonClient:
             DaemonError: If daemon is not reachable or registration fails
 
         Returns:
-            Connection ID from daemon response
+            Connection ID (UUID) from daemon response
         """
+        import os
+        import socket
+
+        # Build identity fields for UUID-based connection tracking
         payload = {
             "host": host,
             "port": port,
             "language": "python",
-            "connectionId": connection_id,
+            "name": connection_id,  # User-facing name
+            "workspaceRoot": os.getcwd(),  # Current working directory
+            "hostname": socket.gethostname(),  # Machine hostname
         }
 
         headers = {}

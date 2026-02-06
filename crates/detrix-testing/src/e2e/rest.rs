@@ -309,7 +309,13 @@ impl ApiClient for RestClient {
             host: host.to_string(),
             port: port.into(), // Convert u16 to u32 for proto
             language: language.to_string(),
-            connection_id: None,
+            // Identity fields for UUID-based connection tracking
+            name: format!("e2e-test-{}-{}", language, port),
+            workspace_root: "/e2e-test".to_string(),
+            hostname: hostname::get()
+                .ok()
+                .and_then(|h| h.into_string().ok())
+                .unwrap_or_else(|| "test-host".to_string()),
             metadata: None,
             program: program.map(|s| s.to_string()), // Optional program path for launch mode (Rust direct lldb-dap)
             safe_mode: false,                        // Default to false for tests

@@ -10,9 +10,7 @@
 //! in the wake/sleep model where the debugger attaches on-demand.
 
 use detrix_testing::e2e::{
-    executor::TestExecutor,
-    reporter::TestReporter,
-    require_tool, ToolDependency,
+    executor::TestExecutor, reporter::TestReporter, require_tool, ToolDependency,
 };
 use regex::Regex;
 use std::process::{Child, Command, Stdio};
@@ -59,7 +57,13 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     // Build the Go app with debug symbols
     let step = reporter.step_start("Build Go App", "go build -gcflags='all=-N -l'");
     let build_output = Command::new("go")
-        .args(["build", "-gcflags=all=-N -l", "-o", "detrix_example_app", "."])
+        .args([
+            "build",
+            "-gcflags=all=-N -l",
+            "-o",
+            "detrix_example_app",
+            ".",
+        ])
         .current_dir(&fixture_dir)
         .output()
         .expect("Failed to build Go app");
@@ -101,18 +105,28 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     // PHASE 3: Wake the client
     // ====================================================================
     reporter.section("PHASE 3: WAKE CLIENT");
-    let step = reporter.step_start("Wake Client", &format!("POST http://localhost:{}/detrix/wake", control_port));
+    let step = reporter.step_start(
+        "Wake Client",
+        &format!("POST http://localhost:{}/detrix/wake", control_port),
+    );
 
     let client = reqwest::Client::new();
     let wake_response = client
-        .post(&format!("http://127.0.0.1:{}/detrix/wake", control_port))
+        .post(format!("http://127.0.0.1:{}/detrix/wake", control_port))
         .send()
         .await
         .expect("Failed to wake client");
 
-    let wake_result: serde_json::Value = wake_response.json().await.expect("Failed to parse wake response");
-    let debug_port = wake_result["debug_port"].as_u64().expect("No debug_port in response");
-    let returned_connection_id = wake_result["connection_id"].as_str().expect("No connection_id in response");
+    let wake_result: serde_json::Value = wake_response
+        .json()
+        .await
+        .expect("Failed to parse wake response");
+    let debug_port = wake_result["debug_port"]
+        .as_u64()
+        .expect("No debug_port in response");
+    let returned_connection_id = wake_result["connection_id"]
+        .as_str()
+        .expect("No connection_id in response");
 
     reporter.step_success(
         step,
@@ -145,7 +159,10 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     });
 
     let metric1_response: serde_json::Value = client
-        .post(&format!("http://127.0.0.1:{}/api/v1/metrics", executor.http_port))
+        .post(format!(
+            "http://127.0.0.1:{}/api/v1/metrics",
+            executor.http_port
+        ))
         .json(&req1)
         .send()
         .await
@@ -153,7 +170,7 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         .json()
         .await
         .expect("Failed to parse response");
-    let metric1_id = metric1_response["data"]["metricId"].as_u64().expect("No metricId");
+    let metric1_id = metric1_response["metricId"].as_u64().expect("No metricId");
     reporter.step_success(step, Some(&format!("ID={}", metric1_id)));
 
     // Metric 2: LOGPOINT - simple variable 'pnl' at line 130
@@ -169,7 +186,10 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     });
 
     let metric2_response: serde_json::Value = client
-        .post(&format!("http://127.0.0.1:{}/api/v1/metrics", executor.http_port))
+        .post(format!(
+            "http://127.0.0.1:{}/api/v1/metrics",
+            executor.http_port
+        ))
         .json(&req2)
         .send()
         .await
@@ -177,11 +197,14 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         .json()
         .await
         .expect("Failed to parse response");
-    let metric2_id = metric2_response["data"]["metricId"].as_u64().expect("No metricId");
+    let metric2_id = metric2_response["metricId"].as_u64().expect("No metricId");
     reporter.step_success(step, Some(&format!("ID={}", metric2_id)));
 
     // Metric 3: BREAKPOINT - function call 'len(symbol)' at line 122
-    let step = reporter.step_start("Add Breakpoint #1", "symbol_length: 'len(symbol)' at line 122");
+    let step = reporter.step_start(
+        "Add Breakpoint #1",
+        "symbol_length: 'len(symbol)' at line 122",
+    );
     let location3 = format!("@{}#122", fixture_file.display());
     let req3 = serde_json::json!({
         "name": "symbol_length",
@@ -193,7 +216,10 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     });
 
     let metric3_response: serde_json::Value = client
-        .post(&format!("http://127.0.0.1:{}/api/v1/metrics", executor.http_port))
+        .post(format!(
+            "http://127.0.0.1:{}/api/v1/metrics",
+            executor.http_port
+        ))
         .json(&req3)
         .send()
         .await
@@ -201,11 +227,14 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         .json()
         .await
         .expect("Failed to parse response");
-    let metric3_id = metric3_response["data"]["metricId"].as_u64().expect("No metricId");
+    let metric3_id = metric3_response["metricId"].as_u64().expect("No metricId");
     reporter.step_success(step, Some(&format!("ID={}", metric3_id)));
 
     // Metric 4: BREAKPOINT - with stack trace at line 126
-    let step = reporter.step_start("Add Breakpoint #2", "entry_price_with_stack: 'entryPrice' at line 126");
+    let step = reporter.step_start(
+        "Add Breakpoint #2",
+        "entry_price_with_stack: 'entryPrice' at line 126",
+    );
     let location4 = format!("@{}#126", fixture_file.display());
     let req4 = serde_json::json!({
         "name": "entry_price_with_stack",
@@ -218,7 +247,10 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     });
 
     let metric4_response: serde_json::Value = client
-        .post(&format!("http://127.0.0.1:{}/api/v1/metrics", executor.http_port))
+        .post(format!(
+            "http://127.0.0.1:{}/api/v1/metrics",
+            executor.http_port
+        ))
         .json(&req4)
         .send()
         .await
@@ -226,7 +258,7 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         .json()
         .await
         .expect("Failed to parse response");
-    let metric4_id = metric4_response["data"]["metricId"].as_u64().expect("No metricId");
+    let metric4_id = metric4_response["metricId"].as_u64().expect("No metricId");
     reporter.step_success(step, Some(&format!("ID={}", metric4_id)));
 
     // ====================================================================
@@ -252,15 +284,25 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     let mut all_passed = true;
 
     for (metric_id, name, mode) in metrics_to_check {
-        let step = reporter.step_start(&format!("Check {} Events", name), &format!("Mode: {}", mode));
+        let step = reporter.step_start(
+            &format!("Check {} Events", name),
+            &format!("Mode: {}", mode),
+        );
 
         let url = format!(
             "http://127.0.0.1:{}/api/v1/events?metricId={}&limit=10&since={}",
             executor.http_port, metric_id, session_start_micros
         );
 
-        let events_response = client.get(&url).send().await.expect("Failed to query events");
-        let events: Vec<serde_json::Value> = events_response.json().await.expect("Failed to parse events");
+        let events_response = client
+            .get(url)
+            .send()
+            .await
+            .expect("Failed to query events");
+        let events: Vec<serde_json::Value> = events_response
+            .json()
+            .await
+            .expect("Failed to parse events");
 
         if events.is_empty() {
             reporter.step_failed(step, &format!("NO EVENTS! {} metrics must work!", mode));
@@ -269,7 +311,11 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
             let sample_value = events[0]["result"]["valueJson"].as_str().unwrap_or("N/A");
             reporter.step_success(
                 step,
-                Some(&format!("{} events, sample value: {}", events.len(), sample_value)),
+                Some(&format!(
+                    "{} events, sample value: {}",
+                    events.len(),
+                    sample_value
+                )),
             );
         }
     }
@@ -281,7 +327,7 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
 
     // Sleep the client
     let _ = client
-        .post(&format!("http://127.0.0.1:{}/detrix/sleep", control_port))
+        .post(format!("http://127.0.0.1:{}/detrix/sleep", control_port))
         .send()
         .await;
 

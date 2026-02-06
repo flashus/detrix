@@ -193,8 +193,17 @@ pub trait ConnectionRepository: Send + Sync {
     /// Save a new connection
     async fn save(&self, connection: &Connection) -> Result<ConnectionId>;
 
-    /// Find connection by ID
+    /// Find connection by ID (UUID)
     async fn find_by_id(&self, id: &ConnectionId) -> Result<Option<Connection>>;
+
+    /// Find connection by identity components (for process restart detection)
+    async fn find_by_identity(
+        &self,
+        name: &str,
+        language: &str,
+        workspace_root: &str,
+        hostname: &str,
+    ) -> Result<Option<Connection>>;
 
     /// Find connection by address (host:port)
     async fn find_by_address(&self, host: &str, port: u16) -> Result<Option<Connection>>;

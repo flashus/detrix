@@ -44,40 +44,68 @@ pub fn parse_location(location: &str) -> Result<Location, McpError> {
     parse_location_flexible(location, None)
 }
 
-/// Parse location from flexible input formats.
+/// Parse a location string into a `Location`.
+///
+/// This is the shared core parser used by both serde deserialization (REST/gRPC/WS)
+/// and MCP tool handlers. All location string parsing goes through this function.
 ///
 /// Accepts:
 /// - `@file.py#123` (standard format)
-/// - `file.py#123` (missing @, auto-handled)
-/// - `file.py` + line=123 (separate params)
-/// - `/absolute/path/file.py#123`
+/// - `file.py#123` (without @ prefix)
 /// - `./relative/path/file.py#123`
+/// - `/absolute/path/file.py#123`
 /// - `C:/Windows/path.py#123` (Windows paths work naturally with # separator)
+///
+/// # Returns
+/// * `Ok(Location)` - Successfully parsed location
+/// * `Err(String)` - Error message describing what went wrong
+pub fn parse_location_str(location: &str) -> Result<Location, String> {
+    let location = location.trim();
+
+    if location.is_empty() {
+        return Err("Location string cannot be empty".to_string());
+    }
+
+    // Strip @ if present (optional)
+    let location = location.strip_prefix('@').unwrap_or(location);
+
+    // Normalize path (remove leading ./)
+    let location = location.strip_prefix("./").unwrap_or(location);
+
+    // Try to extract line from string using rsplit_once('#')
+    // Using '#' instead of ':' to avoid conflicts with Windows paths like C:/
+    if let Some((file, line_str)) = location.rsplit_once('#') {
+        if let Ok(line) = line_str.parse::<u32>() {
+            return Ok(Location {
+                file: file.to_string(),
+                line,
+            });
+        }
+    }
+
+    Err(format!(
+        "Invalid location format '{}'. Expected 'file#line' or '@file#line'",
+        location
+    ))
+}
+
+/// Parse location from flexible input formats (MCP-specific wrapper).
+///
+/// Extends [`parse_location_str`] with `line_override` support and MCP error types.
+///
+/// Additional formats beyond [`parse_location_str`]:
+/// - `file.py` + line=123 (separate params via `line_override`)
 ///
 /// # Arguments
 /// * `location` - Location string in any supported format
 /// * `line_override` - Optional line number that takes precedence over line in string
-///
-/// # Returns
-/// * `Ok(Location)` - Successfully parsed location
-/// * `Err(McpError)` - Invalid format with helpful error message
-///
-/// # Example
-/// ```ignore
-/// // All of these work:
-/// parse_location_flexible("@auth.py#127", None)?;
-/// parse_location_flexible("auth.py#127", None)?;
-/// parse_location_flexible("auth.py", Some(127))?;
-/// parse_location_flexible("@auth.py#100", Some(127))?;  // Uses 127
-/// parse_location_flexible("C:/Users/test.py#10", None)?;  // Windows path
-/// ```
 pub fn parse_location_flexible(
     location: &str,
     line_override: Option<u32>,
 ) -> Result<Location, McpError> {
-    let location = location.trim();
+    let trimmed = location.trim();
 
-    if location.is_empty() {
+    if trimmed.is_empty() {
         return Err(McpError::invalid_params(
             "Location cannot be empty.\n\
              Expected formats:\n\
@@ -88,36 +116,25 @@ pub fn parse_location_flexible(
         ));
     }
 
-    // Strip @ if present (optional now)
-    let location = location.strip_prefix('@').unwrap_or(location);
-
-    // Normalize path (remove leading ./)
-    let location = location.strip_prefix("./").unwrap_or(location);
-
-    // Try to extract line from string using rsplit_once('#')
-    // Using '#' instead of ':' to avoid conflicts with Windows paths like C:/
-    if let Some((file, line_str)) = location.rsplit_once('#') {
-        // Only treat as line if it's actually a number
-        if let Ok(parsed_line) = line_str.parse::<u32>() {
-            let final_line = line_override.unwrap_or(parsed_line);
-            return Ok(Location {
-                file: file.to_string(),
-                line: final_line,
-            });
+    // Try core parser first
+    if let Ok(mut loc) = parse_location_str(trimmed) {
+        if let Some(line) = line_override {
+            loc.line = line;
         }
-        // Not a number after # - treat whole thing as filename
-        // Fall through to check line_override
+        return Ok(loc);
     }
 
-    // No line in string, must have line_override
+    // Core parser failed - try with line_override (file-only string + separate line)
     if let Some(line) = line_override {
+        let file = trimmed.strip_prefix('@').unwrap_or(trimmed);
+        let file = file.strip_prefix("./").unwrap_or(file);
         return Ok(Location {
-            file: location.to_string(),
+            file: file.to_string(),
             line,
         });
     }
 
-    // No line anywhere - return helpful error
+    // No line anywhere - return helpful MCP error
     Err(McpError::invalid_params(
         format!(
             "Could not determine line number.\n\
@@ -128,7 +145,7 @@ pub fn parse_location_flexible(
              - 'file.py' with separate line=123 parameter\n\
              \n\
              Hint: Use inspect_file to find the correct line number.",
-            location
+            trimmed
         ),
         None,
     ))

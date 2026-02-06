@@ -341,6 +341,25 @@ impl ConnectionRepository for MockConnectionRepository {
             .cloned())
     }
 
+    async fn find_by_identity(
+        &self,
+        name: &str,
+        language: &str,
+        workspace_root: &str,
+        hostname: &str,
+    ) -> Result<Option<Connection>> {
+        let connections = self.connections.lock().await;
+        Ok(connections
+            .values()
+            .find(|c| {
+                c.name.as_ref().map(|n| n.as_str()) == Some(name)
+                    && c.language.as_str() == language
+                    && c.workspace_root == workspace_root
+                    && c.hostname == hostname
+            })
+            .cloned())
+    }
+
     async fn update(&self, connection: &Connection) -> Result<()> {
         let mut connections = self.connections.lock().await;
         connections.insert(connection.id.clone(), connection.clone());

@@ -83,14 +83,15 @@ impl McpE2eFixture {
     async fn with_mock_connection(&self) -> ConnectionId {
         // Use the connection_service to create a connection (saves to DB and starts adapter)
         // MockDapAdapterFactory will create a MockDapAdapter
+        let identity =
+            detrix_core::ConnectionIdentity::new("test", "python", "/test-workspace", "test-host");
         self.state
             .context
             .connection_service
             .create_connection(
                 "127.0.0.1".to_string(),
                 5678,
-                "python".to_string(),
-                Some("test".to_string()),
+                identity,
                 None,  // No program path for Python
                 None,  // No pid (not using AttachPid mode)
                 false, // SafeMode disabled for tests
@@ -100,17 +101,22 @@ impl McpE2eFixture {
     }
 
     /// Helper to create a test metric
-    fn sample_metric(name: &str, group: Option<&str>) -> Metric {
-        Self::sample_metric_at_line(name, group, 10)
+    fn sample_metric(name: &str, group: Option<&str>, conn_id: &ConnectionId) -> Metric {
+        Self::sample_metric_at_line(name, group, 10, conn_id)
     }
 
     /// Helper to create a test metric at a specific line
     /// Uses real fixture file path for file validation
-    fn sample_metric_at_line(name: &str, group: Option<&str>, line: u32) -> Metric {
+    fn sample_metric_at_line(
+        name: &str,
+        group: Option<&str>,
+        line: u32,
+        conn_id: &ConnectionId,
+    ) -> Metric {
         Metric {
             id: None,
             name: name.to_string(),
-            connection_id: ConnectionId::from("test"),
+            connection_id: conn_id.clone(),
             group: group.map(|s| s.to_string()),
             location: Location {
                 file: test_py_path(),
@@ -165,9 +171,9 @@ async fn test_server_info_has_tools_capability() {
 #[tokio::test]
 async fn test_e2e_add_and_list_metric() {
     let fixture = McpE2eFixture::new().await;
-    fixture.with_mock_connection().await;
+    let conn_id = fixture.with_mock_connection().await;
 
-    let metric = McpE2eFixture::sample_metric("test_metric", Some("test_group"));
+    let metric = McpE2eFixture::sample_metric("test_metric", Some("test_group"), &conn_id);
 
     let metric_id = fixture
         .state
@@ -195,9 +201,9 @@ async fn test_e2e_add_and_list_metric() {
 #[tokio::test]
 async fn test_e2e_toggle_metric() {
     let fixture = McpE2eFixture::new().await;
-    fixture.with_mock_connection().await;
+    let conn_id = fixture.with_mock_connection().await;
 
-    let metric = McpE2eFixture::sample_metric("toggle_test", None);
+    let metric = McpE2eFixture::sample_metric("toggle_test", None, &conn_id);
 
     let metric_id = fixture
         .state
@@ -250,9 +256,9 @@ async fn test_e2e_toggle_metric() {
 #[tokio::test]
 async fn test_e2e_query_events() {
     let fixture = McpE2eFixture::new().await;
-    fixture.with_mock_connection().await;
+    let conn_id = fixture.with_mock_connection().await;
 
-    let metric = McpE2eFixture::sample_metric("query_test", None);
+    let metric = McpE2eFixture::sample_metric("query_test", None, &conn_id);
 
     let metric_id = fixture
         .state
@@ -268,7 +274,7 @@ async fn test_e2e_query_events() {
         let event = MetricEvent::new(
             metric_id,
             "query_test".to_string(),
-            ConnectionId::from("test"),
+            conn_id.clone(),
             format!(r#"{{"value": {}}}"#, i),
         );
         fixture.state.event_repository.save(&event).await.unwrap();
@@ -302,13 +308,13 @@ async fn test_e2e_validate_expression() {
 #[tokio::test]
 async fn test_e2e_full_metric_lifecycle() {
     let fixture = McpE2eFixture::new().await;
-    fixture.with_mock_connection().await;
+    let conn_id = fixture.with_mock_connection().await;
 
     // 1. Add metric
     let metric = Metric {
         id: None,
         name: "lifecycle_test".to_string(),
-        connection_id: ConnectionId::from("test"),
+        connection_id: conn_id.clone(),
         group: Some("test".to_string()),
         location: Location {
             file: app_py_path(),
@@ -392,7 +398,7 @@ async fn test_e2e_full_metric_lifecycle() {
 #[tokio::test]
 async fn test_e2e_multiple_metrics_in_group() {
     let fixture = McpE2eFixture::new().await;
-    fixture.with_mock_connection().await;
+    let conn_id = fixture.with_mock_connection().await;
 
     // Add metrics in different groups at different lines (DAP only supports one logpoint per line)
     for (name, group, line) in [
@@ -400,7 +406,7 @@ async fn test_e2e_multiple_metrics_in_group() {
         ("metric_b", "group_b", 20),
         ("metric_c", "group_a", 30),
     ] {
-        let metric = McpE2eFixture::sample_metric_at_line(name, Some(group), line);
+        let metric = McpE2eFixture::sample_metric_at_line(name, Some(group), line, &conn_id);
         fixture
             .state
             .context
@@ -433,7 +439,7 @@ async fn test_e2e_multiple_metrics_in_group() {
 #[tokio::test]
 async fn test_concurrent_tool_calls_no_deadlock() {
     let fixture = McpE2eFixture::new().await;
-    fixture.with_mock_connection().await;
+    let conn_id = fixture.with_mock_connection().await;
 
     // Spawn multiple concurrent add operations
     let mut add_handles = vec![];
@@ -441,11 +447,12 @@ async fn test_concurrent_tool_calls_no_deadlock() {
     for i in 0..10 {
         let state = Arc::clone(&fixture.state);
         let file_path = fixture_path.clone();
+        let conn_id_clone = conn_id.clone();
         let handle = tokio::spawn(async move {
             let metric = Metric {
                 id: None,
                 name: format!("concurrent_metric_{}", i),
-                connection_id: ConnectionId::from("test"),
+                connection_id: conn_id_clone,
                 group: Some("concurrent_group".to_string()),
                 location: Location {
                     file: file_path,
@@ -529,10 +536,10 @@ async fn test_concurrent_tool_calls_no_deadlock() {
 #[tokio::test]
 async fn test_graceful_degradation_list_metrics_when_disconnected() {
     let fixture = McpE2eFixture::new().await;
-    fixture.with_mock_connection().await;
+    let conn_id = fixture.with_mock_connection().await;
 
     // Add a metric first (MockDapAdapter is "connected")
-    let metric = McpE2eFixture::sample_metric("test_metric", None);
+    let metric = McpE2eFixture::sample_metric("test_metric", None, &conn_id);
     fixture
         .state
         .context
@@ -561,10 +568,10 @@ async fn test_graceful_degradation_list_metrics_when_disconnected() {
 #[tokio::test]
 async fn test_graceful_degradation_query_events_when_disconnected() {
     let fixture = McpE2eFixture::new().await;
-    fixture.with_mock_connection().await;
+    let conn_id = fixture.with_mock_connection().await;
 
     // Add a metric
-    let metric = McpE2eFixture::sample_metric("query_test", None);
+    let metric = McpE2eFixture::sample_metric("query_test", None, &conn_id);
     let metric_id = fixture
         .state
         .context
@@ -579,7 +586,7 @@ async fn test_graceful_degradation_query_events_when_disconnected() {
         id: None,
         metric_id,
         metric_name: "query_test".to_string(),
-        connection_id: ConnectionId::from("test"),
+        connection_id: conn_id.clone(),
         timestamp: MetricEvent::now_micros(),
         thread_name: None,
         thread_id: None,

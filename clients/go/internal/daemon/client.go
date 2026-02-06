@@ -97,12 +97,14 @@ func (c *Client) HealthCheck(daemonURL string, timeout time.Duration) error {
 
 // RegisterRequest is the request body for connection registration.
 type RegisterRequest struct {
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Language string `json:"language"`
-	Name     string `json:"connectionId"`
-	Token    string `json:"token,omitempty"`
-	SafeMode bool   `json:"safe_mode,omitempty"`
+	Host          string `json:"host"`
+	Port          int    `json:"port"`
+	Language      string `json:"language"`
+	Name          string `json:"name"`
+	WorkspaceRoot string `json:"workspaceRoot"`
+	Hostname      string `json:"hostname"`
+	Token         string `json:"token,omitempty"`
+	SafeMode      bool   `json:"safe_mode,omitempty"`
 }
 
 // RegisterResponse is the response from connection registration.

@@ -53,7 +53,7 @@ class MockDaemonHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(
-                json.dumps({"connectionId": data.get("connectionId")}).encode()
+                json.dumps({"connectionId": data.get("name", data.get("connectionId", "mock-conn"))}).encode()
             )
         else:
             self.send_response(404)

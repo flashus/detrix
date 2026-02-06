@@ -1105,7 +1105,10 @@ impl DapWorkflowScenarios {
                     }
 
                     // Check events for each introspection metric
+                    // Reset counters each iteration to avoid double-counting
                     let mut total_introspection_events = 0;
+                    let mut iter_stack_trace_events = 0;
+                    let mut iter_memory_snapshot_events = 0;
                     for metric in &config.introspection_metrics {
                         if let Ok(r) = client.query_events(&metric.name, 100).await {
                             let count = r.data.len();
@@ -1118,10 +1121,10 @@ impl DapWorkflowScenarios {
 
                                 // Track specific introspection types
                                 if metric.capture_stack_trace {
-                                    result.stack_trace_events += count;
+                                    iter_stack_trace_events += count;
                                 }
                                 if metric.capture_memory_snapshot {
-                                    result.memory_snapshot_events += count;
+                                    iter_memory_snapshot_events += count;
                                 }
 
                                 // Log introspection event details
@@ -1208,6 +1211,11 @@ impl DapWorkflowScenarios {
                         }
                     }
 
+                    // Update result with latest snapshot (not accumulating)
+                    result.introspection_events = total_introspection_events;
+                    result.stack_trace_events = iter_stack_trace_events;
+                    result.memory_snapshot_events = iter_memory_snapshot_events;
+
                     if total_introspection_events >= config.introspection_metrics.len() {
                         reporter.step_success(
                             step,
@@ -1218,7 +1226,6 @@ impl DapWorkflowScenarios {
                                 result.memory_snapshot_events
                             )),
                         );
-                        result.introspection_events = total_introspection_events;
                         break;
                     }
 

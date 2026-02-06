@@ -28,6 +28,11 @@ fn main() -> Result<()> {
         .field_attribute("enabled", "#[serde(default)]")
         .field_attribute("capture_stack_trace", "#[serde(default)]")
         .field_attribute("capture_memory_snapshot", "#[serde(default)]")
+        // Location accepts both object {"file":"..","line":N} and string "@file#N" formats
+        .type_attribute(
+            "detrix.v1.Location",
+            "#[serde(try_from = \"crate::location_serde::LocationInput\")]",
+        )
         // Compile all proto files
         .compile_protos(
             &[

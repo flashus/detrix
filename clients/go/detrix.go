@@ -307,14 +307,29 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 	// 2c. Discover auth token
 	token := auth.DiscoverToken(detrixHome)
 
-	// 2d. Register with daemon
+	// 2d. Get workspace root and hostname for identity
+	workspaceRoot, err := os.Getwd()
+	if err != nil {
+		workspaceRoot = "/unknown"
+		slog.Warn("failed to get working directory", "error", err)
+	}
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "unknown"
+		slog.Warn("failed to get hostname", "error", err)
+	}
+
+	// 2e. Register with daemon
 	connID, err := daemonClient.Register(targetDaemonURL, daemon.RegisterRequest{
-		Host:     debugHost,
-		Port:     delveProc.Port,
-		Language: "go",
-		Name:     name,
-		Token:    token,
-		SafeMode: safeMode,
+		Host:          debugHost,
+		Port:          delveProc.Port,
+		Language:      "go",
+		Name:          name,
+		WorkspaceRoot: workspaceRoot,
+		Hostname:      hostname,
+		Token:         token,
+		SafeMode:      safeMode,
 	}, registerTimeout)
 	if err != nil {
 		if killErr := delveManager.Kill(delveProc); killErr != nil {

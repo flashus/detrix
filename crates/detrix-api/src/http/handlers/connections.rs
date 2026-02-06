@@ -121,11 +121,21 @@ pub async fn create_connection(
 
     let connection_service = &state.context.connection_service;
 
+    // Build connection identity from request
+    // Note: name, workspace_root, hostname are required fields
+    let identity = detrix_core::ConnectionIdentity::new(
+        payload.name,
+        payload.language.clone(),
+        payload.workspace_root,
+        payload.hostname,
+    );
+
     // ConnectionService.create_connection now handles:
-    // 1. Saving connection to repository
-    // 2. Starting adapter via AdapterLifecycleManager
-    // 3. Setting up event listeners
-    // 4. Updating connection status
+    // 1. Validating identity and generating UUID
+    // 2. Saving connection to repository
+    // 3. Starting adapter via AdapterLifecycleManager
+    // 4. Setting up event listeners
+    // 5. Updating connection status
     // Proto uses u32 for port, service expects u16
     let port = payload.port as u16;
 
@@ -133,8 +143,7 @@ pub async fn create_connection(
         .create_connection(
             payload.host.clone(),
             port,
-            payload.language.clone(),
-            payload.connection_id,
+            identity,
             payload.program,   // Optional program path for Rust direct lldb-dap
             payload.pid,       // Optional PID for Rust client AttachPid mode
             payload.safe_mode, // SafeMode: only allow logpoints
@@ -154,7 +163,7 @@ pub async fn create_connection(
     Ok((
         StatusCode::CREATED,
         Json(CreateConnectionResponse {
-            connection_id: connection_id.0.clone(),
+            connection_id: connection.id.0.clone(),
             status: status::CREATED.to_string(),
             connection: Some(connection_to_rest_response(&connection)),
             metadata: None,

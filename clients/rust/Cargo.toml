@@ -37,6 +37,7 @@ subtle = "2.5"
 # Utilities
 dirs = "5.0"
 tracing = "0.1"
+hostname = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal", "process"] }

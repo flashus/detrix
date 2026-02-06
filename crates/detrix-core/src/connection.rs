@@ -1,5 +1,6 @@
 //! Connection entity and types for managing debugger connections (debugpy, delve, lldb-dap)
 
+use crate::connection_identity::ConnectionIdentity;
 use crate::entities::SourceLanguage;
 use crate::{Error, Result};
 use chrono::Utc;
@@ -128,12 +129,19 @@ impl From<&str> for ConnectionStatus {
 /// Connection to a debugger server (debugpy, delve, lldb-dap)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Connection {
-    /// Unique connection identifier
+    /// Unique connection identifier (UUID generated from identity)
+    /// Format: SHA256(name|language|workspace_root|hostname)[0..16]
     pub id: ConnectionId,
 
-    /// User-friendly name (optional alias)
+    /// User-friendly name (e.g., "trade-bot")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+
+    /// Workspace directory (absolute path)
+    pub workspace_root: String,
+
+    /// Machine hostname for multi-host isolation
+    pub hostname: String,
 
     /// Host address (e.g., "127.0.0.1", "localhost")
     pub host: String,
@@ -178,7 +186,68 @@ impl Connection {
         Utc::now().timestamp_micros()
     }
 
-    /// Create a new connection
+    /// Create a new connection with identity (preferred method)
+    pub fn new_with_identity(
+        identity: ConnectionIdentity,
+        host: String,
+        port: u16,
+    ) -> Result<Self> {
+        // Validate identity
+        identity
+            .validate()
+            .map_err(|e| Error::InvalidConfig(e.to_string()))?;
+
+        // Validate port range (MIN_UNRESERVED_PORT-65535)
+        if port < MIN_UNRESERVED_PORT {
+            return Err(Error::InvalidConfig(format!(
+                "Port {} is below {} (reserved range)",
+                port, MIN_UNRESERVED_PORT
+            )));
+        }
+
+        // Validate host is not empty
+        if host.is_empty() {
+            return Err(Error::InvalidConfig("Host cannot be empty".to_string()));
+        }
+
+        // Parse language
+        let language: SourceLanguage = identity
+            .language
+            .as_str()
+            .try_into()
+            .map_err(|e| Error::InvalidConfig(format!("Invalid language: {}", e)))?;
+
+        // Validate language is known
+        if language == SourceLanguage::Unknown {
+            return Err(Error::InvalidConfig(
+                "Unknown language is not allowed for connections. Specify a valid language: python, go, rust, javascript, typescript, java, cpp, c, ruby, php".to_string()
+            ));
+        }
+
+        // Generate UUID from identity and use it as ConnectionId
+        let uuid = identity.to_uuid();
+        let connection_id = ConnectionId::new(&uuid);
+
+        let now = Self::now_micros();
+        Ok(Self {
+            id: connection_id,
+            name: Some(identity.name),
+            workspace_root: identity.workspace_root,
+            hostname: identity.hostname,
+            host,
+            port,
+            language,
+            status: ConnectionStatus::Disconnected,
+            auto_reconnect: true,
+            safe_mode: false,
+            created_at: now,
+            last_connected_at: None,
+            last_active: now,
+        })
+    }
+
+    /// Create a new connection (legacy method for testing)
+    /// For production use, prefer new_with_identity()
     pub fn new(
         id: ConnectionId,
         host: String,
@@ -209,6 +278,8 @@ impl Connection {
         Ok(Self {
             id,
             name: None,
+            workspace_root: "/unknown".to_string(),
+            hostname: "unknown".to_string(),
             host,
             port,
             language,
@@ -221,7 +292,7 @@ impl Connection {
         })
     }
 
-    /// Create a new connection with auto-generated ID
+    /// Create a new connection with auto-generated ID (legacy method)
     pub fn new_with_auto_id(host: String, port: u16, language: SourceLanguage) -> Result<Self> {
         let id = ConnectionId::from_host_port(&host, port);
         Self::new(id, host, port, language)
@@ -581,5 +652,67 @@ mod tests {
         // Test deserialization
         let deserialized: Connection = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, conn);
+    }
+
+    #[test]
+    fn test_connection_new_with_identity() {
+        let identity =
+            ConnectionIdentity::new("trade-bot", "python", "/workspace/project", "host1");
+        let conn =
+            Connection::new_with_identity(identity.clone(), "127.0.0.1".to_string(), 5678).unwrap();
+
+        // Verify ID is the deterministic UUID
+        let expected_uuid = identity.to_uuid();
+        assert_eq!(conn.id.0, expected_uuid);
+
+        // Verify identity fields
+        assert_eq!(conn.name, Some("trade-bot".to_string()));
+        assert_eq!(conn.workspace_root, "/workspace/project");
+        assert_eq!(conn.hostname, "host1");
+        assert_eq!(conn.language, SourceLanguage::Python);
+
+        // Verify connection details
+        assert_eq!(conn.host, "127.0.0.1");
+        assert_eq!(conn.port, 5678);
+    }
+
+    #[test]
+    fn test_connection_identity_different_workspace_different_uuid() {
+        let identity1 = ConnectionIdentity::new("app", "go", "/workspace1", "host");
+        let conn1 =
+            Connection::new_with_identity(identity1, "127.0.0.1".to_string(), 5678).unwrap();
+
+        let identity2 = ConnectionIdentity::new("app", "go", "/workspace2", "host");
+        let conn2 =
+            Connection::new_with_identity(identity2, "127.0.0.1".to_string(), 5678).unwrap();
+
+        // Different workspace → different ID
+        assert_ne!(conn1.id, conn2.id);
+    }
+
+    #[test]
+    fn test_connection_identity_different_language_different_uuid() {
+        let identity1 = ConnectionIdentity::new("app", "python", "/workspace", "host");
+        let conn1 =
+            Connection::new_with_identity(identity1, "127.0.0.1".to_string(), 5678).unwrap();
+
+        let identity2 = ConnectionIdentity::new("app", "rust", "/workspace", "host");
+        let conn2 =
+            Connection::new_with_identity(identity2, "127.0.0.1".to_string(), 5678).unwrap();
+
+        // Different language → different ID
+        assert_ne!(conn1.id, conn2.id);
+    }
+
+    #[test]
+    fn test_connection_identity_validation_failure() {
+        let identity = ConnectionIdentity::new("", "python", "/workspace", "host");
+        let result = Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5678);
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Connection name cannot be empty"));
     }
 }

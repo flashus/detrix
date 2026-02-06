@@ -35,6 +35,9 @@ pub mod http;
 // MCP (Model Context Protocol) handlers (DTO mapping only)
 pub mod mcp;
 
+// Flexible Location deserialization (accepts both object and @file#line string)
+pub mod location_serde;
+
 // Common utilities shared across API layers
 pub mod common;
 

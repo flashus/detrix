@@ -445,6 +445,23 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
     // Discover auth token
     let token = auth::discover_token(detrix_home.as_ref().map(std::path::Path::new));
 
+    // Get workspace root and hostname for identity
+    let workspace_root = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .unwrap_or_else(|| {
+            warn!("Failed to get current directory, using /unknown");
+            "/unknown".to_string()
+        });
+
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| {
+            warn!("Failed to get hostname, using unknown");
+            "unknown".to_string()
+        });
+
     // Register with daemon
     // Pass our PID so the daemon can use AttachPid mode with lldb-dap
     let connection_id = match daemon_client.register(
@@ -454,6 +471,8 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
             port: actual_debug_port,
             language: "rust".to_string(),
             name: name.clone(),
+            workspace_root,
+            hostname,
             pid: Some(std::process::id()),
             token,
             safe_mode,

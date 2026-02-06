@@ -41,6 +41,10 @@ dirs = "6"
 # Logging
 tracing.workspace = true
 
+# Utilities
+hostname = "0.4"  # Get machine hostname for connection identity
+regex.workspace = true
+
 # Macro utilities for unified tests
 paste = "1.0"
 

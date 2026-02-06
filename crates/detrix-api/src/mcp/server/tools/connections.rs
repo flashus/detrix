@@ -54,12 +54,32 @@ pub async fn create_connection_impl(
 ) -> Result<CreateConnectionResult, McpError> {
     let connection_service = &state.context.connection_service;
 
+    // Build connection identity with defaults for MCP
+    let name = params
+        .name
+        .unwrap_or_else(|| format!("mcp-{}-{}:{}", params.language, params.host, params.port));
+    let workspace_root = params
+        .workspace_root
+        .unwrap_or_else(|| "/unknown".to_string());
+    let hostname = params.hostname.unwrap_or_else(|| {
+        hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "unknown".to_string())
+    });
+
+    let identity = detrix_core::ConnectionIdentity::new(
+        name,
+        params.language.clone(),
+        workspace_root,
+        hostname,
+    );
+
     match connection_service
         .create_connection(
             params.host.clone(),
             params.port as u16,
-            params.language.clone(),
-            params.connection_id,
+            identity,
             params.program,   // Optional program path for Rust direct lldb-dap
             None,             // MCP doesn't use PID-based attach (client library feature)
             params.safe_mode, // SafeMode: only allow logpoints

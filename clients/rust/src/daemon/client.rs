@@ -21,9 +21,15 @@ pub struct RegisterRequest {
     /// Programming language.
     pub language: String,
 
-    /// Connection name.
-    #[serde(rename = "connectionId")]
+    /// Connection name (user-facing identifier).
     pub name: String,
+
+    /// Workspace root directory.
+    #[serde(rename = "workspaceRoot")]
+    pub workspace_root: String,
+
+    /// Machine hostname.
+    pub hostname: String,
 
     /// Process ID to attach to (required for Rust/lldb-dap AttachPid mode).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -197,6 +203,8 @@ mod tests {
             port: 5678,
             language: "rust".to_string(),
             name: "test-client".to_string(),
+            workspace_root: "/workspace".to_string(),
+            hostname: "test-host".to_string(),
             pid: Some(12345),
             token: Some("secret".to_string()),
             safe_mode: true,
@@ -206,6 +214,8 @@ mod tests {
         assert!(json.contains("\"host\":\"127.0.0.1\""));
         assert!(json.contains("\"port\":5678"));
         assert!(json.contains("\"language\":\"rust\""));
+        assert!(json.contains("\"workspaceRoot\":\"/workspace\""));
+        assert!(json.contains("\"hostname\":\"test-host\""));
         assert!(json.contains("\"pid\":12345"));
         assert!(json.contains("\"safeMode\":true"));
     }
@@ -217,6 +227,8 @@ mod tests {
             port: 5678,
             language: "rust".to_string(),
             name: "test-client".to_string(),
+            workspace_root: "/workspace".to_string(),
+            hostname: "test-host".to_string(),
             pid: None,
             token: None,
             safe_mode: false,
@@ -229,5 +241,8 @@ mod tests {
         assert!(!json.contains("pid"));
         // safeMode should be omitted when false
         assert!(!json.contains("safeMode"));
+        // Required fields should be present
+        assert!(json.contains("\"workspaceRoot\":\"/workspace\""));
+        assert!(json.contains("\"hostname\":\"test-host\""));
     }
 }

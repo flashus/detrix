@@ -56,6 +56,7 @@ uuid.workspace = true
 sysinfo.workspace = true
 regex.workspace = true
 paste.workspace = true
+hostname = "0.4"  # Get machine hostname for connection identity
 
 # Unix-specific for process info
 [target.'cfg(unix)'.dependencies]

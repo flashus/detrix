@@ -9,7 +9,7 @@
 use crate::services::AdapterLifecycleManager;
 use crate::{ConnectionRepositoryRef, MetricRepositoryRef};
 use detrix_core::{
-    Connection, ConnectionId, ConnectionStatus, Result, SourceLanguage, SystemEvent,
+    Connection, ConnectionId, ConnectionIdentity, ConnectionStatus, Result, SystemEvent,
 };
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -63,80 +63,90 @@ impl ConnectionService {
     /// Create a new connection to a debugger server
     ///
     /// This method:
-    /// 1. Validates connection parameters via domain logic
-    /// 2. Saves connection to repository
-    /// 3. Delegates adapter lifecycle to AdapterLifecycleManager
-    /// 4. Updates connection status on success
+    /// 1. Validates connection identity and parameters
+    /// 2. Generates deterministic UUID from identity
+    /// 3. Checks for existing connection with same identity (idempotency)
+    /// 4. Saves connection to repository
+    /// 5. Delegates adapter lifecycle to AdapterLifecycleManager
+    /// 6. Updates connection status on success
     ///
     /// # Arguments
     /// * `host` - Host address (e.g., "127.0.0.1", "localhost")
     /// * `port` - Port number (must be >= 1024)
-    /// * `language` - Language/adapter type (e.g., "python", "go", "rust")
-    /// * `id` - Optional custom connection ID. If None, auto-generates from host:port
+    /// * `identity` - Connection identity (name, language, workspace_root, hostname)
     /// * `program` - Optional program path for Rust direct lldb-dap launch mode
+    /// * `pid` - Optional PID for AttachPid mode
     /// * `safe_mode` - Enable SafeMode: only allow logpoints, disable breakpoint-based operations
     ///
     /// # Returns
-    /// ConnectionId of the created connection
+    /// ConnectionId (which is the deterministic UUID) of the created connection
     ///
     /// # Business Rules
     /// - Port must be >= 1024 (not in reserved range)
     /// - Host must not be empty
-    /// - Language must not be empty
-    /// - Connection ID must be unique (auto-generated IDs prevent collisions)
-    #[instrument(skip(self), fields(host = %host, port = port, language = %language, pid = ?pid, safe_mode = safe_mode))]
+    /// - Identity must be valid (non-empty fields)
+    /// - Connection UUID is deterministic based on identity
+    /// - Idempotent: same identity + connected adapter = return existing
+    #[instrument(skip(self), fields(host = %host, port = port, name = %identity.name, language = %identity.language, workspace_root = %identity.workspace_root, hostname = %identity.hostname, pid = ?pid, safe_mode = safe_mode))]
     pub async fn create_connection(
         &self,
         host: String,
         port: u16,
-        language: String,
-        id: Option<String>,
+        identity: ConnectionIdentity,
         program: Option<String>,
         pid: Option<u32>,
         safe_mode: bool,
     ) -> Result<ConnectionId> {
+        use detrix_core::Error;
         use tracing::info;
 
-        // 1. Parse language string to SourceLanguage (fail-fast with clear error)
-        let language: SourceLanguage = language.try_into()?;
+        // 1. Validate identity
+        identity.validate().map_err(Error::InvalidConfig)?;
 
-        // 2. Determine connection ID (auto-generate or use provided)
-        let connection_id = match id {
-            Some(custom_id) => ConnectionId::new(custom_id),
-            None => ConnectionId::from_host_port(&host, port),
-        };
+        // 2. Generate deterministic UUID from identity
+        let uuid = identity.to_uuid();
+        let connection_id = ConnectionId::new(&uuid);
 
-        // 3. Check if connection already exists and is connected
-        //    This handles the case where restore_connections is running or connection was already created
-        if let Ok(Some(existing)) = self.connection_repo.find_by_id(&connection_id).await {
+        // 3. Check if connection with same identity already exists and is connected
+        //    This handles idempotency and the case where restore_connections is running
+        if let Ok(Some(existing)) = self
+            .connection_repo
+            .find_by_identity(
+                &identity.name,
+                &identity.language,
+                &identity.workspace_root,
+                &identity.hostname,
+            )
+            .await
+        {
             if existing.status == ConnectionStatus::Connected
                 && self
                     .adapter_lifecycle_manager
-                    .has_adapter(&connection_id)
+                    .has_adapter(&existing.id)
                     .await
             {
                 info!(
-                    "Connection {} already exists and is connected, returning existing",
-                    connection_id.0
+                    "Connection with identity {:?} already exists and is connected (UUID={}), returning existing",
+                    identity, uuid
                 );
-                return Ok(connection_id);
+                return Ok(existing.id);
             }
             // Connection exists but not connected - will be restarted below
             info!(
-                "Connection {} exists but status is {:?}, will restart adapter",
-                connection_id.0, existing.status
+                "Connection with identity exists but not connected (UUID={}), will restart adapter",
+                uuid
             );
         }
 
-        // 4. Create Connection entity (validates host, port, and rejects Unknown language)
-        let mut connection = Connection::new(connection_id.clone(), host.clone(), port, language)?;
+        // 4. Create Connection entity from identity (validates host, port, and rejects Unknown language)
+        // The language validation happens inside new_with_identity
+        let mut connection = Connection::new_with_identity(identity, host.clone(), port)?;
         connection.safe_mode = safe_mode;
 
         // 5. Save connection to repository (initially Disconnected)
         self.connection_repo.save(&connection).await?;
 
         // 6. Start adapter via lifecycle manager (handles everything: start, subscribe, route events)
-        //    Pass language to dispatch to the correct adapter factory method
         //    Note: start_adapter returns degradation info (sync_failed, resume_failed) which is logged internally
         let _start_result = self
             .adapter_lifecycle_manager

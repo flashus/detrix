@@ -47,14 +47,21 @@ impl ConnectionService for ConnectionServiceImpl {
         let req = request.into_inner();
         let connection_service = self.get_connection_service();
 
+        // Build connection identity from request
+        let identity = detrix_core::ConnectionIdentity::new(
+            req.name,
+            req.language.clone(),
+            req.workspace_root,
+            req.hostname,
+        );
+
         // Call service (ALL business logic happens here)
         // ConnectionService.create_connection now handles adapter lifecycle internally
         let connection_id = connection_service
             .create_connection(
                 req.host.clone(),
                 req.port as u16,
-                req.language.clone(),
-                req.connection_id,
+                identity,
                 req.program,   // Optional program path for Rust direct lldb-dap
                 req.pid,       // Optional PID for Rust client AttachPid mode
                 req.safe_mode, // SafeMode: only allow logpoints
@@ -70,7 +77,7 @@ impl ConnectionService for ConnectionServiceImpl {
             .ok_or_else(|| Status::internal("Connection not found after creation"))?;
 
         Ok(Response::new(CreateConnectionResponse {
-            connection_id: connection_id.0.clone(),
+            connection_id: connection.id.0.clone(),
             status: status::CREATED.to_string(),
             connection: Some(core_to_proto_connection_info(&connection)),
             metadata: None,

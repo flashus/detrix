@@ -33,18 +33,22 @@ service ConnectionService {
 // ============================================================
 
 message CreateConnectionRequest {
-  string host = 1;                  // Host address (e.g., "127.0.0.1", "localhost")
-  uint32 port = 2;                  // Port number (must be >= 1024)
-  string language = 3;              // Language/adapter type (e.g., "python", "go", "rust")
-  optional string connection_id = 4; // Optional custom connection ID
-  RequestMetadata metadata = 5;
-  optional string program = 6;      // Program path for launch mode (Rust direct lldb-dap)
-  bool safe_mode = 7;               // SafeMode: only allow logpoints, disable breakpoint-based operations
-  optional uint32 pid = 8;          // Process ID for AttachPid mode (Rust client library)
+  string host = 1;                   // Host address (e.g., "127.0.0.1", "localhost")
+  uint32 port = 2;                   // Port number (must be >= 1024)
+  string language = 3;               // Language/adapter type (e.g., "python", "go", "rust")
+  RequestMetadata metadata = 4;
+  optional string program = 5;       // Program path for launch mode (Rust direct lldb-dap)
+  bool safe_mode = 6;                // SafeMode: only allow logpoints, disable breakpoint-based operations
+  optional uint32 pid = 7;           // Process ID for AttachPid mode (Rust client library)
+
+  // Identity fields for UUID generation
+  string name = 8;                   // User-friendly name (e.g., "trade-bot")
+  string workspace_root = 9;         // Workspace directory for isolation
+  string hostname = 10;              // Machine hostname for multi-host support
 }
 
 message CreateConnectionResponse {
-  string connection_id = 1;         // Unique connection identifier
+  string connection_id = 1;         // Stable UUID: SHA256(name|language|workspace_root|hostname)[0..16]
   string status = 2;                // "created", "connected", etc.
   ConnectionInfo connection = 3;    // Full connection info
   ResponseMetadata metadata = 4;
@@ -97,18 +101,23 @@ message CleanupConnectionsResponse {
 // ============================================================
 
 message ConnectionInfo {
-  string connection_id = 1;
+  string connection_id = 1;          // Stable UUID: SHA256(name|language|workspace_root|hostname)[0..16]
   string host = 2;
   uint32 port = 3;
   string language = 4;
   ConnectionStatus status = 5;
-  int64 created_at = 6;             // Unix timestamp (microseconds)
+  int64 created_at = 6;              // Unix timestamp (microseconds)
   optional int64 connected_at = 7;   // Unix timestamp (microseconds)
   optional int64 last_active_at = 8; // Unix timestamp (microseconds)
   bool auto_reconnect = 9;
   uint32 reconnect_attempts = 10;
   uint32 max_reconnect_attempts = 11;
-  bool safe_mode = 12;              // SafeMode: only allow logpoints, disable breakpoint-based operations
+  bool safe_mode = 12;               // SafeMode: only allow logpoints, disable breakpoint-based operations
+
+  // Identity fields for UUID generation
+  optional string name = 13;         // User-friendly name (e.g., "trade-bot")
+  string workspace_root = 14;        // Workspace directory for isolation
+  string hostname = 15;              // Machine hostname for multi-host support
 }
 
 // Connection status enum

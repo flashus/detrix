@@ -451,6 +451,16 @@ impl ConnectionRepository for MockConnectionRepository {
         Ok(None)
     }
 
+    async fn find_by_identity(
+        &self,
+        _name: &str,
+        _language: &str,
+        _workspace_root: &str,
+        _hostname: &str,
+    ) -> Result<Option<Connection>> {
+        Ok(None)
+    }
+
     async fn list_all(&self) -> Result<Vec<Connection>> {
         let conns = self.connections.lock().await;
         Ok(conns.values().cloned().collect())

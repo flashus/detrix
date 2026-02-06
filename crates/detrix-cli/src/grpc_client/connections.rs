@@ -42,11 +42,28 @@ impl ConnectionsClient {
         program: Option<&str>,
         safe_mode: bool,
     ) -> Result<ConnectionInfo> {
+        // Generate identity fields for UUID-based connection tracking
+        let name = connection_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("cli-{}-{}:{}", language, host, port));
+
+        let workspace_root = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_else(|| "/unknown".to_string());
+
+        let hostname = hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "unknown".to_string());
+
         let request = CreateConnectionRequest {
             host: host.to_string(),
             port,
             language: language.to_string(),
-            connection_id: connection_id.map(|s| s.to_string()),
+            name,
+            workspace_root,
+            hostname,
             metadata: Some(RequestMetadata::default()),
             program: program.map(|s| s.to_string()),
             safe_mode,
