@@ -2,7 +2,7 @@
 
 This document tracks all places in the codebase that need to be updated when adding support for a new programming language/debugger.
 
-**Last Updated:** 10 January 2026 
+**Last Updated:** 7 February 2026
 
 ## Quick Reference: All Code Locations
 
@@ -39,6 +39,8 @@ When adding a new language, you need to update these specific locations:
 | `crates/detrix-application/src/safety/treesitter/{newlang}.rs` | New file | Tree-sitter AST analyzer |
 | `crates/detrix-application/src/safety/treesitter/mod.rs` | Module exports | `pub use newlang::analyze_newlang;` |
 | `crates/detrix-application/src/safety/treesitter/node_kinds.rs` | New module | Add node kind constants for the language |
+| `crates/detrix-application/src/safety/treesitter/scope.rs` | `analyze_scope()` dispatch | Add `SourceLanguage::NewLang => analyze_newlang_scope()` |
+| `crates/detrix-application/src/safety/treesitter/comment_stripper.rs` | `strip_comments()` dispatch | Add `SourceLanguage::NewLang => strip_newlang_comments()` |
 | `Cargo.toml` (workspace) | Dependencies | Add `tree-sitter-{newlang}` crate |
 
 ### LSP Purity Analysis (Optional - for user-defined function analysis)
@@ -48,17 +50,28 @@ When adding a new language, you need to update these specific locations:
 | `crates/detrix-lsp/src/lib.rs` | Module exports | `pub mod newlang;` |
 | `crates/detrix-config/src/safety/{newlang}.rs` | `default_{newlang}_lsp_config()` | LSP config with server command |
 
-### API Documentation (Required)
+### Application Integration (Required)
 | File | Section | What to Add |
 |------|---------|-------------|
+| `crates/detrix-application/src/services/file_inspection_types.rs` | `capabilities()` match | Add `LanguageCapabilities` for the new language |
+
+### API & Expression Extraction (Required)
+| File | Section | What to Add |
+|------|---------|-------------|
+| `crates/detrix-api/src/common/expression_extractor.rs` | New struct | Implement `ExpressionExtractor` trait for the language |
+| `crates/detrix-api/src/common/expression_extractor.rs` | `get_extractor()` | Add match arm for the new language |
+| `crates/detrix-api/src/common/expression_extractor.rs` | `detect_language()` | Add file extension mapping |
 | `crates/detrix-api/src/mcp/server.rs` | Schema descriptions | Update supported languages list in tool schemas |
-| `crates/detrix-api/proto/connections.proto` | Comment | Document new language |
+| `crates/detrix-api/src/mcp/params.rs` | `CreateConnectionParams` | Update `language` field schema description |
+| `crates/detrix-api/proto/connections.proto` | Language comment | Document new language value |
 
 ### Testing (Required)
 | File | Section | What to Add |
 |------|---------|-------------|
 | `crates/detrix-dap/tests/{newlang}_tests.rs` | New file | Adapter unit/integration tests |
 | `crates/detrix-application/src/safety/unified_tests/{newlang}_unified.rs` | New file | Safety validation tests |
+| `crates/detrix-testing/src/fixtures.rs` | `sample_metric_for_language()` | Add match arm with language-appropriate defaults |
+| `crates/detrix-testing/src/e2e/dap_scenarios.rs` | `DapLanguageExt` | Add `dap_display_name()` match arm |
 | `fixtures/{newlang}/` | New directory | Example program for testing |
 
 ### Documentation (Required)
@@ -187,6 +200,8 @@ All adapters use a **generic base adapter** pattern for maximum code reuse (~80%
 ```
 
 ## Checklist for Adding a New Language
+
+> **Note:** The code examples below use JavaScript/TypeScript as an illustrative template. JavaScript support is **not currently implemented** in Detrix — there is no `JavaScriptAdapter`, no `javascript.rs` safety config, and JavaScript is not in `SourceLanguage::DAP_SUPPORTED`. Treat these snippets as a structural guide for adding any new language.
 
 ### 1. Add SourceLanguage Variant
 
