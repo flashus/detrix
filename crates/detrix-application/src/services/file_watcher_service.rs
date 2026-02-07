@@ -90,7 +90,9 @@ impl NotifyFileWatcher {
             },
         )
         .map_err(|e| {
-            detrix_core::Error::InvalidConfig(format!("Failed to create file watcher: {}", e))
+            detrix_core::Error::InvalidConfig(
+                format!("Failed to create file watcher: {}", e).into(),
+            )
         })?;
 
         let watcher = Self {
@@ -124,17 +126,20 @@ impl FileWatcher for NotifyFileWatcher {
         // Check if already shut down
         if *self.shutdown.read().await {
             return Err(detrix_core::Error::InvalidConfig(
-                "File watcher has been shut down".to_string(),
+                "File watcher has been shut down".into(),
             ));
         }
 
         // Canonicalize path for consistent comparison
         let canonical_path = path.canonicalize().map_err(|e| {
-            detrix_core::Error::InvalidConfig(format!(
-                "Path '{}' does not exist or cannot be resolved: {}",
-                path.display(),
-                e
-            ))
+            detrix_core::Error::InvalidConfig(
+                format!(
+                    "Path '{}' does not exist or cannot be resolved: {}",
+                    path.display(),
+                    e
+                )
+                .into(),
+            )
         })?;
 
         // Check if already watching
@@ -160,15 +165,13 @@ impl FileWatcher for NotifyFileWatcher {
                     .watcher()
                     .watch(&canonical_path, recursive_mode)
                     .map_err(|e| {
-                        detrix_core::Error::InvalidConfig(format!(
-                            "Failed to watch '{}': {}",
-                            canonical_path.display(),
-                            e
-                        ))
+                        detrix_core::Error::InvalidConfig(
+                            format!("Failed to watch '{}': {}", canonical_path.display(), e).into(),
+                        )
                     })?;
             } else {
                 return Err(detrix_core::Error::InvalidConfig(
-                    "File watcher has been shut down".to_string(),
+                    "File watcher has been shut down".into(),
                 ));
             }
         }

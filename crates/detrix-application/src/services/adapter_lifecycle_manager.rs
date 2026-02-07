@@ -54,6 +54,8 @@ pub struct ManagedAdapterInfo {
     pub started_at: Instant,
     /// Whether the adapter is connected
     pub is_connected: bool,
+    /// SafeMode: Only allow logpoints (non-blocking), disable breakpoint-based operations
+    pub safe_mode: bool,
 }
 
 /// Result of starting an adapter, including any degradation info
@@ -81,6 +83,8 @@ struct ManagedAdapter {
     started_at: Instant,
     /// Current status
     status: ManagedAdapterStatus,
+    /// SafeMode: Only allow logpoints (non-blocking), disable breakpoint-based operations
+    safe_mode: bool,
 }
 
 /// Central manager for adapter lifecycle and event routing
@@ -138,13 +142,17 @@ pub struct AdapterLifecycleManager {
     /// Handle to the cleanup task
     cleanup_task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
+    /// Connection repository for updating safe_mode and status
+    connection_repository: ConnectionRepositoryRef,
+
     /// Optional event output for external destinations (Graylog/GELF, etc.)
     event_output: Option<EventOutputRef>,
 
     /// Connections currently being started (prevents concurrent start attempts)
     /// This prevents race conditions when restore_connections and create_connection
     /// try to start the same adapter simultaneously.
-    pending_starts: Arc<DashMap<ConnectionId, ()>>,
+    /// Maps connection_id -> port being connected to (allows cancellation when port changes)
+    pending_starts: Arc<DashMap<ConnectionId, u16>>,
 }
 
 impl AdapterLifecycleManager {
@@ -232,6 +240,7 @@ impl AdapterLifecycleManager {
             cleanup_task_handle: Arc::clone(&cleanup_task_handle),
             event_output,
             pending_starts: Arc::new(DashMap::new()),
+            connection_repository: Arc::clone(&connection_repository),
         };
 
         // Start the flush task if flush interval is configured
@@ -482,7 +491,7 @@ impl AdapterLifecycleManager {
     ///
     /// # Returns
     /// `StartAdapterResult` with degradation info (sync_failed, resume_failed, metrics counts)
-    #[instrument(skip(self), fields(connection_id = %connection_id.0, host = %host, port = port, language = %language))]
+    #[instrument(skip(self), fields(connection_id = %connection_id.0, host = %host, port = port, language = %language, safe_mode = safe_mode))]
     pub async fn start_adapter(
         &self,
         connection_id: ConnectionId,
@@ -490,41 +499,135 @@ impl AdapterLifecycleManager {
         port: u16,
         language: SourceLanguage,
         program: Option<String>,
+        pid: Option<u32>,
+        safe_mode: bool,
     ) -> Result<StartAdapterResult> {
         info!(
-            "Starting {} adapter for connection {} ({}:{})",
-            language, connection_id.0, host, port
+            "Starting {} adapter for connection {} ({}:{}) pid={:?} safe_mode={}",
+            language, connection_id.0, host, port, pid, safe_mode
         );
 
-        // Check if another caller is already starting this adapter (prevents race conditions)
-        // This can happen when restore_connections_on_startup and create_connection overlap
-        if self.pending_starts.contains_key(&connection_id) {
-            warn!(
-                "Adapter start already in progress for connection {}, returning early",
+        // Atomically try to mark this connection as being started
+        // If another caller is already starting it, we'll wait for them
+        // This prevents race conditions when restore_connections and create_connection overlap
+        //
+        // We use DashMap's entry API for atomic check-and-insert to prevent TOCTOU race
+        // The entry check is wrapped in a block to ensure lock is released before waiting
+        let max_retries = self.adapter_config.adapter_start_max_retries;
+        let mut retry_count = 0;
+
+        loop {
+            // Atomically try to insert into pending_starts
+            // The block ensures the Entry (and its lock) is dropped before we wait
+            let (already_pending, pending_port) = {
+                use dashmap::mapref::entry::Entry;
+                match self.pending_starts.entry(connection_id.clone()) {
+                    Entry::Occupied(entry) => {
+                        let pending_port = *entry.get();
+                        (true, Some(pending_port))
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(port);
+                        (false, None)
+                    }
+                }
+            }; // Entry is dropped here, lock released
+
+            if !already_pending {
+                // We're the first to start this connection
+                break;
+            }
+
+            // Check if the pending connection is to a DIFFERENT port
+            // If so, cancel the old attempt and take over (new port = new debugger instance)
+            if let Some(old_port) = pending_port {
+                if old_port != port {
+                    warn!(
+                        "Connection {} is being reconnected to new port {} (was {}), cancelling old attempt",
+                        connection_id.0, port, old_port
+                    );
+                    // Remove the old entry to signal cancellation to the old task
+                    self.pending_starts.remove(&connection_id);
+                    // Insert our new entry
+                    self.pending_starts.insert(connection_id.clone(), port);
+                    // Proceed with our connection attempt
+                    break;
+                }
+            }
+
+            // Same port - another caller is starting this connection, wait for them
+            info!(
+                "Adapter start already in progress for connection {}, waiting for it to complete",
                 connection_id.0
             );
-            return Err(detrix_core::Error::InvalidConfig(format!(
-                "Connection {} is already being started by another caller",
-                connection_id.0
-            )));
+
+            // Wait for the pending start to complete (poll with timeout)
+            let max_wait = std::time::Duration::from_secs(30);
+            let poll_interval = std::time::Duration::from_millis(100);
+            let start = std::time::Instant::now();
+
+            while self.pending_starts.contains_key(&connection_id) {
+                if start.elapsed() > max_wait {
+                    warn!(
+                        "Timeout waiting for pending start of connection {}",
+                        connection_id.0
+                    );
+                    return Err(detrix_core::Error::Adapter(format!(
+                        "Timeout waiting for connection {} to be started by another caller",
+                        connection_id.0
+                    )));
+                }
+                tokio::time::sleep(poll_interval).await;
+            }
+
+            // The other caller finished - check if adapter now exists
+            if self.adapters.contains_key(&connection_id) {
+                info!(
+                    "Connection {} was started by another caller, returning success",
+                    connection_id.0
+                );
+                return Ok(StartAdapterResult::default());
+            }
+
+            // Other caller failed - retry if we haven't exceeded limit
+            retry_count += 1;
+            if retry_count >= max_retries {
+                warn!(
+                    "Max retries ({}) exceeded for connection {}",
+                    max_retries, connection_id.0
+                );
+                return Err(detrix_core::Error::Adapter(format!(
+                    "Failed to start connection {} after {} retries",
+                    connection_id.0, max_retries
+                )));
+            }
+
+            info!(
+                "Previous start attempt for {} failed, retrying ({}/{})",
+                connection_id.0, retry_count, max_retries
+            );
+            // continue to retry
         }
 
-        // Mark this connection as being started
-        self.pending_starts.insert(connection_id.clone(), ());
-
         // RAII-style cleanup: ensure pending_starts entry is removed on all exit paths
+        // Only removes if the port matches (to avoid cancelling a newer request)
         struct PendingGuard {
-            pending_starts: Arc<DashMap<ConnectionId, ()>>,
+            pending_starts: Arc<DashMap<ConnectionId, u16>>,
             connection_id: ConnectionId,
+            port: u16,
         }
         impl Drop for PendingGuard {
             fn drop(&mut self) {
-                self.pending_starts.remove(&self.connection_id);
+                // Only remove if our port is still the one registered
+                // If a newer request came in with a different port, don't remove their entry
+                self.pending_starts
+                    .remove_if(&self.connection_id, |_, v| *v == self.port);
             }
         }
         let _pending_guard = PendingGuard {
             pending_starts: Arc::clone(&self.pending_starts),
             connection_id: connection_id.clone(),
+            port,
         };
 
         // Check if adapter already exists
@@ -546,12 +649,12 @@ impl AdapterLifecycleManager {
             }
             SourceLanguage::Rust => {
                 self.adapter_factory
-                    .create_rust_adapter(host, port, program.as_deref())
+                    .create_rust_adapter(host, port, program.as_deref(), pid)
                     .await?
             }
             _ => {
                 return Err(detrix_core::Error::InvalidConfig(
-                    SourceLanguage::language_error(language.as_str()),
+                    SourceLanguage::language_error(language.as_str()).into(),
                 ));
             }
         };
@@ -682,6 +785,31 @@ impl AdapterLifecycleManager {
             }
         }
 
+        // Check if we were cancelled (a newer request took over with a different port)
+        // If our port is no longer in pending_starts, stop the adapter and return
+        let was_cancelled = self
+            .pending_starts
+            .get(&connection_id)
+            .map(|entry| *entry != port)
+            .unwrap_or(true); // If entry is gone, we were cancelled
+
+        if was_cancelled {
+            warn!(
+                "Connection {} start was superseded by a newer request, stopping adapter",
+                connection_id.0
+            );
+            // Stop the adapter we just created since a newer request will handle it
+            if let Err(e) = adapter.stop().await {
+                warn!("Failed to stop superseded adapter: {}", e);
+            }
+            // Abort the event listener
+            handle.abort();
+            return Err(detrix_core::Error::Adapter(format!(
+                "Connection {} start was superseded by a newer request",
+                connection_id.0
+            )));
+        }
+
         // Store managed adapter
         let managed = ManagedAdapter {
             adapter,
@@ -689,6 +817,7 @@ impl AdapterLifecycleManager {
             shutdown_tx,
             started_at: Instant::now(),
             status: ManagedAdapterStatus::Running,
+            safe_mode,
         };
 
         self.adapters.insert(connection_id.clone(), managed);
@@ -709,14 +838,19 @@ impl AdapterLifecycleManager {
     /// * `connection_id` - Unique identifier for this connection
     /// * `adapter` - Pre-created adapter instance (should be started)
     /// * `language` - Language/adapter type (for system event reporting)
-    #[instrument(skip(self, adapter), fields(connection_id = %connection_id.0, language = %language))]
+    /// * `safe_mode` - Whether this connection is in SafeMode (blocks breakpoint-based operations)
+    #[instrument(skip(self, adapter), fields(connection_id = %connection_id.0, language = %language, safe_mode = safe_mode))]
     pub async fn register_adapter(
         &self,
         connection_id: ConnectionId,
         adapter: DapAdapterRef,
         language: SourceLanguage,
+        safe_mode: bool,
     ) -> Result<()> {
-        info!("Registering adapter for connection {}", connection_id.0);
+        info!(
+            "Registering adapter for connection {} safe_mode={}",
+            connection_id.0, safe_mode
+        );
 
         // Check if adapter already exists
         if self.adapters.contains_key(&connection_id) {
@@ -741,6 +875,7 @@ impl AdapterLifecycleManager {
             shutdown_tx,
             started_at: Instant::now(),
             status: ManagedAdapterStatus::Running,
+            safe_mode,
         };
 
         self.adapters.insert(connection_id.clone(), managed);
@@ -767,6 +902,7 @@ impl AdapterLifecycleManager {
         let conn_id = connection_id.clone();
         let event_buffer = Arc::clone(&self.event_buffer);
         let batch_size = self.batching_config.batch_size;
+        let max_buffer_size = self.batching_config.max_buffer_size;
         let flush_tx = self.flush_tx.clone();
         let lang_str = language.to_string();
         let event_output = self.event_output.clone();
@@ -791,6 +927,7 @@ impl AdapterLifecycleManager {
                                     &event,
                                     &event_buffer,
                                     batch_size,
+                                    max_buffer_size,
                                     &flush_tx,
                                     &broadcast_tx,
                                     &conn_id,
@@ -809,6 +946,7 @@ impl AdapterLifecycleManager {
                                     &event,
                                     &event_buffer,
                                     batch_size,
+                                    max_buffer_size,
                                     &flush_tx,
                                     &broadcast_tx,
                                     &conn_id,
@@ -873,13 +1011,16 @@ impl AdapterLifecycleManager {
 
     /// Process a single event (helper for spawn_event_listener)
     ///
-    /// Events are always buffered for optimal performance. Backpressure is
-    /// handled by channel capacity, not buffer limits.
+    /// Events are always buffered for optimal performance. When the buffer
+    /// exceeds `max_buffer_size`, oldest events are dropped to prevent
+    /// unbounded memory growth under high load.
     /// Events are also sent to external output (Graylog/GELF) if configured.
+    #[allow(clippy::too_many_arguments)]
     async fn process_event(
         event: &MetricEvent,
         event_buffer: &Arc<Mutex<VecDeque<MetricEvent>>>,
         batch_size: usize,
+        max_buffer_size: usize,
         flush_tx: &mpsc::Sender<()>,
         broadcast_tx: &broadcast::Sender<MetricEvent>,
         conn_id: &ConnectionId,
@@ -891,9 +1032,22 @@ impl AdapterLifecycleManager {
         );
 
         // Buffered mode: add to buffer, flush when batch_size reached
-        // Backpressure is handled by channel capacity (bounded channel)
+        // Overflow handling: drop oldest events if buffer exceeds max_buffer_size
         let should_flush = {
             let mut buffer = event_buffer.lock().await;
+
+            // Overflow handling: drop oldest events if buffer is at max capacity
+            if buffer.len() >= max_buffer_size {
+                let to_drop = buffer.len() - max_buffer_size + 1;
+                for _ in 0..to_drop {
+                    buffer.pop_front();
+                }
+                warn!(
+                    "Event buffer overflow for connection {}: dropped {} oldest events (buffer at max {})",
+                    conn_id.0, to_drop, max_buffer_size
+                );
+            }
+
             buffer.push_back(event.clone());
             let current_len = buffer.len();
             debug!(
@@ -1035,8 +1189,81 @@ impl AdapterLifecycleManager {
         self.adapters.contains_key(connection_id)
     }
 
+    /// Check if a connection is in SafeMode
+    ///
+    /// Returns `Some(true)` if the connection is in SafeMode,
+    /// `Some(false)` if not in SafeMode, or `None` if no adapter is registered.
+    pub fn is_safe_mode(&self, connection_id: &ConnectionId) -> Option<bool> {
+        self.adapters.get(connection_id).map(|r| r.safe_mode)
+    }
+
+    /// Update SafeMode for an existing connection
+    ///
+    /// Updates both the in-memory adapter state and persists to the database.
+    /// Database is updated FIRST to ensure consistency (if DB fails, in-memory stays unchanged).
+    ///
+    /// # Returns
+    /// - `Ok(true)` if updated successfully
+    /// - `Ok(false)` if adapter not registered (no-op)
+    /// - `Err` on database error during persistence
+    ///
+    /// # Race Condition Handling
+    /// If the adapter is removed during the async DB operation, the DB update still
+    /// completes (which is the authoritative state), and we log a warning. This is
+    /// acceptable because the adapter is gone anyway.
+    #[instrument(skip(self), fields(connection_id = %connection_id.0, safe_mode = safe_mode))]
+    pub async fn update_safe_mode(
+        &self,
+        connection_id: &ConnectionId,
+        safe_mode: bool,
+    ) -> Result<bool> {
+        // Check adapter exists first (without modifying)
+        // Note: Due to async operations, adapter could be removed between this check
+        // and the final update. This is handled below with a warning.
+        if !self.adapters.contains_key(connection_id) {
+            warn!(
+                "Cannot update safe_mode for connection {}: adapter not found",
+                connection_id.0
+            );
+            return Ok(false);
+        }
+
+        // Persist to database FIRST (fail fast - if DB fails, in-memory stays unchanged)
+        if let Some(mut connection) = self.connection_repository.find_by_id(connection_id).await? {
+            connection.safe_mode = safe_mode;
+            self.connection_repository.update(&connection).await?;
+        } else {
+            // Connection not in database - unusual state, log warning but continue
+            // (update in-memory anyway since caller expects the change to take effect)
+            warn!(
+                "Connection {} has adapter but not in database (updating in-memory only)",
+                connection_id.0
+            );
+        }
+
+        // Update in-memory AFTER successful DB write
+        // Handle race condition: adapter could have been removed during async DB operation
+        if let Some(mut entry) = self.adapters.get_mut(connection_id) {
+            entry.safe_mode = safe_mode;
+            info!(
+                "Updated safe_mode={} for connection {}",
+                safe_mode, connection_id.0
+            );
+        } else {
+            // Adapter was removed during the DB operation - this is a race condition
+            // but acceptable: DB is updated (authoritative state), adapter is gone
+            warn!(
+                "Adapter for connection {} was removed during safe_mode update \
+                 (DB updated, in-memory update skipped)",
+                connection_id.0
+            );
+        }
+
+        Ok(true)
+    }
+
     /// List all managed adapters with their status
-    pub async fn list_adapters(&self) -> Vec<ManagedAdapterInfo> {
+    pub fn list_adapters(&self) -> Vec<ManagedAdapterInfo> {
         self.adapters
             .iter()
             .map(|r| ManagedAdapterInfo {
@@ -1044,6 +1271,7 @@ impl AdapterLifecycleManager {
                 status: r.value().status,
                 started_at: r.value().started_at,
                 is_connected: r.value().adapter.is_connected(),
+                safe_mode: r.value().safe_mode,
             })
             .collect()
     }

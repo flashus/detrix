@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use detrix_core::system_event::{SystemEvent, SystemEventType};
 use detrix_core::{
-    Connection, ConnectionId, ConnectionStatus, Metric, MetricEvent, MetricId, Result,
+    Connection, ConnectionId, ConnectionStatus, Error, Metric, MetricEvent, MetricId, Result,
 };
 use detrix_ports::{
     ConnectionRepository, DlqEntry, DlqEntryStatus, DlqRepository, EventRepository,
@@ -218,6 +218,13 @@ impl MetricRepository for MockMetricRepository {
 
         Ok(summaries)
     }
+
+    async fn delete_by_connection_id(&self, connection_id: &ConnectionId) -> Result<u64> {
+        let mut metrics = self.metrics.write().unwrap();
+        let before = metrics.len();
+        metrics.retain(|_, m| m.connection_id != *connection_id);
+        Ok((before - metrics.len()) as u64)
+    }
 }
 
 // ============================================================================
@@ -282,6 +289,23 @@ impl EventRepository for MockEventRepository {
         let mut filtered: Vec<_> = events
             .iter()
             .filter(|e| e.metric_id == metric_id)
+            .cloned()
+            .collect();
+        // Sort by timestamp descending to match real DB behavior
+        filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(filtered.into_iter().take(limit as usize).collect())
+    }
+
+    async fn find_by_metric_id_since(
+        &self,
+        metric_id: MetricId,
+        since_micros: i64,
+        limit: i64,
+    ) -> Result<Vec<MetricEvent>> {
+        let events = self.events.read().unwrap();
+        let mut filtered: Vec<_> = events
+            .iter()
+            .filter(|e| e.metric_id == metric_id && e.timestamp >= since_micros)
             .cloned()
             .collect();
         // Sort by timestamp descending to match real DB behavior
@@ -575,6 +599,25 @@ impl ConnectionRepository for MockConnectionRepository {
             .cloned())
     }
 
+    async fn find_by_identity(
+        &self,
+        name: &str,
+        language: &str,
+        workspace_root: &str,
+        hostname: &str,
+    ) -> Result<Option<Connection>> {
+        let connections = self.connections.lock().await;
+        Ok(connections
+            .values()
+            .find(|c| {
+                c.name.as_deref() == Some(name)
+                    && c.language.as_str() == language
+                    && c.workspace_root == workspace_root
+                    && c.hostname == hostname
+            })
+            .cloned())
+    }
+
     async fn list_all(&self) -> Result<Vec<Connection>> {
         let connections = self.connections.lock().await;
         Ok(connections.values().cloned().collect())
@@ -590,16 +633,20 @@ impl ConnectionRepository for MockConnectionRepository {
         let mut connections = self.connections.lock().await;
         if let Some(conn) = connections.get_mut(id) {
             conn.status = status;
+            Ok(())
+        } else {
+            Err(Error::Database(format!("Connection {} not found", id.0)))
         }
-        Ok(())
     }
 
     async fn touch(&self, id: &ConnectionId) -> Result<()> {
         let mut connections = self.connections.lock().await;
         if let Some(conn) = connections.get_mut(id) {
             conn.touch();
+            Ok(())
+        } else {
+            Err(Error::Database(format!("Connection {} not found", id.0)))
         }
-        Ok(())
     }
 
     async fn delete(&self, id: &ConnectionId) -> Result<()> {

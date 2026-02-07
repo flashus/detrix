@@ -45,6 +45,8 @@ pub struct ConnectionInfo {
     pub port: u16,
     pub language: String,
     pub status: String,
+    #[serde(default)]
+    pub safe_mode: bool,
 }
 
 /// Metric info returned from API

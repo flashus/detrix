@@ -340,6 +340,24 @@ pub async fn run(
         None
     };
 
+    // Restore connections from previous sessions in the BACKGROUND
+    // This allows the HTTP server to start immediately without blocking on
+    // reconnection attempts that may take a long time (especially if debuggers are not running)
+    // - If debugger is still running → reconnect
+    // - If debugger is gone → delete the connection
+    {
+        let connection_service = Arc::clone(&app_context.connection_service);
+        tokio::spawn(async move {
+            let (reconnected, deleted) = connection_service.restore_connections_on_startup().await;
+            if reconnected > 0 || deleted > 0 {
+                info!(
+                    "🔄 Connection restore: {} reconnected, {} removed (debuggers not running)",
+                    reconnected, deleted
+                );
+            }
+        });
+    }
+
     // Start HTTP server (REST, WebSocket, MCP HTTP)
     let http_handle = if http_enabled {
         info!("🌐 Starting HTTP server on port {}...", http_port);
@@ -532,20 +550,6 @@ pub async fn run(
         info!("   (MCP-spawned daemon - will auto-shutdown when all MCP clients disconnect)");
     }
     info!("");
-
-    // Restore connections from previous sessions
-    // - If debugger is still running → reconnect
-    // - If debugger is gone → delete the connection
-    let (reconnected, deleted) = app_context
-        .connection_service
-        .restore_connections_on_startup()
-        .await;
-    if reconnected > 0 || deleted > 0 {
-        info!(
-            "🔄 Connection restore: {} reconnected, {} removed (debuggers not running)",
-            reconnected, deleted
-        );
-    }
 
     // NOTE: Event broadcasting is handled automatically via the shared broadcast channel.
     // AdapterLifecycleManager publishes events to StreamingService.event_sender(),

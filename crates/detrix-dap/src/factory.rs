@@ -64,14 +64,21 @@ impl DapAdapterFactory for DapAdapterFactoryImpl {
         _host: &str,
         port: u16,
         program: Option<&str>,
+        pid: Option<u32>,
     ) -> Result<DapAdapterRef> {
-        // Choose configuration based on whether a program path is provided
-        let config = match program {
+        // Choose configuration based on mode:
+        // 1. Launch mode: program path provided, launch it through lldb-dap
+        // 2. AttachPid mode: PID provided, attach to running process (Rust client library)
+        // 3. Attach mode: connect to existing lldb-dap (e.g., via lldb-serve wrapper)
+        let config = match (program, pid) {
             // Direct TCP connection to lldb-dap: send program path in launch request
             // This is the preferred mode for direct lldb-dap connection
-            Some(program_path) => RustAdapter::config_direct_launch(program_path, port),
+            (Some(program_path), _) => RustAdapter::config_direct_launch(program_path, port),
+            // AttachPid mode: Rust client library passes its PID for lldb-dap to attach
+            // Uses stopOnEntry: false to prevent deadlock during registration
+            (None, Some(target_pid)) => RustAdapter::config_with_pid(target_pid, port),
             // Attach mode: connect to existing lldb-dap (e.g., via lldb-serve wrapper)
-            None => RustAdapter::default_config(port),
+            (None, None) => RustAdapter::default_config(port),
         };
 
         // Create RustAdapter instance
@@ -148,7 +155,9 @@ mod tests {
     #[tokio::test]
     async fn test_factory_creates_rust_adapter() {
         let factory = DapAdapterFactoryImpl::new(PathBuf::from("/tmp"));
-        let result = factory.create_rust_adapter("127.0.0.1", 4711, None).await;
+        let result = factory
+            .create_rust_adapter("127.0.0.1", 4711, None, None)
+            .await;
 
         assert!(result.is_ok());
         let adapter = result.unwrap();
@@ -163,7 +172,9 @@ mod tests {
 
         // Test with different ports
         for port in [4711, 4712, 13000] {
-            let result = factory.create_rust_adapter("127.0.0.1", port, None).await;
+            let result = factory
+                .create_rust_adapter("127.0.0.1", port, None, None)
+                .await;
             assert!(result.is_ok());
         }
     }

@@ -250,6 +250,8 @@ Metric {
 ### Logpoint
 A DAP breakpoint with `logMessage` that captures values **without pausing execution**. Detrix converts metrics to logpoints using DAP protocol.
 
+**Note:** Go (Delve) logpoints don't support function calls. When a Go expression contains function calls (like `fmt.Sprintf()`), Detrix automatically uses a breakpoint with "repl" evaluate context instead. This causes a brief pause (~1ms) but enables full expression evaluation. See `docs/ADD_LANGUAGE.md` for details.
+
 ### Connection
 A DAP adapter connection to a running process. One Detrix daemon can manage multiple connections simultaneously (e.g., Python app + Go service + Rust binary).
 

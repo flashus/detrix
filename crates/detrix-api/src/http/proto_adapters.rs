@@ -33,6 +33,7 @@ use crate::http::handlers::{CreateMetricRequest, StackTraceSliceDto};
 pub fn rest_request_to_add_metric_request(
     req: &CreateMetricRequest,
     safety_level: &str,
+    language: detrix_core::SourceLanguage,
 ) -> AddMetricRequest {
     // Convert location
     let location = Some(ProtoLocation {
@@ -68,7 +69,7 @@ pub fn rest_request_to_add_metric_request(
         group: req.group.clone(),
         location,
         expression: req.expression.clone(),
-        language: req.language.clone(),
+        language: Some(language.to_string()), // Use connection's language (parameter)
         enabled: req.enabled,
         mode,
         condition: None, // REST doesn't support conditions yet

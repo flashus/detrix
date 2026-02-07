@@ -89,6 +89,13 @@ pub enum ConnectionMode {
         program: Option<String>,
         /// Wait for the next instance to launch (macOS only)
         wait_for: bool,
+        /// LLDB initialization commands (e.g., type formatters, settings)
+        ///
+        /// These are sent in the attach request as `initCommands` and executed
+        /// BEFORE attaching. Used for setting up:
+        /// - Type formatters (type summary add)
+        /// - LLDB settings (settings set ...)
+        init_commands: Vec<String>,
     },
 }
 
@@ -343,6 +350,29 @@ impl AdapterConfig {
             pid: Some(pid),
             program: None,
             wait_for: false,
+            init_commands: Vec::new(),
+        };
+        self
+    }
+
+    /// Set connection mode to AttachPid with init commands (for type formatters)
+    ///
+    /// This mode connects via TCP and sends a DAP "attach" request with the PID
+    /// and includes LLDB init commands for type formatters.
+    pub fn attach_pid_with_commands(
+        mut self,
+        host: impl Into<String>,
+        port: u16,
+        pid: u32,
+        init_commands: Vec<String>,
+    ) -> Self {
+        self.connection_mode = ConnectionMode::AttachPid {
+            host: host.into(),
+            port,
+            pid: Some(pid),
+            program: None,
+            wait_for: false,
+            init_commands,
         };
         self
     }
@@ -363,6 +393,7 @@ impl AdapterConfig {
             pid: None,
             program: Some(program.into()),
             wait_for: false,
+            init_commands: Vec::new(),
         };
         self
     }
@@ -383,6 +414,7 @@ impl AdapterConfig {
             pid: None,
             program: Some(program.into()),
             wait_for: true,
+            init_commands: Vec::new(),
         };
         self
     }

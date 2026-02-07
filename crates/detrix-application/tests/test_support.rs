@@ -1,10 +1,8 @@
 use detrix_application::{
-    ConnectionRepository, DapAdapter, DapAdapterFactory, DapAdapterRef, EventRepository,
-    MetricRepository, RemoveMetricResult, SetMetricResult,
+    DapAdapter, DapAdapterFactory, DapAdapterRef, EventRepository, MetricRepository,
+    RemoveMetricResult, SetMetricResult,
 };
-use detrix_core::{
-    Connection, ConnectionId, ConnectionStatus, Error, Metric, MetricEvent, MetricId, Result,
-};
+use detrix_core::{ConnectionId, Metric, MetricEvent, MetricId, Result};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -17,10 +15,8 @@ use tokio::sync::{Mutex, RwLock};
 use std::sync::Mutex as StdMutex;
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone, Default)]
-pub struct MockConnectionRepository {
-    connections: Arc<Mutex<HashMap<ConnectionId, Connection>>>,
-}
+// Use canonical MockConnectionRepository from detrix-testing
+pub use detrix_testing::MockConnectionRepository;
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -165,6 +161,7 @@ impl DapAdapterFactory for StatefulMockAdapterFactory {
         host: &str,
         port: u16,
         _program: Option<&str>,
+        _pid: Option<u32>,
     ) -> Result<DapAdapterRef> {
         self.create_python_adapter(host, port).await
     }
@@ -248,131 +245,9 @@ impl DapAdapterFactory for SimpleMockAdapterFactory {
         host: &str,
         port: u16,
         _program: Option<&str>,
+        _pid: Option<u32>,
     ) -> Result<DapAdapterRef> {
         Ok(Arc::new(SimpleMockDapAdapter::new(host, port)))
-    }
-}
-
-impl MockConnectionRepository {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub async fn get_connection(&self, id: &ConnectionId) -> Option<Connection> {
-        self.connections.lock().await.get(id).cloned()
-    }
-
-    pub async fn connection_count(&self) -> usize {
-        self.connections.lock().await.len()
-    }
-}
-
-#[async_trait::async_trait]
-impl ConnectionRepository for MockConnectionRepository {
-    async fn save(&self, connection: &Connection) -> Result<ConnectionId> {
-        let mut connections = self.connections.lock().await;
-        connections.insert(connection.id.clone(), connection.clone());
-        Ok(connection.id.clone())
-    }
-
-    async fn find_by_id(&self, id: &ConnectionId) -> Result<Option<Connection>> {
-        let connections = self.connections.lock().await;
-        Ok(connections.get(id).cloned())
-    }
-
-    async fn list_all(&self) -> Result<Vec<Connection>> {
-        let connections = self.connections.lock().await;
-        Ok(connections.values().cloned().collect())
-    }
-
-    async fn update_status(&self, id: &ConnectionId, status: ConnectionStatus) -> Result<()> {
-        let mut connections = self.connections.lock().await;
-        if let Some(conn) = connections.get_mut(id) {
-            conn.status = status;
-            Ok(())
-        } else {
-            Err(Error::MetricNotFound(format!(
-                "Connection {} not found",
-                id.0
-            )))
-        }
-    }
-
-    async fn touch(&self, id: &ConnectionId) -> Result<()> {
-        let mut connections = self.connections.lock().await;
-        if let Some(conn) = connections.get_mut(id) {
-            conn.touch();
-            Ok(())
-        } else {
-            Err(Error::MetricNotFound(format!(
-                "Connection {} not found",
-                id.0
-            )))
-        }
-    }
-
-    async fn delete(&self, id: &ConnectionId) -> Result<()> {
-        let mut connections = self.connections.lock().await;
-        connections.remove(id);
-        Ok(())
-    }
-
-    async fn exists(&self, id: &ConnectionId) -> Result<bool> {
-        let connections = self.connections.lock().await;
-        Ok(connections.contains_key(id))
-    }
-
-    async fn find_active(&self) -> Result<Vec<Connection>> {
-        let connections = self.connections.lock().await;
-        Ok(connections
-            .values()
-            .filter(|c| c.is_active())
-            .cloned()
-            .collect())
-    }
-
-    async fn find_by_address(&self, host: &str, port: u16) -> Result<Option<Connection>> {
-        let connections = self.connections.lock().await;
-        Ok(connections
-            .values()
-            .find(|c| c.host == host && c.port == port)
-            .cloned())
-    }
-
-    async fn update(&self, connection: &Connection) -> Result<()> {
-        let mut connections = self.connections.lock().await;
-        connections.insert(connection.id.clone(), connection.clone());
-        Ok(())
-    }
-
-    async fn find_for_reconnect(&self) -> Result<Vec<Connection>> {
-        let connections = self.connections.lock().await;
-        Ok(connections
-            .values()
-            .filter(|c| c.should_reconnect())
-            .cloned()
-            .collect())
-    }
-
-    async fn find_by_language(&self, language: &str) -> Result<Vec<Connection>> {
-        let connections = self.connections.lock().await;
-        Ok(connections
-            .values()
-            .filter(|c| c.language.as_str() == language)
-            .cloned()
-            .collect())
-    }
-
-    async fn delete_disconnected(&self) -> Result<u64> {
-        let mut connections = self.connections.lock().await;
-        let initial_count = connections.len();
-        connections.retain(|_, c| {
-            !matches!(
-                c.status,
-                ConnectionStatus::Disconnected | ConnectionStatus::Failed(_)
-            )
-        });
-        Ok((initial_count - connections.len()) as u64)
     }
 }
 
@@ -451,6 +326,10 @@ impl MetricRepository for MockMetricRepository {
     async fn get_group_summaries(&self) -> Result<Vec<detrix_application::ports::GroupSummary>> {
         Ok(Vec::new())
     }
+
+    async fn delete_by_connection_id(&self, _connection_id: &ConnectionId) -> Result<u64> {
+        Ok(0)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -519,6 +398,21 @@ impl EventRepository for MockEventRepository {
         Ok(events
             .iter()
             .filter(|e| e.metric_id == metric_id)
+            .take(limit as usize)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_metric_id_since(
+        &self,
+        metric_id: MetricId,
+        since_micros: i64,
+        limit: i64,
+    ) -> Result<Vec<MetricEvent>> {
+        let events = self.events.read().await;
+        Ok(events
+            .iter()
+            .filter(|e| e.metric_id == metric_id && e.timestamp >= since_micros)
             .take(limit as usize)
             .cloned()
             .collect())

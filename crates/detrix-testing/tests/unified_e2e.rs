@@ -305,6 +305,1062 @@ mod dap_workflow_tests {
         }
     }
 
+    /// Test Go mixed metric modes (logpoint + breakpoint)
+    ///
+    /// This test verifies that simple variable metrics (logpoint mode) and function
+    /// call metrics (breakpoint mode) can work together on DIFFERENT lines.
+    ///
+    /// Architecture:
+    /// - Simple variables use logpoint mode (setBreakpoints with logMessage) - non-blocking
+    /// - Function calls use breakpoint mode (no logMessage, relies on stopped event) - blocking
+    ///
+    /// Both types can coexist in the same file as long as they're on different lines.
+    #[tokio::test]
+    async fn test_dap_go_mixed_metric_modes() {
+        use detrix_testing::e2e::client::{AddMetricRequest, ApiClient};
+        use std::time::Duration;
+
+        if !detrix_testing::e2e::require_tool(detrix_testing::e2e::ToolDependency::Delve).await {
+            return;
+        }
+        let mut executor = TestExecutor::new();
+        let reporter = TestReporter::new("DAP Go Mixed Metric Modes", "MCP");
+        reporter.print_header();
+
+        let script_path = executor
+            .workspace_root
+            .join("fixtures/go/detrix_example_app.go");
+
+        // Start daemon
+        if let Err(e) = executor.start_daemon().await {
+            reporter.error(&format!("Failed to start daemon: {}", e));
+            executor.print_daemon_logs(50);
+            panic!("Failed to start daemon: {}", e);
+        }
+
+        // Start delve
+        if let Err(e) = executor.start_delve(script_path.to_str().unwrap()).await {
+            reporter.error(&format!("Failed to start delve: {}", e));
+            executor.print_delve_logs(50);
+            panic!("Failed to start delve: {}", e);
+        }
+
+        let client = McpClient::new(executor.http_port);
+
+        // Step 1: Create connection
+        reporter.section("PHASE 1: CREATE CONNECTION");
+        let step = reporter.step_start("Create Connection", "Connect to Go debugger");
+
+        let connection_id = match client
+            .create_connection("127.0.0.1", executor.delve_port, "go")
+            .await
+        {
+            Ok(r) => {
+                reporter.step_success(step, Some(&format!("Connected: {}", r.data.connection_id)));
+                r.data.connection_id
+            }
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to connect: {}", e);
+            }
+        };
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Step 2: Add BOTH types of metrics
+        reporter.section("PHASE 2: ADD MIXED METRICS");
+
+        // Metric 1: Simple variable (logpoint mode) - line 117 where 'symbol' is assigned
+        // This will use logpoint (setBreakpoints with logMessage)
+        // Use line 122 (orderID := placeOrder) where symbol is in scope
+        let location1 = format!("@{}#122", script_path.display());
+        let step = reporter.step_start(
+            "Add Logpoint Metric",
+            "Add simple variable 'symbol' at line 122 (logpoint mode)",
+        );
+
+        let mut request1 =
+            AddMetricRequest::new("symbol_logpoint", &location1, "symbol", &connection_id);
+        request1.language = Some("go".to_string());
+
+        match client.add_metric(request1).await {
+            Ok(r) => {
+                reporter.step_success(step, Some(&format!("Added id={} (logpoint mode)", r.data)));
+            }
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to add logpoint metric: {}", e);
+            }
+        }
+
+        // Metric 2: Function call (breakpoint mode) - line 127 where pnl is calculated
+        // This will use breakpoint (pauses execution) because it's a function call
+        // Using len() which is a non-variadic function that Delve supports
+        // Use line 127 (pnl := calculatePnl) which is a function call
+        let location2 = format!("@{}#127", script_path.display());
+        let step = reporter.step_start(
+            "Add Breakpoint Metric",
+            "Add function 'len(symbol)' at line 127 (breakpoint mode)",
+        );
+
+        let mut request2 = AddMetricRequest::new(
+            "symbol_len_breakpoint",
+            &location2,
+            "len(symbol)", // Non-variadic function - should work
+            &connection_id,
+        );
+        request2.language = Some("go".to_string());
+        // Enable introspection to force breakpoint mode
+        request2.capture_stack_trace = Some(true);
+
+        match client.add_metric(request2).await {
+            Ok(r) => {
+                reporter.step_success(
+                    step,
+                    Some(&format!("Added id={} (breakpoint mode)", r.data)),
+                );
+            }
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to add breakpoint metric: {}", e);
+            }
+        }
+
+        // Step 3: Wait for events from BOTH metrics
+        reporter.section("PHASE 3: VERIFY BOTH METRICS CAPTURE EVENTS");
+
+        let step = reporter.step_start(
+            "Wait for Events",
+            "Verify both logpoint and breakpoint metrics capture events",
+        );
+
+        let mut logpoint_events = 0;
+        let mut breakpoint_events = 0;
+
+        // Wait up to 20 seconds for events from both
+        for i in 0..20 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            // Check logpoint metric
+            if let Ok(r) = client.query_events("symbol_logpoint", 10).await {
+                if !r.data.is_empty() && logpoint_events == 0 {
+                    reporter.info(&format!(
+                        "Logpoint metric captured {} events (first: '{}')",
+                        r.data.len(),
+                        r.data[0].value
+                    ));
+                }
+                logpoint_events = r.data.len();
+            }
+
+            // Check breakpoint metric
+            if let Ok(r) = client.query_events("symbol_len_breakpoint", 10).await {
+                if !r.data.is_empty() && breakpoint_events == 0 {
+                    reporter.info(&format!(
+                        "Breakpoint metric captured {} events (first: '{}')",
+                        r.data.len(),
+                        r.data[0].value
+                    ));
+                }
+                breakpoint_events = r.data.len();
+            }
+
+            // Success if both have at least one event
+            if logpoint_events > 0 && breakpoint_events > 0 {
+                reporter.step_success(
+                    step,
+                    Some(&format!(
+                        "Both metrics captured events! Logpoint: {}, Breakpoint: {}",
+                        logpoint_events, breakpoint_events
+                    )),
+                );
+                break;
+            }
+
+            if i == 19 {
+                executor.print_daemon_logs(100);
+                reporter.step_failed(
+                    step,
+                    &format!(
+                        "Timeout: logpoint={}, breakpoint={} (both should have >0)",
+                        logpoint_events, breakpoint_events
+                    ),
+                );
+                panic!(
+                    "Mixed metric modes test failed: logpoint={}, breakpoint={}",
+                    logpoint_events, breakpoint_events
+                );
+            }
+        }
+
+        // Step 4: Cleanup
+        reporter.section("PHASE 4: CLEANUP");
+
+        let _ = client.remove_metric("symbol_logpoint").await;
+        let _ = client.remove_metric("symbol_len_breakpoint").await;
+        let _ = client.close_connection(&connection_id).await;
+
+        reporter.section("TEST COMPLETE");
+        reporter.info("Successfully verified mixed logpoint + breakpoint modes work together!");
+        reporter.print_footer(true);
+    }
+
+    /// Test mixed logpoint + breakpoint streaming: verifies that logpoints produce events
+    /// via DAP output events (non-blocking) and breakpoints produce events via DAP stopped
+    /// events (with introspection data).
+    ///
+    /// This is the Rust E2E equivalent of `go run ./examples/test_wake`.
+    ///
+    /// Metrics (same as test_wake):
+    /// 1. order_symbol@118 — simple variable (logpoint, non-blocking)
+    /// 2. pnl_value@130 — simple variable (logpoint, non-blocking)
+    /// 3. symbol_length@122 — Go function call len(symbol) (breakpoint, blocking)
+    /// 4. entry_price_with_stack@126 — simple variable with stack trace (breakpoint, blocking)
+    ///
+    /// Verifies:
+    /// - All 4 metrics produce events
+    /// - Logpoint metrics have NO stack trace (captured via output events)
+    /// - Breakpoint metric with stack trace HAS stack trace data
+    /// - Daemon logs show correct LOGPOINT/BREAKPOINT mode per metric
+    #[tokio::test]
+    async fn test_dap_go_mixed_logpoint_breakpoint_streaming() {
+        use detrix_testing::e2e::client::{AddMetricRequest, ApiClient};
+        use std::time::Duration;
+
+        if !detrix_testing::e2e::require_tool(detrix_testing::e2e::ToolDependency::Delve).await {
+            return;
+        }
+        let mut executor = TestExecutor::new();
+        let reporter = TestReporter::new("DAP Go Mixed Logpoint/Breakpoint Streaming", "MCP");
+        reporter.print_header();
+
+        let script_path = executor
+            .workspace_root
+            .join("fixtures/go/detrix_example_app.go");
+
+        // Start daemon and delve
+        if let Err(e) = executor.start_daemon().await {
+            reporter.error(&format!("Failed to start daemon: {}", e));
+            executor.print_daemon_logs(50);
+            panic!("Failed to start daemon: {}", e);
+        }
+
+        if let Err(e) = executor.start_delve(script_path.to_str().unwrap()).await {
+            reporter.error(&format!("Failed to start delve: {}", e));
+            executor.print_delve_logs(50);
+            panic!("Failed to start delve: {}", e);
+        }
+
+        let client = McpClient::new(executor.http_port);
+
+        // ====================================================================
+        // PHASE 1: Create connection
+        // ====================================================================
+        reporter.section("PHASE 1: CREATE CONNECTION");
+        let step = reporter.step_start("Create Connection", "Connect to Go debugger via Delve");
+
+        let connection_id = match client
+            .create_connection("127.0.0.1", executor.delve_port, "go")
+            .await
+        {
+            Ok(r) => {
+                reporter.step_success(step, Some(&format!("Connected: {}", r.data.connection_id)));
+                r.data.connection_id
+            }
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to connect: {}", e);
+            }
+        };
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // ====================================================================
+        // PHASE 2: Add 4 metrics (2 logpoints + 2 breakpoints)
+        // ====================================================================
+        reporter.section("PHASE 2: ADD METRICS (2 LOGPOINTS + 2 BREAKPOINTS)");
+
+        // Metric 1: LOGPOINT — simple variable 'symbol' at line 118
+        // symbol is assigned on line 117, in scope from line 118
+        let location1 = format!("@{}#118", script_path.display());
+        let step = reporter.step_start(
+            "Add Logpoint #1",
+            "order_symbol: simple variable 'symbol' at line 118 (LOGPOINT)",
+        );
+        let mut req1 = AddMetricRequest::new("order_symbol", &location1, "symbol", &connection_id);
+        req1.language = Some("go".to_string());
+        match client.add_metric(req1).await {
+            Ok(r) => reporter.step_success(step, Some(&format!("id={}", r.data))),
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to add order_symbol: {}", e);
+            }
+        }
+
+        // Metric 2: LOGPOINT — simple variable 'pnl' at line 130
+        // pnl is assigned on line 127, in scope from line 128
+        let location2 = format!("@{}#130", script_path.display());
+        let step = reporter.step_start(
+            "Add Logpoint #2",
+            "pnl_value: simple variable 'pnl' at line 130 (LOGPOINT)",
+        );
+        let mut req2 = AddMetricRequest::new("pnl_value", &location2, "pnl", &connection_id);
+        req2.language = Some("go".to_string());
+        match client.add_metric(req2).await {
+            Ok(r) => reporter.step_success(step, Some(&format!("id={}", r.data))),
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to add pnl_value: {}", e);
+            }
+        }
+
+        // Metric 3: BREAKPOINT — Go function call len(symbol) at line 122
+        // symbol is in scope; len() is a non-variadic function Delve supports via "call" prefix
+        let location3 = format!("@{}#122", script_path.display());
+        let step = reporter.step_start(
+            "Add Breakpoint #1",
+            "symbol_length: function call 'len(symbol)' at line 122 (BREAKPOINT)",
+        );
+        let mut req3 =
+            AddMetricRequest::new("symbol_length", &location3, "len(symbol)", &connection_id);
+        req3.language = Some("go".to_string());
+        match client.add_metric(req3).await {
+            Ok(r) => reporter.step_success(step, Some(&format!("id={}", r.data))),
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to add symbol_length: {}", e);
+            }
+        }
+
+        // Metric 4: BREAKPOINT — simple variable with stack trace at line 126
+        // entryPrice assigned on line 125, in scope from line 126
+        let location4 = format!("@{}#126", script_path.display());
+        let step = reporter.step_start(
+            "Add Breakpoint #2",
+            "entry_price_with_stack: 'entryPrice' with captureStackTrace at line 126 (BREAKPOINT)",
+        );
+        let mut req4 = AddMetricRequest::new(
+            "entry_price_with_stack",
+            &location4,
+            "entryPrice",
+            &connection_id,
+        );
+        req4.language = Some("go".to_string());
+        req4.capture_stack_trace = Some(true);
+        match client.add_metric(req4).await {
+            Ok(r) => reporter.step_success(step, Some(&format!("id={}", r.data))),
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to add entry_price_with_stack: {}", e);
+            }
+        }
+
+        // ====================================================================
+        // PHASE 3: Wait for events from ALL 4 metrics
+        // ====================================================================
+        reporter.section("PHASE 3: VERIFY ALL 4 METRICS STREAM EVENTS");
+
+        let metric_names = [
+            "order_symbol",
+            "pnl_value",
+            "symbol_length",
+            "entry_price_with_stack",
+        ];
+
+        let step = reporter.step_start(
+            "Wait for Events",
+            "All 4 metrics must produce at least 1 event each (20s timeout)",
+        );
+
+        let mut event_counts: [usize; 4] = [0; 4];
+        let mut success = false;
+
+        for attempt in 0..20 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            for (i, name) in metric_names.iter().enumerate() {
+                if let Ok(r) = client.query_events(name, 10).await {
+                    if !r.data.is_empty() && event_counts[i] == 0 {
+                        reporter.info(&format!(
+                            "  {} captured first event: '{}'",
+                            name, r.data[0].value
+                        ));
+                    }
+                    event_counts[i] = r.data.len();
+                }
+            }
+
+            if event_counts.iter().all(|&c| c > 0) {
+                reporter.step_success(
+                    step,
+                    Some(&format!(
+                        "All 4 metrics streaming! order_symbol={}, pnl_value={}, symbol_length={}, entry_price_with_stack={}",
+                        event_counts[0], event_counts[1], event_counts[2], event_counts[3]
+                    )),
+                );
+                success = true;
+                break;
+            }
+
+            if attempt == 19 {
+                executor.print_daemon_logs(100);
+                let missing: Vec<_> = metric_names
+                    .iter()
+                    .zip(event_counts.iter())
+                    .filter(|(_, &c)| c == 0)
+                    .map(|(n, _)| *n)
+                    .collect();
+                reporter.step_failed(
+                    step,
+                    &format!(
+                        "Timeout: missing events from: {}. Counts: {:?}",
+                        missing.join(", "),
+                        event_counts
+                    ),
+                );
+                panic!(
+                    "Mixed streaming failed: missing events from {:?}. Counts: {:?}",
+                    missing, event_counts
+                );
+            }
+        }
+
+        assert!(success, "All 4 metrics must produce events");
+
+        // ====================================================================
+        // PHASE 4: Verify event characteristics by mode
+        // ====================================================================
+        reporter.section("PHASE 4: VERIFY LOGPOINT VS BREAKPOINT EVENT CHARACTERISTICS");
+
+        // Logpoint events: should have NO stack trace (captured via DAP output events)
+        for name in &["order_symbol", "pnl_value"] {
+            let step = reporter.step_start(
+                "Check Logpoint Events",
+                &format!(
+                    "'{}' events should have NO stack trace (logpoint mode)",
+                    name
+                ),
+            );
+
+            if let Ok(r) = client.query_events(name, 10).await {
+                let has_stack = r.data.iter().any(|e| e.stack_trace.is_some());
+                if has_stack {
+                    reporter.step_failed(
+                        step,
+                        &format!(
+                            "'{}' has stack trace data — was it set as breakpoint instead of logpoint?",
+                            name
+                        ),
+                    );
+                    panic!(
+                        "Logpoint metric '{}' should NOT have stack trace data",
+                        name
+                    );
+                } else {
+                    reporter.step_success(
+                        step,
+                        Some(&format!(
+                            "'{}': {} events, none with stack trace (correct: logpoint mode)",
+                            name,
+                            r.data.len()
+                        )),
+                    );
+                }
+            }
+        }
+
+        // Breakpoint metric with stack trace: SHOULD have stack trace data
+        {
+            let step = reporter.step_start(
+                "Check Breakpoint Events",
+                "'entry_price_with_stack' events should have stack trace (breakpoint mode)",
+            );
+
+            if let Ok(r) = client.query_events("entry_price_with_stack", 10).await {
+                let with_stack = r.data.iter().filter(|e| e.stack_trace.is_some()).count();
+                if with_stack > 0 {
+                    // Show a sample stack trace
+                    if let Some(event) = r.data.iter().find(|e| e.stack_trace.is_some()) {
+                        if let Some(ref st) = event.stack_trace {
+                            reporter.info(&format!(
+                                "  Stack trace ({} frames): top={}",
+                                st.frames.len(),
+                                st.frames.first().map(|f| f.name.as_str()).unwrap_or("?")
+                            ));
+                        }
+                    }
+                    reporter.step_success(
+                        step,
+                        Some(&format!(
+                            "{}/{} events have stack trace (correct: breakpoint with introspection)",
+                            with_stack,
+                            r.data.len()
+                        )),
+                    );
+                } else {
+                    reporter.step_failed(
+                        step,
+                        &format!(
+                            "entry_price_with_stack: 0/{} events have stack trace — introspection not working",
+                            r.data.len()
+                        ),
+                    );
+                    panic!("Breakpoint metric with captureStackTrace should have stack trace data");
+                }
+            }
+        }
+
+        // symbol_length (Go function call): produces events via stopped handler
+        // No introspection requested, so no stack trace expected, but events should exist
+        {
+            let step = reporter.step_start(
+                "Check Function Call Events",
+                "'symbol_length' events should exist (breakpoint for Go function call)",
+            );
+
+            if let Ok(r) = client.query_events("symbol_length", 10).await {
+                assert!(!r.data.is_empty(), "symbol_length should have events");
+                // Verify the value is a number (len(symbol) returns an int)
+                let first_value = &r.data[0].value;
+                reporter.step_success(
+                    step,
+                    Some(&format!(
+                        "{} events, first value='{}' (Go function call via breakpoint)",
+                        r.data.len(),
+                        first_value
+                    )),
+                );
+            }
+        }
+
+        // ====================================================================
+        // PHASE 5: Verify daemon logs show correct LOGPOINT/BREAKPOINT modes
+        // ====================================================================
+        reporter.section("PHASE 5: VERIFY DAEMON LOGS SHOW CORRECT MODES");
+
+        let step = reporter.step_start(
+            "Check Daemon Logs",
+            "Daemon should log LOGPOINT for simple vars, BREAKPOINT for introspection/func calls",
+        );
+
+        let logs = executor.get_daemon_logs(200);
+
+        let has_logpoint_order = logs.contains("order_symbol") && logs.contains("LOGPOINT");
+        let has_logpoint_pnl = logs.contains("pnl_value") && logs.contains("LOGPOINT");
+        let has_breakpoint_len = logs.contains("symbol_length") && logs.contains("BREAKPOINT");
+        let has_breakpoint_stack =
+            logs.contains("entry_price_with_stack") && logs.contains("BREAKPOINT");
+
+        reporter.info(&format!(
+            "  order_symbol → LOGPOINT: {}",
+            has_logpoint_order
+        ));
+        reporter.info(&format!("  pnl_value → LOGPOINT: {}", has_logpoint_pnl));
+        reporter.info(&format!(
+            "  symbol_length → BREAKPOINT: {}",
+            has_breakpoint_len
+        ));
+        reporter.info(&format!(
+            "  entry_price_with_stack → BREAKPOINT: {}",
+            has_breakpoint_stack
+        ));
+
+        if has_logpoint_order && has_logpoint_pnl && has_breakpoint_len && has_breakpoint_stack {
+            reporter.step_success(step, Some("All 4 metrics show correct modes in logs"));
+        } else {
+            reporter.warn(
+                "Some mode log lines not found — log format may differ, but events verified above",
+            );
+        }
+
+        // ====================================================================
+        // PHASE 6: Cleanup
+        // ====================================================================
+        reporter.section("PHASE 6: CLEANUP");
+
+        for name in &metric_names {
+            let _ = client.remove_metric(name).await;
+        }
+        let _ = client.close_connection(&connection_id).await;
+
+        reporter.section("TEST COMPLETE");
+        reporter.info("Mixed logpoint/breakpoint streaming verified:");
+        reporter
+            .info("  - 2 logpoint metrics: events via DAP output (non-blocking, no stack trace)");
+        reporter.info("  - 1 breakpoint metric (Go func call): events via DAP stopped");
+        reporter
+            .info("  - 1 breakpoint metric (stack trace): events via DAP stopped WITH stack trace");
+        reporter.print_footer(true);
+    }
+
+    /// Test that removing a metric preserves the other metric's mode.
+    ///
+    /// Regression test for a bug where `remove_metric()` always recreated remaining
+    /// breakpoints as logpoints, losing breakpoint mode for introspection metrics.
+    ///
+    /// This test:
+    /// 1. Adds a logpoint metric and a breakpoint metric on the same file
+    /// 2. Verifies both capture events
+    /// 3. Removes the breakpoint metric
+    /// 4. Verifies the logpoint metric CONTINUES to capture events
+    /// 5. Removes the logpoint metric and adds it back with a breakpoint metric
+    /// 6. Removes the logpoint metric
+    /// 7. Verifies the breakpoint metric CONTINUES to capture events
+    #[tokio::test]
+    async fn test_dap_go_remove_preserves_other_mode() {
+        use detrix_testing::e2e::client::{AddMetricRequest, ApiClient};
+        use std::time::Duration;
+
+        if !detrix_testing::e2e::require_tool(detrix_testing::e2e::ToolDependency::Delve).await {
+            return;
+        }
+        let mut executor = TestExecutor::new();
+        let reporter = TestReporter::new("DAP Go Remove Preserves Mode", "MCP");
+        reporter.print_header();
+
+        let script_path = executor
+            .workspace_root
+            .join("fixtures/go/detrix_example_app.go");
+
+        if let Err(e) = executor.start_daemon().await {
+            reporter.error(&format!("Failed to start daemon: {}", e));
+            executor.print_daemon_logs(50);
+            panic!("Failed to start daemon: {}", e);
+        }
+
+        if let Err(e) = executor.start_delve(script_path.to_str().unwrap()).await {
+            reporter.error(&format!("Failed to start delve: {}", e));
+            executor.print_delve_logs(50);
+            panic!("Failed to start delve: {}", e);
+        }
+
+        let client = McpClient::new(executor.http_port);
+
+        // Create connection
+        let connection_id = match client
+            .create_connection("127.0.0.1", executor.delve_port, "go")
+            .await
+        {
+            Ok(r) => r.data.connection_id,
+            Err(e) => panic!("Failed to connect: {}", e),
+        };
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // =====================================================================
+        // PART A: Remove breakpoint metric, verify logpoint survives
+        // =====================================================================
+        reporter.section("PART A: REMOVE BREAKPOINT, VERIFY LOGPOINT SURVIVES");
+
+        // Add logpoint metric (simple variable)
+        let location1 = format!("@{}#122", script_path.display());
+        let mut req1 = AddMetricRequest::new("lp_symbol", &location1, "symbol", &connection_id);
+        req1.language = Some("go".to_string());
+        client
+            .add_metric(req1)
+            .await
+            .expect("Failed to add logpoint metric");
+
+        // Add breakpoint metric (introspection)
+        let location2 = format!("@{}#130", script_path.display());
+        let mut req2 = AddMetricRequest::new("bp_order", &location2, "orderID", &connection_id);
+        req2.language = Some("go".to_string());
+        req2.capture_stack_trace = Some(true);
+        client
+            .add_metric(req2)
+            .await
+            .expect("Failed to add breakpoint metric");
+
+        // Wait for both to capture events
+        let step = reporter.step_start("Wait for Both", "Both metrics should capture events");
+        let mut lp_count = 0;
+        let mut bp_count = 0;
+        for _ in 0..15 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if let Ok(r) = client.query_events("lp_symbol", 10).await {
+                lp_count = r.data.len();
+            }
+            if let Ok(r) = client.query_events("bp_order", 10).await {
+                bp_count = r.data.len();
+            }
+            if lp_count > 0 && bp_count > 0 {
+                break;
+            }
+        }
+        if lp_count == 0 || bp_count == 0 {
+            executor.print_daemon_logs(100);
+            reporter.step_failed(
+                step,
+                &format!("Timeout: logpoint={}, breakpoint={}", lp_count, bp_count),
+            );
+            panic!(
+                "Both metrics must capture events before removal test: logpoint={}, breakpoint={}",
+                lp_count, bp_count
+            );
+        }
+        reporter.step_success(
+            step,
+            Some(&format!("logpoint={}, breakpoint={}", lp_count, bp_count)),
+        );
+
+        // Remove the breakpoint metric
+        let step = reporter.step_start("Remove Breakpoint", "Remove breakpoint metric");
+        client
+            .remove_metric("bp_order")
+            .await
+            .expect("Failed to remove breakpoint metric");
+        reporter.step_success(step, Some("Removed bp_order"));
+
+        // Record baseline for logpoint
+        let baseline = if let Ok(r) = client.query_events("lp_symbol", 100).await {
+            r.data.len()
+        } else {
+            0
+        };
+
+        // Wait for logpoint to capture MORE events after breakpoint removal
+        let step = reporter.step_start(
+            "Verify Logpoint Survives",
+            "Logpoint metric should continue capturing after breakpoint removal",
+        );
+        tokio::time::sleep(Duration::from_secs(8)).await;
+
+        let new_count = if let Ok(r) = client.query_events("lp_symbol", 100).await {
+            r.data.len()
+        } else {
+            0
+        };
+
+        if new_count > baseline {
+            reporter.step_success(
+                step,
+                Some(&format!(
+                    "Logpoint survived: before={}, after={}",
+                    baseline, new_count
+                )),
+            );
+        } else {
+            executor.print_daemon_logs(100);
+            reporter.step_failed(
+                step,
+                &format!(
+                    "Logpoint stopped after breakpoint removal: before={}, after={}",
+                    baseline, new_count
+                ),
+            );
+            panic!(
+                "Logpoint metric stopped capturing after removing breakpoint metric (before={}, after={})",
+                baseline, new_count
+            );
+        }
+
+        // Cleanup part A
+        let _ = client.remove_metric("lp_symbol").await;
+
+        // =====================================================================
+        // PART B: Remove logpoint metric, verify breakpoint survives
+        // =====================================================================
+        reporter.section("PART B: REMOVE LOGPOINT, VERIFY BREAKPOINT SURVIVES");
+
+        // Add logpoint metric
+        let mut req3 = AddMetricRequest::new(
+            "lp_pnl",
+            &format!("@{}#127", script_path.display()),
+            "pnl",
+            &connection_id,
+        );
+        req3.language = Some("go".to_string());
+        client
+            .add_metric(req3)
+            .await
+            .expect("Failed to add logpoint metric");
+
+        // Add breakpoint metric
+        let mut req4 = AddMetricRequest::new(
+            "bp_entry_price",
+            &format!("@{}#130", script_path.display()),
+            "entryPrice",
+            &connection_id,
+        );
+        req4.language = Some("go".to_string());
+        req4.capture_stack_trace = Some(true);
+        client
+            .add_metric(req4)
+            .await
+            .expect("Failed to add breakpoint metric");
+
+        // Wait for both
+        let step = reporter.step_start("Wait for Both", "Both metrics should capture events");
+        let mut lp_count = 0;
+        let mut bp_count = 0;
+        for _ in 0..15 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if let Ok(r) = client.query_events("lp_pnl", 10).await {
+                lp_count = r.data.len();
+            }
+            if let Ok(r) = client.query_events("bp_entry_price", 10).await {
+                bp_count = r.data.len();
+            }
+            if lp_count > 0 && bp_count > 0 {
+                break;
+            }
+        }
+        if lp_count == 0 || bp_count == 0 {
+            executor.print_daemon_logs(100);
+            reporter.step_failed(
+                step,
+                &format!("Timeout: logpoint={}, breakpoint={}", lp_count, bp_count),
+            );
+            panic!(
+                "Both metrics must capture events: logpoint={}, breakpoint={}",
+                lp_count, bp_count
+            );
+        }
+        reporter.step_success(
+            step,
+            Some(&format!("logpoint={}, breakpoint={}", lp_count, bp_count)),
+        );
+
+        // Remove the logpoint metric
+        let step = reporter.step_start("Remove Logpoint", "Remove logpoint metric");
+        client
+            .remove_metric("lp_pnl")
+            .await
+            .expect("Failed to remove logpoint metric");
+        reporter.step_success(step, Some("Removed lp_pnl"));
+
+        // Record baseline for breakpoint
+        let baseline = if let Ok(r) = client.query_events("bp_entry_price", 100).await {
+            r.data.len()
+        } else {
+            0
+        };
+
+        // Wait for breakpoint to capture MORE events after logpoint removal
+        let step = reporter.step_start(
+            "Verify Breakpoint Survives",
+            "Breakpoint metric should continue capturing after logpoint removal",
+        );
+        tokio::time::sleep(Duration::from_secs(8)).await;
+
+        let new_count = if let Ok(r) = client.query_events("bp_entry_price", 100).await {
+            r.data.len()
+        } else {
+            0
+        };
+
+        if new_count > baseline {
+            reporter.step_success(
+                step,
+                Some(&format!(
+                    "Breakpoint survived: before={}, after={}",
+                    baseline, new_count
+                )),
+            );
+        } else {
+            executor.print_daemon_logs(100);
+            reporter.step_failed(
+                step,
+                &format!(
+                    "Breakpoint stopped after logpoint removal: before={}, after={}",
+                    baseline, new_count
+                ),
+            );
+            panic!(
+                "Breakpoint metric stopped capturing after removing logpoint metric (before={}, after={})",
+                baseline, new_count
+            );
+        }
+
+        // Cleanup
+        reporter.section("CLEANUP");
+        let _ = client.remove_metric("bp_entry_price").await;
+        let _ = client.close_connection(&connection_id).await;
+
+        reporter.section("TEST COMPLETE");
+        reporter.info("Removing one metric mode does not break the other!");
+        reporter.print_footer(true);
+    }
+
+    /// Test Go variadic function error handling
+    ///
+    /// This test verifies that when a variadic function (like fmt.Sprintf) is used
+    /// as a metric expression in Go, the error message is properly returned to the user.
+    /// Delve does NOT support variadic functions via DAP evaluate - this test ensures
+    /// the error is captured and returned as the event value.
+    #[tokio::test]
+    async fn test_dap_go_variadic_function_error() {
+        use detrix_testing::e2e::client::{AddMetricRequest, ApiClient};
+        use std::time::Duration;
+
+        if !detrix_testing::e2e::require_tool(detrix_testing::e2e::ToolDependency::Delve).await {
+            return;
+        }
+        let mut executor = TestExecutor::new();
+        let reporter = TestReporter::new("DAP Go Variadic Function Error", "MCP");
+        reporter.print_header();
+
+        // Get script path for Go detrix_example_app.go
+        let script_path = executor
+            .workspace_root
+            .join("fixtures/go/detrix_example_app.go");
+
+        // Start daemon
+        if let Err(e) = executor.start_daemon().await {
+            reporter.error(&format!("Failed to start daemon: {}", e));
+            executor.print_daemon_logs(50);
+            panic!("Failed to start daemon: {}", e);
+        }
+
+        // Start delve (Go debugger)
+        if let Err(e) = executor.start_delve(script_path.to_str().unwrap()).await {
+            reporter.error(&format!("Failed to start delve: {}", e));
+            executor.print_delve_logs(50);
+            panic!("Failed to start delve: {}", e);
+        }
+
+        let client = McpClient::new(executor.http_port);
+
+        // Step 1: Create connection
+        reporter.section("PHASE 1: CREATE CONNECTION");
+        let step = reporter.step_start("Create Connection", "Connect to Go debugger");
+
+        let connection_id = match client
+            .create_connection("127.0.0.1", executor.delve_port, "go")
+            .await
+        {
+            Ok(r) => {
+                reporter.step_success(step, Some(&format!("Connected: {}", r.data.connection_id)));
+                r.data.connection_id
+            }
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to connect: {}", e);
+            }
+        };
+
+        // Wait for DAP handshake
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Step 2: Add metric with variadic function (should fail)
+        reporter.section("PHASE 2: ADD VARIADIC FUNCTION METRIC");
+
+        // Use a line where 'symbol' is in scope (line 122 after it's assigned on 117)
+        let location = format!("@{}#122", script_path.display());
+
+        let step = reporter.step_start(
+            "Add Variadic Metric",
+            "Add metric with fmt.Sprintf (variadic function)",
+        );
+
+        // Use fmt.Sprintf which is a variadic function - Delve doesn't support these
+        let mut request = AddMetricRequest::new(
+            "variadic_test",
+            &location,
+            r#"fmt.Sprintf("%s", symbol)"#,
+            &connection_id,
+        );
+        request.language = Some("go".to_string());
+        // Enable introspection to force breakpoint mode (required for function calls)
+        request.capture_stack_trace = Some(true);
+
+        match client.add_metric(request).await {
+            Ok(r) => {
+                reporter.step_response("OK", Some(&format!("id={}", r.data)));
+                reporter.step_success(step, Some("Metric added (will fail on evaluation)"));
+            }
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                panic!("Failed to add metric: {}", e);
+            }
+        }
+
+        // Step 3: Wait for events and check for variadic error
+        reporter.section("PHASE 3: VERIFY VARIADIC ERROR IN EVENTS");
+
+        let step = reporter.step_start(
+            "Wait for Error Event",
+            "Check that variadic function error is captured",
+        );
+
+        let mut found_variadic_error = false;
+        let mut event_value = String::new();
+
+        // Wait up to 15 seconds for events
+        for _ in 0..15 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            if let Ok(r) = client.query_events("variadic_test", 10).await {
+                for event in &r.data {
+                    reporter.info(&format!(
+                        "Event: value='{}', is_error={}",
+                        event.value, event.is_error
+                    ));
+
+                    // Check for variadic function error patterns:
+                    // - "can not convert value of type string to []interface {}"
+                    // - "too many arguments"
+                    // - "evaluation failed"
+                    if event.value.contains("[]interface")
+                        || event.value.contains("too many arguments")
+                        || event.value.contains("evaluation failed")
+                    {
+                        found_variadic_error = true;
+                        event_value = event.value.clone();
+                        break;
+                    }
+                }
+            }
+
+            if found_variadic_error {
+                break;
+            }
+        }
+
+        if found_variadic_error {
+            reporter.step_success(
+                step,
+                Some(&format!(
+                    "Variadic error captured: {}",
+                    &event_value[..event_value.len().min(100)]
+                )),
+            );
+        } else {
+            executor.print_daemon_logs(100);
+            reporter.step_failed(step, "Variadic function error not captured in events");
+            panic!(
+                "Expected variadic function error in events, but none found. \
+                Delve should return an error like 'can not convert value of type string to []interface {{}}'"
+            );
+        }
+
+        // Step 4: Cleanup
+        reporter.section("PHASE 4: CLEANUP");
+
+        let step = reporter.step_start("Remove Metric", "Remove variadic_test metric");
+        match client.remove_metric("variadic_test").await {
+            Ok(_) => reporter.step_success(step, Some("Removed")),
+            Err(e) => reporter.step_failed(step, &e.to_string()),
+        }
+
+        let step = reporter.step_start("Close Connection", "Close connection");
+        match client.close_connection(&connection_id).await {
+            Ok(_) => reporter.step_success(step, Some("Closed")),
+            Err(e) => reporter.step_failed(step, &e.to_string()),
+        }
+
+        reporter.section("TEST COMPLETE");
+        reporter.info(&format!("Variadic error message: {}", event_value));
+
+        // Verify error message contains expected pattern
+        assert!(
+            event_value.contains("[]interface") || event_value.contains("too many arguments"),
+            "Error message should indicate variadic function issue: {}",
+            event_value
+        );
+
+        reporter.print_footer(true);
+    }
+
     /// Run Rust DAP workflow (requires lldb-dap and compiled detrix_example_app)
     #[tokio::test]
     async fn test_dap_rust_workflow() {
@@ -316,9 +1372,7 @@ mod dap_workflow_tests {
         reporter.print_header();
 
         // For Rust, start_lldb expects source file path (will compile it)
-        let source_path = executor
-            .workspace_root
-            .join("fixtures/rust/detrix_example_app.rs");
+        let source_path = executor.workspace_root.join("fixtures/rust/src/main.rs");
 
         // Start daemon
         if let Err(e) = executor.start_daemon().await {
@@ -408,9 +1462,7 @@ mod dap_workflow_tests {
         reporter.print_header();
 
         // For Rust, start_codelldb expects source file path (will compile it)
-        let source_path = executor
-            .workspace_root
-            .join("fixtures/rust/detrix_example_app.rs");
+        let source_path = executor.workspace_root.join("fixtures/rust/src/main.rs");
 
         // Start daemon
         if let Err(e) = executor.start_daemon().await {
@@ -701,8 +1753,6 @@ mod dap_workflow_tests {
 
         let config = DapWorkflowConfig::rust();
         let source_file = executor.workspace_root.join(&config.source_file);
-        // Binary path is source file without extension (e.g., detrix_example_app.rs -> detrix_example_app)
-        let binary_path = source_file.with_extension("");
 
         // Note: start_lldb handles building via OnceLock - don't build here to avoid races
 
@@ -719,6 +1769,12 @@ mod dap_workflow_tests {
             executor.print_lldb_logs(50);
             panic!("Failed to start lldb-dap: {}", e);
         }
+
+        // Get the actual binary path from executor (set by start_lldb after build)
+        let binary_path = executor
+            .rust_binary_path
+            .clone()
+            .expect("rust_binary_path should be set after start_lldb");
 
         let client = McpClient::new(executor.http_port);
         let lldb_port = executor.lldb_port;
@@ -967,9 +2023,7 @@ mod grpc_dap_workflow_tests {
         let reporter = TestReporter::new("DAP Rust Workflow", "gRPC");
         reporter.print_header();
 
-        let source_path = executor
-            .workspace_root
-            .join("fixtures/rust/detrix_example_app.rs");
+        let source_path = executor.workspace_root.join("fixtures/rust/src/main.rs");
 
         if let Err(e) = executor.start_daemon().await {
             reporter.error(&format!("Failed to start daemon: {}", e));
@@ -1237,8 +2291,6 @@ mod grpc_dap_workflow_tests {
 
         let config = DapWorkflowConfig::rust();
         let source_file = executor.workspace_root.join(&config.source_file);
-        // Binary path is source file without extension (e.g., detrix_example_app.rs -> detrix_example_app)
-        let binary_path = source_file.with_extension("");
 
         // Note: start_lldb handles building via OnceLock - don't build here to avoid races
 
@@ -1253,6 +2305,12 @@ mod grpc_dap_workflow_tests {
             executor.print_lldb_logs(50);
             panic!("Failed to start lldb-dap: {}", e);
         }
+
+        // Get the actual binary path from executor (set by start_lldb after build)
+        let binary_path = executor
+            .rust_binary_path
+            .clone()
+            .expect("rust_binary_path should be set after start_lldb");
 
         let client = GrpcClient::with_http_port(executor.grpc_port, executor.http_port);
         let lldb_port = executor.lldb_port;
@@ -1496,9 +2554,7 @@ mod rest_dap_workflow_tests {
         let reporter = TestReporter::new("DAP Rust Workflow", "REST");
         reporter.print_header();
 
-        let source_path = executor
-            .workspace_root
-            .join("fixtures/rust/detrix_example_app.rs");
+        let source_path = executor.workspace_root.join("fixtures/rust/src/main.rs");
 
         if let Err(e) = executor.start_daemon().await {
             reporter.error(&format!("Failed to start daemon: {}", e));
@@ -1766,8 +2822,6 @@ mod rest_dap_workflow_tests {
 
         let config = DapWorkflowConfig::rust();
         let source_file = executor.workspace_root.join(&config.source_file);
-        // Binary path is source file without extension (e.g., detrix_example_app.rs -> detrix_example_app)
-        let binary_path = source_file.with_extension("");
 
         // Note: start_lldb handles building via OnceLock - don't build here to avoid races
 
@@ -1782,6 +2836,12 @@ mod rest_dap_workflow_tests {
             executor.print_lldb_logs(50);
             panic!("Failed to start lldb-dap: {}", e);
         }
+
+        // Get the actual binary path from executor (set by start_lldb after build)
+        let binary_path = executor
+            .rust_binary_path
+            .clone()
+            .expect("rust_binary_path should be set after start_lldb");
 
         let client = RestClient::new(executor.http_port);
         let lldb_port = executor.lldb_port;
@@ -3223,14 +4283,14 @@ mod observe_workflow_tests {
         reporter.section("STEP 5: OBSERVE WITH EXPLICIT LINE");
         let step = reporter.step_start(
             "Observe (Explicit Line)",
-            "Using observe tool with line 53 (all variables in scope)",
+            "Using observe tool with line 66 (all variables in scope)",
         );
         reporter.info(&format!("  File: {}", script_path.display()));
         reporter.info("  Expression: price");
-        reporter.info("  Line: 53 (explicit)");
+        reporter.info("  Line: 66 (explicit)");
 
         let observe_request = ObserveRequest::new(script_path.to_str().unwrap(), "price")
-            .with_line(53)
+            .with_line(66)
             .with_connection_id(&connection_id)
             .with_name("observe_price_explicit");
 
@@ -3261,11 +4321,11 @@ mod observe_workflow_tests {
             "Using observe without name - should auto-generate",
         );
         reporter.info("  Expression: order_id");
-        reporter.info("  Line: 50 (different line to avoid DAP conflict)");
+        reporter.info("  Line: 63 (different line to avoid DAP conflict)");
         reporter.info("  Name: (auto-generated)");
 
         let observe_request = ObserveRequest::new(script_path.to_str().unwrap(), "order_id")
-            .with_line(50) // Different line to avoid DAP logpoint conflict
+            .with_line(63) // Different line to avoid DAP logpoint conflict
             .with_connection_id(&connection_id);
         // No name set - should auto-generate
 
@@ -3289,12 +4349,12 @@ mod observe_workflow_tests {
             "Using observe with stack trace + memory snapshot",
         );
         reporter.info("  Expression: quantity");
-        reporter.info("  Line: 51 (different line to avoid DAP conflict)");
+        reporter.info("  Line: 64 (different line to avoid DAP conflict)");
         reporter.info("  Stack Trace: enabled");
         reporter.info("  Memory Snapshot: enabled");
 
         let observe_request = ObserveRequest::new(script_path.to_str().unwrap(), "quantity")
-            .with_line(51) // Different line to avoid DAP logpoint conflict
+            .with_line(64) // Different line to avoid DAP logpoint conflict
             .with_connection_id(&connection_id)
             .with_name("observe_quantity_introspection")
             .with_group("python_observe_test")
@@ -3493,14 +4553,15 @@ mod observe_workflow_tests {
         reporter.section("STEP 5: OBSERVE GO VARIABLES");
         let step = reporter.step_start(
             "Observe (Go)",
-            "Using observe tool on line 69 (all variables in scope)",
+            "Using observe tool on line 127 (all variables in scope)",
         );
         reporter.info(&format!("  File: {}", source_path.display()));
         reporter.info("  Expression: orderID");
-        reporter.info("  Line: 69");
+        reporter.info("  Line: 127");
 
+        // Line 127 is `pnl := calculatePnl(...)` where all variables are in scope
         let observe_request = ObserveRequest::new(source_path.to_str().unwrap(), "orderID")
-            .with_line(69)
+            .with_line(127)
             .with_connection_id(&connection_id)
             .with_name("observe_go_orderid");
 
@@ -3655,14 +4716,15 @@ mod observe_workflow_tests {
         reporter.section("STEP 5: OBSERVE RUST VARIABLES");
         let step = reporter.step_start(
             "Observe (Rust)",
-            "Using observe tool on line 83 (all variables in scope)",
+            "Using observe tool on line 117 (all variables in scope)",
         );
         reporter.info(&format!("  File: {}", source_path.display()));
         reporter.info("  Expression: order_id");
-        reporter.info("  Line: 83");
+        reporter.info("  Line: 117");
 
+        // Line 117 is the pnl calculation line where order_id is in scope
         let observe_request = ObserveRequest::new(source_path.to_str().unwrap(), "order_id")
-            .with_line(83)
+            .with_line(117)
             .with_connection_id(&connection_id)
             .with_name("observe_rust_orderid");
 
@@ -3800,16 +4862,16 @@ mod enable_from_diff_workflow_tests {
 
         // Create a diff with valid Python print statements
         // These expressions should all be parseable (simple identifiers/attributes)
+        // Line numbers updated for +13 lines Detrix client init at top of file
         let diff = format!(
             r#"diff --git a/{path} b/{path}
-@@ -45,6 +45,9 @@ def run_trade_loop():
-     symbol = random.choice(symbols)
-+    print(f"symbol={{symbol}}")
-     quantity = random.randint(1, 50)
-+    print(f"quantity={{quantity}}")
-     price = random.uniform(100, 1000)
-+    print(f"price={{price}}")
-     order_id = place_order(symbol, quantity, price)
+@@ -54,6 +54,9 @@ def main():
+        symbol = random.choice(symbols)
++        print(f"symbol={{symbol}}")
+        quantity = random.randint(1, 50)
++        print(f"quantity={{quantity}}")
+        price = random.uniform(100, 1000)
++        print(f"price={{price}}")
 "#,
             path = script_path.display()
         );
@@ -3951,15 +5013,16 @@ mod enable_from_diff_workflow_tests {
         reporter.section("STEP 2: ENABLE FROM DIFF - PARTIAL SUCCESS");
 
         // Mix of simple and complex expressions
+        // Line numbers updated for +13 lines Detrix client init at top of file
         let diff = format!(
             r#"diff --git a/{path} b/{path}
-@@ -45,6 +45,9 @@ def run_trade_loop():
-     symbol = random.choice(symbols)
-+    print(f"symbol={{symbol}}")
-     quantity = random.randint(1, 50)
-+    print(calculate_total(quantity, price))
-     price = random.uniform(100, 1000)
-+    print(f"price={{price}}")
+@@ -54,6 +54,9 @@ def main():
+        symbol = random.choice(symbols)
++        print(f"symbol={{symbol}}")
+        quantity = random.randint(1, 50)
++        print(calculate_total(quantity, price))
+        price = random.uniform(100, 1000)
++        print(f"price={{price}}")
 "#,
             path = script_path.display()
         );

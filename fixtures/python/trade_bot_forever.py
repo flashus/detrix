@@ -4,6 +4,19 @@ import time
 import random
 import signal
 import sys
+import os
+
+# Optional Detrix client initialization for client tests
+# Set DETRIX_CLIENT_ENABLED=1 to enable, provide DETRIX_DAEMON_URL and DETRIX_CONTROL_PORT
+if os.environ.get("DETRIX_CLIENT_ENABLED", "0") == "1":
+    import detrix
+    detrix.init(
+        name=os.environ.get("DETRIX_CLIENT_NAME", "trade-bot"),
+        daemon_url=os.environ.get("DETRIX_DAEMON_URL", "http://127.0.0.1:8090"),
+        control_port=int(os.environ.get("DETRIX_CONTROL_PORT", "0")),
+    )
+    _status = detrix.status()
+    print(f"Control plane: http://127.0.0.1:{_status['control_port']}")
 
 running = True
 
@@ -42,10 +55,10 @@ def main():
         quantity = random.randint(1, 50)
         price = random.uniform(100, 1000)
         
-        # Line 42 - place_order call
+        # Metric point: order_id assignment (line 59)
         order_id = place_order(symbol, quantity, price)
-        
-        # Line 45 - calculate pnl
+
+        # Metric point: entry_price/current_price (lines 62-63)
         entry_price = price
         current_price = price * random.uniform(0.95, 1.05)
         pnl = calculate_pnl(entry_price, current_price, quantity)

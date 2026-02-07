@@ -98,6 +98,87 @@ impl RestClient {
                 .expect("Failed to create HTTP client"),
         }
     }
+
+    /// Query events with timestamp filter
+    ///
+    /// # Arguments
+    /// * `metric_name` - Name of the metric to query events for
+    /// * `limit` - Maximum number of events to return
+    /// * `since_micros` - Only return events with timestamp >= this value (microseconds since epoch)
+    pub async fn query_events_since(
+        &self,
+        metric_name: &str,
+        limit: u32,
+        since_micros: i64,
+    ) -> ApiResult<Vec<EventInfo>> {
+        // Use camelCase for query params (as expected by API with serde rename_all = "camelCase")
+        let response = self
+            .client
+            .get(format!(
+                "{}/api/v1/events?metricName={}&limit={}&since={}",
+                self.base_url, metric_name, limit, since_micros
+            ))
+            .send()
+            .await
+            .map_err(|e| ApiError::new(format!("Query events failed: {}", e)))?;
+
+        // Check for HTTP errors before parsing
+        let status = response.status();
+        let raw = response
+            .text()
+            .await
+            .map_err(|e| ApiError::new(format!("Failed to read response: {}", e)))?;
+
+        if !status.is_success() {
+            return Err(ApiError::new(format!("HTTP {} - {}", status, raw)).with_raw(raw));
+        }
+
+        // Use proto MetricEvent type
+        let events: Vec<ProtoMetricEvent> = serde_json::from_str(&raw).map_err(|e| {
+            ApiError::new(format!("Failed to parse response: {}", e)).with_raw(raw.clone())
+        })?;
+
+        let infos: Vec<EventInfo> = events
+            .into_iter()
+            .map(|e| {
+                // Convert timestamp to ISO string
+                let timestamp_iso = chrono::DateTime::from_timestamp_micros(e.timestamp)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_else(|| e.timestamp.to_string());
+
+                // Calculate age in seconds
+                let now = chrono::Utc::now().timestamp_micros();
+                let age_seconds = (now - e.timestamp) / 1_000_000;
+
+                // Check result oneof for value or error
+                let (value, is_error) = match e.result {
+                    Some(detrix_api::metric_event::Result::ValueJson(v)) => (v, false),
+                    Some(detrix_api::metric_event::Result::Error(_)) => (String::new(), true),
+                    None => (String::new(), false),
+                };
+
+                // Convert introspection data using proto types
+                let stack_trace = e.stack_trace.as_ref().map(proto_to_core_stack_trace);
+                let memory_snapshot = e
+                    .memory_snapshot
+                    .as_ref()
+                    .map(proto_to_core_memory_snapshot);
+
+                EventInfo {
+                    metric_name: e.metric_name,
+                    value,
+                    timestamp_iso,
+                    age_seconds,
+                    is_error,
+                    stack_trace,
+                    memory_snapshot,
+                    extra: std::collections::HashMap::new(),
+                }
+            })
+            .collect();
+
+        Ok(ApiResponse::new(infos).with_raw(raw))
+    }
 }
 
 // ============================================================================
@@ -228,9 +309,14 @@ impl ApiClient for RestClient {
             host: host.to_string(),
             port: port.into(), // Convert u16 to u32 for proto
             language: language.to_string(),
-            connection_id: None,
+            // Identity fields for UUID-based connection tracking
+            name: format!("e2e-test-{}-{}", language, port),
+            workspace_root: "/e2e-test".to_string(),
+            hostname: detrix_api::common::resolve_hostname(),
             metadata: None,
             program: program.map(|s| s.to_string()), // Optional program path for launch mode (Rust direct lldb-dap)
+            safe_mode: false,                        // Default to false for tests
+            pid: None,                               // Tests don't use AttachPid mode
         };
 
         let response = self
@@ -269,6 +355,7 @@ impl ApiClient for RestClient {
             port: conn.port as u16, // Convert from proto u32
             language: conn.language,
             status: status_i32_to_string(conn.status),
+            safe_mode: conn.safe_mode,
         })
         .with_raw(raw))
     }
@@ -324,6 +411,7 @@ impl ApiClient for RestClient {
             port: conn.port as u16,
             language: conn.language,
             status: status_i32_to_string(conn.status),
+            safe_mode: conn.safe_mode,
         })
         .with_raw(raw))
     }
@@ -353,6 +441,7 @@ impl ApiClient for RestClient {
                 port: c.port as u16,
                 language: c.language,
                 status: status_i32_to_string(c.status),
+                safe_mode: c.safe_mode,
             })
             .collect();
 
@@ -392,7 +481,7 @@ impl ApiClient for RestClient {
             group: request.group,
             location: ProtoLocation { file, line },
             expression: request.expression,
-            language: "python".to_string(), // Default to python
+            language: None, // Language derived from connection, not from request
             enabled: request.enabled.unwrap_or(true), // Default to enabled if not specified
             mode,
             safety_level: Some("strict".to_string()),
@@ -985,7 +1074,7 @@ mod tests {
                 line: 42,
             },
             expression: "x + y".to_string(),
-            language: "python".to_string(),
+            language: None, // Derived from connection
             enabled: true,
             mode: "stream".to_string(),
             safety_level: Some("strict".to_string()),
@@ -1026,7 +1115,7 @@ mod tests {
                 line: 42,
             },
             expression: "x".to_string(),
-            language: "python".to_string(),
+            language: None, // Derived from connection
             enabled: true,
             mode: "stream".to_string(),
             safety_level: None,

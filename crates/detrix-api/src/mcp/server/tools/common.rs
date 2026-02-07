@@ -1,11 +1,7 @@
 //! Common helpers shared across tool implementations
 
-use crate::mcp::error::ToMcpResult;
-use crate::state::ApiState;
 use detrix_config::DefaultsConfig;
-use detrix_core::{Connection, ConnectionId, Metric, MetricMode, SafetyLevel, SourceLanguage};
-use rmcp::ErrorData as McpError;
-use std::sync::Arc;
+use detrix_core::{ConnectionId, Metric, MetricMode, SafetyLevel, SourceLanguage};
 
 // ============================================================================
 // Metric Building Helpers
@@ -90,24 +86,6 @@ impl MetricBuilder {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn with_mode(mut self, mode: MetricMode) -> Self {
-        self.mode = mode;
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn with_enabled(mut self, enabled: bool) -> Self {
-        self.enabled = enabled;
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn with_safety_level(mut self, safety_level: SafetyLevel) -> Self {
-        self.safety_level = safety_level;
-        self
-    }
-
     pub fn build(self) -> Metric {
         let ttl = self.ttl_seconds.map(|t| t as u64);
         Metric {
@@ -136,99 +114,6 @@ impl MetricBuilder {
             anchor_status: Default::default(),
         }
     }
-}
-
-// ============================================================================
-// Connection Validation Helpers
-// ============================================================================
-
-/// Get and validate a connection, ensuring it has a running adapter
-#[allow(dead_code)] // Prepared for future tool logic extraction
-pub async fn get_validated_connection(
-    state: &Arc<ApiState>,
-    connection_id: &ConnectionId,
-) -> Result<Connection, McpError> {
-    let connection = state
-        .context
-        .connection_service
-        .get_connection(connection_id)
-        .await
-        .mcp_context("Failed to get connection")?
-        .ok_or_else(|| {
-            McpError::invalid_params(
-                format!(
-                    "Connection '{}' not found. Use list_connections to see available connections.",
-                    connection_id
-                ),
-                None,
-            )
-        })?;
-
-    // Check connection has a running adapter
-    if !state
-        .context
-        .adapter_lifecycle_manager
-        .has_adapter(connection_id)
-        .await
-    {
-        return Err(McpError::invalid_params(
-            format!(
-                "Connection '{}' is not connected (status: {:?}). Reconnect or use a different connection.",
-                connection_id, connection.status
-            ),
-            None,
-        ));
-    }
-
-    Ok(connection)
-}
-
-// ============================================================================
-// Response Building Helpers
-// ============================================================================
-
-/// Parameters for building a metric response
-#[allow(dead_code)] // Prepared for future tool logic extraction
-pub struct MetricResponseParams<'a> {
-    pub success: bool,
-    pub metric_id: i64,
-    pub metric_name: &'a str,
-    pub file: &'a str,
-    pub line: u32,
-    pub expression: &'a str,
-    pub connection_id: &'a str,
-    pub warnings: &'a [String],
-    pub additional_context: Option<serde_json::Value>,
-}
-
-/// Build a JSON response for metric operations
-#[allow(dead_code)] // Prepared for future tool logic extraction
-pub fn build_metric_response(params: MetricResponseParams<'_>) -> serde_json::Value {
-    let mut response = serde_json::json!({
-        "success": params.success,
-        "metric_id": params.metric_id,
-        "name": params.metric_name,
-        "location": format!("@{}#{}", params.file, params.line),
-        "parsed": {
-            "file": params.file,
-            "line": params.line,
-            "expression": params.expression,
-            "connection_id": params.connection_id,
-        },
-        "warnings": params.warnings,
-    });
-
-    if let Some(ctx) = params.additional_context {
-        if let Some(obj) = response.as_object_mut() {
-            if let Some(ctx_obj) = ctx.as_object() {
-                for (k, v) in ctx_obj {
-                    obj.insert(k.clone(), v.clone());
-                }
-            }
-        }
-    }
-
-    response
 }
 
 /// Parameters for building an observe response

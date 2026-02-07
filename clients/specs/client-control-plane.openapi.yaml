@@ -1,0 +1,433 @@
+openapi: 3.0.3
+info:
+  title: Detrix Client Control Plane API
+  description: |
+    HTTP API exposed by Detrix client libraries for controlling the debug-on-demand lifecycle.
+
+    This specification defines the contract that all Detrix client implementations (Python, Go, Rust)
+    must follow to ensure cross-language consistency and interoperability with the Detrix daemon.
+
+    ## Authentication Model
+
+    - **Localhost requests** (127.0.0.1, ::1, localhost) are ALWAYS allowed without authentication.
+      This is safe because only local processes can access these addresses.
+    - **Remote requests** require a valid Bearer token in the Authorization header.
+      The token must match the token configured in DETRIX_TOKEN environment variable
+      or stored in ~/detrix/mcp-token file.
+    - If no token is configured AND the request is from a non-localhost address, access is DENIED.
+
+    ## State Machine
+
+    The client operates in three states:
+    ```
+    SLEEPING <-> WAKING -> AWAKE
+        ^                    |
+        +--------------------+
+    ```
+
+    - **SLEEPING**: Initial state. Control plane running, debugger not started, not registered with daemon.
+    - **WAKING**: Transitional state during wake() operation. Debugger starting, daemon registration in progress.
+    - **AWAKE**: Active state. Debugger listening, registered with daemon, ready for observation.
+
+  version: 1.0.0
+  contact:
+    name: Detrix Project
+    url: https://github.com/flashus/detrix
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://127.0.0.1:{port}
+    description: Local control plane server
+    variables:
+      port:
+        default: "0"
+        description: Control plane port (0 = auto-assigned)
+
+tags:
+  - name: Health
+    description: Health check endpoints (no auth required)
+  - name: Status
+    description: Status and info endpoints (auth required for remote)
+  - name: Lifecycle
+    description: State transition endpoints (auth required for remote)
+
+paths:
+  /detrix/health:
+    get:
+      tags:
+        - Health
+      summary: Health check
+      description: |
+        Returns the health status of the client control plane.
+        This endpoint does NOT require authentication.
+      operationId: getHealth
+      responses:
+        "200":
+          description: Client is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /detrix/status:
+    get:
+      tags:
+        - Status
+      summary: Get client status
+      description: |
+        Returns the current state and configuration of the client.
+        Requires authentication for non-localhost requests.
+      operationId: getStatus
+      security:
+        - bearerAuth: []
+        - localhostAuth: []
+      responses:
+        "200":
+          description: Current client status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /detrix/info:
+    get:
+      tags:
+        - Status
+      summary: Get client info
+      description: |
+        Returns static information about the client process.
+        Requires authentication for non-localhost requests.
+      operationId: getInfo
+      security:
+        - bearerAuth: []
+        - localhostAuth: []
+      responses:
+        "200":
+          description: Client information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InfoResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /detrix/wake:
+    post:
+      tags:
+        - Lifecycle
+      summary: Wake the client
+      description: |
+        Transitions the client from SLEEPING to AWAKE state.
+
+        This operation:
+        1. Starts the language-specific debug adapter (debugpy for Python, delve for Go, etc.)
+        2. Registers the connection with the Detrix daemon
+        3. Returns the debug port and connection ID
+
+        If already AWAKE, returns `status: "already_awake"` without error.
+
+        The WAKING transitional state is used internally to allow concurrent status()
+        calls while the wake operation is in progress.
+      operationId: wake
+      security:
+        - bearerAuth: []
+        - localhostAuth: []
+      requestBody:
+        description: Optional parameters for wake operation
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WakeRequest"
+      responses:
+        "200":
+          description: Client is now awake or was already awake
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WakeResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Debugger failed to start
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Daemon not reachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /detrix/sleep:
+    post:
+      tags:
+        - Lifecycle
+      summary: Put the client to sleep
+      description: |
+        Transitions the client from AWAKE to SLEEPING state.
+
+        This operation:
+        1. Unregisters the connection from the Detrix daemon (best effort)
+        2. Marks the client state as SLEEPING
+
+        Note: Due to debugger limitations (e.g., debugpy cannot stop its listener),
+        the debug port may remain open after sleep(). The `debug_port_active` field
+        in status reflects the actual port state.
+
+        If already SLEEPING, returns `status: "already_sleeping"` without error.
+      operationId: sleep
+      security:
+        - bearerAuth: []
+        - localhostAuth: []
+      responses:
+        "200":
+          description: Client is now sleeping or was already sleeping
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SleepResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Bearer token authentication for remote requests.
+        Token must match DETRIX_TOKEN env var or ~/detrix/mcp-token file.
+    localhostAuth:
+      type: apiKey
+      in: header
+      name: X-Localhost
+      description: |
+        Implicit authentication for localhost requests.
+        Requests from 127.0.0.1, ::1, or localhost are automatically authorized.
+
+  schemas:
+    HealthResponse:
+      type: object
+      description: Health check response
+      required:
+        - status
+        - service
+      properties:
+        status:
+          type: string
+          enum: ["ok"]
+          description: Health status (always "ok" if the control plane is running)
+        service:
+          type: string
+          enum: ["detrix-client"]
+          description: Service identifier
+      example:
+        status: "ok"
+        service: "detrix-client"
+
+    StatusResponse:
+      type: object
+      description: Current client status
+      required:
+        - state
+        - name
+        - control_host
+        - control_port
+        - debug_port
+        - debug_port_active
+        - daemon_url
+        # connection_id is nullable, so not required
+      properties:
+        state:
+          $ref: "#/components/schemas/ClientState"
+        name:
+          type: string
+          description: Connection name for this client
+          example: "my-service-12345"
+        control_host:
+          type: string
+          description: Host the control plane is bound to
+          example: "127.0.0.1"
+        control_port:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          description: |
+            Actual port the control plane is listening on.
+            0 if the control plane has not been started yet.
+          example: 8091
+        debug_port:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          description: |
+            Debug adapter port. 0 if debugger has never been started.
+            May be non-zero even when sleeping due to debugger limitations.
+          example: 5678
+        debug_port_active:
+          type: boolean
+          description: |
+            True if the debug port is actually open and accepting connections.
+            This may be true even when state is "sleeping" because some debuggers
+            (e.g., debugpy) cannot stop their listener once started.
+          example: true
+        daemon_url:
+          type: string
+          description: URL of the Detrix daemon this client connects to
+          example: "http://127.0.0.1:8090"
+        connection_id:
+          type: string
+          nullable: true
+          description: |
+            Connection ID assigned by the daemon upon registration.
+            Null if not currently registered (state is "sleeping").
+          example: "conn_abc123"
+      example:
+        state: "awake"
+        name: "my-service-12345"
+        control_host: "127.0.0.1"
+        control_port: 8091
+        debug_port: 5678
+        debug_port_active: true
+        daemon_url: "http://127.0.0.1:8090"
+        connection_id: "conn_abc123"
+
+    InfoResponse:
+      type: object
+      description: Static client process information
+      required:
+        - name
+        - pid
+      properties:
+        name:
+          type: string
+          description: Connection name for this client
+          example: "my-service-12345"
+        pid:
+          type: integer
+          format: int64
+          description: Process ID of the client
+          example: 12345
+        python_version:
+          type: string
+          description: Python version (Python client only)
+          example: "3.12.0 (main, Oct  2 2023, 00:00:00)"
+        python_executable:
+          type: string
+          description: Python executable path (Python client only)
+          example: "/usr/bin/python3"
+        go_version:
+          type: string
+          description: Go version (Go client only)
+          example: "go1.22.0"
+        rust_version:
+          type: string
+          description: Rust version (Rust client only)
+          example: "1.75.0"
+      example:
+        name: "my-service-12345"
+        pid: 12345
+        python_version: "3.12.0"
+        python_executable: "/usr/bin/python3"
+
+    WakeRequest:
+      type: object
+      description: Optional parameters for wake operation
+      properties:
+        daemon_url:
+          type: string
+          format: uri
+          description: |
+            Override the daemon URL for this wake operation.
+            If not provided, uses the URL configured during init().
+          example: "http://192.168.1.100:8090"
+
+    WakeResponse:
+      type: object
+      description: Response from wake operation
+      required:
+        - status
+        - debug_port
+        - connection_id
+      properties:
+        status:
+          type: string
+          enum: ["awake", "already_awake"]
+          description: |
+            "awake" if the client transitioned from sleeping to awake.
+            "already_awake" if the client was already in awake state.
+        debug_port:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 65535
+          description: Port the debug adapter is listening on
+          example: 5678
+        connection_id:
+          type: string
+          description: Connection ID assigned by the daemon
+          example: "conn_abc123"
+      example:
+        status: "awake"
+        debug_port: 5678
+        connection_id: "conn_abc123"
+
+    SleepResponse:
+      type: object
+      description: Response from sleep operation
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: ["sleeping", "already_sleeping"]
+          description: |
+            "sleeping" if the client transitioned from awake to sleeping.
+            "already_sleeping" if the client was already in sleeping state.
+      example:
+        status: "sleeping"
+
+    ClientState:
+      type: string
+      enum: ["sleeping", "waking", "awake"]
+      description: |
+        Client state machine state:
+        - **sleeping**: Initial/inactive state. Control plane running, debugger not started.
+        - **waking**: Transitional state during wake operation.
+        - **awake**: Active state. Debugger listening, registered with daemon.
+
+    ErrorResponse:
+      type: object
+      description: Error response
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Error message
+          example: "Daemon not reachable at http://127.0.0.1:8090"

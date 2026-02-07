@@ -56,6 +56,7 @@ uuid.workspace = true
 sysinfo.workspace = true
 regex.workspace = true
 paste.workspace = true
+hostname = "0.4"  # Get machine hostname for connection identity
 
 # Unix-specific for process info
 [target.'cfg(unix)'.dependencies]
@@ -80,6 +81,9 @@ detrix-testing = { path = "../detrix-testing" }
 # Infrastructure crates for integration tests (not used in production code)
 detrix-storage = { path = "../detrix-storage" }
 detrix-dap = { path = "../detrix-dap" }
+
+[lints]
+workspace = true
 
 [[test]]
 name = "grpc_integration"

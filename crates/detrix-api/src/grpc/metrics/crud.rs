@@ -24,6 +24,22 @@ pub async fn handle_add_metric(
         req.safety_level = config.safety.default_safety_level().as_str().to_string();
     }
 
+    // If language is not provided, derive it from the connection (same pattern as MCP/REST)
+    if req.language.as_ref().map_or(true, |l| l.is_empty()) {
+        let conn_id = detrix_core::ConnectionId::from(req.connection_id.as_str());
+        let connection = state
+            .context
+            .connection_service
+            .get_connection(&conn_id)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to get connection: {}", e)))?
+            .ok_or_else(|| {
+                Status::not_found(format!("Connection '{}' not found", req.connection_id))
+            })?;
+
+        req.language = Some(connection.language.to_string());
+    }
+
     // Convert proto DTO to domain type
     let metric =
         add_request_to_metric(&req).map_err(|e| Status::invalid_argument(e.to_string()))?;

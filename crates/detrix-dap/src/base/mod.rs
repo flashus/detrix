@@ -27,7 +27,7 @@ mod tests;
 
 // Re-export public API
 pub use adapter::BaseAdapter;
-pub use metrics::MetricManager;
+pub use metrics::{build_source_breakpoint, MetricManager};
 pub use parsing::{find_metric_for_error, parse_value, LogpointParseResult};
 pub use traits::{NoThreadExtractor, OutputParser, ThreadExtractor, ThreadInfo, DETRICS_PREFIX};
 

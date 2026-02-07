@@ -15,6 +15,7 @@ mod tests {
         ConnectionId, Location, Metric, MetricEvent, MetricId, MetricMode, SafetyLevel,
         SourceLanguage, SystemEvent,
     };
+    use detrix_ports::ConnectionRepository;
     use detrix_testing::{MockConnectionRepository, MockEventRepository, MockMetricRepository};
     use std::collections::HashSet;
     use std::path::PathBuf;
@@ -237,6 +238,7 @@ mod tests {
             _host: &str,
             _port: u16,
             _program: Option<&str>,
+            _pid: Option<u32>,
         ) -> detrix_core::Result<DapAdapterRef> {
             Ok(Arc::new(MockAdapter::new()) as DapAdapterRef)
         }
@@ -279,6 +281,7 @@ mod tests {
             _host: &str,
             _port: u16,
             _program: Option<&str>,
+            _pid: Option<u32>,
         ) -> detrix_core::Result<DapAdapterRef> {
             // Return a clone of the shared adapter reference
             Ok(Arc::clone(&self.shared_adapter) as DapAdapterRef)
@@ -343,7 +346,9 @@ mod tests {
                 "127.0.0.1",
                 5678,
                 SourceLanguage::Python,
-                None,
+                None,  // program
+                None,  // pid
+                false, // safe_mode = false for normal tests
             )
             .await
             .expect("Failed to register mock adapter");
@@ -373,7 +378,9 @@ mod tests {
                 "127.0.0.1",
                 5678,
                 SourceLanguage::Python,
-                None,
+                None,  // program
+                None,  // pid
+                false, // safe_mode = false for normal tests
             )
             .await
             .expect("Failed to register failing mock adapter");
@@ -908,5 +915,221 @@ mod tests {
         // Verify metric still exists
         let metric = service.get_metric(metric_id).await.unwrap();
         assert!(metric.is_some(), "Metric should still exist");
+    }
+
+    // ==================== SafeMode Enforcement Tests ====================
+
+    /// Creates a test service with a SafeMode-enabled connection
+    async fn create_test_service_with_safe_mode_connection() -> MetricService {
+        let repository = Arc::new(MockMetricRepository::new());
+        let connection_repository = Arc::new(MockConnectionRepository::new());
+        let adapter_manager = create_test_adapter_manager();
+
+        let connection_id = ConnectionId::from("safe_mode_conn");
+
+        // Create and save a connection with safe_mode enabled
+        let mut connection = detrix_core::Connection::new(
+            connection_id.clone(),
+            "127.0.0.1".to_string(),
+            5678,
+            SourceLanguage::Python,
+        )
+        .unwrap();
+        connection.safe_mode = true;
+        connection_repository.save(&connection).await.unwrap();
+
+        // Register a mock adapter for this connection with safe_mode enabled
+        adapter_manager
+            .start_adapter(
+                connection_id,
+                "127.0.0.1",
+                5678,
+                SourceLanguage::Python,
+                None, // program
+                None, // pid
+                true, // safe_mode = true for SafeMode tests
+            )
+            .await
+            .expect("Failed to register mock adapter");
+
+        let (system_event_tx, _) = tokio::sync::broadcast::channel::<SystemEvent>(100);
+        MetricService::builder(
+            repository as MetricRepositoryRef,
+            adapter_manager,
+            system_event_tx,
+        )
+        .build()
+    }
+
+    fn create_safe_mode_test_metric(name: &str) -> Metric {
+        Metric {
+            id: None,
+            name: name.to_string(),
+            connection_id: ConnectionId::from("safe_mode_conn"),
+            group: Some("test_group".to_string()),
+            location: Location {
+                file: test_py_path(),
+                line: 30,
+            },
+            expression: "x.value".to_string(),
+            language: SourceLanguage::Python,
+            enabled: true,
+            mode: MetricMode::Stream,
+            condition: None,
+            safety_level: SafetyLevel::Strict,
+            created_at: None,
+            capture_stack_trace: false,
+            stack_trace_ttl: None,
+            stack_trace_slice: None,
+            capture_memory_snapshot: false,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+            anchor: None,
+            anchor_status: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_safe_mode_blocks_capture_stack_trace() {
+        let service = create_test_service_with_safe_mode_connection().await;
+
+        let mut metric = create_safe_mode_test_metric("stack_trace_metric");
+        metric.capture_stack_trace = true;
+
+        let result = service.add_metric(metric, false).await;
+
+        assert!(
+            result.is_err(),
+            "Should block capture_stack_trace in SafeMode"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("SafeMode"),
+            "Error should mention SafeMode: {}",
+            err
+        );
+        assert!(
+            err.contains("capture_stack_trace"),
+            "Error should mention capture_stack_trace: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_safe_mode_blocks_capture_memory_snapshot() {
+        let service = create_test_service_with_safe_mode_connection().await;
+
+        let mut metric = create_safe_mode_test_metric("memory_snapshot_metric");
+        metric.location.line = 31; // Different line to avoid conflict
+        metric.capture_memory_snapshot = true;
+
+        let result = service.add_metric(metric, false).await;
+
+        assert!(
+            result.is_err(),
+            "Should block capture_memory_snapshot in SafeMode"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("SafeMode"),
+            "Error should mention SafeMode: {}",
+            err
+        );
+        assert!(
+            err.contains("capture_memory_snapshot"),
+            "Error should mention capture_memory_snapshot: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_safe_mode_blocks_both_introspection_features() {
+        let service = create_test_service_with_safe_mode_connection().await;
+
+        let mut metric = create_safe_mode_test_metric("both_introspection_metric");
+        metric.location.line = 32; // Different line to avoid conflict
+        metric.capture_stack_trace = true;
+        metric.capture_memory_snapshot = true;
+
+        let result = service.add_metric(metric, false).await;
+
+        assert!(
+            result.is_err(),
+            "Should block both introspection features in SafeMode"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("SafeMode"),
+            "Error should mention SafeMode: {}",
+            err
+        );
+        // Error should mention both operations
+        assert!(
+            err.contains("capture_stack_trace") && err.contains("capture_memory_snapshot"),
+            "Error should mention both operations: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_safe_mode_allows_basic_logpoints() {
+        let service = create_test_service_with_safe_mode_connection().await;
+
+        // Basic metric without introspection features
+        let metric = create_safe_mode_test_metric("basic_logpoint");
+
+        let result = service.add_metric(metric, false).await;
+
+        assert!(
+            result.is_ok(),
+            "Should allow basic logpoints in SafeMode: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_safe_mode_blocks_update_with_introspection() {
+        let service = create_test_service_with_safe_mode_connection().await;
+
+        // First add a basic metric (should succeed)
+        let metric = create_safe_mode_test_metric("update_test_metric");
+        let outcome = service.add_metric(metric.clone(), false).await.unwrap();
+        let metric_id = outcome.value;
+
+        // Now try to update it to enable capture_stack_trace
+        let mut updated_metric = metric.clone();
+        updated_metric.id = Some(metric_id);
+        updated_metric.capture_stack_trace = true;
+
+        let result = service.update_metric(&updated_metric).await;
+
+        assert!(
+            result.is_err(),
+            "Should block update with capture_stack_trace in SafeMode"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("SafeMode"),
+            "Error should mention SafeMode: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_safe_mode_allows_introspection() {
+        // Use the default test service (no SafeMode)
+        let service = create_test_service().await;
+
+        let mut metric = create_test_metric("introspection_metric");
+        metric.capture_stack_trace = true;
+        metric.capture_memory_snapshot = true;
+
+        let result = service.add_metric(metric, false).await;
+
+        assert!(
+            result.is_ok(),
+            "Should allow introspection features when NOT in SafeMode: {:?}",
+            result
+        );
     }
 }

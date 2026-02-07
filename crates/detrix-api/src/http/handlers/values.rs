@@ -58,7 +58,7 @@ pub async fn get_metric_value(
     let events = state
         .context
         .streaming_service
-        .query_metric_events(MetricId(id), Some(1))
+        .query_metric_events(MetricId(id), Some(1), None)
         .await
         .http_context("Failed to query events")?;
 
@@ -148,7 +148,7 @@ pub async fn get_metric_history(
     let events = state
         .context
         .streaming_service
-        .query_metric_events(MetricId(id), Some(limit_plus_one))
+        .query_metric_events(MetricId(id), Some(limit_plus_one), None)
         .await
         .http_context("Failed to query events")?;
 

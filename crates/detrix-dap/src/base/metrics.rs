@@ -8,12 +8,54 @@ use crate::{
     SourceBreakpoint,
 };
 use detrix_application::{RemoveMetricResult, SetMetricResult};
-use detrix_core::Metric;
+use detrix_core::{expression_contains_function_call, Metric, SourceLanguage};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+
+/// Determine the correct SourceBreakpoint type for a metric.
+///
+/// Returns `SourceBreakpoint::at_line()` (breakpoint mode) when:
+/// - Introspection is needed (stack trace or memory snapshot) and adapter doesn't support
+///   logpoint introspection
+/// - Go function calls (require "call" prefix via DAP evaluate)
+///
+/// Returns `SourceBreakpoint::logpoint()` (non-blocking) otherwise.
+///
+/// This function is used by both `set_metric` and `remove_metric` to ensure
+/// consistent breakpoint mode across all `setBreakpoints` DAP requests.
+pub fn build_source_breakpoint(
+    metric: &Metric,
+    supports_logpoint_introspection: bool,
+    logpoint_message: &str,
+) -> SourceBreakpoint {
+    let needs_introspection = metric.capture_stack_trace || metric.capture_memory_snapshot;
+    let is_go_function_call = metric.language == SourceLanguage::Go
+        && expression_contains_function_call(&metric.expression);
+
+    let use_breakpoint =
+        (needs_introspection && !supports_logpoint_introspection) || is_go_function_call;
+
+    if use_breakpoint {
+        info!(
+            "Metric '{}' at {}:{} → BREAKPOINT (introspection={}, go_func_call={})",
+            metric.name,
+            metric.location.file,
+            metric.location.line,
+            needs_introspection,
+            is_go_function_call
+        );
+        SourceBreakpoint::at_line(metric.location.line)
+    } else {
+        info!(
+            "Metric '{}' at {}:{} → LOGPOINT (non-blocking)",
+            metric.name, metric.location.file, metric.location.line
+        );
+        SourceBreakpoint::logpoint(metric.location.line, logpoint_message)
+    }
+}
 
 // ============================================================================
 // MetricManager Trait
@@ -100,32 +142,21 @@ pub trait MetricManager: Send + Sync {
             .insert(metric.name.clone(), metric.clone());
 
         // Collect ALL breakpoints for this file (including the new one we just added)
-        // This is critical because DAP `setBreakpoints` REPLACES all breakpoints in a file
+        // This is critical because DAP `setBreakpoints` REPLACES all breakpoints in a file.
+        // Each metric is independently set as logpoint or breakpoint based on its own needs.
+        // DAP spec and all supported debuggers (Delve, debugpy, lldb-dap) correctly handle
+        // mixed logpoints + breakpoints in a single setBreakpoints request.
         let active = self.active_metrics().read().await;
-        let all_breakpoints: Vec<SourceBreakpoint> = active
+        let file_metrics: Vec<&Metric> = active
             .values()
             .filter(|m| m.location.file == *file_path)
+            .collect();
+
+        let all_breakpoints: Vec<SourceBreakpoint> = file_metrics
+            .iter()
             .map(|m| {
-                // Use breakpoint only when introspection is enabled AND adapter doesn't support
-                // logpoint-based introspection. This will cause the debugger to stop, allowing
-                // us to capture stack trace and variables via DAP requests.
-                let needs_introspection = m.capture_stack_trace || m.capture_memory_snapshot;
-                if needs_introspection && !Self::supports_logpoint_introspection() {
-                    debug!(
-                        "[{}] Using breakpoint for '{}' (introspection enabled: stack={}, memory={}, logpoint_introspection=false)",
-                        Self::language_name(), m.name, m.capture_stack_trace, m.capture_memory_snapshot
-                    );
-                    SourceBreakpoint::at_line(m.location.line)
-                } else {
-                    // Use logpoint - adapter handles introspection in logpoint message if needed
-                    if needs_introspection {
-                        debug!(
-                            "[{}] Using logpoint with introspection for '{}' (stack={}, memory={})",
-                            Self::language_name(), m.name, m.capture_stack_trace, m.capture_memory_snapshot
-                        );
-                    }
-                    SourceBreakpoint::logpoint(m.location.line, Self::build_logpoint_message(m))
-                }
+                let msg = Self::build_logpoint_message(m);
+                build_source_breakpoint(m, Self::supports_logpoint_introspection(), &msg)
             })
             .collect();
         drop(active);
@@ -228,12 +259,20 @@ pub trait MetricManager: Send + Sync {
         // Remove from tracking first (keyed by metric name)
         self.active_metrics().write().await.remove(&metric.name);
 
-        // Get remaining breakpoints for this file
+        // Get remaining breakpoints for this file, each independently set as
+        // logpoint or breakpoint via build_source_breakpoint (same logic as set_metric).
         let active = self.active_metrics().read().await;
-        let remaining_breakpoints: Vec<SourceBreakpoint> = active
+        let remaining_metrics: Vec<&Metric> = active
             .values()
             .filter(|m| m.location.file == *file_path)
-            .map(|m| SourceBreakpoint::logpoint(m.location.line, Self::build_logpoint_message(m)))
+            .collect();
+
+        let remaining_breakpoints: Vec<SourceBreakpoint> = remaining_metrics
+            .iter()
+            .map(|m| {
+                let msg = Self::build_logpoint_message(m);
+                build_source_breakpoint(m, Self::supports_logpoint_introspection(), &msg)
+            })
             .collect();
         drop(active);
 

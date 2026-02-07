@@ -333,6 +333,7 @@ impl DetrixServer {
 Language-specific setup:
 - Python: `python -m debugpy --listen HOST:PORT --wait-for-client script.py`
 - Go: `dlv debug --headless --listen=:PORT --api-version=2`
+  Note: Simple variables recommended. Function calls work but BLOCK the process.
 - Rust: `detrix lldb-serve ./target/debug/binary --listen 127.0.0.1:PORT`
   Binary MUST be built with debug symbols (cargo build, NOT --release).
   The lldb-serve wrapper handles program launch and type formatters automatically."
@@ -702,7 +703,7 @@ impl rmcp::ServerHandler for DetrixServer {
                  ## Quick Start\n\
                  1. Start debugger (in terminal):\n\
                     - Python: `python -m debugpy --listen 5678 --wait-for-client script.py`\n\
-                    - Go: `dlv debug --headless --listen=:2345 --api-version=2`\n\
+                    - Go: `dlv debug --headless --listen=:2345 --api-version=2` (function calls work but block)\n\
                     - Rust: `detrix lldb-serve ./target/debug/binary --listen 127.0.0.1:4711`\n\
                  2. create_connection(host, port, language)\n\
                  3. observe(file, expression) or add_metric(...)\n\n\

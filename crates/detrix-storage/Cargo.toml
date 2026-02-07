@@ -29,3 +29,6 @@ tempfile.workspace = true
 futures.workspace = true
 proptest = { workspace = true }
 detrix-core = { path = "../detrix-core" }
+
+[lints]
+workspace = true

@@ -163,6 +163,10 @@ pub const DEFAULT_EVENT_BUFFER_CAPACITY: usize = 1_000;
 /// Events per batch for storage operations
 pub const DEFAULT_EVENT_BATCH_SIZE: usize = 100;
 
+/// Maximum event buffer size before overflow handling kicks in
+/// When buffer exceeds this limit, oldest events are dropped with warning
+pub const DEFAULT_EVENT_MAX_BUFFER_SIZE: usize = 10_000;
+
 /// Flush interval for event batching (balance between latency and batch efficiency)
 pub const DEFAULT_EVENT_FLUSH_INTERVAL_MS: u64 = 1_000;
 
@@ -320,6 +324,9 @@ pub const DEFAULT_MAX_RECONNECT_ATTEMPTS: u32 = 10;
 /// Maximum "connection refused" attempts before fast-fail
 /// When nothing is listening on the port, fail quickly instead of waiting for full timeout
 pub const DEFAULT_MAX_CONNECTION_REFUSED_ATTEMPTS: u32 = 3;
+
+/// Maximum retries when starting an adapter (handles race conditions with concurrent start requests)
+pub const DEFAULT_ADAPTER_START_MAX_RETRIES: u32 = 3;
 
 /// Initial delay before first reconnection attempt
 pub const DEFAULT_INITIAL_RECONNECT_DELAY_MS: u64 = 1_000;

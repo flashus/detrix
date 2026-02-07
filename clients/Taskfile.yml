@@ -1,0 +1,297 @@
+version: "3"
+
+# Detrix Client Libraries Taskfile
+#
+# Tasks for managing and generating client libraries from OpenAPI specs.
+# All clients are generated from the shared spec in specs/client-control-plane.openapi.yaml
+
+vars:
+  SPEC_FILE: "specs/client-control-plane.openapi.yaml"
+  GENERATED_DIR: ".generated"
+
+tasks:
+  # ============================================================================
+  # Validation
+  # ============================================================================
+
+  validate-spec:
+    desc: Validate the OpenAPI spec
+    cmds:
+      - |
+        if command -v openapi-generator-cli &> /dev/null; then
+          openapi-generator-cli validate -i {{.SPEC_FILE}}
+        elif command -v npx &> /dev/null; then
+          npx @openapitools/openapi-generator-cli validate -i {{.SPEC_FILE}}
+        else
+          echo "⚠️  openapi-generator-cli not found, using Python yaml validation"
+          python -c "import yaml; yaml.safe_load(open('{{.SPEC_FILE}}'))"
+          echo "✅ YAML syntax valid (install openapi-generator-cli for full validation)"
+        fi
+
+  # ============================================================================
+  # Code Generation - Python
+  # ============================================================================
+
+  generate-python-models:
+    desc: Generate Python Pydantic models from OpenAPI spec
+    dir: python
+    cmds:
+      - mkdir -p detrix/_generated
+      - |
+        uv run datamodel-codegen \
+          --input ../{{.SPEC_FILE}} \
+          --input-file-type openapi \
+          --output detrix/_generated/models.py \
+          --output-model-type pydantic_v2.BaseModel \
+          --use-annotated \
+          --field-constraints \
+          --snake-case-field \
+          --use-default-kwarg \
+          --target-python-version 3.11
+      - echo "✅ Generated Python models in python/detrix/_generated/models.py"
+
+  generate-python-scaffold:
+    desc: Generate Python client scaffold from OpenAPI spec
+    dir: python
+    deps:
+      - generate-python-models
+    cmds:
+      - |
+        echo "📝 Python scaffold generation complete"
+        echo ""
+        echo "Generated files:"
+        echo "  - detrix/_generated/models.py  (Pydantic models)"
+        echo ""
+        echo "Note: The control plane implementation in control.py uses these"
+        echo "models. Update it manually if the spec changes significantly."
+
+  # ============================================================================
+  # Code Generation - Go
+  # ============================================================================
+
+  generate-go-types:
+    desc: Generate Go types from OpenAPI spec
+    cmds:
+      - mkdir -p go/internal/generated
+      - |
+        OAPI_CODEGEN=$(command -v oapi-codegen || echo "$HOME/go/bin/oapi-codegen")
+        if [ -x "$OAPI_CODEGEN" ]; then
+          $OAPI_CODEGEN -package generated -generate types {{.SPEC_FILE}} > go/internal/generated/types.go
+          echo "✅ Generated Go types in go/internal/generated/types.go"
+        else
+          echo "⚠️  oapi-codegen not installed. Install with:"
+          echo "    go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest"
+          exit 1
+        fi
+
+  # ============================================================================
+  # Code Generation - Rust
+  # ============================================================================
+
+  generate-rust-types:
+    desc: Generate Rust types from OpenAPI spec
+    dir: rust/xtask
+    cmds:
+      - cargo run --quiet -- generate
+      - cd .. && cargo fmt
+      - echo "✅ Generated Rust types in rust/src/generated.rs"
+
+  # ============================================================================
+  # All Languages
+  # ============================================================================
+
+  generate-all:
+    desc: Generate client code for all languages
+    deps:
+      - validate-spec
+    cmds:
+      - task: generate-python-models
+      - task: generate-go-types
+      - task: generate-rust-types
+      - echo "✅ All client code generated"
+
+  # ============================================================================
+  # Python Client Tasks
+  # ============================================================================
+
+  python-test:
+    desc: Run Python client tests
+    dir: python
+    cmds:
+      - uv run pytest -v
+
+  python-lint:
+    desc: Lint Python client code
+    dir: python
+    cmds:
+      - uv run ruff check detrix
+
+  python-format:
+    desc: Format Python client code
+    dir: python
+    cmds:
+      - uv run ruff format detrix tests
+
+  python-typecheck:
+    desc: Type check Python client
+    dir: python
+    cmds:
+      - uv run mypy detrix
+
+  python-check:
+    desc: Run all Python checks (lint, typecheck, test)
+    dir: python
+    cmds:
+      - task: python-lint
+      - task: python-typecheck
+      - task: python-test
+      - echo "✅ All Python checks passed"
+
+  # ============================================================================
+  # Go Client Tasks
+  # ============================================================================
+
+  go-test:
+    desc: Run Go client tests
+    dir: go
+    cmds:
+      - go test ./...
+
+  go-build:
+    desc: Build Go client
+    dir: go
+    cmds:
+      - go build ./...
+
+  go-lint:
+    desc: Lint Go client code
+    dir: go
+    cmds:
+      - golangci-lint run
+
+  go-check:
+    desc: Run all Go checks (build, lint, test)
+    dir: go
+    cmds:
+      - task: go-build
+      - task: go-lint
+      - task: go-test
+      - echo "✅ All Go checks passed"
+
+  # ============================================================================
+  # Rust Client Tasks
+  # ============================================================================
+
+  rust-build:
+    desc: Build Rust client
+    dir: rust
+    cmds:
+      - cargo build
+
+  rust-test:
+    desc: Run Rust client tests
+    dir: rust
+    cmds:
+      - cargo test
+
+  rust-lint:
+    desc: Lint Rust client code
+    dir: rust
+    cmds:
+      - cargo clippy --all -- -D warnings
+
+  rust-fmt:
+    desc: Format Rust client code
+    dir: rust
+    cmds:
+      - cargo fmt
+
+  rust-fmt-check:
+    desc: Check Rust client formatting
+    dir: rust
+    cmds:
+      - cargo fmt -- --check
+
+  rust-check:
+    desc: Run all Rust checks (fmt, build, lint, test)
+    dir: rust
+    cmds:
+      - task: rust-fmt-check
+      - task: rust-build
+      - task: rust-lint
+      - task: rust-test
+      - echo "✅ All Rust checks passed"
+
+  # ============================================================================
+  # All Clients
+  # ============================================================================
+
+  test:
+    desc: Run all client tests (Python, Go, and Rust)
+    cmds:
+      - task: python-test
+      - task: go-test
+      - task: rust-test
+      - echo "✅ All client tests passed"
+
+  check:
+    desc: Run all client checks (Python, Go, and Rust)
+    cmds:
+      - task: python-check
+      - task: go-check
+      - task: rust-check
+      - echo "✅ All client checks passed"
+
+  # ============================================================================
+  # Client Testing
+  # ============================================================================
+
+  client-test:
+    desc: Run client tests (E2E tests using fixtures with Detrix client enabled)
+    cmds:
+      - |
+        cd .. && cargo test -p detrix-testing client_tests --release -- --nocapture
+
+  # ============================================================================
+  # Development Helpers
+  # ============================================================================
+
+  sync-spec-to-python:
+    desc: Sync OpenAPI spec changes to Python implementation
+    deps:
+      - generate-python-models
+    cmds:
+      - |
+        echo "📝 OpenAPI spec synced to Python"
+        echo ""
+        echo "The generated models are in: python/detrix/_generated/models.py"
+        echo ""
+        echo "Manual updates may be needed in:"
+        echo "  - python/detrix/control.py (HTTP handlers)"
+        echo "  - python/detrix/__init__.py (public API)"
+        echo ""
+        echo "Run 'task python-check' to verify the implementation."
+
+  # ============================================================================
+  # Pre-commit
+  # ============================================================================
+
+  pre-commit:
+    desc: Run all pre-commit checks (generate, format, lint, test)
+    cmds:
+      - task: generate-all
+      - task: check
+      - echo "✅ All pre-commit checks passed"
+
+  # ============================================================================
+  # Clean
+  # ============================================================================
+
+  clean:
+    desc: Clean generated files
+    cmds:
+      - rm -rf {{.GENERATED_DIR}}
+      - rm -rf python/detrix/_generated
+      - rm -rf go/internal/generated
+      - rm -rf rust/src/generated
+      - echo "✅ Cleaned generated files"

@@ -133,49 +133,52 @@ impl DapWorkflowConfig {
     /// IMPORTANT: DAP logpoints evaluate BEFORE the line executes, so we must use
     /// lines where variables are already in scope from PREVIOUS assignments.
     ///
-    /// Variables defined at:
-    /// - Line 41: `symbol = random.choice(symbols)`
-    /// - Line 42: `quantity = random.randint(1, 50)`
-    /// - Line 43: `price = random.uniform(100, 1000)`
-    /// - Line 46: `order_id = place_order(...)` <- symbol, quantity, price in scope here
-    /// - Line 53: `print(...)` <- all variables in scope here
+    /// Variables defined at (after Detrix client init block - +13 lines offset):
+    /// - Line 54: `symbol = random.choice(symbols)`
+    /// - Line 55: `quantity = random.randint(1, 50)`
+    /// - Line 56: `price = random.uniform(100, 1000)`
+    /// - Line 59: `order_id = place_order(...)` <- symbol, quantity, price in scope here
+    /// - Line 66: `print(...)` <- all variables in scope here
     ///
     /// So we use:
-    /// - Line 46 for symbol, quantity, price (before order_id is assigned, but after others)
-    /// - Line 53 for order_id (after it's assigned on line 46)
+    /// - Line 59 for symbol, quantity, price (before order_id is assigned, but after others)
+    /// - Line 66 for order_id (after it's assigned on line 59)
     pub fn python() -> Self {
         Self {
             language: SourceLanguage::Python,
             source_file: PathBuf::from("fixtures/python/trade_bot_forever.py"),
             metrics: vec![
-                // order_id is assigned on line 46, so evaluate after that (line 53)
-                MetricPoint::new("order_metric", 53, "order_id").with_group("python_workflow"),
-                // price is assigned on line 43, so evaluate after that (line 46)
-                MetricPoint::new("price_metric", 46, "price").with_group("python_workflow"),
+                // order_id is assigned on line 59, so evaluate after that (line 66)
+                MetricPoint::new("order_metric", 66, "order_id").with_group("python_workflow"),
+                // price is assigned on line 56, so evaluate after that (line 59)
+                MetricPoint::new("price_metric", 59, "price").with_group("python_workflow"),
                 // IMPORTANT: Each metric must be on a DIFFERENT line because DAP logpoints
                 // evaluate only one expression per breakpoint location
-                // quantity is assigned on line 42, evaluate on line 49 (entry_price := price)
-                MetricPoint::new("quantity_metric", 49, "quantity").with_group("python_workflow"),
-                // symbol is assigned on line 41, evaluate on line 50 (current_price := ...)
-                MetricPoint::new("symbol_metric", 50, "symbol").with_group("python_workflow"),
+                // quantity is assigned on line 55, evaluate on line 62 (entry_price := price)
+                MetricPoint::new("quantity_metric", 62, "quantity").with_group("python_workflow"),
+                // symbol is assigned on line 54, evaluate on line 63 (current_price := ...)
+                MetricPoint::new("symbol_metric", 63, "symbol").with_group("python_workflow"),
             ],
             // Introspection metrics: stack trace and memory snapshot capture
-            // Use line 53 where all variables are in scope
+            // Each metric MUST be on a different line (Detrix allows only one metric per line)
+            // - Line 66: `print(f"  -> P&L: ...")` - all vars in scope
+            // - Line 67: `print()` - all vars in scope
+            // - Line 69: `time.sleep(3)` - all vars in scope
             introspection_metrics: vec![
-                MetricPoint::new("stack_trace_metric", 53, "order_id")
+                MetricPoint::new("stack_trace_metric", 66, "order_id")
                     .with_group("python_introspection")
                     .with_stack_trace(),
-                MetricPoint::new("memory_snapshot_metric", 53, "price")
+                MetricPoint::new("memory_snapshot_metric", 67, "price")
                     .with_group("python_introspection")
                     .with_memory_snapshot(),
-                MetricPoint::new("full_introspection_metric", 53, "quantity")
+                MetricPoint::new("full_introspection_metric", 69, "quantity")
                     .with_group("python_introspection")
                     .with_introspection(),
             ],
-            inspect_line: 53,
+            inspect_line: 66,
             inspect_variable: "price".to_string(),
             invalid_metric: Some(
-                MetricPoint::new("bad_metric", 53, "nonexistent_var").with_group("python_workflow"),
+                MetricPoint::new("bad_metric", 66, "nonexistent_var").with_group("python_workflow"),
             ),
             group_name: "python_workflow".to_string(),
             event_wait_secs: 15,
@@ -188,52 +191,62 @@ impl DapWorkflowConfig {
     /// IMPORTANT: DAP logpoints evaluate BEFORE the line executes, so we must use
     /// lines where variables are already in scope from PREVIOUS assignments.
     ///
-    /// Variables defined at:
-    /// - Line 59: `symbol := symbols[...]`
-    /// - Line 60: `quantity := rand.Intn(50) + 1`
-    /// - Line 61: `price := rand.Float64()*900 + 100`
-    /// - Line 64: `orderID := placeOrder(...)` <- symbol, quantity, price in scope here
-    /// - Line 72: `_ = orderID` <- all variables in scope here
+    /// Variables defined at (with Detrix client init block + log function):
+    /// - Line 117: `symbol := symbols[...]`
+    /// - Line 118: `quantity := rand.Intn(50) + 1`
+    /// - Line 119: `price := rand.Float64()*900 + 100`
+    /// - Line 122: `orderID := placeOrder(...)` <- symbol, quantity, price in scope here
+    /// - Line 125: `entryPrice := price`
+    /// - Line 126: `currentPrice := ...`
+    /// - Line 127: `pnl := calculatePnl(...)` <- all variables in scope here
+    /// - Line 130: `_ = orderID` <- all variables in scope here
+    /// - Line 131: `_ = pnl` <- all variables in scope here
+    /// - Line 133: `log(...)` <- all variables in scope here
     ///
     /// So we use:
-    /// - Line 64 for symbol, quantity, price (before orderID is assigned, but after others)
-    /// - Line 69 for orderID (after it's assigned on line 64, on real executable statement)
-    ///   NOTE: Line 72 (`_ = orderID`) is optimized away by Go compiler - breakpoints don't work!
+    /// - Line 122 for symbol, quantity, price (on orderID assignment, after others assigned)
+    /// - Line 127 for orderID (after it's assigned on line 122, on pnl calculation)
+    /// - Line 130-133 for introspection (all variables in scope)
     pub fn go() -> Self {
         Self {
             language: SourceLanguage::Go,
             source_file: PathBuf::from("fixtures/go/detrix_example_app.go"),
             metrics: vec![
-                // orderID is assigned on line 64, so evaluate after that on line 69
-                // NOTE: Line 72 (`_ = orderID`) is optimized away by Go compiler!
-                // Use line 69 (`pnl := calculatePnl(...)`) which is a real executable statement
-                MetricPoint::new("order_metric", 69, "orderID").with_group("go_workflow"),
-                // price is assigned on line 61, so evaluate after that (line 64)
-                MetricPoint::new("price_metric", 64, "price").with_group("go_workflow"),
+                // orderID is assigned on line 122, so evaluate after that on line 127
+                // Use line 127 (`pnl := calculatePnl(...)`) which is a real executable statement
+                MetricPoint::new("order_metric", 127, "orderID").with_group("go_workflow"),
+                // price is assigned on line 119, so evaluate after that (line 122)
+                MetricPoint::new("price_metric", 122, "price").with_group("go_workflow"),
                 // IMPORTANT: Each metric must be on a DIFFERENT line because DAP logpoints
                 // evaluate only one expression per breakpoint location
-                // quantity is assigned on line 60, evaluate on line 67 (entryPrice := price)
-                MetricPoint::new("quantity_metric", 67, "quantity").with_group("go_workflow"),
-                // symbol is assigned on line 59, evaluate on line 68 (currentPrice := ...)
-                MetricPoint::new("symbol_metric", 68, "symbol").with_group("go_workflow"),
+                // quantity is assigned on line 118, evaluate on line 125 (entryPrice := price)
+                MetricPoint::new("quantity_metric", 125, "quantity").with_group("go_workflow"),
+                // symbol is assigned on line 117, evaluate on line 126 (currentPrice := ...)
+                MetricPoint::new("symbol_metric", 126, "symbol").with_group("go_workflow"),
             ],
             // Introspection metrics: stack trace and memory snapshot capture
-            // Use line 69 (`pnl := calculatePnl(...)`) which is a real executable statement
+            // Each metric MUST be on a different line (Detrix allows only one metric per line)
+            // Lines must be REAL executable statements (not `_ = x` dead assignments).
+            // Delve requires actual code at the line to set a verified breakpoint.
+            // - Line 130: `totalPnl = totalPnl + pnl` - real assignment
+            // - Line 131: `lastOrderID := orderID` - real assignment
+            // - Line 133: `log(...)` - function call
             introspection_metrics: vec![
-                MetricPoint::new("stack_trace_metric", 69, "orderID")
+                MetricPoint::new("stack_trace_metric", 130, "orderID")
                     .with_group("go_introspection")
                     .with_stack_trace(),
-                MetricPoint::new("memory_snapshot_metric", 69, "price")
+                MetricPoint::new("memory_snapshot_metric", 131, "price")
                     .with_group("go_introspection")
                     .with_memory_snapshot(),
-                MetricPoint::new("full_introspection_metric", 69, "quantity")
+                MetricPoint::new("full_introspection_metric", 133, "quantity")
                     .with_group("go_introspection")
                     .with_introspection(),
             ],
-            inspect_line: 69,
+            inspect_line: 127,
             inspect_variable: "price".to_string(),
             invalid_metric: Some(
-                MetricPoint::new("bad_metric", 72, "nonexistent_var").with_group("go_workflow"),
+                // Line 104 is `go signalHandler(sigChan)` - sigChan is only variable in scope
+                MetricPoint::new("bad_metric", 104, "nonexistent_var").with_group("go_workflow"),
             ),
             group_name: "go_workflow".to_string(),
             event_wait_secs: 15,
@@ -241,62 +254,102 @@ impl DapWorkflowConfig {
         }
     }
 
-    /// Create a Rust workflow config using detrix_example_app.rs
+    /// Create a Rust workflow config using fixtures/rust/src/main.rs
     ///
-    /// IMPORTANT: DAP logpoints evaluate BEFORE the line executes, so we must use
+    /// This uses the unified fixture that works for both DAP and client tests:
+    ///   cargo build  # for DAP tests (no client feature)
+    ///   cargo run --features client  # for client tests
+    ///
+    /// LINE NUMBER CALCULATION:
+    /// All line numbers are calculated as MAIN_LINE + offset.
+    /// If you modify fixtures/rust/src/main.rs, only update MAIN_LINE here.
+    ///
+    /// MAIN_LINE = 76 (the line where `fn main()` is defined)
+    ///
+    /// Offset definitions (from main):
+    /// - main+31: symbol assignment (line 107)
+    /// - main+33: quantity assignment (line 109)
+    /// - main+35: price assignment (line 111)
+    /// - main+38: order_id = place_order (line 114, symbol/quantity/price in scope)
+    /// - main+41: entry_price assignment (line 117)
+    /// - main+43: current_price assignment (line 119)
+    /// - main+45: pnl = calculate_pnl (line 121, all vars in scope)
+    /// - main+52: log! (line 128, introspection point 1)
+    /// - main+54: stderr().flush() (line 130, introspection point 2)
+    /// - main+56: thread::sleep() (line 132, introspection point 3)
+    ///
+    /// IMPORTANT: DAP logpoints evaluate BEFORE the line executes, so we use
     /// lines where variables are already in scope from PREVIOUS assignments.
-    ///
-    /// Variables defined at:
-    /// - Line 65: `let symbol = ...`
-    /// - Line 66: `let quantity = ...`
-    /// - Line 67: `let price = ...`
-    /// - Line 70: `let order_id = place_order(...)` <- symbol, quantity, price in scope here
-    /// - Line 78: `let _ = order_id;` <- all variables in scope here
-    ///
-    /// So we use:
-    /// - Line 70 for symbol, quantity, price (before order_id is assigned, but after others)
-    /// - Line 78 for order_id (after it's assigned on line 70)
     pub fn rust() -> Self {
+        // Base line number for fn main() - update this if you add/remove lines before main()
+        const MAIN_LINE: u32 = 76;
+
+        // Offsets from main() for each variable/metric point
+        // Note: Not all offsets are used directly - some are for documentation
+        #[allow(dead_code)]
+        const OFFSET_SYMBOL: u32 = 31; // symbol assignment (line 107)
+        #[allow(dead_code)]
+        const OFFSET_QUANTITY: u32 = 33; // quantity assignment (line 109)
+        #[allow(dead_code)]
+        const OFFSET_PRICE: u32 = 35; // price assignment (line 111)
+        const OFFSET_ORDER_ID: u32 = 38; // place_order call (line 114)
+        const OFFSET_ENTRY_PRICE: u32 = 41; // entry_price assignment (line 117)
+        const OFFSET_CURRENT_PRICE: u32 = 43; // current_price assignment (line 119)
+        const OFFSET_PNL: u32 = 45; // pnl calculation (line 121)
+        const OFFSET_LOG: u32 = 52; // log! introspection point (line 128)
+        const OFFSET_FLUSH: u32 = 54; // stderr flush introspection point (line 130)
+        const OFFSET_SLEEP: u32 = 56; // thread::sleep introspection point (line 132)
+
         Self {
             language: SourceLanguage::Rust,
-            source_file: PathBuf::from("fixtures/rust/detrix_example_app.rs"),
+            source_file: PathBuf::from("fixtures/rust/src/main.rs"),
             metrics: vec![
-                // order_id is assigned on line 70, so evaluate after that (line 75)
-                // NOTE: Line 78 (`let _ = order_id`) may be optimized away!
-                MetricPoint::new("order_metric", 75, "order_id").with_group("rust_workflow"),
-                // price is assigned on line 67, so evaluate after that (line 70)
-                MetricPoint::new("price_metric", 70, "price").with_group("rust_workflow"),
-                // IMPORTANT: Each metric must be on a DIFFERENT line because DAP logpoints
-                // evaluate only one expression per breakpoint location
-                // quantity is assigned on line 66, evaluate on line 73 (entry_price = price)
-                MetricPoint::new("quantity_metric", 73, "quantity").with_group("rust_workflow"),
-                // symbol is assigned on line 65, evaluate on line 74 (current_price = ...)
-                MetricPoint::new("symbol_metric", 74, "symbol").with_group("rust_workflow"),
+                // order_id is assigned at main+33, evaluate after (main+36 = entry_price line)
+                MetricPoint::new("order_metric", MAIN_LINE + OFFSET_ENTRY_PRICE, "order_id")
+                    .with_group("rust_workflow"),
+                // price is assigned at main+30, evaluate after (main+33 = place_order line)
+                MetricPoint::new("price_metric", MAIN_LINE + OFFSET_ORDER_ID, "price")
+                    .with_group("rust_workflow"),
+                // quantity is assigned at main+28, evaluate after (main+38 = current_price line)
+                MetricPoint::new(
+                    "quantity_metric",
+                    MAIN_LINE + OFFSET_CURRENT_PRICE,
+                    "quantity",
+                )
+                .with_group("rust_workflow"),
+                // symbol is assigned at main+26, evaluate after (main+40 = pnl line)
+                MetricPoint::new("symbol_metric", MAIN_LINE + OFFSET_PNL, "symbol")
+                    .with_group("rust_workflow"),
             ],
             // Introspection metrics: stack trace and memory snapshot capture
-            // IMPORTANT: These must be on DIFFERENT lines than regular metrics!
-            // Regular metrics use: 70, 73, 74, 75
-            // Introspection uses: 83, 85, 87 (distinct function calls)
-            // Note: Each line has a unique function call to ensure LLDB
-            // can set breakpoints on distinct instructions
+            // Use distinct function call lines for reliable breakpoint placement
             introspection_metrics: vec![
-                // Line 83: println! with pnl/iteration - all variables in scope
-                MetricPoint::new("stack_trace_metric", 83, "order_id")
+                // main+52: log! - all variables in scope
+                MetricPoint::new("stack_trace_metric", MAIN_LINE + OFFSET_LOG, "order_id")
                     .with_group("rust_introspection")
                     .with_stack_trace(),
-                // Line 85: stdout().flush() - I/O syscall, definitely executable
-                MetricPoint::new("memory_snapshot_metric", 85, "price")
+                // main+54: stderr().flush() - I/O syscall
+                MetricPoint::new("memory_snapshot_metric", MAIN_LINE + OFFSET_FLUSH, "price")
                     .with_group("rust_introspection")
                     .with_memory_snapshot(),
-                // Line 87: thread::sleep() - function call, definitely executable
-                MetricPoint::new("full_introspection_metric", 87, "quantity")
-                    .with_group("rust_introspection")
-                    .with_introspection(),
+                // main+56: thread::sleep() - function call
+                MetricPoint::new(
+                    "full_introspection_metric",
+                    MAIN_LINE + OFFSET_SLEEP,
+                    "quantity",
+                )
+                .with_group("rust_introspection")
+                .with_introspection(),
             ],
-            inspect_line: 83,
+            inspect_line: MAIN_LINE + OFFSET_LOG,
             inspect_variable: "price".to_string(),
             invalid_metric: Some(
-                MetricPoint::new("bad_metric", 75, "nonexistent_var").with_group("rust_workflow"),
+                MetricPoint::new(
+                    "bad_metric",
+                    MAIN_LINE + OFFSET_ENTRY_PRICE,
+                    "nonexistent_var",
+                )
+                .with_group("rust_workflow"),
             ),
             group_name: "rust_workflow".to_string(),
             event_wait_secs: 15,
@@ -1052,7 +1105,10 @@ impl DapWorkflowScenarios {
                     }
 
                     // Check events for each introspection metric
+                    // Reset counters each iteration to avoid double-counting
                     let mut total_introspection_events = 0;
+                    let mut iter_stack_trace_events = 0;
+                    let mut iter_memory_snapshot_events = 0;
                     for metric in &config.introspection_metrics {
                         if let Ok(r) = client.query_events(&metric.name, 100).await {
                             let count = r.data.len();
@@ -1065,10 +1121,10 @@ impl DapWorkflowScenarios {
 
                                 // Track specific introspection types
                                 if metric.capture_stack_trace {
-                                    result.stack_trace_events += count;
+                                    iter_stack_trace_events += count;
                                 }
                                 if metric.capture_memory_snapshot {
-                                    result.memory_snapshot_events += count;
+                                    iter_memory_snapshot_events += count;
                                 }
 
                                 // Log introspection event details
@@ -1155,6 +1211,11 @@ impl DapWorkflowScenarios {
                         }
                     }
 
+                    // Update result with latest snapshot (not accumulating)
+                    result.introspection_events = total_introspection_events;
+                    result.stack_trace_events = iter_stack_trace_events;
+                    result.memory_snapshot_events = iter_memory_snapshot_events;
+
                     if total_introspection_events >= config.introspection_metrics.len() {
                         reporter.step_success(
                             step,
@@ -1165,7 +1226,6 @@ impl DapWorkflowScenarios {
                                 result.memory_snapshot_events
                             )),
                         );
-                        result.introspection_events = total_introspection_events;
                         break;
                     }
 

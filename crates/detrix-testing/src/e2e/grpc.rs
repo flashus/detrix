@@ -324,9 +324,14 @@ impl ApiClient for GrpcClient {
                 host: host.to_string(),
                 port: port.into(), // Convert u16 to u32 for proto
                 language: language.to_string(),
-                connection_id: None,
+                // Identity fields for UUID-based connection tracking
+                name: format!("e2e-test-{}-{}", language, port),
+                workspace_root: "/e2e-test".to_string(),
+                hostname: detrix_api::common::resolve_hostname(),
                 metadata: None,
                 program: program.map(|s| s.to_string()), // Optional program path for launch mode (Rust direct lldb-dap)
+                safe_mode: false,                        // Default to false for tests
+                pid: None,                               // Tests don't use AttachPid mode
             })
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?
@@ -339,6 +344,7 @@ impl ApiClient for GrpcClient {
             port: conn.port as u16, // Convert from proto u32
             language: conn.language,
             status: response.status,
+            safe_mode: conn.safe_mode,
         }))
     }
 
@@ -379,6 +385,7 @@ impl ApiClient for GrpcClient {
             port: conn.port as u16,
             language: conn.language,
             status: format!("{:?}", conn.status),
+            safe_mode: conn.safe_mode,
         }))
     }
 
@@ -402,6 +409,7 @@ impl ApiClient for GrpcClient {
                 port: conn.port as u16,
                 language: conn.language,
                 status: format!("{:?}", conn.status),
+                safe_mode: conn.safe_mode,
             })
             .collect();
 
@@ -432,10 +440,7 @@ impl ApiClient for GrpcClient {
                 group: request.group,
                 location: Some(Location { file, line }),
                 expression: request.expression,
-                language: request
-                    .language
-                    .clone()
-                    .unwrap_or_else(|| "python".to_string()),
+                language: request.language.clone(), // Optional - will be derived from connection if None
                 enabled: request.enabled.unwrap_or(true), // Default to enabled if not specified
                 mode: Some(MetricMode {
                     mode: Some(Mode::Stream(StreamMode {})),

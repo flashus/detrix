@@ -397,6 +397,7 @@ pub trait DapAdapterFactory: Send + Sync {
     /// * `host` - Host address (e.g., "127.0.0.1", "localhost")
     /// * `port` - Port number where lldb-dap is listening
     /// * `program` - Optional program path for direct launch mode
+    /// * `pid` - Optional process ID for AttachPid mode (Rust client library)
     ///
     /// # Returns
     /// A configured Rust adapter ready to connect
@@ -405,5 +406,6 @@ pub trait DapAdapterFactory: Send + Sync {
         host: &str,
         port: u16,
         program: Option<&str>,
+        pid: Option<u32>,
     ) -> Result<DapAdapterRef>;
 }

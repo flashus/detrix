@@ -112,7 +112,7 @@ message AddMetricRequest {
   optional string group = 2;
   Location location = 3;
   string expression = 4;
-  string language = 5;         // "python", "go", "rust"
+  optional string language = 5;  // DEPRECATED: Derived from connection if not provided
   bool enabled = 6;
   MetricMode mode = 7;
   optional string condition = 8;

@@ -48,6 +48,10 @@ pub struct CreateArgs {
     /// Program path for Rust launch mode (requires lldb-dap --connection listen://HOST:PORT)
     #[arg(long)]
     program: Option<String>,
+
+    /// SafeMode: only allow logpoints (non-blocking), disable breakpoint-based operations
+    #[arg(long)]
+    safe_mode: bool,
 }
 
 #[derive(Args)]
@@ -96,6 +100,7 @@ async fn create(
             &args.language,
             args.id.as_deref(),
             args.program.as_deref(),
+            args.safe_mode,
         )
         .await
         .context("Failed to create connection")?;

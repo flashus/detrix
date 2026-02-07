@@ -42,6 +42,7 @@
 
 pub mod availability;
 pub mod client;
+pub mod client_tests;
 pub mod daemon_discovery;
 pub mod dap_scenarios;
 pub mod executor;

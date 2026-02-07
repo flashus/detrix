@@ -290,7 +290,7 @@ pub async fn add_metric_impl(
         connection_id_str.clone(),
         safety_level,
     );
-    proto_request.language = connection.language.to_string();
+    proto_request.language = Some(connection.language.to_string());
 
     let metric = add_request_to_metric(&proto_request)
         .map_err(|e| McpError::invalid_params(e.to_string(), None))?;

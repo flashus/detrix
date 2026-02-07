@@ -126,6 +126,11 @@ pub fn add_request_to_metric(req: &AddMetricRequest) -> Result<Metric, Error> {
         _ => None,
     });
 
+    // Language should be filled in by handler (derived from connection if not provided)
+    let language_str = req.language.as_ref().ok_or_else(|| {
+        Error::InvalidRequest("Missing language (should be derived from connection)".to_string())
+    })?;
+
     Ok(Metric {
         id: None,
         name: req.name.clone(),
@@ -133,7 +138,7 @@ pub fn add_request_to_metric(req: &AddMetricRequest) -> Result<Metric, Error> {
         group: req.group.clone(),
         location: proto_to_core_location(location),
         expression: req.expression.clone(),
-        language: req.language.clone().try_into()?,
+        language: language_str.clone().try_into()?,
         mode: proto_to_core_mode(mode)?,
         enabled: req.enabled,
         condition: req.condition.clone(),
@@ -443,8 +448,8 @@ pub fn core_group_info_to_proto(
 /// IMPORTANT: Uses exhaustive destructuring - compiler will error if new fields added.
 ///
 /// Core Connection fields:
-///   id, name, host, port, language, status, auto_reconnect, created_at,
-///   last_connected_at, last_active
+///   id, name, host, port, language, status, auto_reconnect, safe_mode,
+///   created_at, last_connected_at, last_active
 pub fn connection_to_info(
     connection: &detrix_core::Connection,
 ) -> crate::generated::detrix::v1::ConnectionInfo {
@@ -453,12 +458,15 @@ pub fn connection_to_info(
     // Exhaustive destructuring - compiler will error if new fields are added to Connection
     let detrix_core::Connection {
         id,
-        name: _, // Not in proto ConnectionInfo
+        name,
+        workspace_root,
+        hostname,
         host,
         port,
         language,
         status,
         auto_reconnect,
+        safe_mode,
         created_at,
         last_connected_at,
         last_active,
@@ -483,9 +491,14 @@ pub fn connection_to_info(
         connected_at: *last_connected_at,
         last_active_at: Some(*last_active),
         auto_reconnect: *auto_reconnect,
+        safe_mode: *safe_mode,
         // Runtime state not tracked in core Connection - use defaults
         reconnect_attempts: 0,
         max_reconnect_attempts: 0, // 0 = unlimited retries
+        // Identity fields
+        name: name.clone(),
+        workspace_root: workspace_root.clone(),
+        hostname: hostname.clone(),
     }
 }
 
@@ -710,49 +723,19 @@ pub fn proto_to_core_connection(
 
     Ok(Connection {
         id: ConnectionId::from(proto.connection_id.as_str()),
-        name: None,
+        name: proto.name.clone(),
+        workspace_root: proto.workspace_root.clone(),
+        hostname: proto.hostname.clone(),
         host: proto.host.clone(),
         port: proto.port as u16,
         language,
         status,
         auto_reconnect: proto.auto_reconnect,
+        safe_mode: proto.safe_mode,
         created_at: proto.created_at,
         last_connected_at: proto.connected_at,
         last_active: proto.last_active_at.unwrap_or(0),
     })
-}
-
-/// Convert core ConnectionStatus to proto ConnectionStatus (i32)
-///
-/// Used by gRPC servers to convert connection status for responses.
-pub fn core_status_to_proto(status: &detrix_core::ConnectionStatus) -> i32 {
-    use crate::generated::detrix::v1::ConnectionStatus;
-    match status {
-        detrix_core::ConnectionStatus::Disconnected => ConnectionStatus::Disconnected as i32,
-        detrix_core::ConnectionStatus::Connecting => ConnectionStatus::Connecting as i32,
-        detrix_core::ConnectionStatus::Connected => ConnectionStatus::Connected as i32,
-        detrix_core::ConnectionStatus::Reconnecting => ConnectionStatus::Connecting as i32, // Map reconnecting to connecting
-        detrix_core::ConnectionStatus::Failed(_) => ConnectionStatus::Failed as i32,
-    }
-}
-
-/// Convert core Connection to proto ConnectionInfo
-///
-/// Used by gRPC servers to convert connection data for responses.
-pub fn core_to_proto_connection_info(conn: &detrix_core::Connection) -> ConnectionInfo {
-    ConnectionInfo {
-        connection_id: conn.id.0.clone(),
-        host: conn.host.clone(),
-        port: conn.port as u32,
-        language: conn.language.to_string(),
-        status: core_status_to_proto(&conn.status),
-        created_at: conn.created_at,
-        connected_at: conn.last_connected_at,
-        last_active_at: Some(conn.last_active),
-        auto_reconnect: conn.auto_reconnect,
-        reconnect_attempts: 0,     // Not tracked in current Connection struct
-        max_reconnect_attempts: 0, // Not tracked in current Connection struct
-    }
 }
 
 #[cfg(test)]

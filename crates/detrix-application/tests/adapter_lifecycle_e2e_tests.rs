@@ -42,6 +42,21 @@ const FLUSH_WAIT_MS: u64 = (DEFAULT_EVENT_FLUSH_INTERVAL_MS as f64 * 1.2) as u64
 /// Mock MetricRepository that returns empty (no pre-existing metrics)
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+/// Create a test connection identity with standard workspace/hostname defaults.
+/// Only the name varies between tests.
+fn test_identity(name: &str) -> detrix_core::ConnectionIdentity {
+    detrix_core::ConnectionIdentity::new(
+        name,
+        SourceLanguage::Python,
+        "/test-workspace",
+        "test-host",
+    )
+}
+
+// ============================================================================
 // Test Fixtures
 // ============================================================================
 
@@ -76,8 +91,12 @@ impl E2eTestFixture {
             Arc::clone(&connection_repo) as ConnectionRepositoryRef,
         ));
 
+        // Create a new metric_repo for ConnectionService since the first one was moved
+        let metric_repo_for_conn_service: MetricRepositoryRef =
+            Arc::new(MockMetricRepository::new());
         let connection_service = Arc::new(ConnectionService::new(
             Arc::clone(&connection_repo) as ConnectionRepositoryRef,
+            metric_repo_for_conn_service,
             Arc::clone(&lifecycle_manager),
             system_event_tx,
         ));
@@ -132,19 +151,22 @@ async fn test_e2e_complete_daemon_workflow() {
     let fixture = E2eTestFixture::new().await;
 
     // Step 1: Create a connection (simulates: POST /api/v1/connections)
+    let identity = test_identity("test-trading-bot");
     let connection_id = fixture
         .connection_service
         .create_connection(
             "localhost".to_string(),
             5678,
-            "python".to_string(),
-            Some("test-trading-bot".to_string()),
-            None,
+            identity.clone(),
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .expect("Should create connection");
 
-    assert_eq!(connection_id.0, "test-trading-bot");
+    let expected_uuid = identity.to_uuid();
+    assert_eq!(connection_id.0, expected_uuid);
 
     // Step 2: Verify connection is saved and status is Connected
     let connection = fixture
@@ -165,9 +187,9 @@ async fn test_e2e_complete_daemon_workflow() {
             .await
     );
 
-    let adapter_info = fixture.lifecycle_manager.list_adapters().await;
+    let adapter_info = fixture.lifecycle_manager.list_adapters();
     assert_eq!(adapter_info.len(), 1);
-    assert_eq!(adapter_info[0].connection_id.0, "test-trading-bot");
+    assert_eq!(adapter_info[0].connection_id.0, expected_uuid);
     assert_eq!(adapter_info[0].status, ManagedAdapterStatus::Running);
 
     // Step 4: Get the mock adapter and send events (simulates debugpy output)
@@ -232,38 +254,44 @@ async fn test_e2e_multiple_connections() {
     let fixture = E2eTestFixture::new().await;
 
     // Create 3 connections
+    let identity1 = test_identity("conn-1");
     let conn1 = fixture
         .connection_service
         .create_connection(
             "localhost".to_string(),
             5678,
-            "python".to_string(),
-            Some("conn-1".to_string()),
-            None,
+            identity1,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
 
+    let identity2 = test_identity("conn-2");
     let conn2 = fixture
         .connection_service
         .create_connection(
             "localhost".to_string(),
             5679,
-            "python".to_string(),
-            Some("conn-2".to_string()),
-            None,
+            identity2,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
 
+    let identity3 = test_identity("conn-3");
     let conn3 = fixture
         .connection_service
         .create_connection(
             "localhost".to_string(),
             5680,
-            "python".to_string(),
-            Some("conn-3".to_string()),
-            None,
+            identity3,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -380,20 +408,25 @@ async fn test_e2e_event_broadcast_for_streaming() {
         Arc::clone(&connection_repo) as ConnectionRepositoryRef,
     ));
 
+    // Create a new metric_repo for ConnectionService since the first one was moved
+    let metric_repo_for_conn: MetricRepositoryRef = Arc::new(MockMetricRepository::new());
     let connection_service = Arc::new(ConnectionService::new(
         Arc::clone(&connection_repo) as ConnectionRepositoryRef,
+        metric_repo_for_conn,
         Arc::clone(&lifecycle_manager),
         system_event_tx,
     ));
 
     // Create connection
+    let identity = test_identity("stream-test");
     connection_service
         .create_connection(
             "localhost".to_string(),
             5678,
-            "python".to_string(),
-            Some("stream-test".to_string()),
-            None,
+            identity,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -431,13 +464,20 @@ async fn test_e2e_concurrent_connection_creation() {
     for i in 0..10 {
         let service = Arc::clone(&fixture.connection_service);
         join_set.spawn(async move {
+            let identity = detrix_core::ConnectionIdentity::new(
+                format!("concurrent-conn-{}", i),
+                SourceLanguage::Python,
+                "/test-workspace",
+                "test-host",
+            );
             service
                 .create_connection(
                     "localhost".to_string(),
                     5700 + i as u16,
-                    "python".to_string(),
-                    Some(format!("concurrent-conn-{}", i)),
-                    None,
+                    identity,
+                    None,  // program
+                    None,  // pid
+                    false, // safe_mode
                 )
                 .await
         });
@@ -477,14 +517,16 @@ async fn test_e2e_connection_recreation() {
     let fixture = E2eTestFixture::new().await;
 
     // Create connection
+    let identity = test_identity("recreate-test");
     let conn_id = fixture
         .connection_service
         .create_connection(
             "localhost".to_string(),
             5678,
-            "python".to_string(),
-            Some("recreate-test".to_string()),
-            None,
+            identity.clone(),
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -512,20 +554,22 @@ async fn test_e2e_connection_recreation() {
         .await
         .unwrap();
 
-    // Recreate with same ID
+    // Recreate with same identity (should get same UUID)
     let new_conn_id = fixture
         .connection_service
         .create_connection(
             "localhost".to_string(),
             5678,
-            "python".to_string(),
-            Some("recreate-test".to_string()),
-            None,
+            identity.clone(),
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
 
-    assert_eq!(new_conn_id.0, "recreate-test");
+    let expected_uuid = identity.to_uuid();
+    assert_eq!(new_conn_id.0, expected_uuid);
 
     // Send more events
     let new_adapter = fixture
@@ -560,14 +604,16 @@ async fn test_e2e_connection_recreation() {
 async fn test_adapter_lifecycle_manager_broadcasts_events() {
     let fixture = E2eTestFixture::new().await;
 
+    let identity = test_identity("broadcast-test");
     let conn_id = fixture
         .connection_service
         .create_connection(
             "localhost".to_string(),
             5678,
-            "python".to_string(),
-            None,
-            None,
+            identity,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -599,14 +645,16 @@ async fn test_e2e_stop_all_cleanup() {
 
     // Create multiple connections
     for i in 0..5 {
+        let identity = test_identity(&format!("stop-all-conn-{}", i));
         fixture
             .connection_service
             .create_connection(
                 "localhost".to_string(),
                 5700 + i as u16,
-                "python".to_string(),
-                Some(format!("stop-all-conn-{}", i)),
-                None,
+                identity,
+                None,  // program
+                None,  // pid
+                false, // safe_mode
             )
             .await
             .unwrap();
@@ -635,14 +683,16 @@ async fn test_e2e_stop_all_cleanup() {
 async fn test_e2e_high_volume_events() {
     let fixture = E2eTestFixture::new().await;
 
+    let identity = test_identity("high-volume");
     fixture
         .connection_service
         .create_connection(
             "localhost".to_string(),
             5678,
-            "python".to_string(),
-            Some("high-volume".to_string()),
-            None,
+            identity,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -683,27 +733,36 @@ async fn test_e2e_connection_status_updated_on_crash() {
     let fixture = E2eTestFixture::new().await;
 
     // Create first connection (simulating Python debugger)
+    let identity_python = test_identity("python-conn");
     let conn_id_python = fixture
         .connection_service
         .create_connection(
             "localhost".to_string(),
             5680,
-            "python".to_string(),
-            Some("python-conn".to_string()),
-            None,
+            identity_python,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
 
     // Create second connection (simulating Rust debugger)
+    let identity_rust = detrix_core::ConnectionIdentity::new(
+        "rust-conn",
+        SourceLanguage::Rust,
+        "/test-workspace",
+        "test-host",
+    );
     let conn_id_rust = fixture
         .connection_service
         .create_connection(
             "localhost".to_string(),
             5681,
-            "rust".to_string(),
-            Some("rust-conn".to_string()),
-            None,
+            identity_rust,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();

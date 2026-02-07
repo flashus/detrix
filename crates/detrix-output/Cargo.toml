@@ -36,3 +36,6 @@ rand = "0.9"
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 detrix-testing = { path = "../detrix-testing" }
+
+[lints]
+workspace = true

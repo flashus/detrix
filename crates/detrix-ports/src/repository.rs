@@ -36,8 +36,11 @@ pub struct MetricFilter {
 pub trait MetricRepository: Send + Sync {
     /// Save a new metric
     ///
-    /// If `upsert` is false (default), fails if metric with same (name, connection_id) exists.
-    /// If `upsert` is true, updates existing metric with same (name, connection_id).
+    /// If `upsert` is false (default), fails if metric with same (location, connection_id) exists.
+    /// If `upsert` is true, updates existing metric with same (location, connection_id).
+    ///
+    /// Note: Uniqueness is based on location (file:line) + connection_id, not name.
+    /// This matches DAP's constraint of one logpoint per line.
     async fn save(&self, metric: &Metric) -> Result<MetricId> {
         self.save_with_options(metric, false).await
     }
@@ -46,7 +49,7 @@ pub trait MetricRepository: Send + Sync {
     ///
     /// # Arguments
     /// * `metric` - The metric to save
-    /// * `upsert` - If true, update on conflict; if false, fail on conflict
+    /// * `upsert` - If true, update on (location, connection_id) conflict; if false, fail on conflict
     async fn save_with_options(&self, metric: &Metric, upsert: bool) -> Result<MetricId>;
 
     /// Find metric by ID
@@ -116,6 +119,15 @@ pub trait MetricRepository: Send + Sync {
     /// Returns aggregated group statistics using a single GROUP BY query.
     /// Much more efficient than loading all metrics and counting in memory.
     async fn get_group_summaries(&self) -> Result<Vec<GroupSummary>>;
+
+    /// Delete all metrics for a connection.
+    ///
+    /// Used when a connection is explicitly deleted (not just disconnected)
+    /// to prevent orphaned metrics.
+    ///
+    /// # Returns
+    /// The number of metrics deleted.
+    async fn delete_by_connection_id(&self, connection_id: &ConnectionId) -> Result<u64>;
 }
 
 /// Repository for metric events
@@ -129,6 +141,19 @@ pub trait EventRepository: Send + Sync {
 
     /// Find events by metric ID
     async fn find_by_metric_id(&self, metric_id: MetricId, limit: i64) -> Result<Vec<MetricEvent>>;
+
+    /// Find events by metric ID with timestamp filter (events since given timestamp)
+    ///
+    /// # Arguments
+    /// * `metric_id` - The metric to query events for
+    /// * `since_micros` - Only return events with timestamp >= this value (microseconds since epoch)
+    /// * `limit` - Maximum number of events to return
+    async fn find_by_metric_id_since(
+        &self,
+        metric_id: MetricId,
+        since_micros: i64,
+        limit: i64,
+    ) -> Result<Vec<MetricEvent>>;
 
     /// Find events by multiple metric IDs (batch query - single DB call)
     async fn find_by_metric_ids(
@@ -168,8 +193,17 @@ pub trait ConnectionRepository: Send + Sync {
     /// Save a new connection
     async fn save(&self, connection: &Connection) -> Result<ConnectionId>;
 
-    /// Find connection by ID
+    /// Find connection by ID (UUID)
     async fn find_by_id(&self, id: &ConnectionId) -> Result<Option<Connection>>;
+
+    /// Find connection by identity components (for process restart detection)
+    async fn find_by_identity(
+        &self,
+        name: &str,
+        language: &str,
+        workspace_root: &str,
+        hostname: &str,
+    ) -> Result<Option<Connection>>;
 
     /// Find connection by address (host:port)
     async fn find_by_address(&self, host: &str, port: u16) -> Result<Option<Connection>>;

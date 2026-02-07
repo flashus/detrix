@@ -270,46 +270,104 @@ pub async fn capture_memory_snapshot(
     })
 }
 
-/// Evaluate an expression in the context of a stack frame
+/// Evaluate an expression in the context of a stack frame.
+///
+/// The `context` parameter determines the evaluation mode:
+/// - `"watch"` - Standard watch expression evaluation (default for most languages)
+/// - `"repl"` - REPL context, enables function calls (used by Go/Delve, in Go, only works in breakpoint mode and doesnt support variadic args functions)
+/// - `"hover"` - Hover context for quick evaluation
+///
+/// Returns `Ok(value)` on success, `Err(error_message)` on failure.
+/// The error message contains the actual debugger error for user feedback.
 pub async fn evaluate_expression(
     broker: &Arc<DapBroker>,
     expression: &str,
     frame_id: i64,
-) -> Option<String> {
+    context: &str,
+) -> Result<String, String> {
     let args = serde_json::json!({
         "expression": expression,
         "frameId": frame_id,
-        "context": "watch"  // "watch" context for evaluating expressions
+        "context": context
     });
 
-    let response = broker
-        .send_request("evaluate", Some(args))
-        .await
-        .debug_ok(&format!("Evaluate request failed for '{}'", expression))?;
+    debug!(
+        "Evaluating expression: '{}' in context '{}' (frame_id={})",
+        expression, context, frame_id
+    );
+
+    let response = match broker.send_request("evaluate", Some(args)).await {
+        Ok(r) => r,
+        Err(e) => {
+            let err = format!("DAP request failed: {}", e);
+            warn!("Evaluate request failed for '{}': {}", expression, err);
+            return Err(err);
+        }
+    };
 
     if !response.success {
-        debug!("Evaluate request unsuccessful for '{}'", expression);
-        return None;
+        // Extract detailed error message from response body if available
+        let error_detail = response
+            .body
+            .as_ref()
+            .and_then(|b| b.get("error"))
+            .and_then(|e| e.get("format"))
+            .and_then(|f| f.as_str())
+            .map(String::from)
+            .or_else(|| response.message.clone())
+            .unwrap_or_else(|| "Unknown error".to_string());
+
+        warn!(
+            "Evaluate request unsuccessful for '{}': {}",
+            expression, error_detail
+        );
+        return Err(error_detail);
     }
 
-    response
-        .body?
-        .get("result")
-        .and_then(|r| r.as_str())
-        .map(String::from)
+    let body = response.body.ok_or_else(|| {
+        let err = "Response missing body".to_string();
+        warn!("Evaluate response missing body for '{}'", expression);
+        err
+    })?;
+
+    debug!("Evaluate response body: {:?}", body);
+
+    // Try to get result as string, or convert from other types
+    body.get("result")
+        .map(|r| {
+            if let Some(s) = r.as_str() {
+                s.to_string()
+            } else {
+                // For non-string results, convert to string representation
+                r.to_string()
+            }
+        })
+        .ok_or_else(|| {
+            let err = "Response missing 'result' field".to_string();
+            warn!(
+                "Evaluate response missing 'result' field for '{}': body={:?}",
+                expression, body
+            );
+            err
+        })
 }
 
-/// Find ALL metrics at a stopped location (there may be multiple metrics on the same line)
+/// Find metrics at a stopped location, preferring exact line matches.
 ///
-/// For compiled languages (Rust, Go), the debugger might resolve breakpoints to nearby lines
-/// due to compiler optimizations. We use a tolerance of +/- 5 lines for matching.
+/// Strategy (prevents cross-evaluation between nearby breakpoints):
+/// 1. Find all metrics matching the file with exact line match (distance 0)
+/// 2. If exact matches found, return only those
+/// 3. If no exact match, fall back to the closest metric(s) within ±DAP_LINE_TOLERANCE
+///    (handles compiler-adjusted breakpoint lines in Go/Rust)
 pub async fn find_metrics_at_location(
     active_metrics: &Arc<RwLock<HashMap<String, Metric>>>,
     file: &str,
     line: u32,
 ) -> Vec<Metric> {
     let metrics = active_metrics.read().await;
-    let mut result = Vec::new();
+    let mut exact_matches = Vec::new();
+    let mut closest_distance = u32::MAX;
+    let mut tolerance_matches = Vec::new();
 
     // Get filename for flexible matching
     let filename = std::path::Path::new(file)
@@ -325,7 +383,6 @@ pub async fn find_metrics_at_location(
     );
 
     for metric in metrics.values() {
-        // Check if metric is at this location
         let metric_filename = std::path::Path::new(&metric.location.file)
             .file_name()
             .and_then(|n| n.to_str());
@@ -336,34 +393,62 @@ pub async fn find_metrics_at_location(
 
         // Allow some tolerance in line matching for compiled languages
         // (LLDB/Delve may resolve breakpoints to nearby lines)
+        if !file_matches {
+            continue;
+        }
+
         let metric_line = metric.location.line;
-        let line_matches = metric_line == line
-            || (line > metric_line && line - metric_line <= DAP_LINE_TOLERANCE)
-            || (metric_line > line && metric_line - line <= DAP_LINE_TOLERANCE);
+        let distance = line.abs_diff(metric_line);
 
         trace!(
-            "  checking metric '{}' at {}:{} (metric_filename={:?}): file_matches={}, line_matches={} (stopped at line {})",
+            "  checking metric '{}' at {}:{}: distance={} (stopped at line {})",
             metric.name,
             metric.location.file,
             metric.location.line,
-            metric_filename,
-            file_matches,
-            line_matches,
+            distance,
             line
         );
 
-        if file_matches && line_matches {
-            result.push(metric.clone());
+        if distance == 0 {
+            exact_matches.push(metric.clone());
+        } else if distance <= DAP_LINE_TOLERANCE {
+            if distance < closest_distance {
+                closest_distance = distance;
+                tolerance_matches.clear();
+                tolerance_matches.push(metric.clone());
+            } else if distance == closest_distance {
+                tolerance_matches.push(metric.clone());
+            }
         }
     }
 
-    trace!(
-        "find_metrics_at_location: found {} metrics near {}:{} (tolerance={})",
-        result.len(),
-        file,
-        line,
-        DAP_LINE_TOLERANCE
-    );
+    // Prefer exact matches; only fall back to closest tolerance matches
+    let result = if !exact_matches.is_empty() {
+        trace!(
+            "find_metrics_at_location: {} exact match(es) at {}:{}",
+            exact_matches.len(),
+            file,
+            line,
+        );
+        exact_matches
+    } else if !tolerance_matches.is_empty() {
+        trace!(
+            "find_metrics_at_location: no exact match, using {} closest metric(s) at distance {} from {}:{}",
+            tolerance_matches.len(),
+            closest_distance,
+            file,
+            line,
+        );
+        tolerance_matches
+    } else {
+        trace!(
+            "find_metrics_at_location: no metrics found near {}:{} (tolerance={})",
+            file,
+            line,
+            DAP_LINE_TOLERANCE
+        );
+        Vec::new()
+    };
 
     result
 }

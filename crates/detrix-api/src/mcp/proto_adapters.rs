@@ -72,7 +72,7 @@ pub fn mcp_params_to_add_metric_request(
         group: params.group.clone(),
         location,
         expression: params.expression.clone(),
-        language: String::new(), // Will be filled from connection
+        language: None, // Will be filled from connection
         enabled: params.enabled,
         mode,
         condition: None,                        // MCP doesn't support conditions yet

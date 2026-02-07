@@ -6,7 +6,7 @@ use super::config::{AdapterConfig, ConnectionMode};
 use crate::{Capabilities, DapBroker, Error, InitializeRequestArguments, Result};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Initialize DAP connection (handshake)
 pub async fn initialize_dap(
@@ -172,11 +172,20 @@ pub async fn initialize_dap(
             pid,
             program,
             wait_for,
+            init_commands,
         } => {
             // For lldb-dap, send attach request with PID or program name.
             // lldb-dap will attach to the running process.
             // See: https://github.com/llvm/llvm-project/blob/main/lldb/tools/lldb-dap/README.md
-            let mut attach_args = serde_json::json!({});
+            //
+            // CRITICAL: stopOnEntry must be false to prevent deadlock when attaching
+            // to a process that is waiting for an HTTP response (e.g., Rust client
+            // waiting for daemon registration response). Without this, lldb-dap
+            // pauses the target via ptrace, the target can't receive the HTTP response,
+            // and the registration times out.
+            let mut attach_args = serde_json::json!({
+                "stopOnEntry": false
+            });
 
             if let Some(p) = pid {
                 attach_args["pid"] = serde_json::json!(p);
@@ -187,10 +196,14 @@ pub async fn initialize_dap(
             if *wait_for {
                 attach_args["waitFor"] = serde_json::json!(true);
             }
+            // Add init commands for type formatters (e.g., Rust &str display)
+            if !init_commands.is_empty() {
+                attach_args["initCommands"] = serde_json::json!(init_commands);
+            }
 
             debug!(
-                "Sending attach request to {}:{} with pid={:?}, program={:?}, waitFor={}",
-                host, port, pid, program, wait_for
+                "Sending attach request to {}:{} with pid={:?}, program={:?}, waitFor={}, init_commands={}",
+                host, port, pid, program, wait_for, init_commands.len()
             );
 
             // Send attach request and wait for response
@@ -218,14 +231,28 @@ pub async fn initialize_dap(
     }
 
     // For AttachRemote mode (e.g., Delve headless), the program is paused after attach.
-    // We do NOT auto-continue here - logpoints should be set first via set_metric(),
-    // then the caller should use continue_execution() to resume the program.
-    // This ensures logpoints are active before the program starts running.
-    // See: https://github.com/go-delve/delve/blob/master/Documentation/api/dap/README.md
+    // We must send a continue request to resume execution, otherwise logpoints won't fire.
+    // Note: For languages like Go (Delve), the debugger pauses the program when DAP connects,
+    // even if the process was started with `dlv attach --continue`. We need to explicitly
+    // resume it via DAP continue request after initialization.
     if matches!(config.connection_mode, ConnectionMode::AttachRemote { .. }) {
-        debug!(
-            "AttachRemote mode: program is paused, waiting for logpoints to be set before continue"
-        );
+        debug!("AttachRemote mode: sending continue request to resume program execution");
+
+        let continue_args = serde_json::json!({
+            "threadId": 1  // Use main thread
+        });
+
+        let continue_response = broker.send_request("continue", Some(continue_args)).await?;
+
+        if continue_response.success {
+            info!("Program execution resumed after attach (required for logpoints to fire)");
+        } else {
+            // Don't fail initialization if continue fails - the program might already be running
+            debug!(
+                "Continue request failed (program may already be running): {:?}",
+                continue_response.message
+            );
+        }
     }
 
     debug!("DAP connection initialized for {}", config.adapter_id);

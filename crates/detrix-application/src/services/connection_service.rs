@@ -7,13 +7,13 @@
 //! - Is protocol-agnostic (no knowledge of gRPC, REST, MCP, etc.)
 
 use crate::services::AdapterLifecycleManager;
-use crate::ConnectionRepositoryRef;
+use crate::{ConnectionRepositoryRef, MetricRepositoryRef};
 use detrix_core::{
-    Connection, ConnectionId, ConnectionStatus, Result, SourceLanguage, SystemEvent,
+    Connection, ConnectionId, ConnectionIdentity, ConnectionStatus, Result, SystemEvent,
 };
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::instrument;
+use tracing::{info, instrument};
 
 /// Service for managing debugger connections
 ///
@@ -28,6 +28,9 @@ pub struct ConnectionService {
     /// Repository for persisting connections
     connection_repo: ConnectionRepositoryRef,
 
+    /// Repository for persisting metrics (needed for cascade delete)
+    metric_repo: MetricRepositoryRef,
+
     /// Lifecycle manager for DAP adapters
     adapter_lifecycle_manager: Arc<AdapterLifecycleManager>,
 
@@ -40,15 +43,18 @@ impl ConnectionService {
     ///
     /// # Arguments
     /// * `connection_repo` - Repository for connection persistence
+    /// * `metric_repo` - Repository for metric persistence (for cascade delete)
     /// * `adapter_lifecycle_manager` - Manager for DAP adapter lifecycle
     /// * `system_event_tx` - Broadcast channel for system events
     pub fn new(
         connection_repo: ConnectionRepositoryRef,
+        metric_repo: MetricRepositoryRef,
         adapter_lifecycle_manager: Arc<AdapterLifecycleManager>,
         system_event_tx: broadcast::Sender<SystemEvent>,
     ) -> Self {
         Self {
             connection_repo,
+            metric_repo,
             adapter_lifecycle_manager,
             system_event_tx,
         }
@@ -57,98 +63,96 @@ impl ConnectionService {
     /// Create a new connection to a debugger server
     ///
     /// This method:
-    /// 1. Validates connection parameters via domain logic
-    /// 2. Saves connection to repository
-    /// 3. Delegates adapter lifecycle to AdapterLifecycleManager
-    /// 4. Updates connection status on success
+    /// 1. Validates connection identity and parameters
+    /// 2. Generates deterministic UUID from identity
+    /// 3. Checks for existing connection with same identity (idempotency)
+    /// 4. Saves connection to repository
+    /// 5. Delegates adapter lifecycle to AdapterLifecycleManager
+    /// 6. Updates connection status on success
     ///
     /// # Arguments
     /// * `host` - Host address (e.g., "127.0.0.1", "localhost")
     /// * `port` - Port number (must be >= 1024)
-    /// * `language` - Language/adapter type (e.g., "python", "go", "rust")
-    /// * `id` - Optional custom connection ID. If None, auto-generates from host:port
+    /// * `identity` - Connection identity (name, language, workspace_root, hostname)
     /// * `program` - Optional program path for Rust direct lldb-dap launch mode
+    /// * `pid` - Optional PID for AttachPid mode
+    /// * `safe_mode` - Enable SafeMode: only allow logpoints, disable breakpoint-based operations
     ///
     /// # Returns
-    /// ConnectionId of the created connection
+    /// ConnectionId (which is the deterministic UUID) of the created connection
     ///
     /// # Business Rules
     /// - Port must be >= 1024 (not in reserved range)
     /// - Host must not be empty
-    /// - Language must not be empty
-    /// - Connection ID must be unique (auto-generated IDs prevent collisions)
-    #[instrument(skip(self), fields(host = %host, port = port, language = %language))]
+    /// - Identity must be valid (non-empty fields)
+    /// - Connection UUID is deterministic based on identity
+    /// - Idempotent: same identity + connected adapter = return existing
+    #[instrument(skip(self), fields(host = %host, port = port, name = %identity.name, language = %identity.language, workspace_root = %identity.workspace_root, hostname = %identity.hostname, pid = ?pid, safe_mode = safe_mode))]
     pub async fn create_connection(
         &self,
         host: String,
         port: u16,
-        language: String,
-        id: Option<String>,
+        identity: ConnectionIdentity,
         program: Option<String>,
+        pid: Option<u32>,
+        safe_mode: bool,
     ) -> Result<ConnectionId> {
-        use tracing::info;
+        // 1. Create Connection entity from identity (validates identity, host, port, language + generates UUID)
+        let mut connection = Connection::new_with_identity(identity, host, port)?;
+        connection.safe_mode = safe_mode;
+        let connection_id = connection.id.clone();
 
-        // 1. Parse language string to SourceLanguage (fail-fast with clear error)
-        let language: SourceLanguage = language.try_into()?;
-
-        // 2. Determine connection ID (auto-generate or use provided)
-        let connection_id = match id {
-            Some(custom_id) => ConnectionId::new(custom_id),
-            None => ConnectionId::from_host_port(&host, port),
-        };
-
-        // 3. Check if connection already exists and is connected
-        //    This handles the case where restore_connections is running or connection was already created
+        // 2. Check if connection with same UUID already exists and is connected
+        //    UUID is deterministic from identity, so find_by_id is equivalent to find_by_identity
+        //    This handles idempotency and the case where restore_connections is running
         if let Ok(Some(existing)) = self.connection_repo.find_by_id(&connection_id).await {
             if existing.status == ConnectionStatus::Connected
                 && self
                     .adapter_lifecycle_manager
-                    .has_adapter(&connection_id)
+                    .has_adapter(&existing.id)
                     .await
             {
                 info!(
-                    "Connection {} already exists and is connected, returning existing",
+                    "Connection already exists and is connected (UUID={}), returning existing",
                     connection_id.0
                 );
-                return Ok(connection_id);
+                return Ok(existing.id);
             }
             // Connection exists but not connected - will be restarted below
             info!(
-                "Connection {} exists but status is {:?}, will restart adapter",
-                connection_id.0, existing.status
+                "Connection exists but not connected (UUID={}), will restart adapter",
+                connection_id.0
             );
         }
 
-        // 4. Create Connection entity (validates host, port, and rejects Unknown language)
-        let connection = Connection::new(connection_id.clone(), host.clone(), port, language)?;
-
-        // 5. Save connection to repository (initially Disconnected)
+        // 3. Save connection to repository (initially Disconnected, ON CONFLICT upserts)
         self.connection_repo.save(&connection).await?;
 
-        // 6. Start adapter via lifecycle manager (handles everything: start, subscribe, route events)
-        //    Pass language to dispatch to the correct adapter factory method
+        // 4. Start adapter via lifecycle manager (handles everything: start, subscribe, route events)
         //    Note: start_adapter returns degradation info (sync_failed, resume_failed) which is logged internally
         let _start_result = self
             .adapter_lifecycle_manager
             .start_adapter(
                 connection_id.clone(),
-                &host,
-                port,
+                &connection.host,
+                connection.port,
                 connection.language,
                 program,
+                pid,
+                connection.safe_mode,
             )
             .await?;
 
-        // 7. Update connection status to Connected
+        // 5. Update connection status to Connected
         self.connection_repo
             .update_status(&connection_id, ConnectionStatus::Connected)
             .await?;
 
-        // 8. Emit connection created event
+        // 6. Emit connection created event
         let event = SystemEvent::connection_created(
             connection_id.clone(),
-            &host,
-            port,
+            &connection.host,
+            connection.port,
             connection.language.as_str(),
         );
         let _ = self.system_event_tx.send(event);
@@ -169,6 +173,7 @@ impl ConnectionService {
     /// - Stops the adapter and cleans up resources
     /// - Updates connection status to Disconnected
     /// - Does NOT delete the connection (keeps history)
+    /// - Does NOT delete metrics (they persist for reconnection)
     #[instrument(skip(self), fields(connection_id = %id.0))]
     pub async fn disconnect(&self, id: &ConnectionId) -> Result<()> {
         // 1. Stop adapter via lifecycle manager
@@ -182,6 +187,48 @@ impl ConnectionService {
         // 3. Emit connection closed event
         let event = SystemEvent::connection_closed(id.clone());
         let _ = self.system_event_tx.send(event);
+
+        Ok(())
+    }
+
+    /// Delete a connection and all associated metrics.
+    ///
+    /// This method:
+    /// 1. Stops the adapter via AdapterLifecycleManager
+    /// 2. Deletes all metrics associated with the connection
+    /// 3. Deletes the connection from repository
+    ///
+    /// Use this for explicit user-requested deletion, not for disconnect/reconnection scenarios.
+    ///
+    /// # Arguments
+    /// * `id` - Connection ID to delete
+    ///
+    /// # Business Rules
+    /// - Stops the adapter and cleans up resources
+    /// - Cascade deletes all associated metrics
+    /// - Removes the connection from storage
+    #[instrument(skip(self), fields(connection_id = %id.0))]
+    pub async fn delete_connection(&self, id: &ConnectionId) -> Result<()> {
+        // 1. Stop adapter via lifecycle manager (ignore error if not running)
+        let _ = self.adapter_lifecycle_manager.stop_adapter(id).await;
+
+        // 2. Delete all associated metrics (cascade delete)
+        let deleted_metrics = self.metric_repo.delete_by_connection_id(id).await?;
+        if deleted_metrics > 0 {
+            info!(
+                "Deleted {} metrics for connection {}",
+                deleted_metrics, id.0
+            );
+        }
+
+        // 3. Delete connection from repository
+        self.connection_repo.delete(id).await?;
+
+        // 4. Emit connection closed event
+        let event = SystemEvent::connection_closed(id.clone());
+        let _ = self.system_event_tx.send(event);
+
+        info!("Deleted connection {}", id.0);
 
         Ok(())
     }
@@ -320,10 +367,18 @@ impl ConnectionService {
             }
 
             // Attempt to start the adapter (port is open, so this should succeed quickly)
-            // Note: restored connections use attach mode (no program path)
+            // Note: restored connections use attach mode (no program path, no PID)
             match self
                 .adapter_lifecycle_manager
-                .start_adapter(conn_id.clone(), &conn.host, conn.port, conn.language, None)
+                .start_adapter(
+                    conn_id.clone(),
+                    &conn.host,
+                    conn.port,
+                    conn.language,
+                    None, // program
+                    None, // pid - restored connections don't use AttachPid mode
+                    conn.safe_mode,
+                )
                 .await
             {
                 Ok(_) => {

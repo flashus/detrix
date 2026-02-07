@@ -170,40 +170,39 @@ pub(crate) fn string_to_mode(mode_type: &str, config: Option<&str>) -> Result<Me
         MODE_STREAM => Ok(MetricMode::Stream),
         MODE_FIRST => Ok(MetricMode::First),
         MODE_SAMPLE => {
-            let config = config
-                .ok_or_else(|| Error::InvalidConfig("Sample mode requires config".to_string()))?;
+            let config =
+                config.ok_or_else(|| Error::InvalidConfig("Sample mode requires config".into()))?;
             let json: serde_json::Value = serde_json::from_str(config)?;
             let rate = json["rate"]
                 .as_u64()
-                .ok_or_else(|| Error::InvalidConfig("Missing rate".to_string()))?
+                .ok_or_else(|| Error::InvalidConfig("Missing rate".into()))?
                 as u32;
             Ok(MetricMode::Sample { rate })
         }
         MODE_SAMPLE_INTERVAL => {
             let config = config.ok_or_else(|| {
-                Error::InvalidConfig("SampleInterval mode requires config".to_string())
+                Error::InvalidConfig("SampleInterval mode requires config".into())
             })?;
             let json: serde_json::Value = serde_json::from_str(config)?;
             let seconds = json["seconds"]
                 .as_u64()
-                .ok_or_else(|| Error::InvalidConfig("Missing seconds".to_string()))?
+                .ok_or_else(|| Error::InvalidConfig("Missing seconds".into()))?
                 as u32;
             Ok(MetricMode::SampleInterval { seconds })
         }
         MODE_THROTTLE => {
             let config = config
-                .ok_or_else(|| Error::InvalidConfig("Throttle mode requires config".to_string()))?;
+                .ok_or_else(|| Error::InvalidConfig("Throttle mode requires config".into()))?;
             let json: serde_json::Value = serde_json::from_str(config)?;
             let max_per_second = json["max_per_second"]
                 .as_u64()
-                .ok_or_else(|| Error::InvalidConfig("Missing max_per_second".to_string()))?
+                .ok_or_else(|| Error::InvalidConfig("Missing max_per_second".into()))?
                 as u32;
             Ok(MetricMode::Throttle { max_per_second })
         }
-        _ => Err(Error::InvalidConfig(format!(
-            "Unknown mode type: {}",
-            mode_type
-        ))),
+        _ => Err(Error::InvalidConfig(
+            format!("Unknown mode type: {}", mode_type).into(),
+        )),
     }
 }
 

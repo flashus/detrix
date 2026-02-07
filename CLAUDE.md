@@ -2,6 +2,24 @@
 
 This file provides guidance to Claude Code when working with code in this repository.
 
+## Rust Development
+
+- This is primarily a Rust codebase. Ensure `cargo check` and `cargo clippy` pass after making changes.
+- When modifying Rust code, follow idiomatic patterns: prefer `Result` over panics, use `?` operator for error propagation, and leverage the type system.
+Add under a new 
+
+## Workflows
+
+### Code Audit Workflow
+
+- When working on audit items or code quality fixes, always complete ALL remaining items before ending. Track progress using a checklist format.
+- After each fix, verify the fix compiles and doesn't introduce regressions by running `cargo check` and relevant tests.
+
+## Task Completion
+
+- When given a list of items to fix/verify, work through ALL items to completion. Do not stop mid-list.
+- If a task is complex, break it into sub-tasks using TodoWrite but ensure every sub-task is resolved before finishing.
+
 ## Project Overview
 
 **Detrix** is an LLM-first dynamic observability platform that enables developers and AI agents to add metrics to any line of code without redeployment.
@@ -225,7 +243,7 @@ mod tests {
 
 ### detrix-core (Domain Layer)
 - **Contains:** Entities (Metric, MetricEvent, Connection), Value Objects (MetricId, Location), Error types
-- **Allowed deps:** `serde`, `chrono`, `thiserror`, `async-trait`
+- **Allowed deps:** `serde`, `serde_json`, `chrono`, `thiserror`, `sha2`
 - **FORBIDDEN:** Port traits, config, safety, tokio runtime features, infrastructure
 
 ### detrix-ports (Ports Layer)
@@ -247,7 +265,7 @@ mod tests {
 ### detrix-testing (Test Utilities)
 - **Contains:** Mock implementations of all port traits, fixtures, E2E utilities
 - **Organized in:** `mocks/adapters.rs`, `mocks/repositories.rs`
-- **Allowed deps:** `detrix-ports`, `detrix-core`
+- **Allowed deps:** `detrix-core`, `detrix-config`, `detrix-ports`, `detrix-application`, `detrix-api`
 
 ### detrix-api (Interface Layer)
 - **Contains:** gRPC/REST/WebSocket/MCP controllers
@@ -284,9 +302,11 @@ detrix/
 │   ├── detrix-cli/            # UI: CLI + composition root
 │   ├── detrix-testing/        # Testing: mocks & fixtures
 │   └── detrix-tui/            # UI: Terminal dashboard
-├── proto/                     # gRPC protocol definitions
+├── clients/                   # SDK clients
+│   ├── go/                    # Go client
+│   ├── python/                # Python client
+│   └── rust/                  # Rust client
 ├── fixtures/                  # Example apps for testing
-├── scripts/                   # Installation scripts
 ├── skills/detrix/             # Claude Code skill
 └── docs/
     ├── ARCHITECTURE.md        # Full architecture guide
@@ -315,10 +335,10 @@ task pre-commit
 ```toml
 # .cargo/config.toml specifies custom build directory:
 [build]
-target-dir = "../detrix/target"
+target-dir = "../../../../../detrix/target"  # resolves to ~/detrix/target
 ```
 
-Always use the configured build directory for binary paths.
+Always use the configured build directory for binary paths. The relative path resolves to `~/detrix/target` from the workspace root.
 
 ### Running Detrix
 ```bash

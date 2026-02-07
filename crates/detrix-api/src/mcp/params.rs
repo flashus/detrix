@@ -28,7 +28,9 @@ pub struct AddMetricParams {
         description = "Line number (optional if included in location). Takes precedence over line in location string."
     )]
     pub line: Option<u32>,
-    #[schemars(description = "Expression to evaluate (e.g., user.id, {'a': x, 'b': y})")]
+    #[schemars(
+        description = "Expression to evaluate (e.g., user.id, {'a': x, 'b': y}). For Go: simple variables recommended; non-variadic function calls work but BLOCK process (variadic like fmt.Sprintf NOT supported)."
+    )]
     pub expression: String,
     #[schemars(
         description = "Connection ID to use for this metric. Required. Get from create_connection response or list_connections."
@@ -163,7 +165,9 @@ pub struct ObserveParams {
     #[schemars(description = "File path to observe (relative or absolute)")]
     pub file: String,
 
-    #[schemars(description = "Expression to capture (e.g., 'user.balance', 'len(items)')")]
+    #[schemars(
+        description = "Expression to capture (e.g., 'user.balance', 'len(items)'). For Go: simple variables recommended; non-variadic function calls work but BLOCK process (variadic like fmt.Sprintf NOT supported)."
+    )]
     pub expression: String,
 
     #[schemars(description = "Line number (optional - auto-finds best line if not specified)")]
@@ -247,8 +251,19 @@ pub struct CreateConnectionParams {
         description = "Language/adapter type. Required. Supported values: 'python', 'go', 'rust'"
     )]
     pub language: String,
-    #[schemars(description = "Optional custom connection ID")]
-    pub connection_id: Option<String>,
+
+    // Identity fields for UUID-based connection tracking
+    #[schemars(
+        description = "Connection name (user-facing label, e.g., 'my-app'). If not provided, defaults to 'mcp-<language>-<host>:<port>'"
+    )]
+    pub name: Option<String>,
+    #[schemars(
+        description = "Workspace root directory (absolute path). If not provided, defaults to '/unknown'"
+    )]
+    pub workspace_root: Option<String>,
+    #[schemars(description = "Machine hostname. If not provided, defaults to local hostname")]
+    pub hostname: Option<String>,
+
     #[schemars(
         description = "Program path to launch (for Rust/lldb-dap only). REQUIRED for Rust: First start lldb-dap with `lldb-dap --connection listen://HOST:PORT`, then specify the debug binary path here. Binary must have debug symbols (cargo build, NOT --release)."
     )]
@@ -257,6 +272,11 @@ pub struct CreateConnectionParams {
         description = "Process ID to attach to (for Rust/lldb-dap only). When specified, lldb-dap will attach to this running process."
     )]
     pub pid: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "SafeMode: Only allow logpoints (non-blocking), disable breakpoint-based operations like function calls, stack traces, memory snapshots. Recommended for production environments."
+    )]
+    pub safe_mode: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

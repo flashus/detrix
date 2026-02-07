@@ -174,14 +174,21 @@ impl E2ETestServer {
         );
 
         // Connect to debugpy using ConnectionService
+        let identity = detrix_core::ConnectionIdentity::new(
+            format!("grpc-e2e-{}", debugpy_port),
+            detrix_core::SourceLanguage::Python,
+            "/test-workspace",
+            "test-host",
+        );
         context
             .connection_service
             .create_connection(
                 "127.0.0.1".to_string(),
                 debugpy_port,
-                "python".to_string(),
-                None, // auto-generate connection ID
-                None, // No program path for Python
+                identity,
+                None,  // No program path for Python
+                None,  // No pid (not using AttachPid mode)
+                false, // SafeMode disabled for tests
             )
             .await?;
 

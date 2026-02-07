@@ -6,7 +6,11 @@ use detrix_application::{
     AdapterLifecycleManager, ConnectionRepositoryRef, ConnectionService, DapAdapterFactoryRef,
     EventCaptureService, MetricRepositoryRef,
 };
-use detrix_core::{ConnectionId, ConnectionStatus, Error, MetricEvent, SystemEvent};
+use detrix_core::{
+    ConnectionId, ConnectionIdentity, ConnectionStatus, Error, MetricEvent, SourceLanguage,
+    SystemEvent,
+};
+use detrix_testing::fixtures::sample_connection_identity;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -31,6 +35,7 @@ use test_support::{
 
 fn create_test_fixtures() -> (
     Arc<MockConnectionRepository>,
+    MetricRepositoryRef,
     Arc<AdapterLifecycleManager>,
     broadcast::Sender<SystemEvent>,
 ) {
@@ -47,11 +52,16 @@ fn create_test_fixtures() -> (
         broadcast_tx,
         system_event_tx.clone(),
         adapter_factory,
-        metric_repo,
+        metric_repo.clone(),
         Arc::clone(&connection_repo) as ConnectionRepositoryRef,
     ));
 
-    (connection_repo, adapter_lifecycle_manager, system_event_tx)
+    (
+        connection_repo,
+        metric_repo,
+        adapter_lifecycle_manager,
+        system_event_tx,
+    )
 }
 
 // ============================================================================
@@ -61,17 +71,26 @@ fn create_test_fixtures() -> (
 #[tokio::test]
 async fn test_create_connection_with_auto_generated_id() {
     // Arrange
-    let (repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo.clone(), lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let service = ConnectionService::new(
+        repo.clone(),
+        metric_repo,
+        lifecycle_manager,
+        system_event_tx,
+    );
+
+    // Create identity (UUID will be deterministic)
+    let identity = sample_connection_identity();
 
     // Act
     let result = service
         .create_connection(
             "127.0.0.1".to_string(),
             5678,
-            "python".to_string(),
-            None,
-            None,
+            identity,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await;
 
@@ -79,8 +98,9 @@ async fn test_create_connection_with_auto_generated_id() {
     assert!(result.is_ok());
     let connection_id = result.unwrap();
 
-    // ID should be auto-generated from host:port
-    assert_eq!(connection_id.0, "127_0_0_1_5678");
+    // ID should be deterministic UUID from identity
+    let expected_uuid = sample_connection_identity().to_uuid();
+    assert_eq!(connection_id.0, expected_uuid);
 
     // Connection should be saved in repository
     let saved_conn = repo.get_connection(&connection_id).await;
@@ -88,24 +108,42 @@ async fn test_create_connection_with_auto_generated_id() {
     let conn = saved_conn.unwrap();
     assert_eq!(conn.host, "127.0.0.1");
     assert_eq!(conn.port, 5678);
+    assert_eq!(conn.name, Some("test-app".to_string()));
+    assert_eq!(conn.workspace_root, "/workspace");
+    assert_eq!(conn.hostname, "test-host");
     // After successful creation, status should be Connected
     assert_eq!(conn.status, ConnectionStatus::Connected);
 }
 
 #[tokio::test]
-async fn test_create_connection_with_custom_id() {
+async fn test_create_connection_with_identity() {
     // Arrange
-    let (repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo.clone(), lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let service = ConnectionService::new(
+        repo.clone(),
+        metric_repo,
+        lifecycle_manager,
+        system_event_tx,
+    );
+
+    // Create identity with custom name
+    let identity = ConnectionIdentity::new(
+        "my-custom-connection",
+        SourceLanguage::Python,
+        "/my/workspace",
+        "my-host",
+    );
+    let expected_uuid = identity.to_uuid();
 
     // Act
     let result = service
         .create_connection(
             "127.0.0.1".to_string(),
             5678,
-            "python".to_string(),
-            Some("my-custom-connection".to_string()),
-            None,
+            identity,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await;
 
@@ -113,28 +151,40 @@ async fn test_create_connection_with_custom_id() {
     assert!(result.is_ok());
     let connection_id = result.unwrap();
 
-    // ID should be the custom one
-    assert_eq!(connection_id.0, "my-custom-connection");
+    // ID should be deterministic UUID from identity
+    assert_eq!(connection_id.0, expected_uuid);
 
-    // Connection should be saved
+    // Connection should be saved with identity fields
     let saved_conn = repo.get_connection(&connection_id).await;
     assert!(saved_conn.is_some());
+    let conn = saved_conn.unwrap();
+    assert_eq!(conn.name, Some("my-custom-connection".to_string()));
+    assert_eq!(conn.workspace_root, "/my/workspace");
+    assert_eq!(conn.hostname, "my-host");
 }
 
 #[tokio::test]
 async fn test_create_connection_validates_port_range() {
     // Arrange
-    let (repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo.clone(), lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let service = ConnectionService::new(
+        repo.clone(),
+        metric_repo,
+        lifecycle_manager,
+        system_event_tx,
+    );
+
+    let identity = sample_connection_identity();
 
     // Act - Port below 1024 should fail
     let result = service
         .create_connection(
             "127.0.0.1".to_string(),
             80,
-            "python".to_string(),
-            None,
-            None,
+            identity,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await;
 
@@ -152,12 +202,19 @@ async fn test_create_connection_validates_port_range() {
 #[tokio::test]
 async fn test_create_connection_validates_host() {
     // Arrange
-    let (repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo.clone(), lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let service = ConnectionService::new(
+        repo.clone(),
+        metric_repo,
+        lifecycle_manager,
+        system_event_tx,
+    );
+
+    let identity = sample_connection_identity();
 
     // Act - Empty host should fail
     let result = service
-        .create_connection(String::new(), 5678, "python".to_string(), None, None)
+        .create_connection(String::new(), 5678, identity, None, None, false)
         .await;
 
     // Assert
@@ -171,17 +228,25 @@ async fn test_create_connection_validates_host() {
 #[tokio::test]
 async fn test_create_connection_starts_adapter() {
     // Arrange
-    let (repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo, lifecycle_manager.clone(), system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let service = ConnectionService::new(
+        repo,
+        metric_repo,
+        lifecycle_manager.clone(),
+        system_event_tx,
+    );
+
+    let identity = sample_connection_identity();
 
     // Act
     let result = service
         .create_connection(
             "localhost".to_string(),
             5679,
-            "python".to_string(),
-            None,
-            None,
+            identity,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await;
 
@@ -200,17 +265,25 @@ async fn test_create_connection_starts_adapter() {
 #[tokio::test]
 async fn test_disconnect_stops_adapter_and_updates_status() {
     // Arrange
-    let (repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo.clone(), lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let service = ConnectionService::new(
+        repo.clone(),
+        metric_repo,
+        lifecycle_manager,
+        system_event_tx,
+    );
+
+    let identity = sample_connection_identity();
 
     // First create a connection
     let connection_id = service
         .create_connection(
             "127.0.0.1".to_string(),
             5678,
-            "python".to_string(),
-            None,
-            None,
+            identity,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -236,8 +309,8 @@ async fn test_disconnect_stops_adapter_and_updates_status() {
 async fn test_disconnect_nonexistent_adapter_succeeds() {
     // AdapterLifecycleManager.stop_adapter succeeds even for nonexistent adapters
     // But updating connection status will fail if connection doesn't exist
-    let (repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo, lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
 
     // Act - Try to disconnect nonexistent connection
     let nonexistent_id = ConnectionId::new("does-not-exist");
@@ -250,37 +323,50 @@ async fn test_disconnect_nonexistent_adapter_succeeds() {
 #[tokio::test]
 async fn test_list_connections_returns_all() {
     // Arrange
-    let (repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo.clone(), lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let service = ConnectionService::new(
+        repo.clone(),
+        metric_repo,
+        lifecycle_manager,
+        system_event_tx,
+    );
 
-    // Create multiple connections
+    // Create multiple connections with different identities
+    let identity1 = ConnectionIdentity::new("app1", SourceLanguage::Python, "/workspace1", "host1");
     service
         .create_connection(
             "127.0.0.1".to_string(),
             5678,
-            "python".to_string(),
-            None,
-            None,
+            identity1,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
+
+    let identity2 = ConnectionIdentity::new("app2", SourceLanguage::Python, "/workspace2", "host2");
     service
         .create_connection(
             "127.0.0.1".to_string(),
             5679,
-            "python".to_string(),
-            None,
-            None,
+            identity2,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
+
+    let identity3 = ConnectionIdentity::new("app3", SourceLanguage::Python, "/workspace3", "host3");
     service
         .create_connection(
             "localhost".to_string(),
             5680,
-            "python".to_string(),
-            None,
-            None,
+            identity3,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -302,8 +388,8 @@ async fn test_list_connections_returns_all() {
 #[tokio::test]
 async fn test_list_connections_empty_when_no_connections() {
     // Arrange
-    let (repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo, lifecycle_manager, system_event_tx);
+    let (_repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let service = ConnectionService::new(_repo, metric_repo, lifecycle_manager, system_event_tx);
 
     // Act
     let result = service.list_connections().await;
@@ -317,16 +403,25 @@ async fn test_list_connections_empty_when_no_connections() {
 #[tokio::test]
 async fn test_get_connection_by_id() {
     // Arrange
-    let (repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo, lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
+
+    let identity = ConnectionIdentity::new(
+        "test-conn",
+        SourceLanguage::Python,
+        "/workspace",
+        "test-host",
+    );
+    let expected_uuid = identity.to_uuid();
 
     let connection_id = service
         .create_connection(
             "127.0.0.1".to_string(),
             5678,
-            "python".to_string(),
-            Some("test-conn".to_string()),
-            None,
+            identity,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -339,7 +434,8 @@ async fn test_get_connection_by_id() {
     let conn = result.unwrap();
     assert!(conn.is_some());
     let conn = conn.unwrap();
-    assert_eq!(conn.id.0, "test-conn");
+    assert_eq!(conn.id.0, expected_uuid);
+    assert_eq!(conn.name, Some("test-conn".to_string()));
     assert_eq!(conn.host, "127.0.0.1");
     assert_eq!(conn.port, 5678);
 }
@@ -347,8 +443,8 @@ async fn test_get_connection_by_id() {
 #[tokio::test]
 async fn test_get_connection_returns_none_for_nonexistent() {
     // Arrange
-    let (repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo, lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
 
     // Act
     let nonexistent_id = ConnectionId::new("does-not-exist");
@@ -362,16 +458,19 @@ async fn test_get_connection_returns_none_for_nonexistent() {
 #[tokio::test]
 async fn test_get_adapter_returns_adapter_for_active_connection() {
     // Arrange
-    let (repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo, lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
+
+    let identity = sample_connection_identity();
 
     let connection_id = service
         .create_connection(
             "127.0.0.1".to_string(),
             5678,
-            "python".to_string(),
-            None,
-            None,
+            identity,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -388,16 +487,19 @@ async fn test_get_adapter_returns_adapter_for_active_connection() {
 #[tokio::test]
 async fn test_get_adapter_returns_none_after_disconnect() {
     // Arrange
-    let (repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo, lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
+
+    let identity = sample_connection_identity();
 
     let connection_id = service
         .create_connection(
             "127.0.0.1".to_string(),
             5678,
-            "python".to_string(),
-            None,
-            None,
+            identity,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
         )
         .await
         .unwrap();
@@ -410,4 +512,53 @@ async fn test_get_adapter_returns_none_after_disconnect() {
 
     // Assert
     assert!(adapter.is_none());
+}
+
+/// Test that create_connection returns existing connection when already Connected.
+/// This tests the early-exit path when connection is already fully established.
+#[tokio::test]
+async fn test_create_connection_returns_existing_when_connected() {
+    // Arrange
+    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let service = ConnectionService::new(
+        repo.clone(),
+        metric_repo,
+        lifecycle_manager.clone(),
+        system_event_tx,
+    );
+
+    // Create identity (same identity for both calls)
+    let identity = ConnectionIdentity::new(
+        "test-existing",
+        SourceLanguage::Python,
+        "/workspace",
+        "test-host",
+    );
+
+    // First, create a connection normally
+    let connection_id = service
+        .create_connection(
+            "127.0.0.1".to_string(),
+            9997,
+            identity.clone(),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+    // Verify it's connected
+    let conn = repo.get_connection(&connection_id).await.unwrap();
+    assert_eq!(conn.status, ConnectionStatus::Connected);
+    assert!(service.has_running_adapter(&connection_id).await);
+
+    // Act - Call create_connection again with the same identity (idempotency)
+    let result = service
+        .create_connection("127.0.0.1".to_string(), 9997, identity, None, None, false)
+        .await;
+
+    // Assert - Should return the existing connection without error
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), connection_id);
 }

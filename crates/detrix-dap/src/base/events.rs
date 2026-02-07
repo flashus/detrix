@@ -14,7 +14,7 @@ use crate::{
     StoppedEventBody,
 };
 use detrix_config::constants::DEFAULT_DAP_VALUE_DISPLAY_LIMIT;
-use detrix_core::{Metric, MetricEvent};
+use detrix_core::{expression_contains_function_call, Metric, MetricEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::Receiver;
@@ -192,7 +192,7 @@ pub async fn handle_stopped_event(
         );
 
         for metric in metrics_at_location {
-            process_introspection_metric(&broker, &metric, thread_id, frame_id, tx, lang).await;
+            process_stopped_metric(&broker, &metric, thread_id, frame_id, tx, lang).await;
         }
     }
 
@@ -242,8 +242,23 @@ pub async fn get_stopped_location(
     Some((file, line, frame_id))
 }
 
-/// Process a single metric with introspection enabled.
-pub async fn process_introspection_metric(
+/// Process a metric at a stopped breakpoint location.
+///
+/// Evaluates the metric's expression via DAP evaluate and captures optional
+/// introspection data (stack trace, memory snapshot).
+///
+/// Only metrics set as true breakpoints (not logpoints) receive `stopped` events:
+/// - Introspection metrics (stack trace and/or memory snapshot capture)
+/// - Go function call metrics (require "call" prefix via DAP evaluate)
+///
+/// Simple variable metrics without introspection are set as logpoints and handled
+/// by `handle_output_event` instead (via DAP `output` events).
+///
+/// NOTE: Go/Delve supports function calls via DAP evaluate requests using the
+/// `call` prefix (e.g., `call len(x)`). Detrix auto-detects function calls and
+/// adds this prefix automatically. However, **variadic functions are NOT supported**
+/// (e.g., fmt.Sprintf, fmt.Println) - they will return an error.
+pub async fn process_stopped_metric(
     broker: &Arc<DapBroker>,
     metric: &Metric,
     thread_id: i64,
@@ -251,15 +266,26 @@ pub async fn process_introspection_metric(
     tx: &tokio::sync::mpsc::Sender<MetricEvent>,
     lang: &'static str,
 ) {
-    // Skip metrics without introspection
-    if !metric.capture_stack_trace && !metric.capture_memory_snapshot {
-        return;
-    }
+    let needs_introspection = metric.capture_stack_trace || metric.capture_memory_snapshot;
+    let is_go_function_call = metric.language == detrix_core::SourceLanguage::Go
+        && expression_contains_function_call(&metric.expression);
 
-    debug!(
-        "[{}] Processing introspection metric '{}' (stack={}, memory={})",
-        lang, metric.name, metric.capture_stack_trace, metric.capture_memory_snapshot
-    );
+    if is_go_function_call {
+        debug!(
+            "[{}] Processing Go function call metric '{}' (expression: '{}')",
+            lang, metric.name, metric.expression
+        );
+    } else if needs_introspection {
+        debug!(
+            "[{}] Processing introspection metric '{}' (stack={}, memory={})",
+            lang, metric.name, metric.capture_stack_trace, metric.capture_memory_snapshot
+        );
+    } else {
+        debug!(
+            "[{}] Processing metric '{}' at breakpoint (no introspection requested)",
+            lang, metric.name
+        );
+    }
 
     // Capture introspection data
     let stack_trace = if metric.capture_stack_trace {
@@ -275,9 +301,26 @@ pub async fn process_introspection_metric(
     };
 
     // Evaluate the metric expression
-    let value = evaluate_expression(broker, &metric.expression, frame_id)
+    // For Go function calls, use "call <expr>" prefix (required by Delve DAP)
+    // WARNING: Function calls BLOCK the target process while executing!
+    let (eval_expr, eval_context) = if metric.language == detrix_core::SourceLanguage::Go
+        && expression_contains_function_call(&metric.expression)
+    {
+        // Go function calls require "call " prefix and "repl" context
+        // See: https://github.com/golang/vscode-go/issues/100
+        warn!(
+                "[{}] Using blocking 'call' for function expression '{}' - consider using simple variables",
+                lang, metric.expression
+            );
+        (format!("call {}", metric.expression), "repl")
+    } else {
+        // Simple variable access - use "watch" context (faster)
+        (metric.expression.clone(), "watch")
+    };
+
+    let value = evaluate_expression(broker, &eval_expr, frame_id, eval_context)
         .await
-        .unwrap_or_else(|| "<evaluation failed>".to_string());
+        .unwrap_or_else(|err| format!("<evaluation failed: {}>", err));
 
     // Create metric event - metric must have an ID (saved in storage before evaluation)
     let Some(metric_id) = metric.id else {

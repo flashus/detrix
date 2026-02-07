@@ -4,10 +4,10 @@
 //! including timeouts, reconnection policies, and batching thresholds.
 
 use crate::constants::{
-    DEFAULT_ADAPTER_PORT, DEFAULT_API_HOST, DEFAULT_BACKOFF_MULTIPLIER, DEFAULT_BATCH_CONCURRENCY,
-    DEFAULT_BATCH_THRESHOLD, DEFAULT_CONNECTION_TIMEOUT_MS, DEFAULT_DAP_VALUE_DISPLAY_LIMIT,
-    DEFAULT_EVENT_CHANNEL_CAPACITY, DEFAULT_HEALTH_CHECK_TIMEOUT_MS,
-    DEFAULT_INITIAL_RECONNECT_DELAY_MS, DEFAULT_JITTER_RATIO,
+    DEFAULT_ADAPTER_PORT, DEFAULT_ADAPTER_START_MAX_RETRIES, DEFAULT_API_HOST,
+    DEFAULT_BACKOFF_MULTIPLIER, DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_THRESHOLD,
+    DEFAULT_CONNECTION_TIMEOUT_MS, DEFAULT_DAP_VALUE_DISPLAY_LIMIT, DEFAULT_EVENT_CHANNEL_CAPACITY,
+    DEFAULT_HEALTH_CHECK_TIMEOUT_MS, DEFAULT_INITIAL_RECONNECT_DELAY_MS, DEFAULT_JITTER_RATIO,
     DEFAULT_MAX_CONNECTION_REFUSED_ATTEMPTS, DEFAULT_MAX_RECONNECT_ATTEMPTS,
     DEFAULT_MAX_RECONNECT_DELAY_MS, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_RETRY_INTERVAL_MS,
     DEFAULT_SHUTDOWN_TIMEOUT_MS,
@@ -43,6 +43,9 @@ pub struct AdapterConnectionConfig {
     /// When nothing is listening on the port, fail quickly instead of waiting for full timeout
     #[serde(default = "default_max_connection_refused_attempts")]
     pub max_connection_refused_attempts: u32,
+    /// Maximum retries when starting an adapter (handles race conditions with concurrent start requests)
+    #[serde(default = "default_adapter_start_max_retries")]
+    pub adapter_start_max_retries: u32,
     /// Request timeout in milliseconds for DAP requests
     #[serde(default = "default_request_timeout_ms")]
     pub request_timeout_ms: u64,
@@ -93,6 +96,10 @@ fn default_max_connection_refused_attempts() -> u32 {
     DEFAULT_MAX_CONNECTION_REFUSED_ATTEMPTS
 }
 
+fn default_adapter_start_max_retries() -> u32 {
+    DEFAULT_ADAPTER_START_MAX_RETRIES
+}
+
 fn default_request_timeout_ms() -> u64 {
     DEFAULT_REQUEST_TIMEOUT_MS
 }
@@ -123,6 +130,7 @@ impl Default for AdapterConnectionConfig {
             shutdown_timeout_ms: default_shutdown_timeout_ms(),
             retry_interval_ms: default_retry_interval_ms(),
             max_connection_refused_attempts: default_max_connection_refused_attempts(),
+            adapter_start_max_retries: default_adapter_start_max_retries(),
             request_timeout_ms: default_request_timeout_ms(),
             batch_threshold: default_batch_threshold(),
             batch_concurrency: default_batch_concurrency(),
