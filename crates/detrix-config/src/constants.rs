@@ -213,6 +213,9 @@ pub const DEFAULT_MAX_METRICS_PER_GROUP: usize = 1_000;
 /// Maximum expression length in characters
 pub const DEFAULT_MAX_EXPRESSION_LENGTH: usize = 10_000;
 
+/// Maximum number of expressions per metric
+pub const DEFAULT_MAX_EXPRESSIONS_PER_METRIC: usize = 20;
+
 /// Maximum system events to retain
 pub const DEFAULT_SYSTEM_EVENT_MAX_EVENTS: usize = 100_000;
 

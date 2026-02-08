@@ -8,7 +8,7 @@ mod tests {
     use crate::ports::{EventOutput, EventOutputRef, NullOutput, OutputStats};
     use crate::{EventRepository, EventRepositoryRef, MetricRepository, MetricRepositoryRef};
     use async_trait::async_trait;
-    use detrix_core::{Metric, MetricEvent, MetricId};
+    use detrix_core::{ExpressionValue, Metric, MetricEvent, MetricId};
     use detrix_testing::{MockEventRepository, MockMetricRepository};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -42,10 +42,7 @@ mod tests {
                 .as_micros() as i64,
             thread_name: Some("test_thread".to_string()),
             thread_id: Some(12345),
-            value_json: value.to_string(),
-            value_numeric: None,
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::new("", value.to_string())],
             is_error: false,
             error_type: None,
             error_message: None,
@@ -117,7 +114,7 @@ mod tests {
 
         assert!(latest.is_some());
         let event = latest.unwrap();
-        assert_eq!(event.value_json, r#"{"value": 30}"#);
+        assert_eq!(event.value_json(), r#"{"value": 30}"#);
     }
 
     #[tokio::test]
@@ -161,10 +158,7 @@ mod tests {
                 .as_micros() as i64,
             thread_name: None,
             thread_id: None,
-            value_json: String::new(),
-            value_numeric: None,
-            value_string: None,
-            value_boolean: None,
+            values: vec![],
             is_error: true,
             error_type: Some("NameError".to_string()),
             error_message: Some("variable not defined".to_string()),
@@ -221,7 +215,7 @@ mod tests {
                 file: "test.py".to_string(),
                 line: 10,
             },
-            expression: "x".to_string(),
+            expressions: vec!["x".to_string()],
             language: detrix_core::SourceLanguage::Python,
             enabled: true,
             mode: detrix_core::MetricMode::default(),
@@ -248,10 +242,7 @@ mod tests {
             timestamp: created_at - 500_000, // 0.5s before metric creation
             thread_name: None,
             thread_id: None,
-            value_json: r#"{"stale": true}"#.to_string(),
-            value_numeric: None,
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::new("", r#"{"stale": true}"#)],
             is_error: false,
             error_type: None,
             error_message: None,
@@ -271,10 +262,7 @@ mod tests {
             timestamp: created_at + 500_000, // 0.5s after metric creation
             thread_name: None,
             thread_id: None,
-            value_json: r#"{"fresh": true}"#.to_string(),
-            value_numeric: None,
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::new("", r#"{"fresh": true}"#)],
             is_error: false,
             error_type: None,
             error_message: None,
@@ -296,7 +284,7 @@ mod tests {
             1,
             "Should filter out stale events from before metric creation"
         );
-        assert_eq!(events[0].value_json, r#"{"fresh": true}"#);
+        assert_eq!(events[0].value_json(), r#"{"fresh": true}"#);
     }
 
     #[tokio::test]
@@ -316,7 +304,7 @@ mod tests {
                 file: "test.py".to_string(),
                 line: 10,
             },
-            expression: "x".to_string(),
+            expressions: vec!["x".to_string()],
             language: detrix_core::SourceLanguage::Python,
             enabled: true,
             mode: detrix_core::MetricMode::default(),
@@ -343,10 +331,7 @@ mod tests {
             timestamp: created_at - 500_000,
             thread_name: None,
             thread_id: None,
-            value_json: r#"{"before": true}"#.to_string(),
-            value_numeric: None,
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::new("", r#"{"before": true}"#)],
             is_error: false,
             error_type: None,
             error_message: None,
@@ -365,10 +350,7 @@ mod tests {
             timestamp: created_at + 500_000,
             thread_name: None,
             thread_id: None,
-            value_json: r#"{"after": true}"#.to_string(),
-            value_numeric: None,
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::new("", r#"{"after": true}"#)],
             is_error: false,
             error_type: None,
             error_message: None,
@@ -403,10 +385,7 @@ mod tests {
             timestamp: 100,
             thread_name: None,
             thread_id: None,
-            value_json: r#"{"orphan": true}"#.to_string(),
-            value_numeric: None,
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::new("", r#"{"orphan": true}"#)],
             is_error: false,
             error_type: None,
             error_message: None,
@@ -497,10 +476,7 @@ mod tests {
             timestamp: 1234567890,
             thread_name: None,
             thread_id: None,
-            value_json: r#"{"value": 42}"#.to_string(),
-            value_numeric: Some(42.0),
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::with_numeric("", r#"{"value": 42}"#, 42.0)],
             is_error: false,
             error_type: None,
             error_message: None,
@@ -621,10 +597,11 @@ mod tests {
                 timestamp: 1234567890 + i,
                 thread_name: None,
                 thread_id: None,
-                value_json: format!(r#"{{"value": {}}}"#, i),
-                value_numeric: Some(i as f64),
-                value_string: None,
-                value_boolean: None,
+                values: vec![ExpressionValue::with_numeric(
+                    "",
+                    format!(r#"{{"value": {}}}"#, i),
+                    i as f64,
+                )],
                 is_error: false,
                 error_type: None,
                 error_message: None,
@@ -677,10 +654,11 @@ mod tests {
                 timestamp: 1234567890 + i,
                 thread_name: None,
                 thread_id: None,
-                value_json: format!(r#"{{"value": {}}}"#, i),
-                value_numeric: Some(i as f64),
-                value_string: None,
-                value_boolean: None,
+                values: vec![ExpressionValue::with_numeric(
+                    "",
+                    format!(r#"{{"value": {}}}"#, i),
+                    i as f64,
+                )],
                 is_error: false,
                 error_type: None,
                 error_message: None,

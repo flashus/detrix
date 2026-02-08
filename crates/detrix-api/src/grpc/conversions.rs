@@ -23,6 +23,28 @@ pub fn core_to_proto_location(loc: &CoreLocation) -> Location {
     }
 }
 
+/// Convert core TypedValue to proto TypedValue
+fn core_typed_to_proto(
+    tv: Option<&detrix_core::TypedValue>,
+) -> Option<expression_value::TypedValue> {
+    tv.map(|v| match v {
+        detrix_core::TypedValue::Numeric(n) => expression_value::TypedValue::NumericValue(*n),
+        detrix_core::TypedValue::Text(s) => expression_value::TypedValue::StringValue(s.clone()),
+        detrix_core::TypedValue::Boolean(b) => expression_value::TypedValue::BoolValue(*b),
+    })
+}
+
+/// Convert proto TypedValue to core TypedValue
+fn proto_typed_to_core(
+    tv: Option<&expression_value::TypedValue>,
+) -> Option<detrix_core::TypedValue> {
+    tv.map(|v| match v {
+        expression_value::TypedValue::NumericValue(n) => detrix_core::TypedValue::Numeric(*n),
+        expression_value::TypedValue::StringValue(s) => detrix_core::TypedValue::Text(s.clone()),
+        expression_value::TypedValue::BoolValue(b) => detrix_core::TypedValue::Boolean(*b),
+    })
+}
+
 /// Convert proto MetricMode to core MetricMode
 pub fn proto_to_core_mode(mode: &MetricMode) -> Result<CoreMetricMode, Error> {
     if let Some(m) = &mode.mode {
@@ -131,13 +153,22 @@ pub fn add_request_to_metric(req: &AddMetricRequest) -> Result<Metric, Error> {
         Error::InvalidRequest("Missing language (should be derived from connection)".to_string())
     })?;
 
+    // Build expressions: require at least one expression
+    let expressions = if req.expressions.is_empty() {
+        return Err(Error::InvalidRequest(
+            "At least one expression is required".to_string(),
+        ));
+    } else {
+        req.expressions.clone()
+    };
+
     Ok(Metric {
         id: None,
         name: req.name.clone(),
         connection_id: ConnectionId::from(req.connection_id.as_str()),
         group: req.group.clone(),
         location: proto_to_core_location(location),
-        expression: req.expression.clone(),
+        expressions,
         language: language_str.clone().try_into()?,
         mode: proto_to_core_mode(mode)?,
         enabled: req.enabled,
@@ -169,58 +200,12 @@ pub enum ConversionError {
 }
 
 /// Convert core Metric to MetricInfo (for listing)
-/// Note: hit_count and last_hit_at require async DB queries, so they're set to defaults here.
+/// Note: hit_count and last_hit_at are set to defaults (0, None).
 /// Use `metric_to_info_with_stats` for full stats.
 ///
 /// Returns `Result` - caller decides how to handle missing ID (should not happen for stored metrics).
-///
-/// IMPORTANT: Exhaustive destructuring ensures compile-time errors when new fields are added.
 pub fn metric_to_info(metric: &Metric) -> Result<MetricInfo, ConversionError> {
-    // Exhaustive destructuring - compiler will error if new fields are added to Metric
-    let Metric {
-        id,
-        name,
-        connection_id,
-        group,
-        location,
-        expression,
-        language,
-        mode,
-        enabled,
-        condition: _,    // Not included in MetricInfo
-        safety_level: _, // Not included in MetricInfo
-        created_at,
-        capture_stack_trace,
-        stack_trace_ttl: _,   // Not included in MetricInfo
-        stack_trace_slice: _, // Not included in MetricInfo
-        capture_memory_snapshot,
-        snapshot_scope: _, // Not included in MetricInfo
-        snapshot_ttl: _,   // Not included in MetricInfo
-        anchor: _,         // Anchor tracking - not exposed via gRPC yet
-        anchor_status: _,  // Anchor tracking - not exposed via gRPC yet
-    } = metric;
-
-    // Metric should always have ID when converting to proto (comes from storage)
-    let metric_id = id
-        .map(|id| id.0)
-        .ok_or_else(|| ConversionError::MissingMetricId { name: name.clone() })?;
-
-    Ok(MetricInfo {
-        metric_id,
-        name: name.clone(),
-        group: group.clone(),
-        location: Some(core_to_proto_location(location)),
-        expression: expression.clone(),
-        language: language.to_string(),
-        enabled: *enabled,
-        mode: Some(core_to_proto_mode(mode)),
-        created_at: created_at.unwrap_or(0),
-        hit_count: 0,      // Use metric_to_info_with_stats for actual count
-        last_hit_at: None, // Use metric_to_info_with_stats for actual timestamp
-        connection_id: connection_id.0.clone(),
-        capture_stack_trace: *capture_stack_trace,
-        capture_memory_snapshot: *capture_memory_snapshot,
-    })
+    metric_to_info_with_stats(metric, 0, None)
 }
 
 /// Convert core Metric to MetricInfo with hit statistics
@@ -240,7 +225,7 @@ pub fn metric_to_info_with_stats(
         connection_id,
         group,
         location,
-        expression,
+        expressions,
         language,
         mode,
         enabled,
@@ -267,7 +252,7 @@ pub fn metric_to_info_with_stats(
         name: name.clone(),
         group: group.clone(),
         location: Some(core_to_proto_location(location)),
-        expression: expression.clone(),
+        expressions: expressions.clone(),
         language: language.to_string(),
         enabled: *enabled,
         mode: Some(core_to_proto_mode(mode)),
@@ -339,7 +324,8 @@ pub fn core_event_to_proto_with_location(
     location_override: Option<&detrix_core::Location>,
 ) -> crate::generated::detrix::v1::MetricEvent {
     use crate::generated::detrix::v1::{
-        metric_event, MemorySnapshot, MetricEvent, StackFrame, StackTrace, Variable,
+        ExpressionValue as ProtoExpressionValue, MemorySnapshot, MetricEvent, StackFrame,
+        StackTrace, Variable,
     };
 
     // Exhaustive destructuring - compiler will error if new fields are added to core::MetricEvent
@@ -349,10 +335,7 @@ pub fn core_event_to_proto_with_location(
         metric_name,
         connection_id,
         timestamp,
-        value_json,
-        value_numeric: _, // Decomposed from value_json
-        value_string: _,  // Decomposed from value_json
-        value_boolean: _, // Decomposed from value_json
+        values,
         thread_id,
         thread_name,
         is_error,
@@ -364,19 +347,27 @@ pub fn core_event_to_proto_with_location(
         memory_snapshot: core_memory_snapshot,
     } = event;
 
-    // Determine the result (value or error)
-    let result = if *is_error {
-        Some(metric_event::Result::Error(
-            crate::generated::detrix::v1::ErrorResult {
-                error: true,
-                error_code: "EVAL_ERROR".to_string(),
-                error_type: error_type.clone().unwrap_or_default(),
-                error_message: error_message.clone().unwrap_or_default(),
-                traceback: None,
-            },
-        ))
+    // Convert core ExpressionValue to proto ExpressionValue
+    let proto_values: Vec<ProtoExpressionValue> = values
+        .iter()
+        .map(|v| ProtoExpressionValue {
+            expression: v.expression.clone(),
+            value_json: v.value_json.clone(),
+            typed_value: core_typed_to_proto(v.typed_value.as_ref()),
+        })
+        .collect();
+
+    // Convert error to proto ErrorResult (if error)
+    let error = if *is_error {
+        Some(crate::generated::detrix::v1::ErrorResult {
+            error: true,
+            error_code: "EVAL_ERROR".to_string(),
+            error_type: error_type.clone().unwrap_or_default(),
+            error_message: error_message.clone().unwrap_or_default(),
+            traceback: None,
+        })
     } else {
-        Some(metric_event::Result::ValueJson(value_json.clone()))
+        None
     };
 
     // Convert stack trace if present
@@ -425,7 +416,8 @@ pub fn core_event_to_proto_with_location(
         thread_id: *thread_id,
         request_id: request_id.clone(),
         session_id: session_id.clone(),
-        result,
+        values: proto_values,
+        error,
         connection_id: connection_id.0.clone(),
         stack_trace,
         memory_snapshot,
@@ -537,42 +529,41 @@ pub fn proto_to_core_stack_trace(
     }
 }
 
+/// Convert a proto Variable to a core CapturedVariable with the given scope.
+fn proto_variable_to_captured(
+    v: &crate::generated::detrix::v1::Variable,
+    scope: &str,
+) -> detrix_core::CapturedVariable {
+    detrix_core::CapturedVariable {
+        name: v.name.clone(),
+        value: v.value.clone(),
+        var_type: if v.r#type.is_empty() {
+            None
+        } else {
+            Some(v.r#type.clone())
+        },
+        scope: Some(scope.to_string()),
+    }
+}
+
 /// Convert proto MemorySnapshot to core MemorySnapshot
 ///
 /// Used by gRPC clients and E2E tests to convert memory snapshot data.
 pub fn proto_to_core_memory_snapshot(
     proto: &crate::generated::detrix::v1::MemorySnapshot,
 ) -> detrix_core::MemorySnapshot {
-    use detrix_core::{CapturedVariable, MemorySnapshot, SnapshotScope};
+    use detrix_core::{MemorySnapshot, SnapshotScope};
 
     MemorySnapshot {
         locals: proto
             .locals
             .iter()
-            .map(|v| CapturedVariable {
-                name: v.name.clone(),
-                value: v.value.clone(),
-                var_type: if v.r#type.is_empty() {
-                    None
-                } else {
-                    Some(v.r#type.clone())
-                },
-                scope: Some("local".to_string()),
-            })
+            .map(|v| proto_variable_to_captured(v, "local"))
             .collect(),
         globals: proto
             .globals
             .iter()
-            .map(|v| CapturedVariable {
-                name: v.name.clone(),
-                value: v.value.clone(),
-                var_type: if v.r#type.is_empty() {
-                    None
-                } else {
-                    Some(v.r#type.clone())
-                },
-                scope: Some("global".to_string()),
-            })
+            .map(|v| proto_variable_to_captured(v, "global"))
             .collect(),
         scope: SnapshotScope::Local,
     }
@@ -584,19 +575,27 @@ pub fn proto_to_core_memory_snapshot(
 pub fn proto_to_core_event(
     proto: &crate::generated::detrix::v1::MetricEvent,
 ) -> detrix_core::MetricEvent {
-    use crate::generated::detrix::v1::metric_event;
-    use detrix_core::{ConnectionId, MetricEvent, MetricId};
+    use detrix_core::{ConnectionId, ExpressionValue, MetricEvent, MetricId};
 
-    // Extract value/error from result oneof
-    let (value_json, is_error, error_type, error_message) = match &proto.result {
-        Some(metric_event::Result::ValueJson(v)) => (v.clone(), false, None, None),
-        Some(metric_event::Result::Error(e)) => (
-            String::new(),
+    // Convert proto ExpressionValue to core ExpressionValue
+    let values: Vec<ExpressionValue> = proto
+        .values
+        .iter()
+        .map(|v| ExpressionValue {
+            expression: v.expression.clone(),
+            value_json: v.value_json.clone(),
+            typed_value: proto_typed_to_core(v.typed_value.as_ref()),
+        })
+        .collect();
+
+    // Extract error info
+    let (is_error, error_type, error_message) = match &proto.error {
+        Some(e) => (
             true,
             Some(e.error_type.clone()),
             Some(e.error_message.clone()),
         ),
-        None => (String::new(), false, None, None),
+        None => (false, None, None),
     };
 
     // Convert stack trace and memory snapshot using extracted functions
@@ -614,10 +613,7 @@ pub fn proto_to_core_event(
         timestamp: proto.timestamp,
         thread_name: proto.thread_name.clone(),
         thread_id: proto.thread_id,
-        value_json,
-        value_numeric: None,
-        value_string: None,
-        value_boolean: None,
+        values,
         is_error,
         error_type,
         error_message,
@@ -670,7 +666,7 @@ pub fn proto_to_core_metric(
         connection_id: ConnectionId::from(proto.connection_id.as_str()),
         group: proto.group.clone(),
         location,
-        expression: proto.expression.clone(),
+        expressions: proto.expressions.clone(),
         language,
         enabled: proto.enabled,
         mode: MetricMode::Stream, // Default mode (proto has mode field but not fully mapped here)

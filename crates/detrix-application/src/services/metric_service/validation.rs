@@ -29,7 +29,10 @@ impl MetricService {
         // Determine if this metric requires breakpoint (blocking operation)
         let needs_introspection = metric.capture_stack_trace || metric.capture_memory_snapshot;
         let is_go_function_call = metric.language == SourceLanguage::Go
-            && expression_contains_function_call(&metric.expression);
+            && metric
+                .expressions
+                .iter()
+                .any(|e| expression_contains_function_call(e));
 
         let requires_breakpoint = needs_introspection || is_go_function_call;
 
@@ -109,41 +112,61 @@ impl MetricService {
         self.validators.supported_languages()
     }
 
-    /// Validate a metric before saving
+    /// Validate a metric's core fields before persistence (without scope validation).
+    ///
+    /// INVARIANT: Every code path that saves or updates a metric in storage
+    /// MUST call this method (or `validate_metric`) first. This ensures expression
+    /// safety validation (AST analysis, length limits, count limits) cannot be bypassed.
+    ///
+    /// This validates: name format, expressions non-empty, expression count/length limits,
+    /// and AST-based safety checks. Does NOT validate expression scope (variable existence)
+    /// or safe mode constraints.
     ///
     /// Returns warnings (like missing safety validator) that should be reported to CLI.
-    pub(super) fn validate_metric(&self, metric: &Metric) -> Result<Vec<OperationWarning>> {
+    pub(super) fn validate_metric_fields(&self, metric: &Metric) -> Result<Vec<OperationWarning>> {
         let mut warnings = Vec::new();
 
         // Validate name
         Metric::validate_name(&metric.name)?;
 
-        // Validate expression is not empty
-        if metric.expression.trim().is_empty() {
+        // Validate expressions are not empty
+        if metric.expressions.is_empty() || metric.expressions.iter().all(|e| e.trim().is_empty()) {
             return Err(detrix_core::Error::InvalidExpression(
                 "Expression cannot be empty".to_string(),
             )
             .into());
         }
 
-        // Validate expression length using config
-        Metric::validate_expression_length(
-            &metric.expression,
+        // Validate expression count limit
+        if metric.expressions.len() > self.limits_config.max_expressions_per_metric {
+            return Err(detrix_core::Error::InvalidExpression(format!(
+                "Too many expressions: {} (max {})",
+                metric.expressions.len(),
+                self.limits_config.max_expressions_per_metric
+            ))
+            .into());
+        }
+
+        // Validate expression length for each expression using config
+        Metric::validate_expressions_length(
+            &metric.expressions,
             self.limits_config.max_expression_length,
         )?;
 
         // Check if language has a safety validator
         let language_str = metric.language.as_str();
         if self.validators.supports_language(language_str) {
-            // Use language-specific validator for full AST-based safety check
-            let result =
-                self.validators
-                    .validate(language_str, &metric.expression, metric.safety_level)?;
-            if !result.is_safe {
-                return Err(detrix_core::Error::SafetyViolation {
-                    violations: result.errors,
+            // Use language-specific validator for full AST-based safety check on each expression
+            for expr in &metric.expressions {
+                let result = self
+                    .validators
+                    .validate(language_str, expr, metric.safety_level)?;
+                if !result.is_safe {
+                    return Err(detrix_core::Error::SafetyViolation {
+                        violations: result.errors,
+                    }
+                    .into());
                 }
-                .into());
             }
         } else {
             // Language not yet supported for safety validation
@@ -153,6 +176,19 @@ impl MetricService {
                 metric_name: metric.name.clone(),
             });
         }
+
+        Ok(warnings)
+    }
+
+    /// Validate a metric before saving (full validation including scope).
+    ///
+    /// Calls `validate_metric_fields` plus `validate_expression_scope`.
+    /// Use `validate_metric_fields` instead when scope validation is not appropriate
+    /// (e.g., config-file imports at startup before LSP/files are guaranteed available).
+    ///
+    /// Returns warnings (like missing safety validator) that should be reported to CLI.
+    pub(super) fn validate_metric(&self, metric: &Metric) -> Result<Vec<OperationWarning>> {
+        let warnings = self.validate_metric_fields(metric)?;
 
         // Validate expression variables are in scope (Python only, for now)
         self.validate_expression_scope(metric)?;
@@ -175,10 +211,15 @@ impl MetricService {
             return Ok(());
         }
 
-        // Determine if expression is complex (skip scope validation but NOT file check)
-        let expression = metric.expression.trim();
-        let is_complex_expression =
-            expression.contains('.') || expression.contains('(') || expression.contains('[');
+        // Collect simple (non-complex) expressions that need scope validation.
+        // Complex expressions like `obj.attr`, `func()`, or `arr[0]` are validated at runtime
+        // by the debugger, so we skip them here.
+        let simple_expressions: Vec<&str> = metric
+            .expressions
+            .iter()
+            .map(|e| e.trim())
+            .filter(|e| !e.contains('.') && !e.contains('(') && !e.contains('['))
+            .collect();
 
         let request = FileInspectionRequest {
             file_path: metric.location.file.clone(),
@@ -215,31 +256,31 @@ impl MetricService {
             }
         };
 
-        // Skip scope validation for complex expressions (only validate simple variable names)
-        // Complex expression like `obj.attr`, `func()`, or `arr[0]` - skip scope validation
-        // These will be validated at runtime by the debugger
-        if is_complex_expression {
+        // Skip scope validation if all expressions are complex
+        if simple_expressions.is_empty() {
             return Ok(());
         }
 
-        // Check if we got line inspection result with available variables
+        // Check each simple expression against available variables
         if let FileInspectionResult::LineInspection(line_info) = result {
-            if !line_info
-                .available_variables
-                .contains(&expression.to_string())
-            {
-                return Err(detrix_core::Error::InvalidExpression(format!(
-                    "Variable '{}' is not in scope at {}:{}. Available variables: {}",
-                    expression,
-                    metric.location.file,
-                    metric.location.line,
-                    if line_info.available_variables.is_empty() {
-                        "none".to_string()
-                    } else {
-                        line_info.available_variables.join(", ")
-                    }
-                ))
-                .into());
+            for expression in &simple_expressions {
+                if !line_info
+                    .available_variables
+                    .contains(&expression.to_string())
+                {
+                    return Err(detrix_core::Error::InvalidExpression(format!(
+                        "Variable '{}' is not in scope at {}:{}. Available variables: {}",
+                        expression,
+                        metric.location.file,
+                        metric.location.line,
+                        if line_info.available_variables.is_empty() {
+                            "none".to_string()
+                        } else {
+                            line_info.available_variables.join(", ")
+                        }
+                    ))
+                    .into());
+                }
             }
         }
 

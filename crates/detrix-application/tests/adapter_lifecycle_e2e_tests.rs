@@ -112,6 +112,7 @@ impl E2eTestFixture {
     }
 
     fn create_test_event(metric_id: u64, value: &str) -> MetricEvent {
+        use detrix_core::ExpressionValue;
         MetricEvent {
             id: None,
             metric_id: MetricId(metric_id),
@@ -120,10 +121,11 @@ impl E2eTestFixture {
             timestamp: chrono::Utc::now().timestamp_micros(),
             thread_name: None,
             thread_id: None,
-            value_json: format!(r#"{{"value": "{}"}}"#, value),
-            value_numeric: None,
-            value_string: Some(value.to_string()),
-            value_boolean: None,
+            values: vec![ExpressionValue::with_text(
+                "",
+                format!(r#"{{"value": "{}"}}"#, value),
+                value,
+            )],
             is_error: false,
             error_type: None,
             error_message: None,
@@ -223,7 +225,7 @@ async fn test_e2e_complete_daemon_workflow() {
     assert!(events.iter().all(|e| e.metric_name == "test_metric_1"));
     assert!(events
         .iter()
-        .all(|e| e.value_string.as_ref().unwrap().contains("BTCUSD")));
+        .all(|e| e.value_string().unwrap().contains("BTCUSD")));
 
     // Step 8: Disconnect (simulates: cleanup)
     fixture
@@ -449,7 +451,7 @@ async fn test_e2e_event_broadcast_for_streaming() {
     let received_event = received.unwrap().unwrap();
     assert_eq!(received_event.metric_name, "test_metric_1");
     assert_eq!(
-        received_event.value_string,
+        received_event.value_string().map(|s| s.to_string()),
         Some("streaming-test-value".to_string())
     );
 }
@@ -589,14 +591,12 @@ async fn test_e2e_connection_recreation() {
     assert_eq!(events_after, 2, "Should have events from both sessions");
 
     let events = fixture.event_repo.get_events().await;
-    assert!(events.iter().any(|e| e
-        .value_string
-        .as_ref()
-        .unwrap()
-        .contains("before-disconnect")));
     assert!(events
         .iter()
-        .any(|e| e.value_string.as_ref().unwrap().contains("after-reconnect")));
+        .any(|e| e.value_string().unwrap().contains("before-disconnect")));
+    assert!(events
+        .iter()
+        .any(|e| e.value_string().unwrap().contains("after-reconnect")));
 }
 
 /// Test that adapter is properly cleaned up when connection service stops it

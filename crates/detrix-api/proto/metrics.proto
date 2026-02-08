@@ -111,7 +111,7 @@ message AddMetricRequest {
   string name = 1;
   optional string group = 2;
   Location location = 3;
-  string expression = 4;
+  repeated string expressions = 4;
   optional string language = 5;  // DEPRECATED: Derived from connection if not provided
   bool enabled = 6;
   MetricMode mode = 7;
@@ -149,6 +149,7 @@ message MetricResponse {
   string status = 3;
   Location location = 4;
   ResponseMetadata metadata = 5;
+  repeated string expressions = 6;
 }
 
 message RemoveMetricRequest {
@@ -166,7 +167,7 @@ message RemoveMetricResponse {
 
 message UpdateMetricRequest {
   uint64 metric_id = 1;
-  optional string expression = 2;
+  repeated string expressions = 2;
   optional bool enabled = 3;
   optional MetricMode mode = 4;
   optional string condition = 5;
@@ -198,7 +199,7 @@ message MetricInfo {
   string name = 2;
   optional string group = 3;
   Location location = 4;
-  string expression = 5;
+  repeated string expressions = 5;
   string language = 6;
   bool enabled = 7;
   MetricMode mode = 8;

@@ -4,7 +4,7 @@
 //! See: <https://go2docs.graylog.org/current/getting_in_log_data/gelf.html>
 
 use detrix_config::constants::DEFAULT_GELF_SOURCE_HOST;
-use detrix_core::MetricEvent;
+use detrix_core::{MetricEvent, TypedValue};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -98,6 +98,13 @@ impl GelfMessage {
     pub const VERSION: &'static str = "1.1";
 
     /// Create a GELF message from a MetricEvent
+    ///
+    /// All expression values are included as custom fields:
+    /// - `_value_json`: first expression's JSON (backward compat)
+    /// - `_expression_count`: total number of expressions
+    /// - `_expr_<N>_name`: expression name (0-indexed)
+    /// - `_expr_<N>_value`: JSON value
+    /// - `_expr_<N>_numeric` / `_string` / `_boolean`: typed value (if present)
     pub fn from_event(event: &MetricEvent, host: Option<&str>) -> Self {
         let level = if event.is_error {
             GelfLevel::Error
@@ -107,6 +114,35 @@ impl GelfMessage {
 
         // Convert microseconds timestamp to seconds with fractional part
         let timestamp = event.timestamp as f64 / 1_000_000.0;
+
+        // Populate per-expression custom fields
+        let mut extra_fields = HashMap::new();
+        extra_fields.insert(
+            "_expression_count".to_string(),
+            serde_json::json!(event.values.len()),
+        );
+        for (i, expr_val) in event.values.iter().enumerate() {
+            extra_fields.insert(
+                format!("_expr_{i}_name"),
+                serde_json::json!(expr_val.expression),
+            );
+            extra_fields.insert(
+                format!("_expr_{i}_value"),
+                serde_json::json!(expr_val.value_json),
+            );
+            match &expr_val.typed_value {
+                Some(TypedValue::Numeric(n)) => {
+                    extra_fields.insert(format!("_expr_{i}_numeric"), serde_json::json!(n));
+                }
+                Some(TypedValue::Text(s)) => {
+                    extra_fields.insert(format!("_expr_{i}_string"), serde_json::json!(s));
+                }
+                Some(TypedValue::Boolean(b)) => {
+                    extra_fields.insert(format!("_expr_{i}_boolean"), serde_json::json!(b));
+                }
+                None => {}
+            }
+        }
 
         Self {
             version: Self::VERSION.to_string(),
@@ -121,14 +157,14 @@ impl GelfMessage {
             metric_id: event.metric_id.0,
             metric_name: event.metric_name.clone(),
             connection_id: event.connection_id.0.clone(),
-            value_json: event.value_json.clone(),
+            value_json: event.value_json().to_string(),
             thread_name: event.thread_name.clone(),
             thread_id: event.thread_id,
             is_error: event.is_error,
             error_type: event.error_type.clone(),
             error_message: event.error_message.clone(),
             request_id: event.request_id.clone(),
-            extra_fields: HashMap::new(),
+            extra_fields,
         }
     }
 
@@ -163,7 +199,7 @@ impl GelfMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use detrix_core::{ConnectionId, MetricId};
+    use detrix_core::{ConnectionId, ExpressionValue, MetricId};
 
     fn sample_event() -> MetricEvent {
         MetricEvent {
@@ -174,10 +210,11 @@ mod tests {
             timestamp: 1733590800_123456, // 2024-12-07 some time, in microseconds
             thread_name: Some("MainThread".to_string()),
             thread_id: Some(12345),
-            value_json: r#"{"symbol": "AAPL", "qty": 100, "price": 150.25}"#.to_string(),
-            value_numeric: Some(150.25),
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::with_numeric(
+                "order",
+                r#"{"symbol": "AAPL", "qty": 100, "price": 150.25}"#,
+                150.25,
+            )],
             is_error: false,
             error_type: None,
             error_message: None,
@@ -197,10 +234,10 @@ mod tests {
             timestamp: 1733590801_000000,
             thread_name: Some("worker-1".to_string()),
             thread_id: Some(9999),
-            value_json: r#"{"error": "division by zero"}"#.to_string(),
-            value_numeric: None,
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::new(
+                "error",
+                r#"{"error": "division by zero"}"#,
+            )],
             is_error: true,
             error_type: Some("ZeroDivisionError".to_string()),
             error_message: Some("division by zero".to_string()),
@@ -227,6 +264,79 @@ mod tests {
         assert_eq!(msg.thread_name, Some("MainThread".to_string()));
         assert_eq!(msg.thread_id, Some(12345));
         assert_eq!(msg.request_id, Some("req-123".to_string()));
+
+        // Single expression should produce per-expression fields
+        assert_eq!(
+            msg.extra_fields.get("_expression_count"),
+            Some(&serde_json::json!(1))
+        );
+        assert_eq!(
+            msg.extra_fields.get("_expr_0_name"),
+            Some(&serde_json::json!("order"))
+        );
+        assert_eq!(
+            msg.extra_fields.get("_expr_0_numeric"),
+            Some(&serde_json::json!(150.25))
+        );
+    }
+
+    #[test]
+    fn test_gelf_message_multi_expression() {
+        let mut event = sample_event();
+        event.values = vec![
+            ExpressionValue::with_text("symbol", "\"BTCUSD\"", "BTCUSD"),
+            ExpressionValue::with_numeric("quantity", "10", 10.0),
+            ExpressionValue::with_boolean("active", "true", true),
+        ];
+
+        let msg = GelfMessage::from_event(&event, None);
+
+        // Backward compat: _value_json is first expression's value
+        assert_eq!(msg.value_json, "\"BTCUSD\"");
+
+        assert_eq!(
+            msg.extra_fields.get("_expression_count"),
+            Some(&serde_json::json!(3))
+        );
+
+        // Expression 0: text
+        assert_eq!(
+            msg.extra_fields.get("_expr_0_name"),
+            Some(&serde_json::json!("symbol"))
+        );
+        assert_eq!(
+            msg.extra_fields.get("_expr_0_value"),
+            Some(&serde_json::json!("\"BTCUSD\""))
+        );
+        assert_eq!(
+            msg.extra_fields.get("_expr_0_string"),
+            Some(&serde_json::json!("BTCUSD"))
+        );
+        assert!(msg.extra_fields.get("_expr_0_numeric").is_none());
+
+        // Expression 1: numeric
+        assert_eq!(
+            msg.extra_fields.get("_expr_1_name"),
+            Some(&serde_json::json!("quantity"))
+        );
+        assert_eq!(
+            msg.extra_fields.get("_expr_1_value"),
+            Some(&serde_json::json!("10"))
+        );
+        assert_eq!(
+            msg.extra_fields.get("_expr_1_numeric"),
+            Some(&serde_json::json!(10.0))
+        );
+
+        // Expression 2: boolean
+        assert_eq!(
+            msg.extra_fields.get("_expr_2_name"),
+            Some(&serde_json::json!("active"))
+        );
+        assert_eq!(
+            msg.extra_fields.get("_expr_2_boolean"),
+            Some(&serde_json::json!(true))
+        );
     }
 
     #[test]

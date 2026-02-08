@@ -3,8 +3,6 @@
 .claude/
 logs/
 fixtures/go/detrix_example_app
-fixtures/rust/detrix_example_app
-fixtures/rust/detrix_example_app.dSYM/*
 
 # Go client built binaries
 clients/go/basic_usage

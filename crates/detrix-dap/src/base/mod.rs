@@ -29,7 +29,10 @@ mod tests;
 pub use adapter::BaseAdapter;
 pub use metrics::{build_source_breakpoint, MetricManager};
 pub use parsing::{find_metric_for_error, parse_value, LogpointParseResult};
-pub use traits::{NoThreadExtractor, OutputParser, ThreadExtractor, ThreadInfo, DETRICS_PREFIX};
+pub use traits::{
+    NoThreadExtractor, OutputParser, ThreadExtractor, ThreadInfo, DETRICS_PREFIX,
+    MULTI_EXPR_DELIMITER, MULTI_EXPR_DELIMITER_STR,
+};
 
 // Re-export for internal use within the module
 pub(crate) use parsing::{create_metric_event_from_logpoint, parse_logpoint_core};

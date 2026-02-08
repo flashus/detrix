@@ -212,10 +212,17 @@ impl<C: ApiClient> UnifiedTestContext<C> {
     }
 }
 
-/// Create MCP test context
-pub async fn create_mcp_context(test_name: &str) -> Result<UnifiedTestContext<McpClient>, String> {
+/// Start daemon and create reporter/executor for a test context.
+///
+/// Shared setup for all `create_*_context` functions: allocates a
+/// `TestExecutor`, creates a `TestReporter`, prints the header, and
+/// starts the daemon.
+async fn start_daemon_context(
+    test_name: &str,
+    label: &str,
+) -> Result<(TestExecutor, Arc<TestReporter>), String> {
     let mut executor = TestExecutor::new();
-    let reporter = TestReporter::new(test_name, "MCP");
+    let reporter = TestReporter::new(test_name, label);
 
     reporter.print_header();
 
@@ -225,8 +232,13 @@ pub async fn create_mcp_context(test_name: &str) -> Result<UnifiedTestContext<Mc
         return Err(format!("Failed to start daemon: {}", e));
     }
 
-    let client = McpClient::new(executor.http_port);
+    Ok((executor, reporter))
+}
 
+/// Create MCP test context
+pub async fn create_mcp_context(test_name: &str) -> Result<UnifiedTestContext<McpClient>, String> {
+    let (executor, reporter) = start_daemon_context(test_name, "MCP").await?;
+    let client = McpClient::new(executor.http_port);
     Ok(UnifiedTestContext {
         client,
         reporter,
@@ -239,19 +251,8 @@ pub async fn create_mcp_context(test_name: &str) -> Result<UnifiedTestContext<Mc
 pub async fn create_grpc_context(
     test_name: &str,
 ) -> Result<UnifiedTestContext<GrpcClient>, String> {
-    let mut executor = TestExecutor::new();
-    let reporter = TestReporter::new(test_name, "gRPC");
-
-    reporter.print_header();
-
-    if let Err(e) = executor.start_daemon().await {
-        reporter.error(&format!("Failed to start daemon: {}", e));
-        executor.print_daemon_logs(50);
-        return Err(format!("Failed to start daemon: {}", e));
-    }
-
+    let (executor, reporter) = start_daemon_context(test_name, "gRPC").await?;
     let client = GrpcClient::with_http_port(executor.grpc_port, executor.http_port);
-
     Ok(UnifiedTestContext {
         client,
         reporter,
@@ -264,19 +265,8 @@ pub async fn create_grpc_context(
 pub async fn create_rest_context(
     test_name: &str,
 ) -> Result<UnifiedTestContext<RestClient>, String> {
-    let mut executor = TestExecutor::new();
-    let reporter = TestReporter::new(test_name, "REST");
-
-    reporter.print_header();
-
-    if let Err(e) = executor.start_daemon().await {
-        reporter.error(&format!("Failed to start daemon: {}", e));
-        executor.print_daemon_logs(50);
-        return Err(format!("Failed to start daemon: {}", e));
-    }
-
+    let (executor, reporter) = start_daemon_context(test_name, "REST").await?;
     let client = RestClient::new(executor.http_port);
-
     Ok(UnifiedTestContext {
         client,
         reporter,
@@ -287,20 +277,9 @@ pub async fn create_rest_context(
 
 /// Create CLI test context
 pub async fn create_cli_context(test_name: &str) -> Result<UnifiedTestContext<CliClient>, String> {
-    let mut executor = TestExecutor::new();
-    let reporter = TestReporter::new(test_name, "CLI");
-
-    reporter.print_header();
-
-    if let Err(e) = executor.start_daemon().await {
-        reporter.error(&format!("Failed to start daemon: {}", e));
-        executor.print_daemon_logs(50);
-        return Err(format!("Failed to start daemon: {}", e));
-    }
-
+    let (executor, reporter) = start_daemon_context(test_name, "CLI").await?;
     // Use with_grpc_port so CLI can connect to the test daemon
     let client = CliClient::with_grpc_port(executor.http_port, executor.grpc_port);
-
     Ok(UnifiedTestContext {
         client,
         reporter,
@@ -1114,6 +1093,205 @@ pub async fn scenario_group_operations<C: ApiClient>(
     for (name, _, _) in &metrics {
         let _ = ctx.client.remove_metric(name).await;
     }
+    let _ = ctx.client.close_connection(&connection_id).await;
+
+    Ok(())
+}
+
+/// Multi-expression metric scenario (requires debugpy)
+///
+/// Tests that a metric with multiple expressions can be created, events captured,
+/// and the metric correctly stores/returns all expressions.
+pub async fn scenario_multi_expr_metric<C: ApiClient>(
+    ctx: &UnifiedTestContext<C>,
+    debugpy_port: u16,
+    script_path: &str,
+) -> Result<(), ApiError> {
+    ctx.reporter.section("MULTI-EXPRESSION METRIC TEST");
+
+    // Create connection
+    let connection_id = scenario_create_connection(ctx, debugpy_port).await?;
+
+    // Wait for DAP handshake
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    ctx.reporter.section("ADD MULTI-EXPRESSION METRIC");
+
+    // Add metric with 3 expressions at line 19 (symbol, quantity, price all in scope)
+    // detrix_example_app.py line 19: print(...) inside place_order(symbol, quantity, price)
+    // All 3 are function parameters, guaranteed in scope
+    let metric_name = "multi_expr_test";
+    let location = format!("@{}#19", script_path);
+    let expressions = vec![
+        "symbol".to_string(),
+        "quantity".to_string(),
+        "price".to_string(),
+    ];
+
+    TestScenarios::add_multi_expr_metric(
+        &ctx.client,
+        &ctx.reporter,
+        metric_name,
+        &location,
+        expressions.clone(),
+        &connection_id,
+    )
+    .await?;
+
+    // Small delay for persistence
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Verify metric was stored with all 3 expressions
+    ctx.reporter.section("VERIFY EXPRESSIONS STORED");
+
+    let step = ctx
+        .reporter
+        .step_start("List Metrics", "Verify metric has 3 expressions");
+    ctx.reporter.step_request("list_metrics", None);
+
+    let metrics = ctx.client.list_metrics().await?;
+    let multi_metric = metrics.data.iter().find(|m| m.name == metric_name);
+
+    match multi_metric {
+        Some(m) => {
+            ctx.reporter.step_response(
+                "OK",
+                Some(&format!("expressions=[{}]", m.expressions.join(", "))),
+            );
+            if m.expressions.len() == 3 {
+                ctx.reporter.step_success(
+                    step,
+                    Some(&format!(
+                        "Metric has {} expressions as expected",
+                        m.expressions.len()
+                    )),
+                );
+            } else {
+                let msg = format!(
+                    "Expected 3 expressions, got {}: [{}]",
+                    m.expressions.len(),
+                    m.expressions.join(", ")
+                );
+                ctx.reporter.step_failed(step, &msg);
+                return Err(ApiError::new(msg));
+            }
+        }
+        None => {
+            ctx.reporter
+                .step_failed(step, "Multi-expression metric not found in list");
+            return Err(ApiError::new("Multi-expression metric not found"));
+        }
+    }
+
+    // Wait for events
+    ctx.reporter.section("CAPTURE EVENTS");
+
+    let event_count = TestScenarios::wait_for_events(
+        &ctx.client,
+        &ctx.reporter,
+        metric_name,
+        1,  // At least 1 event
+        30, // 30 second timeout
+    )
+    .await?;
+
+    ctx.reporter.info(&format!(
+        "Captured {} events from multi-expression metric",
+        event_count
+    ));
+
+    // Query events and verify they contain proper multi-expression data
+    let step = ctx.reporter.step_start(
+        "Verify Events",
+        "Check that events contain multi-expression values",
+    );
+    ctx.reporter.step_request(
+        "query_events",
+        Some(&format!("name={}, limit=10", metric_name)),
+    );
+
+    let events = ctx.client.query_events(metric_name, 10).await?;
+    if events.data.is_empty() {
+        ctx.reporter.step_failed(step, "No events found");
+        return Err(ApiError::new("No events for multi-expression metric"));
+    }
+
+    // Verify each event has multi-expression values
+    let first_event = &events.data[0];
+    ctx.reporter.info(&format!(
+        "  First event: value='{}', values count={}, values={:?}",
+        first_event.value,
+        first_event.values.len(),
+        first_event.values,
+    ));
+
+    // Verify the values array has entries for each expression
+    if first_event.values.len() < expressions.len() {
+        let msg = format!(
+            "Event has {} values but expected at least {} (one per expression: [{}]). values={:?}",
+            first_event.values.len(),
+            expressions.len(),
+            expressions.join(", "),
+            first_event.values,
+        );
+        ctx.reporter.step_failed(step, &msg);
+        return Err(ApiError::new(msg));
+    }
+
+    // Verify each value entry has a non-empty valueJson
+    for (i, val) in first_event.values.iter().enumerate() {
+        let value_json = val
+            .get("valueJson")
+            .or_else(|| val.get("value_json"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if value_json.is_empty() {
+            let msg = format!("Expression value [{}] has empty valueJson: {:?}", i, val);
+            ctx.reporter.step_failed(step, &msg);
+            return Err(ApiError::new(msg));
+        }
+        ctx.reporter
+            .info(&format!("  Expression [{}]: valueJson='{}'", i, value_json,));
+    }
+
+    // Verify expression names match if available (REST/gRPC include expression field)
+    let has_expression_names = first_event
+        .values
+        .iter()
+        .any(|v| v.get("expression").is_some());
+    if has_expression_names {
+        for (i, (val, expected_expr)) in first_event
+            .values
+            .iter()
+            .zip(expressions.iter())
+            .enumerate()
+        {
+            let actual_expr = val.get("expression").and_then(|v| v.as_str()).unwrap_or("");
+            if actual_expr != expected_expr {
+                let msg = format!(
+                    "Expression [{}]: expected name '{}', got '{}'",
+                    i, expected_expr, actual_expr
+                );
+                ctx.reporter.step_failed(step, &msg);
+                return Err(ApiError::new(msg));
+            }
+        }
+        ctx.reporter
+            .info("  Expression names verified: all match expected");
+    }
+
+    ctx.reporter.step_success(
+        step,
+        Some(&format!(
+            "{} events, each with {} expression values verified",
+            events.data.len(),
+            first_event.values.len(),
+        )),
+    );
+
+    // Cleanup
+    ctx.reporter.section("CLEANUP");
+    let _ = ctx.client.remove_metric(metric_name).await;
     let _ = ctx.client.close_connection(&connection_id).await;
 
     Ok(())

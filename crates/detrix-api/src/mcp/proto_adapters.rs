@@ -71,7 +71,7 @@ pub fn mcp_params_to_add_metric_request(
         connection_id,
         group: params.group.clone(),
         location,
-        expression: params.expression.clone(),
+        expressions: params.expressions.clone(),
         language: None, // Will be filled from connection
         enabled: params.enabled,
         mode,

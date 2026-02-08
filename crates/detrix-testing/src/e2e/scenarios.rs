@@ -243,6 +243,58 @@ impl TestScenarios {
         }
     }
 
+    /// Test adding a metric with multiple expressions
+    pub async fn add_multi_expr_metric<C: ApiClient>(
+        client: &C,
+        reporter: &Arc<TestReporter>,
+        name: &str,
+        location: &str,
+        expressions: Vec<String>,
+        connection_id: &str,
+    ) -> Result<String, ApiError> {
+        let step = reporter.step_start(
+            "Add Multi-Expr Metric",
+            &format!(
+                "Add '{}' at {} with {} expressions",
+                name,
+                location,
+                expressions.len()
+            ),
+        );
+
+        let request =
+            AddMetricRequest::new_multi(name, location, expressions.clone(), connection_id);
+        reporter.step_request(
+            "add_metric",
+            Some(&format!(
+                "name={}, location={}, expressions=[{}], connection_id={}",
+                name,
+                location,
+                expressions.join(", "),
+                connection_id
+            )),
+        );
+
+        match client.add_metric(request).await {
+            Ok(response) => {
+                reporter.step_response("OK", Some(&format!("metric_id={}", response.data)));
+                reporter.step_success(
+                    step,
+                    Some(&format!(
+                        "Metric '{}' added with {} expressions",
+                        name,
+                        expressions.len()
+                    )),
+                );
+                Ok(response.data)
+            }
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                Err(e)
+            }
+        }
+    }
+
     /// Test listing metrics
     pub async fn list_metrics<C: ApiClient>(
         client: &C,
@@ -259,7 +311,7 @@ impl TestScenarios {
                         "  {} @ {} -> {} [{}]",
                         metric.name,
                         metric.location,
-                        metric.expression,
+                        metric.expressions.join(", "),
                         if metric.enabled {
                             "enabled"
                         } else {

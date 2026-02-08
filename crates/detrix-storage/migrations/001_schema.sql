@@ -1,4 +1,6 @@
--- Detrix Database Schema v1.0
+-- Detrix Database Schema v1.1 (alpha, consolidated)
+-- NOTE: Schema consolidated in v1.1-alpha (pre-release).
+-- Existing v1.0 databases require clean install (delete detrix.db, restart daemon).
 -- All timestamps use INTEGER (microseconds since epoch)
 
 -- ============================================================
@@ -7,17 +9,22 @@
 -- Must be created first since metrics references connection_id
 
 CREATE TABLE IF NOT EXISTS connections (
-    id TEXT PRIMARY KEY,                -- ConnectionId (e.g., "127_0_0_1_5678" or custom)
+    id TEXT PRIMARY KEY,                -- ConnectionId (UUID from identity hash)
     host TEXT NOT NULL,                 -- Host address (e.g., "127.0.0.1")
     port INTEGER NOT NULL,              -- Port number (>= 1024)
     status TEXT NOT NULL,               -- "Disconnected", "Connecting", "Connected", "Failed(...)"
     created_at INTEGER NOT NULL,        -- Timestamp when connection was created (microseconds)
     last_active INTEGER NOT NULL,       -- Timestamp of last activity (microseconds)
     name TEXT DEFAULT NULL,             -- User-friendly alias
-    language TEXT NOT NULL,                    -- Language/adapter type (required, no default)
+    language TEXT NOT NULL,             -- Language/adapter type (required, no default)
     auto_reconnect INTEGER NOT NULL DEFAULT 1,  -- Whether to auto-reconnect
-    last_connected_at INTEGER DEFAULT NULL,     -- Timestamp of last successful connection
     safe_mode INTEGER NOT NULL DEFAULT 0,       -- SafeMode: only allow logpoints (non-blocking)
+    last_connected_at INTEGER DEFAULT NULL,     -- Timestamp of last successful connection
+
+    -- Identity fields for deterministic UUID generation:
+    -- UUID = SHA256(name|language|workspace_root|hostname)[0..16]
+    workspace_root TEXT NOT NULL DEFAULT '',     -- Workspace directory (absolute path)
+    hostname TEXT NOT NULL DEFAULT '',           -- Machine hostname for multi-host isolation
 
     CHECK(port >= 1024),                -- Enforce port >= 1024 (not in reserved range)
     CHECK(host != '')                   -- Host cannot be empty
@@ -31,6 +38,11 @@ CREATE INDEX IF NOT EXISTS idx_connections_language ON connections(language);
 CREATE INDEX IF NOT EXISTS idx_connections_auto_reconnect ON connections(auto_reconnect, status);
 CREATE INDEX IF NOT EXISTS idx_connections_safe_mode ON connections(safe_mode);
 
+-- Unique constraint on identity components (prevents duplicate identities)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_identity
+    ON connections(name, language, workspace_root, hostname)
+    WHERE name IS NOT NULL;
+
 -- ============================================================
 -- METRICS REGISTRY
 -- ============================================================
@@ -41,9 +53,9 @@ CREATE TABLE IF NOT EXISTS metrics (
     connection_id TEXT NOT NULL,  -- Which connection this metric belongs to (required, no default)
     group_name TEXT,
     location TEXT NOT NULL,
-    expression TEXT NOT NULL,
-    expression_hash TEXT NOT NULL,
-    language TEXT NOT NULL,                    -- Required, no default
+    expressions_json TEXT NOT NULL,      -- JSON array of expression strings (e.g. '["x.value", "x.price"]')
+    expression_hash TEXT NOT NULL,       -- SHA256 of all expressions (length-prefixed)
+    language TEXT NOT NULL,              -- Required, no default
     enabled BOOLEAN NOT NULL DEFAULT 1,
     mode_type TEXT NOT NULL DEFAULT 'stream',
     mode_config TEXT,
@@ -107,10 +119,8 @@ CREATE TABLE IF NOT EXISTS metric_events (
     thread_name TEXT,
     thread_id INTEGER,
 
-    value_json TEXT NOT NULL,
-    value_numeric REAL,
-    value_string TEXT,
-    value_boolean INTEGER,
+    -- Multi-expression values as JSON array of ExpressionValue objects
+    values_json TEXT NOT NULL,
 
     is_error BOOLEAN NOT NULL DEFAULT 0,
     error_type TEXT,

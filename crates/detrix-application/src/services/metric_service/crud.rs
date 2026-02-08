@@ -13,7 +13,12 @@ impl MetricService {
     ///
     /// Use this when loading metrics from config before the adapter is connected.
     /// Call `sync_metrics_for_connection()` after adapter connects to set logpoints.
+    ///
+    /// Validates metric fields (name, expressions, count/length limits, AST safety)
+    /// before saving. Skips `validate_safe_mode()` (no active connection at import time)
+    /// and `validate_expression_scope()` (LSP/file inspection may not be available).
     pub async fn import_metric(&self, metric: Metric) -> Result<MetricId> {
+        self.validate_metric_fields(&metric)?;
         let metric_id = self.storage.save(&metric).await?;
         Ok(metric_id)
     }

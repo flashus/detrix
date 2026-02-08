@@ -241,7 +241,7 @@ pub async fn run(
                 connection_id: detrix_core::ConnectionId::from(metric_def.connection_id.as_str()),
                 group: metric_def.group.clone(),
                 location: metric_def.location.clone(),
-                expression: metric_def.expression.clone(),
+                expressions: metric_def.expressions.clone(),
                 language: metric_def.language.parse_language().with_context(|| {
                     format!("Invalid language for metric '{}'", metric_def.name)
                 })?,

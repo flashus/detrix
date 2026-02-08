@@ -134,7 +134,7 @@ pub async fn disable_metric(
 pub struct UpdateMetricRequest {
     pub name: Option<String>,
     pub group: Option<String>,
-    pub expression: Option<String>,
+    pub expressions: Option<Vec<String>>,
     pub enabled: Option<bool>,
     pub mode: Option<String>,
     pub safety_level: Option<String>,
@@ -185,8 +185,8 @@ pub async fn update_metric(
     if let Some(group) = payload.group {
         metric.group = Some(group);
     }
-    if let Some(expression) = payload.expression {
-        metric.expression = expression;
+    if let Some(expressions) = payload.expressions {
+        metric.expressions = expressions;
     }
     if let Some(enabled) = payload.enabled {
         metric.enabled = enabled;

@@ -229,6 +229,9 @@ fn validate_config(config: &Config) -> Result<(), ConfigError> {
     if config.limits.max_expression_length == 0 {
         all_errors.push("limits.max_expression_length must be greater than 0".to_string());
     }
+    if config.limits.max_expressions_per_metric == 0 {
+        all_errors.push("limits.max_expressions_per_metric must be greater than 0".to_string());
+    }
 
     // Validate API config
     if config.api.event_buffer_capacity == 0 {
@@ -406,7 +409,7 @@ pool_size = 0
 [[metric]]
 name = "test_metric"
 connection_id = "test-conn"
-expression = "x + 1"
+expressions = ["x + 1"]
 language = "python"
 location = { file = "test.py", line = 10 }
 "#;

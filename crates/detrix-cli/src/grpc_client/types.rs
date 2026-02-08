@@ -11,7 +11,7 @@ pub struct MetricInfo {
     pub group: Option<String>,
     pub location_file: String,
     pub location_line: u32,
-    pub expression: String,
+    pub expressions: Vec<String>,
     pub language: String,
     pub enabled: bool,
     pub mode: String,
@@ -20,15 +20,30 @@ pub struct MetricInfo {
     pub last_hit_at: Option<i64>,
 }
 
+impl MetricInfo {
+    /// Convenience: get the first expression (for display)
+    #[allow(dead_code)]
+    pub fn expression(&self) -> &str {
+        self.expressions.first().map(|s| s.as_str()).unwrap_or("")
+    }
+}
+
 /// Simplified event info for CLI display
 #[derive(Debug, Serialize)]
 pub struct EventInfo {
     pub metric_id: u64,
     pub metric_name: String,
     pub timestamp: i64,
-    pub value_json: Option<String>,
+    pub values_json: Vec<String>,
     pub thread_name: Option<String>,
     pub thread_id: Option<i64>,
+}
+
+impl EventInfo {
+    /// Convenience: get the first value's JSON string (for display)
+    pub fn value_json(&self) -> Option<&str> {
+        self.values_json.first().map(|s| s.as_str())
+    }
 }
 
 /// Simplified connection info for CLI display
@@ -170,7 +185,7 @@ pub struct AddMetricParams {
     pub name: String,
     pub location: String,
     pub line: Option<u32>,
-    pub expression: String,
+    pub expressions: Vec<String>,
     pub connection_id: String,
     pub group: Option<String>,
     pub enabled: bool,

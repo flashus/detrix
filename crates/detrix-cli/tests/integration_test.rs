@@ -11,7 +11,7 @@ use anyhow::Result;
 use detrix_application::{EventRepository, MetricRepository};
 use detrix_config::Config;
 use detrix_core::entities::{MetricMode, SafetyLevel};
-use detrix_core::{ConnectionId, SourceLanguage};
+use detrix_core::{ConnectionId, ExpressionValue, SourceLanguage};
 use detrix_storage::{SqliteConfig, SqliteStorage};
 use detrix_testing::e2e::{find_detrix_binary, get_workspace_root};
 use std::path::PathBuf;
@@ -41,7 +41,7 @@ path = "{}"
 name = "test_metric_1"
 connection_id = "test-conn"
 location = {{ file = "test.py", line = 10 }}
-expression = "f'value={{x}}'"
+expressions = ["f'value={{x}}'"]
 language = "python"
 enabled = true
 mode = {{ mode = "stream" }}
@@ -51,7 +51,7 @@ safety_level = "strict"
 name = "test_metric_2"
 connection_id = "test-conn"
 location = {{ file = "test.py", line = 20 }}
-expression = "f'count={{count}}'"
+expressions = ["f'count={{count}}'"]
 language = "python"
 enabled = true
 mode = {{ mode = "throttle", max_per_second = 5 }}
@@ -125,7 +125,7 @@ async fn test_metric_storage_initialization() -> Result<()> {
             file: "test.py".to_string(),
             line: 42,
         },
-        expression: "x + 1".to_string(),
+        expressions: vec!["x + 1".to_string()],
         language: SourceLanguage::Python,
         mode: MetricMode::Stream,
         enabled: true,
@@ -180,7 +180,7 @@ async fn test_event_storage() -> Result<()> {
             file: "test.py".to_string(),
             line: 100,
         },
-        expression: "value".to_string(),
+        expressions: vec!["value".to_string()],
         language: SourceLanguage::Python,
         mode: MetricMode::Stream,
         enabled: true,
@@ -209,10 +209,11 @@ async fn test_event_storage() -> Result<()> {
         timestamp: chrono::Utc::now().timestamp_micros(),
         thread_id: Some(12345),
         thread_name: Some("MainThread".to_string()),
-        value_string: Some("test_value".to_string()),
-        value_numeric: None,
-        value_boolean: None,
-        value_json: "\"test_value\"".to_string(),
+        values: vec![ExpressionValue::with_text(
+            "value",
+            "\"test_value\"",
+            "test_value",
+        )],
         is_error: false,
         error_type: None,
         error_message: None,
@@ -230,10 +231,7 @@ async fn test_event_storage() -> Result<()> {
         timestamp: chrono::Utc::now().timestamp_micros(),
         thread_id: Some(12345),
         thread_name: Some("MainThread".to_string()),
-        value_string: None,
-        value_numeric: Some(42.0),
-        value_boolean: None,
-        value_json: "42".to_string(),
+        values: vec![ExpressionValue::with_numeric("value", "42", 42.0)],
         is_error: false,
         error_type: None,
         error_message: None,
@@ -254,8 +252,8 @@ async fn test_event_storage() -> Result<()> {
     // Verify event values
     assert!(events
         .iter()
-        .any(|e| e.value_string == Some("test_value".to_string())));
-    assert!(events.iter().any(|e| e.value_numeric == Some(42.0)));
+        .any(|e| e.value_string() == Some("test_value")));
+    assert!(events.iter().any(|e| e.value_numeric() == Some(42.0)));
 
     Ok(())
 }
@@ -291,7 +289,7 @@ async fn test_full_config_to_storage_workflow() -> Result<()> {
             connection_id: ConnectionId::from("test"),
             group: metric_def.group.clone(),
             location: metric_def.location.clone(),
-            expression: metric_def.expression.clone(),
+            expressions: metric_def.expressions.clone(),
             language: metric_def
                 .language
                 .parse()
@@ -327,7 +325,7 @@ async fn test_full_config_to_storage_workflow() -> Result<()> {
         .unwrap();
     assert_eq!(metric1.location.file, "test.py");
     assert_eq!(metric1.location.line, 10);
-    assert_eq!(metric1.expression, "f'value={x}'");
+    assert_eq!(metric1.expression(), "f'value={x}'");
 
     let metric2 = all_metrics
         .iter()

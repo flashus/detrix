@@ -92,13 +92,11 @@ pub async fn handle_output_event<P: OutputParser>(
     };
 
     // Truncate value for display
-    let value_display = if metric_event.value_json.len() > DEFAULT_DAP_VALUE_DISPLAY_LIMIT {
-        format!(
-            "{}...",
-            &metric_event.value_json[..DEFAULT_DAP_VALUE_DISPLAY_LIMIT]
-        )
+    let primary_value = metric_event.value_json();
+    let value_display = if primary_value.len() > DEFAULT_DAP_VALUE_DISPLAY_LIMIT {
+        format!("{}...", &primary_value[..DEFAULT_DAP_VALUE_DISPLAY_LIMIT])
     } else {
-        metric_event.value_json.clone()
+        primary_value.to_string()
     };
 
     info!(
@@ -268,12 +266,15 @@ pub async fn process_stopped_metric(
 ) {
     let needs_introspection = metric.capture_stack_trace || metric.capture_memory_snapshot;
     let is_go_function_call = metric.language == detrix_core::SourceLanguage::Go
-        && expression_contains_function_call(&metric.expression);
+        && metric
+            .expressions
+            .iter()
+            .any(|e| expression_contains_function_call(e));
 
     if is_go_function_call {
         debug!(
-            "[{}] Processing Go function call metric '{}' (expression: '{}')",
-            lang, metric.name, metric.expression
+            "[{}] Processing Go function call metric '{}' (expressions: {:?})",
+            lang, metric.name, metric.expressions
         );
     } else if needs_introspection {
         debug!(
@@ -300,28 +301,6 @@ pub async fn process_stopped_metric(
         None
     };
 
-    // Evaluate the metric expression
-    // For Go function calls, use "call <expr>" prefix (required by Delve DAP)
-    // WARNING: Function calls BLOCK the target process while executing!
-    let (eval_expr, eval_context) = if metric.language == detrix_core::SourceLanguage::Go
-        && expression_contains_function_call(&metric.expression)
-    {
-        // Go function calls require "call " prefix and "repl" context
-        // See: https://github.com/golang/vscode-go/issues/100
-        warn!(
-                "[{}] Using blocking 'call' for function expression '{}' - consider using simple variables",
-                lang, metric.expression
-            );
-        (format!("call {}", metric.expression), "repl")
-    } else {
-        // Simple variable access - use "watch" context (faster)
-        (metric.expression.clone(), "watch")
-    };
-
-    let value = evaluate_expression(broker, &eval_expr, frame_id, eval_context)
-        .await
-        .unwrap_or_else(|err| format!("<evaluation failed: {}>", err));
-
     // Create metric event - metric must have an ID (saved in storage before evaluation)
     let Some(metric_id) = metric.id else {
         error!(
@@ -330,20 +309,59 @@ pub async fn process_stopped_metric(
         );
         return;
     };
-    let mut metric_event = MetricEvent::new(
+
+    // NOTE: Expressions are evaluated sequentially — DAP requires serialized
+    // evaluate requests per-thread. Breakpoint pause duration scales linearly
+    // with expression count. For time-sensitive code, prefer logpoint mode.
+    let mut expression_values = Vec::new();
+    for expr in &metric.expressions {
+        let (eval_expr, eval_context) = if metric.language == detrix_core::SourceLanguage::Go
+            && expression_contains_function_call(expr)
+        {
+            warn!(
+                "[{}] Using blocking 'call' for function expression '{}' - consider using simple variables",
+                lang, expr
+            );
+            (format!("call {}", expr), "repl")
+        } else {
+            (expr.clone(), "watch")
+        };
+
+        let value = evaluate_expression(broker, &eval_expr, frame_id, eval_context)
+            .await
+            .unwrap_or_else(|err| format!("<evaluation failed: {}>", err));
+
+        let (vj, typed) = super::parsing::parse_value(&value);
+        expression_values.push(detrix_core::ExpressionValue {
+            expression: expr.clone(),
+            value_json: vj,
+            typed_value: typed,
+        });
+    }
+
+    let metric_event = MetricEvent {
+        id: None,
         metric_id,
-        metric.name.clone(),
-        metric.connection_id.clone(),
-        value,
-    );
-    metric_event.stack_trace = stack_trace;
-    metric_event.memory_snapshot = memory_snapshot;
+        metric_name: metric.name.clone(),
+        connection_id: metric.connection_id.clone(),
+        timestamp: MetricEvent::now_micros(),
+        thread_name: None,
+        thread_id: None,
+        values: expression_values,
+        is_error: false,
+        error_type: None,
+        error_message: None,
+        request_id: None,
+        session_id: None,
+        stack_trace,
+        memory_snapshot,
+    };
 
     warn!(
         "[{}] INTROSPECTION EVENT for '{}': value={} (stack={}, memory={})",
         lang,
         metric.name,
-        metric_event.value_json,
+        metric_event.value_json(),
         metric_event.stack_trace.is_some(),
         metric_event.memory_snapshot.is_some()
     );

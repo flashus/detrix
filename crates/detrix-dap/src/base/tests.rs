@@ -47,10 +47,15 @@ impl OutputParser for TestParser {
             timestamp: MetricEvent::now_micros(),
             thread_name: None,
             thread_id: None,
-            value_json: value_str.to_string(),
-            value_numeric: value_str.parse().ok(),
-            value_string: Some(value_str.to_string()),
-            value_boolean: None,
+            values: vec![detrix_core::ExpressionValue {
+                expression: String::new(),
+                value_json: value_str.to_string(),
+                typed_value: value_str
+                    .parse::<f64>()
+                    .ok()
+                    .map(detrix_core::TypedValue::Numeric)
+                    .or_else(|| Some(detrix_core::TypedValue::Text(value_str.to_string()))),
+            }],
             is_error: false,
             error_type: None,
             error_message: None,
@@ -69,7 +74,7 @@ impl OutputParser for TestParser {
 fn sample_metric() -> Metric {
     let mut metric = sample_metric_for_language("test_metric", SourceLanguage::Python);
     metric.id = Some(MetricId(1));
-    metric.expression = "x + y".to_string();
+    metric.expressions = vec!["x + y".to_string()];
     metric
 }
 
@@ -176,8 +181,8 @@ async fn test_parse_output_valid() {
     assert!(result.is_some());
     let event = result.unwrap();
     assert_eq!(event.metric_name, "test_metric");
-    assert_eq!(event.value_json, "42");
-    assert_eq!(event.value_numeric, Some(42.0));
+    assert_eq!(event.value_json(), "42");
+    assert_eq!(event.value_numeric(), Some(42.0));
 }
 
 #[tokio::test]
@@ -563,7 +568,7 @@ fn metric_with_config(
         file: "main.go".to_string(),
         line,
     };
-    metric.expression = expression.to_string();
+    metric.expressions = vec![expression.to_string()];
     metric.capture_stack_trace = capture_stack_trace;
     metric.capture_memory_snapshot = capture_memory_snapshot;
     metric

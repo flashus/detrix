@@ -389,8 +389,8 @@ pub struct AddMetricRequest {
     pub group: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "3")]
     pub location: ::core::option::Option<Location>,
-    #[prost(string, tag = "4")]
-    pub expression: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "4")]
+    pub expressions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     /// DEPRECATED: Derived from connection if not provided
     #[prost(string, optional, tag = "5")]
     pub language: ::core::option::Option<::prost::alloc::string::String>,
@@ -464,6 +464,8 @@ pub struct MetricResponse {
     pub location: ::core::option::Option<Location>,
     #[prost(message, optional, tag = "5")]
     pub metadata: ::core::option::Option<ResponseMetadata>,
+    #[prost(string, repeated, tag = "6")]
+    pub expressions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -501,8 +503,8 @@ pub struct RemoveMetricResponse {
 pub struct UpdateMetricRequest {
     #[prost(uint64, tag = "1")]
     pub metric_id: u64,
-    #[prost(string, optional, tag = "2")]
-    pub expression: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "2")]
+    pub expressions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(bool, optional, tag = "3")]
     #[serde(default)]
     pub enabled: ::core::option::Option<bool>,
@@ -569,8 +571,8 @@ pub struct MetricInfo {
     pub group: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "4")]
     pub location: ::core::option::Option<Location>,
-    #[prost(string, tag = "5")]
-    pub expression: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "5")]
+    pub expressions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, tag = "6")]
     pub language: ::prost::alloc::string::String,
     #[prost(bool, tag = "7")]
@@ -2490,6 +2492,32 @@ pub struct StreamAllRequest {
     #[prost(message, optional, tag = "2")]
     pub metadata: ::core::option::Option<RequestMetadata>,
 }
+/// A single expression's evaluated value
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExpressionValue {
+    #[prost(string, tag = "1")]
+    pub expression: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub value_json: ::prost::alloc::string::String,
+    #[prost(oneof = "expression_value::TypedValue", tags = "3, 4, 5")]
+    pub typed_value: ::core::option::Option<expression_value::TypedValue>,
+}
+/// Nested message and enum types in `ExpressionValue`.
+pub mod expression_value {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum TypedValue {
+        #[prost(double, tag = "3")]
+        NumericValue(f64),
+        #[prost(string, tag = "4")]
+        StringValue(::prost::alloc::string::String),
+        #[prost(bool, tag = "5")]
+        BoolValue(bool),
+    }
+}
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2513,6 +2541,11 @@ pub struct MetricEvent {
     /// For grouping related events
     #[prost(string, optional, tag = "8")]
     pub session_id: ::core::option::Option<::prost::alloc::string::String>,
+    /// Result: multiple expression values or error
+    #[prost(message, repeated, tag = "9")]
+    pub values: ::prost::alloc::vec::Vec<ExpressionValue>,
+    #[prost(message, optional, tag = "10")]
+    pub error: ::core::option::Option<ErrorResult>,
     /// Connection that produced this event
     #[prost(string, tag = "11")]
     pub connection_id: ::prost::alloc::string::String,
@@ -2521,22 +2554,6 @@ pub struct MetricEvent {
     pub stack_trace: ::core::option::Option<StackTrace>,
     #[prost(message, optional, tag = "13")]
     pub memory_snapshot: ::core::option::Option<MemorySnapshot>,
-    /// Result
-    #[prost(oneof = "metric_event::Result", tags = "9, 10")]
-    pub result: ::core::option::Option<metric_event::Result>,
-}
-/// Nested message and enum types in `MetricEvent`.
-pub mod metric_event {
-    /// Result
-    #[derive(serde::Serialize, serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
-    pub enum Result {
-        #[prost(string, tag = "9")]
-        ValueJson(::prost::alloc::string::String),
-        #[prost(message, tag = "10")]
-        Error(super::ErrorResult),
-    }
 }
 /// Stack trace captured at metric evaluation
 #[derive(serde::Serialize, serde::Deserialize)]

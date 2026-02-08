@@ -436,31 +436,7 @@ impl RustAdapter {
     fn build_init_commands(program: &str) -> Vec<String> {
         let mut commands: Vec<String> = Vec::new();
 
-        // Try to find Rust sysroot and load its LLDB formatters
-        if let Some(sysroot) = Self::find_rust_sysroot() {
-            let etc_dir = std::path::Path::new(&sysroot).join("lib/rustlib/etc");
-            let lookup_py = etc_dir.join("lldb_lookup.py");
-            let lldb_commands = etc_dir.join("lldb_commands");
-
-            if lookup_py.exists() && lldb_commands.exists() {
-                tracing::info!("[Rust LLDB] Loading formatters from: {}", etc_dir.display());
-                // Import the Python lookup module
-                commands.push(format!("command script import \"{}\"", lookup_py.display()));
-                // Source the type formatter commands
-                commands.push(format!(
-                    "command source -s 0 \"{}\"",
-                    lldb_commands.display()
-                ));
-            } else {
-                tracing::warn!(
-                    "[Rust LLDB] Formatter files not found in sysroot, using fallback formatters"
-                );
-                Self::add_fallback_formatters(&mut commands);
-            }
-        } else {
-            tracing::warn!("[Rust LLDB] Could not find Rust sysroot, using fallback formatters");
-            Self::add_fallback_formatters(&mut commands);
-        }
+        Self::load_sysroot_formatters(&mut commands);
 
         // On Windows, add settings to help LLDB find PDB symbols
         // NOTE: Only SETTINGS can go in initCommands (before target creation)
@@ -500,6 +476,34 @@ impl RustAdapter {
         commands
     }
 
+    /// Load Rust's LLDB formatters from sysroot into the given command list.
+    ///
+    /// Shared by `build_init_commands` and `build_init_commands_for_attach`.
+    fn load_sysroot_formatters(commands: &mut Vec<String>) {
+        if let Some(sysroot) = Self::find_rust_sysroot() {
+            let etc_dir = std::path::Path::new(&sysroot).join("lib/rustlib/etc");
+            let lookup_py = etc_dir.join("lldb_lookup.py");
+            let lldb_commands = etc_dir.join("lldb_commands");
+
+            if lookup_py.exists() && lldb_commands.exists() {
+                tracing::info!("[Rust LLDB] Loading formatters from: {}", etc_dir.display());
+                commands.push(format!("command script import \"{}\"", lookup_py.display()));
+                commands.push(format!(
+                    "command source -s 0 \"{}\"",
+                    lldb_commands.display()
+                ));
+            } else {
+                tracing::warn!(
+                    "[Rust LLDB] Formatter files not found in sysroot, using fallback formatters"
+                );
+                Self::add_fallback_formatters(commands);
+            }
+        } else {
+            tracing::warn!("[Rust LLDB] Could not find Rust sysroot, using fallback formatters");
+            Self::add_fallback_formatters(commands);
+        }
+    }
+
     /// Find the Rust sysroot by running `rustc --print sysroot`.
     fn find_rust_sysroot() -> Option<String> {
         std::process::Command::new("rustc")
@@ -530,33 +534,7 @@ impl RustAdapter {
     /// Falls back to simple formatters if Rust sysroot cannot be found.
     fn build_init_commands_for_attach() -> Vec<String> {
         let mut commands: Vec<String> = Vec::new();
-
-        // Try to find Rust sysroot and load its LLDB formatters
-        if let Some(sysroot) = Self::find_rust_sysroot() {
-            let etc_dir = std::path::Path::new(&sysroot).join("lib/rustlib/etc");
-            let lookup_py = etc_dir.join("lldb_lookup.py");
-            let lldb_commands = etc_dir.join("lldb_commands");
-
-            if lookup_py.exists() && lldb_commands.exists() {
-                tracing::info!("[Rust LLDB] Loading formatters from: {}", etc_dir.display());
-                // Import the Python lookup module
-                commands.push(format!("command script import \"{}\"", lookup_py.display()));
-                // Source the type formatter commands
-                commands.push(format!(
-                    "command source -s 0 \"{}\"",
-                    lldb_commands.display()
-                ));
-            } else {
-                tracing::warn!(
-                    "[Rust LLDB] Formatter files not found in sysroot, using fallback formatters"
-                );
-                Self::add_fallback_formatters(&mut commands);
-            }
-        } else {
-            tracing::warn!("[Rust LLDB] Could not find Rust sysroot, using fallback formatters");
-            Self::add_fallback_formatters(&mut commands);
-        }
-
+        Self::load_sysroot_formatters(&mut commands);
         commands
     }
 
@@ -898,8 +876,11 @@ mod tests {
         assert!(result.is_some());
         let event = result.unwrap();
         assert_eq!(event.metric_name, "test_metric");
-        assert_eq!(event.value_json, "hello_world");
-        assert_eq!(event.value_string, Some("hello_world".to_string()));
+        assert_eq!(event.value_json(), "hello_world");
+        assert_eq!(
+            event.value_string().map(|s| s.to_string()),
+            Some("hello_world".to_string())
+        );
     }
 
     #[tokio::test]
@@ -924,8 +905,8 @@ mod tests {
         assert!(result.is_some());
         let event = result.unwrap();
         assert_eq!(event.metric_name, "test_metric");
-        assert_eq!(event.value_json, "42");
-        assert_eq!(event.value_numeric, Some(42.0));
+        assert_eq!(event.value_json(), "42");
+        assert_eq!(event.value_numeric(), Some(42.0));
     }
 
     #[tokio::test]
@@ -949,7 +930,7 @@ mod tests {
         let result = RustOutputParser::parse_output(&body, &active_metrics).await;
         assert!(result.is_some());
         let event = result.unwrap();
-        assert_eq!(event.value_numeric, Some(1.23));
+        assert_eq!(event.value_numeric(), Some(1.23));
     }
 
     #[tokio::test]
@@ -973,8 +954,8 @@ mod tests {
         let result = RustOutputParser::parse_output(&body, &active_metrics).await;
         assert!(result.is_some());
         let event = result.unwrap();
-        assert!(event.value_json.contains("John"));
-        assert!(event.value_json.contains("30"));
+        assert!(event.value_json().contains("John"));
+        assert!(event.value_json().contains("30"));
     }
 
     #[tokio::test]
@@ -1035,7 +1016,7 @@ mod tests {
         let result = RustOutputParser::parse_output(&body, &active_metrics).await;
         assert!(result.is_some());
         let event = result.unwrap();
-        assert_eq!(event.value_boolean, Some(true));
+        assert_eq!(event.value_boolean(), Some(true));
     }
 
     // =========================================================================
@@ -1126,7 +1107,7 @@ mod tests {
         assert_eq!(event.metric_name, "test_metric");
         assert_eq!(event.thread_id, Some(1));
         assert_eq!(event.thread_name, Some("thread-1".to_string()));
-        assert_eq!(event.value_numeric, Some(42.0));
+        assert_eq!(event.value_numeric(), Some(42.0));
     }
 
     #[tokio::test]

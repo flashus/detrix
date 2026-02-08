@@ -62,10 +62,11 @@ pub async fn handle_add_metric(
     // Return proto DTO
     Ok(Response::new(MetricResponse {
         metric_id: outcome.value.0,
-        name: metric.name,
+        name: metric.name.clone(),
         status: status::CREATED.to_string(),
         location: Some(core_to_proto_location(&metric.location)),
         metadata: None,
+        expressions: metric.expressions,
     }))
 }
 
@@ -128,8 +129,8 @@ pub async fn handle_update_metric(
         .ok_or_else(|| Status::not_found(format!("Metric {} not found", metric_id)))?;
 
     // Apply updates
-    if let Some(expression) = req.expression {
-        metric.expression = expression;
+    if !req.expressions.is_empty() {
+        metric.expressions = req.expressions;
     }
     if let Some(enabled) = req.enabled {
         metric.enabled = enabled;
@@ -163,10 +164,11 @@ pub async fn handle_update_metric(
     // Return proto DTO
     Ok(Response::new(MetricResponse {
         metric_id,
-        name: metric.name,
+        name: metric.name.clone(),
         status: status::UPDATED.to_string(),
         location: Some(core_to_proto_location(&metric.location)),
         metadata: None,
+        expressions: metric.expressions,
     }))
 }
 
@@ -212,5 +214,6 @@ pub async fn handle_get_metric(
         status: status::FOUND.to_string(),
         location: Some(core_to_proto_location(&metric.location)),
         metadata: None,
+        expressions: metric.expressions,
     }))
 }

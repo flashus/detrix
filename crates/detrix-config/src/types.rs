@@ -53,9 +53,9 @@ pub use tui_mod::*;
 
 use crate::constants::{
     DEFAULT_AUDIT_RETENTION_DAYS, DEFAULT_AUTO_SLEEP_SECONDS, DEFAULT_MAX_EVAL_TIME_MS,
-    DEFAULT_MAX_EXPRESSION_LENGTH, DEFAULT_MAX_METRICS_PER_GROUP, DEFAULT_MAX_METRICS_TOTAL,
-    DEFAULT_MAX_PER_SECOND, DEFAULT_ON_ERROR, DEFAULT_RUNTIME_MODE,
-    DEFAULT_SAMPLE_INTERVAL_SECONDS, DEFAULT_SAMPLE_RATE,
+    DEFAULT_MAX_EXPRESSIONS_PER_METRIC, DEFAULT_MAX_EXPRESSION_LENGTH,
+    DEFAULT_MAX_METRICS_PER_GROUP, DEFAULT_MAX_METRICS_TOTAL, DEFAULT_MAX_PER_SECOND,
+    DEFAULT_ON_ERROR, DEFAULT_RUNTIME_MODE, DEFAULT_SAMPLE_INTERVAL_SECONDS, DEFAULT_SAMPLE_RATE,
 };
 use detrix_core::{Location, MetricMode, SafetyLevel};
 use serde::{Deserialize, Serialize};
@@ -349,6 +349,8 @@ pub struct LimitsConfig {
     pub max_metrics_per_group: usize,
     #[serde(default = "default_max_expression_length")]
     pub max_expression_length: usize,
+    #[serde(default = "default_max_expressions_per_metric")]
+    pub max_expressions_per_metric: usize,
 }
 
 fn default_max_metrics_total() -> usize {
@@ -363,12 +365,17 @@ fn default_max_expression_length() -> usize {
     DEFAULT_MAX_EXPRESSION_LENGTH
 }
 
+fn default_max_expressions_per_metric() -> usize {
+    DEFAULT_MAX_EXPRESSIONS_PER_METRIC
+}
+
 impl Default for LimitsConfig {
     fn default() -> Self {
         LimitsConfig {
             max_metrics_total: default_max_metrics_total(),
             max_metrics_per_group: default_max_metrics_per_group(),
             max_expression_length: default_max_expression_length(),
+            max_expressions_per_metric: default_max_expressions_per_metric(),
         }
     }
 }
@@ -405,7 +412,7 @@ pub struct MetricDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     pub location: Location,
-    pub expression: String,
+    pub expressions: Vec<String>,
     pub language: String,
     #[serde(default = "default_true")]
     pub enabled: bool,

@@ -60,6 +60,8 @@ pub struct MetricPoint {
     pub line: u32,
     /// Expression to evaluate
     pub expression: String,
+    /// Additional expressions for multi-expression metrics
+    pub extra_expressions: Vec<String>,
     /// Optional group name
     pub group: Option<String>,
     /// Whether to capture stack trace
@@ -74,10 +76,16 @@ impl MetricPoint {
             name: name.to_string(),
             line,
             expression: expression.to_string(),
+            extra_expressions: vec![],
             group: None,
             capture_stack_trace: false,
             capture_memory_snapshot: false,
         }
+    }
+
+    pub fn with_extra_expressions(mut self, extra: Vec<&str>) -> Self {
+        self.extra_expressions = extra.into_iter().map(|s| s.to_string()).collect();
+        self
     }
 
     pub fn with_group(mut self, group: &str) -> Self {
@@ -158,6 +166,11 @@ impl DapWorkflowConfig {
                 MetricPoint::new("quantity_metric", 62, "quantity").with_group("python_workflow"),
                 // symbol is assigned on line 54, evaluate on line 63 (current_price := ...)
                 MetricPoint::new("symbol_metric", 63, "symbol").with_group("python_workflow"),
+                // Multi-expression metric: capture symbol + quantity + price on a single metric
+                // Line 64: pnl = calculate_pnl(...) - all 3 vars in scope
+                MetricPoint::new("trade_details", 64, "symbol")
+                    .with_extra_expressions(vec!["quantity", "price"])
+                    .with_group("python_workflow"),
             ],
             // Introspection metrics: stack trace and memory snapshot capture
             // Each metric MUST be on a different line (Detrix allows only one metric per line)
@@ -223,6 +236,11 @@ impl DapWorkflowConfig {
                 MetricPoint::new("quantity_metric", 125, "quantity").with_group("go_workflow"),
                 // symbol is assigned on line 117, evaluate on line 126 (currentPrice := ...)
                 MetricPoint::new("symbol_metric", 126, "symbol").with_group("go_workflow"),
+                // Multi-expression metric: capture symbol + quantity + price on a single metric
+                // Line 135: time.Sleep(3 * time.Second) - all vars in scope
+                MetricPoint::new("trade_details", 135, "symbol")
+                    .with_extra_expressions(vec!["quantity", "price"])
+                    .with_group("go_workflow"),
             ],
             // Introspection metrics: stack trace and memory snapshot capture
             // Each metric MUST be on a different line (Detrix allows only one metric per line)
@@ -320,6 +338,10 @@ impl DapWorkflowConfig {
                 // symbol is assigned at main+26, evaluate after (main+40 = pnl line)
                 MetricPoint::new("symbol_metric", MAIN_LINE + OFFSET_PNL, "symbol")
                     .with_group("rust_workflow"),
+                // NOTE: No multi-expression metric for Rust - all executable lines are taken
+                // by other metrics, and `let _ = x` dead assignments are unreliable breakpoint
+                // targets with lldb-dap. Multi-expression DAP coverage is provided by Python
+                // and Go workflows.
             ],
             // Introspection metrics: stack trace and memory snapshot capture
             // Use distinct function call lines for reliable breakpoint placement
@@ -554,12 +576,23 @@ impl DapWorkflowScenarios {
                 )),
             );
 
-            let mut request = super::client::AddMetricRequest::new(
-                &metric.name,
-                &location,
-                &metric.expression,
-                &connection_id,
-            );
+            let mut request = if metric.extra_expressions.is_empty() {
+                super::client::AddMetricRequest::new(
+                    &metric.name,
+                    &location,
+                    &metric.expression,
+                    &connection_id,
+                )
+            } else {
+                let mut all_exprs = vec![metric.expression.clone()];
+                all_exprs.extend(metric.extra_expressions.clone());
+                super::client::AddMetricRequest::new_multi(
+                    &metric.name,
+                    &location,
+                    all_exprs,
+                    &connection_id,
+                )
+            };
             request.language = Some(config.language.as_api_str().to_string());
             request.group = metric.group.clone();
             request.enabled = Some(false); // Add as disabled - will enable via enable_group
@@ -796,6 +829,135 @@ impl DapWorkflowScenarios {
             }
 
             tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+
+        // Verify multi-expression metrics have correct expression count AND event values
+        for metric in &config.metrics {
+            if !metric.extra_expressions.is_empty() {
+                let expected_expr_count = 1 + metric.extra_expressions.len();
+
+                // Check metric has correct expression count
+                let step = reporter.step_start(
+                    "Verify Multi-Expr Metric",
+                    &format!(
+                        "Check '{}' has {} expressions",
+                        metric.name, expected_expr_count
+                    ),
+                );
+
+                match client.list_metrics().await {
+                    Ok(metrics_list) => {
+                        if let Some(found) =
+                            metrics_list.data.iter().find(|m| m.name == metric.name)
+                        {
+                            if found.expressions.len() == expected_expr_count {
+                                reporter.step_success(
+                                    step,
+                                    Some(&format!(
+                                        "Multi-expr metric '{}' has {} expressions: [{}]",
+                                        metric.name,
+                                        found.expressions.len(),
+                                        found.expressions.join(", ")
+                                    )),
+                                );
+                            } else {
+                                reporter.warn(&format!(
+                                    "Multi-expr metric '{}' has {} expressions (expected {}): [{}]",
+                                    metric.name,
+                                    found.expressions.len(),
+                                    expected_expr_count,
+                                    found.expressions.join(", ")
+                                ));
+                            }
+                        } else {
+                            reporter.warn(&format!(
+                                "Multi-expr metric '{}' not found in list",
+                                metric.name
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        reporter.warn(&format!(
+                            "Failed to list metrics for multi-expr check: {}",
+                            e
+                        ));
+                    }
+                }
+
+                // Check events have correct number of expression values
+                let step = reporter.step_start(
+                    "Verify Multi-Expr Events",
+                    &format!(
+                        "Check '{}' events have {} expression values",
+                        metric.name, expected_expr_count
+                    ),
+                );
+
+                match client.query_events(&metric.name, 10).await {
+                    Ok(events) => {
+                        if let Some(first_event) = events.data.first() {
+                            reporter.info(&format!(
+                                "  Event values count={}, values={:?}",
+                                first_event.values.len(),
+                                first_event.values,
+                            ));
+
+                            if first_event.values.len() >= expected_expr_count {
+                                // Verify each value has non-empty valueJson
+                                let mut all_valid = true;
+                                for (i, val) in first_event.values.iter().enumerate() {
+                                    let value_json = val
+                                        .get("valueJson")
+                                        .or_else(|| val.get("value_json"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    if value_json.is_empty() {
+                                        reporter.warn(&format!(
+                                            "  Expression [{}] has empty valueJson: {:?}",
+                                            i, val
+                                        ));
+                                        all_valid = false;
+                                    }
+                                }
+
+                                if all_valid {
+                                    reporter.step_success(
+                                        step,
+                                        Some(&format!(
+                                            "Multi-expr metric '{}' events have {} values, all non-empty",
+                                            metric.name,
+                                            first_event.values.len(),
+                                        )),
+                                    );
+                                } else {
+                                    reporter.warn(&format!(
+                                        "Multi-expr metric '{}' has some empty expression values",
+                                        metric.name
+                                    ));
+                                }
+                            } else {
+                                reporter.warn(&format!(
+                                    "Multi-expr metric '{}' events have {} values (expected {})",
+                                    metric.name,
+                                    first_event.values.len(),
+                                    expected_expr_count,
+                                ));
+                            }
+                        } else {
+                            reporter.warn(&format!(
+                                "No events found for multi-expr metric '{}'",
+                                metric.name
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        reporter.warn(&format!(
+                            "Failed to query events for multi-expr check: {}",
+                            e
+                        ));
+                    }
+                }
+            }
         }
 
         // ========================================================================

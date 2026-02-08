@@ -148,7 +148,7 @@ fn render_event_details(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             lines.push(Line::from(vec![Span::styled("Value: ", app.theme.normal)]));
             // Pretty print JSON if possible
-            let value_display = format_json_pretty(&event.value_json);
+            let value_display = format_json_pretty(event.value_json());
             for line in value_display.lines() {
                 lines.push(Line::from(Span::styled(line.to_string(), app.theme.value)));
             }
@@ -228,12 +228,12 @@ fn render_event_details(frame: &mut Frame, app: &App, area: Rect) {
 fn format_value(event: &detrix_core::MetricEvent) -> String {
     if event.is_error {
         event.error_type.as_deref().unwrap_or("Error").to_string()
-    } else if event.value_json.is_empty() {
+    } else if event.value_json().is_empty() {
         "(empty)".to_string()
     } else {
         // Try to format as compact JSON
         truncate(
-            &compact_json(&event.value_json),
+            &compact_json(event.value_json()),
             TUI_EVENTS_VALUE_TRUNCATE_LEN,
         )
     }

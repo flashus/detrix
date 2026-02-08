@@ -32,13 +32,16 @@ use tracing::{debug, error, info, warn};
 
 /// WebSocket event message (JSON)
 ///
-/// Includes introspection data (stack traces, memory snapshots) when captured.
+/// Includes all expression values and introspection data when captured.
 #[derive(Debug, Serialize)]
+// BREAKING CHANGE (v1.1): Field names changed from snake_case to camelCase.
+// Clients must update: metric_id -> metricId, stack_trace -> stackTrace, etc.
+#[serde(rename_all = "camelCase")]
 struct EventMessage {
     metric_id: u64,
     metric_name: String,
     timestamp: i64,
-    value_json: String,
+    values: Vec<detrix_core::ExpressionValue>,
     /// Stack trace captured at the metric location (if enabled)
     #[serde(skip_serializing_if = "Option::is_none")]
     stack_trace: Option<detrix_core::CapturedStackTrace>,
@@ -53,7 +56,7 @@ impl From<MetricEvent> for EventMessage {
             metric_id: event.metric_id.0,
             metric_name: event.metric_name,
             timestamp: event.timestamp,
-            value_json: event.value_json,
+            values: event.values,
             stack_trace: event.stack_trace,
             memory_snapshot: event.memory_snapshot,
         }
@@ -185,7 +188,7 @@ async fn handle_websocket(socket: WebSocket, state: Arc<ApiState>, config: Strea
                         }
                         Message::Pong(_) => {
                             debug!("WebSocket: Received pong");
-                            pending_pong_for_recv.store(false, Ordering::SeqCst);
+                            pending_pong_for_recv.store(false, Ordering::Release);
                         }
                         Message::Close(_) => {
                             info!("WebSocket: Client closed connection");
@@ -212,7 +215,7 @@ async fn handle_websocket(socket: WebSocket, state: Arc<ApiState>, config: Strea
                 interval_timer.tick().await;
 
                 // Check if we're still waiting for a pong
-                if pending_pong_for_ping.load(Ordering::SeqCst) {
+                if pending_pong_for_ping.load(Ordering::Acquire) {
                     warn!("WebSocket: Pong timeout - closing connection");
                     return false; // Signal that we should close
                 }
@@ -222,14 +225,14 @@ async fn handle_websocket(socket: WebSocket, state: Arc<ApiState>, config: Strea
                 if guard.send(Message::Ping(vec![].into())).await.is_err() {
                     return false;
                 }
-                pending_pong_for_ping.store(true, Ordering::SeqCst);
+                pending_pong_for_ping.store(true, Ordering::Release);
 
                 // Wait for pong with timeout
                 drop(guard); // Release lock
                 tokio::time::sleep(pong_timeout).await;
 
                 // If still pending after timeout, connection is dead
-                if pending_pong_for_ping.load(Ordering::SeqCst) {
+                if pending_pong_for_ping.load(Ordering::Acquire) {
                     warn!(
                         pong_timeout_ms = pong_timeout.as_millis() as u64,
                         "WebSocket: Pong timeout exceeded"
@@ -306,7 +309,7 @@ async fn handle_websocket(socket: WebSocket, state: Arc<ApiState>, config: Strea
 mod tests {
     use super::*;
     use crate::test_support::create_test_state;
-    use detrix_core::{ConnectionId, MetricEvent, MetricId};
+    use detrix_core::{ConnectionId, ExpressionValue, MetricEvent, MetricId};
 
     #[test]
     fn test_event_message_conversion() {
@@ -318,10 +321,7 @@ mod tests {
             timestamp: 1234567890,
             thread_name: None,
             thread_id: None,
-            value_json: r#"{"value": 42}"#.to_string(),
-            value_numeric: None,
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::new("x", r#"{"value": 42}"#)],
             is_error: false,
             error_type: None,
             error_message: None,
@@ -336,7 +336,8 @@ mod tests {
         assert_eq!(msg.metric_id, 123);
         assert_eq!(msg.metric_name, "test_metric");
         assert_eq!(msg.timestamp, 1234567890);
-        assert_eq!(msg.value_json, r#"{"value": 42}"#);
+        assert_eq!(msg.values.len(), 1);
+        assert_eq!(msg.values[0].value_json, r#"{"value": 42}"#);
         assert!(msg.stack_trace.is_none());
         assert!(msg.memory_snapshot.is_none());
     }
@@ -394,10 +395,7 @@ mod tests {
             timestamp: 9876543210,
             thread_name: Some("MainThread".to_string()),
             thread_id: Some(1234),
-            value_json: r#"{"result": "success"}"#.to_string(),
-            value_numeric: None,
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::new("", r#"{"result": "success"}"#)],
             is_error: false,
             error_type: None,
             error_message: None,
@@ -412,7 +410,8 @@ mod tests {
         assert_eq!(msg.metric_id, 456);
         assert_eq!(msg.metric_name, "introspection_metric");
         assert_eq!(msg.timestamp, 9876543210);
-        assert_eq!(msg.value_json, r#"{"result": "success"}"#);
+        assert_eq!(msg.values.len(), 1);
+        assert_eq!(msg.values[0].value_json, r#"{"result": "success"}"#);
 
         // Verify introspection data is preserved
         assert!(msg.stack_trace.is_some());
@@ -439,10 +438,7 @@ mod tests {
             timestamp: 123,
             thread_name: None,
             thread_id: None,
-            value_json: "{}".to_string(),
-            value_numeric: None,
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::new("", "{}")],
             is_error: false,
             error_type: None,
             error_message: None,
@@ -456,8 +452,8 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
 
         // None introspection fields should be omitted (skip_serializing_if = "Option::is_none")
-        assert!(!json.contains("stack_trace"));
-        assert!(!json.contains("memory_snapshot"));
+        assert!(!json.contains("stackTrace"));
+        assert!(!json.contains("memorySnapshot"));
     }
 
     #[test]
@@ -472,10 +468,7 @@ mod tests {
             timestamp: 123,
             thread_name: None,
             thread_id: None,
-            value_json: "{}".to_string(),
-            value_numeric: None,
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::new("", "{}")],
             is_error: false,
             error_type: None,
             error_message: None,
@@ -503,9 +496,9 @@ mod tests {
         let msg: EventMessage = event.into();
         let json = serde_json::to_string(&msg).unwrap();
 
-        // Introspection fields should be included when present
-        assert!(json.contains("stack_trace"));
-        assert!(json.contains("memory_snapshot"));
+        // Introspection fields should be included when present (camelCase)
+        assert!(json.contains("stackTrace"));
+        assert!(json.contains("memorySnapshot"));
         assert!(json.contains("\"name\":\"main\""));
     }
 
@@ -525,10 +518,7 @@ mod tests {
             timestamp: 123,
             thread_name: None,
             thread_id: None,
-            value_json: "{}".to_string(),
-            value_numeric: None,
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::new("", "{}")],
             is_error: false,
             error_type: None,
             error_message: None,

@@ -18,8 +18,8 @@ use detrix_application::{
 };
 use detrix_config::ApiConfig;
 use detrix_core::{
-    AnchorStatus, ConnectionId, Location, Metric, MetricEvent, MetricMode, SafetyLevel,
-    SourceLanguage,
+    AnchorStatus, ConnectionId, ExpressionValue, Location, Metric, MetricEvent, MetricMode,
+    SafetyLevel, SourceLanguage,
 };
 use detrix_storage::{SqliteConfig, SqliteStorage};
 use detrix_testing::fixtures::{app_py_path, test_py_path};
@@ -126,7 +126,7 @@ impl McpE2eFixture {
                 file: test_py_path(),
                 line,
             },
-            expression: "x.value".to_string(),
+            expressions: vec!["x.value".to_string()],
             language: SourceLanguage::Python,
             mode: MetricMode::Stream,
             enabled: true,
@@ -324,7 +324,7 @@ async fn test_e2e_full_metric_lifecycle() {
             file: app_py_path(),
             line: 100,
         },
-        expression: "request.user_id".to_string(),
+        expressions: vec!["request.user_id".to_string()],
         language: SourceLanguage::Python,
         mode: MetricMode::Stream,
         enabled: true,
@@ -400,6 +400,80 @@ async fn test_e2e_full_metric_lifecycle() {
 }
 
 #[tokio::test]
+async fn test_e2e_multi_expression_metric() {
+    let fixture = McpE2eFixture::new().await;
+    let conn_id = fixture.with_mock_connection().await;
+
+    // Create metric with 3 expressions
+    let metric = Metric {
+        id: None,
+        name: "multi_expr_test".to_string(),
+        connection_id: conn_id.clone(),
+        group: Some("multi_expr_group".to_string()),
+        location: Location {
+            file: test_py_path(),
+            line: 10,
+        },
+        expressions: vec![
+            "x.value".to_string(),
+            "y.count".to_string(),
+            "z.status".to_string(),
+        ],
+        language: SourceLanguage::Python,
+        mode: MetricMode::Stream,
+        enabled: true,
+        condition: None,
+        safety_level: SafetyLevel::Strict,
+        created_at: None,
+        capture_stack_trace: false,
+        stack_trace_ttl: None,
+        stack_trace_slice: None,
+        capture_memory_snapshot: false,
+        snapshot_scope: None,
+        snapshot_ttl: None,
+        anchor: None,
+        anchor_status: AnchorStatus::Unanchored,
+    };
+
+    let metric_id = fixture
+        .state
+        .context
+        .metric_service
+        .add_metric(metric, false)
+        .await
+        .expect("Should add multi-expression metric")
+        .value;
+
+    // Retrieve and verify all 3 expressions are stored
+    let retrieved = fixture
+        .state
+        .context
+        .metric_service
+        .get_metric_by_name("multi_expr_test")
+        .await
+        .unwrap()
+        .expect("Metric should exist");
+
+    assert_eq!(retrieved.id, Some(metric_id));
+    assert_eq!(retrieved.expressions.len(), 3);
+    assert_eq!(retrieved.expressions[0], "x.value");
+    assert_eq!(retrieved.expressions[1], "y.count");
+    assert_eq!(retrieved.expressions[2], "z.status");
+
+    // List metrics and verify expressions are preserved
+    let metrics = fixture
+        .state
+        .context
+        .metric_service
+        .list_metrics()
+        .await
+        .unwrap();
+
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0].expressions.len(), 3);
+}
+
+#[tokio::test]
 async fn test_e2e_multiple_metrics_in_group() {
     let fixture = McpE2eFixture::new().await;
     let conn_id = fixture.with_mock_connection().await;
@@ -462,7 +536,7 @@ async fn test_concurrent_tool_calls_no_deadlock() {
                     file: file_path,
                     line: 40 + i as u32, // Lines 40-49 have x0-x9 variables
                 },
-                expression: format!("x{}.value", i),
+                expressions: vec![format!("x{}.value", i)],
                 language: SourceLanguage::Python,
                 mode: MetricMode::Stream,
                 enabled: true,
@@ -594,10 +668,11 @@ async fn test_graceful_degradation_query_events_when_disconnected() {
         timestamp: MetricEvent::now_micros(),
         thread_name: None,
         thread_id: None,
-        value_json: r#"{"test": "value"}"#.to_string(),
-        value_numeric: None,
-        value_string: Some("test_value".to_string()),
-        value_boolean: None,
+        values: vec![ExpressionValue::with_text(
+            "",
+            r#"{"test": "value"}"#,
+            "test_value",
+        )],
         is_error: false,
         error_type: None,
         error_message: None,
@@ -618,7 +693,7 @@ async fn test_graceful_degradation_query_events_when_disconnected() {
         .unwrap();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].value_string, Some("test_value".to_string()));
+    assert_eq!(events[0].value_string(), Some("test_value"));
 }
 
 // ============================================================================
@@ -646,7 +721,7 @@ async fn test_e2e_observe_workflow_with_introspection() {
             file: test_py_path(),
             line: 30,
         },
-        expression: "transaction.amount".to_string(),
+        expressions: vec!["transaction.amount".to_string()],
         language: SourceLanguage::Python,
         mode: MetricMode::Stream,
         enabled: true,
@@ -708,7 +783,7 @@ async fn test_e2e_observe_workflow_connection_binding() {
             file: test_py_path(),
             line: 31,
         },
-        expression: "user.session".to_string(),
+        expressions: vec!["user.session".to_string()],
         language: SourceLanguage::Python,
         mode: MetricMode::Stream,
         enabled: true,
@@ -767,7 +842,7 @@ async fn test_e2e_observe_workflow_with_group() {
                 file: test_py_path(),
                 line,
             },
-            expression: "user.id".to_string(),
+            expressions: vec!["user.id".to_string()],
             language: SourceLanguage::Python,
             mode: MetricMode::Stream,
             enabled: true,

@@ -13,10 +13,12 @@
 //! - Python error detection (NameError, AttributeError, etc.)
 //! - JSON/type-aware value parsing
 
+#[cfg(test)]
+use crate::base::parse_value;
 use crate::{
     base::{
-        parse_logpoint_core, parse_value, BaseAdapter, NoThreadExtractor, OutputParser,
-        DETRICS_PREFIX,
+        create_metric_event_from_logpoint, parse_logpoint_core, BaseAdapter, NoThreadExtractor,
+        OutputParser, DETRICS_PREFIX,
     },
     error_detection::{parse_error_output_common, PYTHON_ERROR_PATTERNS},
     ext::DebugResult,
@@ -24,6 +26,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use detrix_config::AdapterConnectionConfig;
+#[cfg(test)]
+use detrix_core::TypedValue;
 use detrix_core::{
     CapturedStackTrace, CapturedVariable, MemorySnapshot, Metric, MetricEvent, SnapshotScope,
     StackFrame,
@@ -78,10 +82,19 @@ impl OutputParser for PythonOutputParser {
     ///
     /// Format: `DETRICS:name={expression}|ST:[...]|MS:{...}`
     fn build_logpoint_message(metric: &Metric) -> String {
-        let mut message = format!(
-            "{}{}={{{}}}",
-            DETRICS_PREFIX, metric.name, metric.expression
-        );
+        use crate::base::MULTI_EXPR_DELIMITER_STR;
+
+        let value_part = if metric.expressions.len() == 1 {
+            format!("{{{}}}", metric.expressions[0])
+        } else {
+            let blocks: Vec<String> = metric
+                .expressions
+                .iter()
+                .map(|e| format!("{{{}}}", e))
+                .collect();
+            blocks.join(MULTI_EXPR_DELIMITER_STR)
+        };
+        let mut message = format!("{}{}={}", DETRICS_PREFIX, metric.name, value_part);
 
         // Add stack trace capture if requested
         if metric.capture_stack_trace {
@@ -151,57 +164,33 @@ impl PythonOutputParser {
         // Use shared core parsing (Python doesn't extract thread info)
         let parse_result = parse_logpoint_core(text, &NoThreadExtractor)?;
 
-        // Find the metric
-        let metrics = active_metrics.read().await;
-        let metric = metrics
-            .values()
-            .find(|m| m.name == parse_result.metric_name)?;
-        let metric_id = metric.id?;
-        let metric_name = metric.name.clone();
-        let connection_id = metric.connection_id.clone();
-        let snapshot_scope = metric.snapshot_scope.unwrap_or_default();
-        drop(metrics);
+        // Look up snapshot_scope before creating the base event (need metric read lock)
+        let snapshot_scope = {
+            let metrics = active_metrics.read().await;
+            metrics
+                .values()
+                .find(|m| m.name == parse_result.metric_name)
+                .and_then(|m| m.snapshot_scope)
+                .unwrap_or_default()
+        };
 
-        // Parse value with type detection (using shared parser from base)
-        let (value_json, value_numeric, value_string, value_boolean) =
-            parse_value(&parse_result.value_str);
+        // Create base event using shared function (handles metric lookup, value zipping)
+        let mut event = create_metric_event_from_logpoint(&parse_result, active_metrics).await?;
 
-        // Parse introspection data from remaining sections (Python-specific)
+        // Parse Python-specific introspection data from remaining sections
         // The raw text after DETRICS: contains: "name=value|ST:[...]|MS:{...}"
         let content = text.trim_start_matches(DETRICS_PREFIX);
         let sections: Vec<&str> = content.split('|').collect();
 
-        let mut stack_trace = None;
-        let mut memory_snapshot = None;
-
         for section in sections.iter().skip(1) {
             if let Some(st_data) = section.strip_prefix("ST:") {
-                stack_trace = Self::parse_stack_trace_json(st_data);
+                event.stack_trace = Self::parse_stack_trace_json(st_data);
             } else if let Some(ms_data) = section.strip_prefix("MS:") {
-                memory_snapshot = Self::parse_memory_snapshot_json(ms_data, &snapshot_scope);
+                event.memory_snapshot = Self::parse_memory_snapshot_json(ms_data, &snapshot_scope);
             }
         }
 
-        Some(MetricEvent {
-            id: None,
-            metric_id,
-            metric_name,
-            connection_id,
-            timestamp: MetricEvent::now_micros(),
-            thread_name: None,
-            thread_id: None,
-            value_json,
-            value_numeric,
-            value_string,
-            value_boolean,
-            is_error: false,
-            error_type: None,
-            error_message: None,
-            request_id: None,
-            session_id: None,
-            stack_trace,
-            memory_snapshot,
-        })
+        Some(event)
     }
 
     /// Parse stack trace JSON from logpoint output.
@@ -352,7 +341,7 @@ mod tests {
                 file: file.to_string(),
                 line,
             },
-            expression: expression.to_string(),
+            expressions: vec![expression.to_string()],
             language: SourceLanguage::Python,
             enabled: true,
             mode: MetricMode::Stream,
@@ -422,7 +411,10 @@ mod tests {
             .expect("Should parse event");
 
         assert_eq!(event.metric_id, MetricId(1));
-        assert_eq!(event.value_string, Some("BTCUSD".to_string()));
+        assert_eq!(
+            event.value_string().map(|s| s.to_string()),
+            Some("BTCUSD".to_string())
+        );
     }
 
     #[tokio::test]
@@ -458,8 +450,8 @@ mod tests {
 
         assert_eq!(event.metric_id, MetricId(1));
         // JSON value should be stored in value_json
-        assert!(event.value_json.contains("symbol"));
-        assert!(event.value_json.contains("BTCUSD"));
+        assert!(event.value_json().contains("symbol"));
+        assert!(event.value_json().contains("BTCUSD"));
     }
 
     #[tokio::test]
@@ -600,39 +592,30 @@ mod tests {
 
     #[test]
     fn test_parse_value_numeric() {
-        let (json, numeric, string, boolean) = parse_value("42");
+        let (json, typed) = parse_value("42");
         assert_eq!(json, "42");
-        assert_eq!(numeric, Some(42.0));
-        assert!(string.is_none());
-        assert!(boolean.is_none());
+        assert_eq!(typed, Some(TypedValue::Numeric(42.0)));
     }
 
     #[test]
     fn test_parse_value_string() {
-        let (json, numeric, string, boolean) = parse_value("\"hello\"");
+        let (json, typed) = parse_value("\"hello\"");
         assert_eq!(json, "\"hello\"");
-        assert!(numeric.is_none());
-        assert_eq!(string, Some("hello".to_string()));
-        assert!(boolean.is_none());
+        assert_eq!(typed, Some(TypedValue::Text("hello".to_string())));
     }
 
     #[test]
     fn test_parse_value_boolean() {
-        let (json, numeric, string, boolean) = parse_value("true");
+        let (json, typed) = parse_value("true");
         assert_eq!(json, "true");
-        assert!(numeric.is_none());
-        assert!(string.is_none());
-        assert_eq!(boolean, Some(true));
+        assert_eq!(typed, Some(TypedValue::Boolean(true)));
     }
 
     #[test]
     fn test_parse_value_non_json() {
-        let (json, numeric, string, boolean) = parse_value("not json value");
+        let (json, typed) = parse_value("not json value");
         assert_eq!(json, "not json value");
-        // The shared parse_value also tries numeric parsing
-        assert!(numeric.is_none());
-        assert_eq!(string, Some("not json value".to_string()));
-        assert!(boolean.is_none());
+        assert_eq!(typed, Some(TypedValue::Text("not json value".to_string())));
     }
 
     // ========================================================================
@@ -795,7 +778,7 @@ mod tests {
             .await
             .expect("Should parse event with introspection");
 
-        assert_eq!(event.value_numeric, Some(42.0));
+        assert_eq!(event.value_numeric(), Some(42.0));
 
         // Verify stack trace was parsed
         assert!(event.stack_trace.is_some());
@@ -835,7 +818,7 @@ mod proptest_tests {
                 file: "test.py".to_string(),
                 line: 10,
             },
-            expression: "x".to_string(),
+            expressions: vec!["x".to_string()],
             language: SourceLanguage::Python,
             enabled: true,
             mode: MetricMode::Stream,
@@ -976,14 +959,14 @@ mod proptest_tests {
                 };
 
                 if let Some(event) = PythonOutputParser::parse_output(&body, &metrics).await {
-                    if event.value_numeric.is_none() {
+                    if event.value_numeric().is_none() {
                         return Err(TestCaseError::fail("Should detect numeric value"));
                     }
-                    if event.value_numeric.unwrap() as i64 != n {
+                    if event.value_numeric().unwrap() as i64 != n {
                         return Err(TestCaseError::fail(format!(
                             "Expected {}, got {}",
                             n,
-                            event.value_numeric.unwrap()
+                            event.value_numeric().unwrap()
                         )));
                     }
                 }
@@ -1020,11 +1003,11 @@ mod proptest_tests {
                 };
 
                 if let Some(event) = PythonOutputParser::parse_output(&body, &metrics).await {
-                    if event.value_boolean != Some(b) {
+                    if event.value_boolean() != Some(b) {
                         return Err(TestCaseError::fail(format!(
                             "Expected {:?}, got {:?}",
                             Some(b),
-                            event.value_boolean
+                            event.value_boolean()
                         )));
                     }
                 }
@@ -1039,13 +1022,13 @@ mod proptest_tests {
             let _ = parse_value(&s);
         }
 
-        /// parse_value: valid JSON numbers produce numeric field
+        /// parse_value: valid JSON numbers produce Numeric typed value
         #[test]
         fn proptest_parse_value_valid_numbers(n in -1e10f64..1e10f64) {
             // Use a bounded range to avoid floating point precision issues with very large numbers
             let s = format!("{}", n);
-            let (_, numeric, _, _) = parse_value(&s);
-            if let Some(parsed) = numeric {
+            let (_, typed) = parse_value(&s);
+            if let Some(TypedValue::Numeric(parsed)) = typed {
                 // Allow some floating point tolerance (relative for larger numbers)
                 let tolerance = (n.abs() * 1e-10).max(1e-10);
                 prop_assert!((parsed - n).abs() < tolerance, "Parsed {} but expected {}", parsed, n);

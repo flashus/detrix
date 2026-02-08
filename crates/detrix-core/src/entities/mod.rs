@@ -24,7 +24,7 @@ mod purity;
 
 // Re-export all public types for backwards compatibility
 pub use anchor::{AnchorStatus, MetricAnchor, RelocationResult};
-pub use event::{GroupInfo, MetricEvent};
+pub use event::{ExpressionValue, GroupInfo, MetricEvent, TypedValue};
 pub use language::{ParseLanguageError, ParseLanguageExt, ParseLanguageResultExt, SourceLanguage};
 pub use location::Location;
 pub use mcp_usage::{McpErrorCode, McpUsageEvent};
@@ -34,7 +34,8 @@ pub use memory::{
 };
 pub use metric::{
     Metric, MetricId, MetricMode, SafetyLevel, MAX_METRIC_NAME_LEN, MODE_FIRST, MODE_SAMPLE,
-    MODE_SAMPLE_INTERVAL, MODE_STREAM, MODE_THROTTLE, SAFETY_STRICT, SAFETY_TRUSTED,
+    MODE_SAMPLE_INTERVAL, MODE_STREAM, MODE_THROTTLE, MULTI_EXPR_DELIMITER,
+    MULTI_EXPR_DELIMITER_STR, SAFETY_STRICT, SAFETY_TRUSTED,
 };
 pub use purity::{ImpureCall, PurityAnalysis, PurityLevel};
 

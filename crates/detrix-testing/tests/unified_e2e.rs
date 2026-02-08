@@ -115,6 +115,9 @@ generate_tests_all_backends! {
         // Query events
         query_events => scenario_query_events,
 
+        // Multi-expression metric
+        multi_expr_metric => scenario_multi_expr_metric,
+
         // Full lifecycle
         full_metric_lifecycle => scenario_full_metric_lifecycle,
 
@@ -3484,9 +3487,15 @@ mod websocket_streaming_tests {
             Ok(events) => {
                 reporter.step_success(step, Some(&format!("{} events", events.len())));
                 for event in events.iter().take(3) {
+                    let values_display: Vec<String> = event
+                        .values
+                        .iter()
+                        .map(|v| format!("{}={}", v.expression, v.value_json))
+                        .collect();
                     reporter.info(&format!(
                         "  Event: {} = {}",
-                        event.metric_name, event.value_json
+                        event.metric_name,
+                        values_display.join(", ")
                     ));
                 }
             }

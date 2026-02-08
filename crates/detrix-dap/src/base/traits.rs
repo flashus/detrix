@@ -19,6 +19,9 @@ use tokio::sync::RwLock;
 /// Format: `DETRICS:metric_name=value` in output
 pub const DETRICS_PREFIX: &str = "DETRICS:";
 
+// Re-export delimiter constants from detrix-core (single source of truth)
+pub use detrix_core::{MULTI_EXPR_DELIMITER, MULTI_EXPR_DELIMITER_STR};
+
 // ============================================================================
 // OutputParser Trait - Language-specific customization point
 // ============================================================================
@@ -51,10 +54,24 @@ pub trait OutputParser: Send + Sync + 'static {
     /// - CodeLLDB: `DETRICS:name={expression}` (with LLDB expression syntax)
     fn build_logpoint_message(metric: &Metric) -> String {
         // Default implementation - works for debugpy and Delve
-        format!(
-            "{}{}={{{}}}",
-            DETRICS_PREFIX, metric.name, metric.expression
-        )
+        if metric.expressions.len() == 1 {
+            format!(
+                "{}{}={{{}}}",
+                DETRICS_PREFIX, metric.name, metric.expressions[0]
+            )
+        } else {
+            let blocks: Vec<String> = metric
+                .expressions
+                .iter()
+                .map(|e| format!("{{{}}}", e))
+                .collect();
+            format!(
+                "{}{}={}",
+                DETRICS_PREFIX,
+                metric.name,
+                blocks.join(MULTI_EXPR_DELIMITER_STR)
+            )
+        }
     }
 
     /// Whether this debugger requires explicit continue after connection.

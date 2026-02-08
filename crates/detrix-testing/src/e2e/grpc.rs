@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use detrix_api::generated::detrix::v1::{
-    connection_service_client::ConnectionServiceClient, metric_event, metric_mode::Mode,
+    connection_service_client::ConnectionServiceClient, metric_mode::Mode,
     metrics_service_client::MetricsServiceClient, streaming_service_client::StreamingServiceClient,
     AddMetricRequest as ProtoAddMetricRequest, CreateConnectionRequest, GetMcpUsageRequest,
     GetMetricRequest, GroupRequest, ListConnectionsRequest, ListMetricsRequest, Location,
@@ -123,12 +123,12 @@ impl GrpcClient {
 
                 match tokio::time::timeout(Duration::from_millis(100), stream.message()).await {
                     Ok(Ok(Some(event))) => {
-                        let (value, is_error) = match &event.result {
-                            Some(metric_event::Result::ValueJson(val)) => (val.clone(), false),
-                            Some(metric_event::Result::Error(err)) => {
-                                (err.error_message.clone(), true)
-                            }
-                            None => ("".to_string(), false),
+                        let (value, is_error) = if let Some(ref err) = event.error {
+                            (err.error_message.clone(), true)
+                        } else if let Some(first_val) = event.values.first() {
+                            (first_val.value_json.clone(), false)
+                        } else {
+                            ("".to_string(), false)
                         };
 
                         let timestamp_iso =
@@ -158,6 +158,7 @@ impl GrpcClient {
                             is_error,
                             stack_trace,
                             memory_snapshot,
+                            values: vec![],
                             extra: std::collections::HashMap::new(),
                         };
 
@@ -439,7 +440,7 @@ impl ApiClient for GrpcClient {
                 name: request.name,
                 group: request.group,
                 location: Some(Location { file, line }),
-                expression: request.expression,
+                expressions: request.expressions,
                 language: request.language.clone(), // Optional - will be derived from connection if None
                 enabled: request.enabled.unwrap_or(true), // Default to enabled if not specified
                 mode: Some(MetricMode {
@@ -536,7 +537,7 @@ impl ApiClient for GrpcClient {
         Ok(ApiResponse::new(MetricInfo {
             name: response.name,
             location,
-            expression: String::new(), // Not provided in MetricResponse
+            expressions: vec![], // Not provided in MetricResponse
             group: None,
             enabled: true, // Not directly provided
             mode: None,
@@ -569,7 +570,7 @@ impl ApiClient for GrpcClient {
                     .location
                     .map(|l| format!("@{}#{}", l.file, l.line))
                     .unwrap_or_default(),
-                expression: m.expression,
+                expressions: m.expressions,
                 group: m.group,
                 enabled: m.enabled,
                 mode: proto_mode_to_string(&m.mode),
@@ -615,15 +616,13 @@ impl ApiClient for GrpcClient {
             .events
             .into_iter()
             .map(|e| {
-                // Extract value from the MetricEvent result
-                let (value, is_error) = match &e.result {
-                    Some(detrix_api::generated::detrix::v1::metric_event::Result::ValueJson(v)) => {
-                        (v.clone(), false)
-                    }
-                    Some(detrix_api::generated::detrix::v1::metric_event::Result::Error(err)) => {
-                        (err.error_message.clone(), true)
-                    }
-                    None => (String::new(), false),
+                // Extract value from values vec or error
+                let (value, is_error) = if let Some(ref err) = e.error {
+                    (err.error_message.clone(), true)
+                } else if let Some(first_val) = e.values.first() {
+                    (first_val.value_json.clone(), false)
+                } else {
+                    (String::new(), false)
                 };
 
                 // Convert introspection data from proto
@@ -632,6 +631,18 @@ impl ApiClient for GrpcClient {
                     .memory_snapshot
                     .as_ref()
                     .map(proto_to_core_memory_snapshot);
+
+                // Convert proto ExpressionValue to JSON for EventInfo
+                let values: Vec<serde_json::Value> = e
+                    .values
+                    .iter()
+                    .map(|v| {
+                        serde_json::json!({
+                            "expression": v.expression,
+                            "valueJson": v.value_json,
+                        })
+                    })
+                    .collect();
 
                 EventInfo {
                     metric_name: e.metric_name,
@@ -643,6 +654,7 @@ impl ApiClient for GrpcClient {
                     is_error,
                     stack_trace,
                     memory_snapshot,
+                    values,
                     extra: std::collections::HashMap::new(),
                 }
             })

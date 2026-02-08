@@ -164,7 +164,13 @@ impl ClientProcessTester {
                 .open(&log_path)
                 .ok();
 
-            for line in reader.lines() {
+            // Use manual iteration so we can keep the Lines iterator alive
+            // after finding the control plane URL (prevents BrokenPipeError
+            // in the child process when the stdout pipe is dropped).
+            let mut lines_iter = reader.lines();
+            let mut found = false;
+
+            for line_result in lines_iter.by_ref() {
                 if start.elapsed() > timeout {
                     return Err(format!(
                         "{} client did not output control plane URL within timeout. Check log: {}",
@@ -173,7 +179,7 @@ impl ClientProcessTester {
                     ));
                 }
 
-                let line = line.map_err(|e| format!("Failed to read stdout: {}", e))?;
+                let line = line_result.map_err(|e| format!("Failed to read stdout: {}", e))?;
 
                 // Log the line
                 if let Some(ref mut f) = log_file {
@@ -188,6 +194,7 @@ impl ClientProcessTester {
                 {
                     if let Ok(port) = port_str.parse::<u16>() {
                         actual_control_port = port;
+                        found = true;
                         break;
                     }
                 }
@@ -201,6 +208,24 @@ impl ClientProcessTester {
                         log_path
                     ));
                 }
+            }
+
+            if found {
+                // Spawn a background thread to drain remaining stdout into the log file.
+                // This keeps the pipe open so the child process doesn't get BrokenPipeError.
+                let drain_log_path = log_path.clone();
+                std::thread::spawn(move || {
+                    let mut drain_log = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&drain_log_path)
+                        .ok();
+                    for line in lines_iter.map_while(Result::ok) {
+                        if let Some(ref mut f) = drain_log {
+                            use std::io::Write;
+                            let _ = writeln!(f, "{}", line);
+                        }
+                    }
+                });
             }
         }
 

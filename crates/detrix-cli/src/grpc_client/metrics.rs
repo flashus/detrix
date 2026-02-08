@@ -113,7 +113,7 @@ impl MetricsClient {
                 file: file.clone(),
                 line,
             }),
-            expression: params.expression,
+            expressions: params.expressions,
             language: Some(language), // Optional - can be derived from connection
             enabled: params.enabled,
             mode: Some(default_mode),
@@ -185,7 +185,7 @@ impl MetricsClient {
     pub async fn update_metric(
         &mut self,
         name: &str,
-        expression: Option<String>,
+        expressions: Vec<String>,
         enabled: Option<bool>,
     ) -> Result<MetricInfo> {
         // First get the metric to find its ID
@@ -193,7 +193,7 @@ impl MetricsClient {
 
         let request = UpdateMetricRequest {
             metric_id: metric.metric_id,
-            expression,
+            expressions,
             enabled,
             mode: None,
             condition: None,

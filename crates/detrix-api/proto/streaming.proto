@@ -43,6 +43,17 @@ message StreamAllRequest {
 // EVENT MESSAGE
 // ============================================================
 
+// A single expression's evaluated value
+message ExpressionValue {
+  string expression = 1;
+  string value_json = 2;
+  oneof typed_value {
+    double numeric_value = 3;
+    string string_value = 4;
+    bool bool_value = 5;
+  }
+}
+
 message MetricEvent {
   uint64 metric_id = 1;
   string metric_name = 2;
@@ -57,11 +68,9 @@ message MetricEvent {
   optional string request_id = 7;
   optional string session_id = 8;  // For grouping related events
 
-  // Result
-  oneof result {
-    string value_json = 9;
-    ErrorResult error = 10;
-  }
+  // Result: multiple expression values or error
+  repeated ExpressionValue values = 9;
+  optional ErrorResult error = 10;
 
   // Connection that produced this event
   string connection_id = 11;

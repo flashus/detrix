@@ -33,7 +33,10 @@ pub fn build_source_breakpoint(
 ) -> SourceBreakpoint {
     let needs_introspection = metric.capture_stack_trace || metric.capture_memory_snapshot;
     let is_go_function_call = metric.language == SourceLanguage::Go
-        && expression_contains_function_call(&metric.expression);
+        && metric
+            .expressions
+            .iter()
+            .any(|e| expression_contains_function_call(e));
 
     let use_breakpoint =
         (needs_introspection && !supports_logpoint_introspection) || is_go_function_call;
@@ -311,50 +314,5 @@ pub trait MetricManager: Send + Sync {
         }
 
         Ok(RemoveMetricResult::new(confirmed, message))
-    }
-
-    /// Clear all metrics (remove all logpoints).
-    #[allow(dead_code)]
-    async fn clear_metrics(&self) -> Result<()> {
-        let lang = Self::language_name();
-
-        // Collect unique file paths under lock, then drop immediately
-        let files: Vec<String> = {
-            let active_metrics = self.active_metrics().read().await;
-            active_metrics
-                .values()
-                .map(|m| m.location.file.clone())
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect()
-        };
-
-        let broker = self.adapter().broker().await?;
-
-        // Clear breakpoints for each file (lock is not held during I/O)
-        for file in files {
-            let abs_path = self.resolve_path(&file);
-
-            let source = Source {
-                path: Some(abs_path.to_string_lossy().to_string()),
-                name: Some(file.clone()),
-                source_reference: None,
-            };
-
-            let args = SetBreakpointsArguments {
-                source,
-                breakpoints: Some(vec![]), // Empty = clear all
-                source_modified: Some(false),
-            };
-
-            broker
-                .send_request(requests::SET_BREAKPOINTS, Some(serde_json::to_value(args)?))
-                .await?;
-        }
-
-        self.active_metrics().write().await.clear();
-
-        info!("[{}] All metrics cleared", lang);
-        Ok(())
     }
 }

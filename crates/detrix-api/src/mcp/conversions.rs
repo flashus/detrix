@@ -6,12 +6,24 @@
 use chrono::{TimeZone, Utc};
 use detrix_application::services::file_inspection_types::SourceLanguageExt;
 use detrix_core::system_event::{SystemEvent, SystemEventType};
-use detrix_core::{CapturedStackTrace, MemorySnapshot, Metric, MetricEvent};
+use detrix_core::{CapturedStackTrace, ExpressionValue, MemorySnapshot, Metric, MetricEvent};
 use rmcp::model::*;
 use serde::Serialize;
 
 // Most conversions are handled inline in server.rs using existing gRPC converters
 // This module is reserved for MCP-specific conversion needs
+
+/// Format a microsecond timestamp into an ISO 8601 string and compute age in seconds.
+fn format_timestamp_us(timestamp_us: i64) -> (String, i64) {
+    let now_us = Utc::now().timestamp_micros();
+    let age_seconds = (now_us - timestamp_us) / 1_000_000;
+    let iso = match Utc.timestamp_micros(timestamp_us) {
+        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+        chrono::LocalResult::Ambiguous(dt, _) => dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+        chrono::LocalResult::None => "invalid timestamp".to_string(),
+    };
+    (iso, age_seconds)
+}
 
 /// Convert a metric to MCP Content for display
 pub fn metric_to_content(metric: &Metric) -> Vec<Content> {
@@ -54,29 +66,20 @@ pub struct MetricEventDisplay {
     /// Captured memory snapshot (if introspection enabled)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_snapshot: Option<MemorySnapshot>,
+    /// Per-expression values (for multi-expression metrics)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<ExpressionValue>,
 }
 
 impl From<&MetricEvent> for MetricEventDisplay {
     fn from(event: &MetricEvent) -> Self {
-        let now_us = Utc::now().timestamp_micros();
-        let age_us = now_us - event.timestamp;
-        let age_seconds = age_us / 1_000_000;
-
-        // Convert microseconds to ISO 8601
-        // timestamp_micros returns LocalResult which can be Single or Ambiguous
-        let timestamp_iso = match Utc.timestamp_micros(event.timestamp) {
-            chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
-            chrono::LocalResult::Ambiguous(dt, _) => {
-                dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
-            }
-            chrono::LocalResult::None => "invalid timestamp".to_string(),
-        };
+        let (timestamp_iso, age_seconds) = format_timestamp_us(event.timestamp);
 
         // Use value_string if available, otherwise value_json
         let value = event
-            .value_string
-            .clone()
-            .unwrap_or_else(|| event.value_json.clone());
+            .value_string()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| event.value_json().to_string());
 
         MetricEventDisplay {
             id: event.id,
@@ -90,6 +93,7 @@ impl From<&MetricEvent> for MetricEventDisplay {
             timestamp_us: event.timestamp,
             stack_trace: event.stack_trace.clone(),
             memory_snapshot: event.memory_snapshot.clone(),
+            values: event.values.clone(),
         }
     }
 }
@@ -306,18 +310,7 @@ pub struct SystemEventDisplay {
 
 impl From<&SystemEvent> for SystemEventDisplay {
     fn from(event: &SystemEvent) -> Self {
-        let now_us = Utc::now().timestamp_micros();
-        let age_us = now_us - event.timestamp;
-        let age_seconds = age_us / 1_000_000;
-
-        // Convert microseconds to ISO 8601
-        let timestamp_iso = match Utc.timestamp_micros(event.timestamp) {
-            chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
-            chrono::LocalResult::Ambiguous(dt, _) => {
-                dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
-            }
-            chrono::LocalResult::None => "invalid timestamp".to_string(),
-        };
+        let (timestamp_iso, age_seconds) = format_timestamp_us(event.timestamp);
 
         // Parse details JSON if present
         let details = event

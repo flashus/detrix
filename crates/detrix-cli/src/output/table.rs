@@ -49,10 +49,11 @@ pub fn print_metrics(metrics: &[MetricInfo], no_color: bool) {
         let group = m.group.as_deref().unwrap_or("-");
         let hits = m.hit_count.to_string();
 
+        let expression_display = m.expressions.join(", ");
         table.add_row(vec![
             &m.name,
             &location,
-            &m.expression,
+            &expression_display,
             group,
             enabled,
             &hits,
@@ -76,9 +77,16 @@ pub fn print_metrics_toon(metrics: &[MetricInfo]) {
             .as_ref()
             .map(|g| format!(" [{}]", g))
             .unwrap_or_default();
+        let expression_display = m.expressions.join(", ");
         println!(
             "  {} @ {}:{} → {} ({}, {} hits){}",
-            m.name, m.location_file, m.location_line, m.expression, status, m.hit_count, group
+            m.name,
+            m.location_file,
+            m.location_line,
+            expression_display,
+            status,
+            m.hit_count,
+            group
         );
     }
 }
@@ -89,7 +97,7 @@ pub fn print_metric_detail(metric: &MetricInfo, _no_color: bool) {
         "Location:   {}:{}",
         metric.location_file, metric.location_line
     );
-    println!("Expression: {}", metric.expression);
+    println!("Expression: {}", metric.expressions.join(", "));
     println!("Language:   {}", metric.language);
     println!("Enabled:    {}", if metric.enabled { "yes" } else { "no" });
     println!("Mode:       {}", metric.mode);
@@ -177,7 +185,7 @@ pub fn print_events(events: &[EventInfo], no_color: bool) {
 
     for e in events {
         let timestamp = format_timestamp_full(e.timestamp);
-        let value = e.value_json.as_deref().unwrap_or("-");
+        let value = e.value_json().unwrap_or("-");
 
         // Store thread string in a variable to extend its lifetime (avoids .leak())
         let thread_id_str: String;
@@ -207,7 +215,7 @@ pub fn print_events_toon(events: &[EventInfo]) {
     println!("Events ({}):", events.len());
     for e in events {
         let timestamp = format_timestamp_full(e.timestamp);
-        let value = e.value_json.as_deref().unwrap_or("null");
+        let value = e.value_json().unwrap_or("null");
         println!("  [{}] {} = {}", timestamp, e.metric_name, value);
     }
 }

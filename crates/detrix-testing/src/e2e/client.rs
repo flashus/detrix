@@ -54,7 +54,7 @@ pub struct ConnectionInfo {
 pub struct MetricInfo {
     pub name: String,
     pub location: String,
-    pub expression: String,
+    pub expressions: Vec<String>,
     pub group: Option<String>,
     pub enabled: bool,
     pub mode: Option<String>,
@@ -79,6 +79,9 @@ pub struct EventInfo {
     /// Captured memory snapshot (if introspection enabled)
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub memory_snapshot: Option<detrix_core::MemorySnapshot>,
+    /// Multi-expression values (each entry corresponds to an expression)
+    #[serde(default)]
+    pub values: Vec<serde_json::Value>,
     /// Additional fields from MetricEventDisplay (ignored for our purposes)
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
@@ -219,7 +222,7 @@ impl SystemEventInfo {
 pub struct AddMetricRequest {
     pub name: String,
     pub location: String,
-    pub expression: String,
+    pub expressions: Vec<String>,
     /// Connection ID is REQUIRED - enforces explicit metric→connection relationship
     pub connection_id: String,
     /// Language for the metric (e.g., "python", "go", "rust"). Defaults to "python" if not specified.
@@ -250,7 +253,7 @@ impl AddMetricRequest {
         Self {
             name: name.to_string(),
             location: location.to_string(),
-            expression: expression.to_string(),
+            expressions: vec![expression.to_string()],
             connection_id: connection_id.to_string(),
             language: None,
             group: None,
@@ -307,6 +310,36 @@ impl AddMetricRequest {
         group: &str,
     ) -> Self {
         Self::new(name, location, expression, connection_id).with_group(group)
+    }
+
+    /// Create a new add metric request with multiple expressions
+    pub fn new_multi(
+        name: &str,
+        location: &str,
+        expressions: Vec<String>,
+        connection_id: &str,
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            location: location.to_string(),
+            expressions,
+            connection_id: connection_id.to_string(),
+            language: None,
+            group: None,
+            mode: None,
+            enabled: None,
+            sample_rate: None,
+            sample_interval_seconds: None,
+            max_per_second: None,
+            capture_stack_trace: None,
+            stack_trace_ttl: None,
+            stack_trace_full: None,
+            stack_trace_head: None,
+            stack_trace_tail: None,
+            capture_memory_snapshot: None,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+        }
     }
 
     /// Enable stack trace capture
@@ -379,8 +412,8 @@ impl AddMetricRequest {
 pub struct ObserveRequest {
     /// File path to observe (relative or absolute)
     pub file: String,
-    /// Expression to capture (e.g., "user.balance", "len(items)")
-    pub expression: String,
+    /// Expressions to capture (e.g., ["user.balance", "len(items)"])
+    pub expressions: Vec<String>,
     /// Line number (optional - auto-finds if not specified)
     pub line: Option<u32>,
     /// Connection ID (optional - auto-selects if only one connection exists)
@@ -404,7 +437,7 @@ impl ObserveRequest {
     pub fn new(file: &str, expression: &str) -> Self {
         Self {
             file: file.to_string(),
-            expression: expression.to_string(),
+            expressions: vec![expression.to_string()],
             line: None,
             connection_id: None,
             name: None,

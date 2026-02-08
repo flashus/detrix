@@ -180,7 +180,7 @@ pub async fn toggle_metric_impl(
 pub struct GetMetricResult {
     pub name: String,
     pub location: String,
-    pub expression: String,
+    pub expressions: Vec<String>,
     pub group: Option<String>,
     pub enabled: bool,
     pub connection_id: String,
@@ -203,7 +203,7 @@ impl GetMetricResult {
         serde_json::json!({
             "name": self.name,
             "location": self.location,
-            "expression": self.expression,
+            "expressions": self.expressions,
             "group": self.group,
             "enabled": self.enabled,
             "connection_id": self.connection_id,
@@ -228,7 +228,7 @@ pub async fn get_metric_impl(
     Ok(GetMetricResult {
         name: metric.name.clone(),
         location: metric.location.to_string_format(),
-        expression: metric.expression.clone(),
+        expressions: metric.expressions.clone(),
         group: metric.group.clone(),
         enabled: metric.enabled,
         connection_id: metric.connection_id.0.clone(),
@@ -267,8 +267,8 @@ pub async fn update_metric_impl(
         .mcp_ok_or(&format!("Metric '{}' not found", params.name))?;
 
     // Apply updates
-    if let Some(expression) = params.expression {
-        metric.expression = expression;
+    if let Some(expressions) = params.expressions {
+        metric.expressions = expressions;
     }
     if let Some(group) = params.group {
         metric.group = Some(group);

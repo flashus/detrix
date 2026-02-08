@@ -99,7 +99,7 @@ async fn test_add_metric_success() {
         name: "test_metric".to_string(),
         location: format!("@{}#127", auth_py_path()),
         line: None,
-        expression: "user.id".to_string(),
+        expressions: vec!["user.id".to_string()],
         connection_id: conn_id.to_string(),
         group: Some("auth".to_string()),
         enabled: true,
@@ -130,6 +130,62 @@ async fn test_add_metric_success() {
 }
 
 #[tokio::test]
+async fn test_add_metric_multi_expressions() {
+    let fixture = TestFixture::new().await;
+    let conn_id = fixture.with_mock_connection().await;
+
+    let params = AddMetricParams {
+        name: "multi_expr_metric".to_string(),
+        location: format!("@{}#10", test_py_path()),
+        line: None,
+        expressions: vec![
+            "user.id".to_string(),
+            "user.name".to_string(),
+            "user.email".to_string(),
+        ],
+        connection_id: conn_id.to_string(),
+        group: Some("multi_test".to_string()),
+        enabled: true,
+        mode: None,
+        sample_rate: None,
+        sample_interval_seconds: None,
+        max_per_second: None,
+        capture_stack_trace: None,
+        stack_trace_ttl: None,
+        stack_trace_full: None,
+        stack_trace_head: None,
+        stack_trace_tail: None,
+        capture_memory_snapshot: None,
+        snapshot_scope: None,
+        snapshot_ttl: None,
+        replace: None,
+    };
+
+    let result = fixture.server.add_metric(Parameters(params)).await;
+    assert!(
+        result.is_ok(),
+        "add_metric with multiple expressions should succeed: {:?}",
+        result.err()
+    );
+
+    // Verify the metric was stored with all 3 expressions
+    let metrics = fixture
+        .state
+        .context
+        .metric_service
+        .list_metrics()
+        .await
+        .unwrap();
+
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0].name, "multi_expr_metric");
+    assert_eq!(metrics[0].expressions.len(), 3);
+    assert_eq!(metrics[0].expressions[0], "user.id");
+    assert_eq!(metrics[0].expressions[1], "user.name");
+    assert_eq!(metrics[0].expressions[2], "user.email");
+}
+
+#[tokio::test]
 async fn test_add_metric_location_without_at_works() {
     // @ prefix is now optional - both formats should work
     let fixture = TestFixture::new().await;
@@ -139,7 +195,7 @@ async fn test_add_metric_location_without_at_works() {
         name: "no_at_metric".to_string(),
         location: format!("{}#127", auth_py_path()), // No @ prefix - should work now
         line: None,
-        expression: "user.id".to_string(),
+        expressions: vec!["user.id".to_string()],
         connection_id: conn_id.to_string(),
         group: None,
         enabled: true,
@@ -174,7 +230,7 @@ async fn test_add_metric_invalid_location_no_line() {
         name: "bad_metric".to_string(),
         location: "@auth.py".to_string(), // Missing :line and no line parameter
         line: None,
-        expression: "user.id".to_string(),
+        expressions: vec!["user.id".to_string()],
         connection_id: "test-conn".to_string(), // Placeholder, validation fails before connection check
         group: None,
         enabled: true,
@@ -214,7 +270,7 @@ async fn test_add_metric_with_separate_line_param() {
         name: "separate_line_metric".to_string(),
         location: auth_py_path(), // Just file, no :line
         line: Some(127),          // Line provided separately
-        expression: "user.id".to_string(),
+        expressions: vec!["user.id".to_string()],
         connection_id: conn_id.to_string(),
         group: None,
         enabled: true,
@@ -249,7 +305,7 @@ async fn test_add_metric_invalid_line_number() {
         name: "bad_metric".to_string(),
         location: "@auth.py#abc".to_string(), // Invalid line number (non-numeric)
         line: None,
-        expression: "user.id".to_string(),
+        expressions: vec!["user.id".to_string()],
         connection_id: "test-conn".to_string(), // Placeholder, validation fails before connection check
         group: None,
         enabled: true,
@@ -293,7 +349,7 @@ async fn test_mode_string_stream() {
         name: "stream_metric".to_string(),
         location: format!("@{}#30", test_py_path()),
         line: None,
-        expression: "x.value".to_string(), // Use complex expression to skip scope validation
+        expressions: vec!["x.value".to_string()], // Use complex expression to skip scope validation
         connection_id: conn_id.to_string(),
         group: None,
         enabled: true,
@@ -325,7 +381,7 @@ async fn test_mode_string_sample() {
         name: "sample_metric".to_string(),
         location: format!("@{}#30", test_py_path()),
         line: None,
-        expression: "x.value".to_string(), // Use complex expression to skip scope validation
+        expressions: vec!["x.value".to_string()], // Use complex expression to skip scope validation
         connection_id: conn_id.to_string(),
         group: None,
         enabled: true,
@@ -357,7 +413,7 @@ async fn test_mode_string_first() {
         name: "first_metric".to_string(),
         location: format!("@{}#30", test_py_path()),
         line: None,
-        expression: "x.value".to_string(), // Use complex expression to skip scope validation
+        expressions: vec!["x.value".to_string()], // Use complex expression to skip scope validation
         connection_id: conn_id.to_string(),
         group: None,
         enabled: true,
@@ -389,7 +445,7 @@ async fn test_mode_string_throttle() {
         name: "throttle_metric".to_string(),
         location: format!("@{}#30", test_py_path()),
         line: None,
-        expression: "x.value".to_string(), // Use complex expression to skip scope validation
+        expressions: vec!["x.value".to_string()], // Use complex expression to skip scope validation
         connection_id: conn_id.to_string(),
         group: None,
         enabled: true,
@@ -421,7 +477,7 @@ async fn test_snapshot_scope_local() {
         name: "local_snapshot".to_string(),
         location: format!("@{}#30", test_py_path()),
         line: None,
-        expression: "x.value".to_string(), // Use complex expression to skip scope validation
+        expressions: vec!["x.value".to_string()], // Use complex expression to skip scope validation
         connection_id: conn_id.to_string(),
         group: None,
         enabled: true,
@@ -453,7 +509,7 @@ async fn test_snapshot_scope_global() {
         name: "global_snapshot".to_string(),
         location: format!("@{}#30", test_py_path()),
         line: None,
-        expression: "x.value".to_string(), // Use complex expression to skip scope validation
+        expressions: vec!["x.value".to_string()], // Use complex expression to skip scope validation
         connection_id: conn_id.to_string(),
         group: None,
         enabled: true,
@@ -485,7 +541,7 @@ async fn test_snapshot_scope_both() {
         name: "both_snapshot".to_string(),
         location: format!("@{}#30", test_py_path()),
         line: None,
-        expression: "x.value".to_string(), // Use complex expression to skip scope validation
+        expressions: vec!["x.value".to_string()], // Use complex expression to skip scope validation
         connection_id: conn_id.to_string(),
         group: None,
         enabled: true,
@@ -517,7 +573,7 @@ async fn test_stack_trace_options() {
         name: "stack_trace_metric".to_string(),
         location: format!("@{}#30", test_py_path()),
         line: None,
-        expression: "x.value".to_string(), // Use complex expression to skip scope validation
+        expressions: vec!["x.value".to_string()], // Use complex expression to skip scope validation
         connection_id: conn_id.to_string(),
         group: None,
         enabled: true,
@@ -640,7 +696,7 @@ async fn test_observe_with_explicit_line() {
 
     let params = ObserveParams {
         file: auth_py_path(),
-        expression: "user.id".to_string(),
+        expressions: vec!["user.id".to_string()],
         line: Some(127), // Explicit line
         connection_id: Some(conn_id.to_string()),
         name: Some("observe_test".to_string()),
@@ -670,7 +726,7 @@ async fn test_observe_auto_connection_selection() {
 
     let params = ObserveParams {
         file: auth_py_path(),
-        expression: "user.id".to_string(),
+        expressions: vec!["user.id".to_string()],
         line: Some(127),
         connection_id: None, // Not specified - should auto-select
         name: Some("auto_conn_test".to_string()),
@@ -696,7 +752,7 @@ async fn test_observe_no_connection_error() {
 
     let params = ObserveParams {
         file: auth_py_path(),
-        expression: "user.id".to_string(),
+        expressions: vec!["user.id".to_string()],
         line: Some(127),
         connection_id: None,
         name: Some("no_conn_test".to_string()),
@@ -725,7 +781,7 @@ async fn test_observe_with_introspection() {
 
     let params = ObserveParams {
         file: auth_py_path(),
-        expression: "user.id".to_string(),
+        expressions: vec!["user.id".to_string()],
         line: Some(127),
         connection_id: Some(conn_id.to_string()),
         name: Some("introspect_test".to_string()),
@@ -751,7 +807,7 @@ async fn test_observe_generates_metric_name() {
 
     let params = ObserveParams {
         file: auth_py_path(),
-        expression: "user.id".to_string(),
+        expressions: vec!["user.id".to_string()],
         line: Some(127),
         connection_id: Some(conn_id.to_string()),
         name: None, // No name - should be auto-generated
@@ -876,7 +932,7 @@ diff --git a/{file} b/{file}
         .await
         .unwrap();
     assert_eq!(metrics.len(), 1);
-    assert_eq!(metrics[0].expression, "user.id");
+    assert_eq!(metrics[0].expression(), "user.id");
     assert_eq!(metrics[0].group, Some("test_group".to_string()));
 }
 
@@ -952,7 +1008,7 @@ diff --git a/{file} b/{file}
         .unwrap();
     assert_eq!(metrics.len(), 2);
 
-    let expressions: Vec<&str> = metrics.iter().map(|m| m.expression.as_str()).collect();
+    let expressions: Vec<&str> = metrics.iter().map(|m| m.expression()).collect();
     assert!(
         expressions.contains(&"user.name"),
         "Expected 'user.name' expression"

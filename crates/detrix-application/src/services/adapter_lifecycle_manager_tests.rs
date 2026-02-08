@@ -420,6 +420,7 @@ impl MetricRepository for MockMetricRepository {
 // =============================================================================
 
 fn create_test_event(metric_id: u64, value: &str) -> MetricEvent {
+    use detrix_core::ExpressionValue;
     MetricEvent {
         id: None,
         metric_id: MetricId(metric_id),
@@ -428,10 +429,11 @@ fn create_test_event(metric_id: u64, value: &str) -> MetricEvent {
         timestamp: chrono::Utc::now().timestamp_micros(),
         thread_name: None,
         thread_id: None,
-        value_json: format!("{{\"value\": \"{}\"}}", value),
-        value_numeric: None,
-        value_string: Some(value.to_string()),
-        value_boolean: None,
+        values: vec![ExpressionValue::with_text(
+            "",
+            format!("{{\"value\": \"{}\"}}", value),
+            value,
+        )],
         is_error: false,
         error_type: None,
         error_message: None,
@@ -1163,6 +1165,7 @@ mod proptest_batching {
 
     /// Strategy for generating valid metric events
     fn arb_metric_event() -> impl Strategy<Value = MetricEvent> {
+        use detrix_core::ExpressionValue;
         (
             1..1000u64,      // metric_id
             "[a-z]{1,20}",   // metric_name suffix
@@ -1183,10 +1186,7 @@ mod proptest_batching {
                 timestamp: 1_700_000_000_000_000 + ts_offset,
                 thread_name: None,
                 thread_id: None,
-                value_json: value.clone(),
-                value_numeric: None,
-                value_string: Some(value),
-                value_boolean: None,
+                values: vec![ExpressionValue::with_text("", value.clone(), value)],
                 is_error: false,
                 error_type: None,
                 error_message: None,
@@ -1525,7 +1525,7 @@ mod proptest_batching {
                 // Store original values for comparison
                 let original_values: Vec<String> = events
                     .iter()
-                    .map(|e| e.value_json.clone())
+                    .map(|e| e.value_json().to_string())
                     .collect();
 
                 // Add and flush
@@ -1539,8 +1539,8 @@ mod proptest_batching {
                 let persisted = event_repo.get_events().await;
                 for (i, (original, persisted)) in original_values.iter().zip(persisted.iter()).enumerate() {
                     prop_assert_eq!(
-                        original,
-                        &persisted.value_json,
+                        original.as_str(),
+                        persisted.value_json(),
                         "Event {} value should be preserved exactly",
                         i
                     );

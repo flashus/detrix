@@ -262,8 +262,8 @@ mod tests {
         assert!(result.is_some());
         let event = result.unwrap();
         assert_eq!(event.metric_name, "test_metric");
-        assert_eq!(event.value_json, "42");
-        assert_eq!(event.value_numeric, Some(42.0));
+        assert_eq!(event.value_json(), "42");
+        assert_eq!(event.value_numeric(), Some(42.0));
         assert_eq!(event.thread_id, Some(1));
         assert_eq!(event.thread_name, Some("goroutine-1".to_string()));
     }
@@ -291,7 +291,7 @@ mod tests {
         assert!(result.is_some());
         let event = result.unwrap();
         assert_eq!(event.metric_name, "test_metric");
-        assert_eq!(event.value_json, "42");
+        assert_eq!(event.value_json(), "42");
         // No goroutine ID in direct format
         assert_eq!(event.thread_id, None);
         assert_eq!(event.thread_name, None);

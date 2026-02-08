@@ -52,18 +52,16 @@ impl StreamingClient {
         Ok(response
             .events
             .into_iter()
-            .map(|e| EventInfo {
-                metric_id: e.metric_id,
-                metric_name: e.metric_name,
-                timestamp: e.timestamp,
-                value_json: match e.result {
-                    Some(detrix_api::generated::detrix::v1::metric_event::Result::ValueJson(v)) => {
-                        Some(v)
-                    }
-                    _ => None,
-                },
-                thread_name: e.thread_name,
-                thread_id: e.thread_id,
+            .map(|e| {
+                let values_json = e.values.into_iter().map(|v| v.value_json).collect();
+                EventInfo {
+                    metric_id: e.metric_id,
+                    metric_name: e.metric_name,
+                    timestamp: e.timestamp,
+                    values_json,
+                    thread_name: e.thread_name,
+                    thread_id: e.thread_id,
+                }
             })
             .collect())
     }

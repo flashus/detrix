@@ -418,10 +418,11 @@ mod tests {
             timestamp: 1733590800_123456,
             thread_name: Some("MainThread".to_string()),
             thread_id: Some(12345),
-            value_json: r#"{"value": 42}"#.to_string(),
-            value_numeric: Some(42.0),
-            value_string: None,
-            value_boolean: None,
+            values: vec![detrix_core::ExpressionValue::with_numeric(
+                "test",
+                r#"{"value": 42}"#,
+                42.0,
+            )],
             is_error,
             error_type: if is_error {
                 Some("TestError".to_string())

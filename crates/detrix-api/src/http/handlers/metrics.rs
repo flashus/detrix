@@ -60,7 +60,7 @@ pub struct CreateMetricRequest {
     pub connection_id: String,
     pub group: Option<String>,
     pub location: Location,
-    pub expression: String,
+    pub expressions: Vec<String>,
     /// Language/adapter type. DEPRECATED: Now derived from connection.
     /// This field is ignored - language is always taken from the connection configuration.
     #[serde(default)]

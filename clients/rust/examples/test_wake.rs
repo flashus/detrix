@@ -314,6 +314,31 @@ fn run(daemon_url: &str, fixture_dir: &PathBuf) -> i32 {
     );
     print_metric_result("quantity (with stack trace)", line_println, &metric3);
 
+    // Metric 4: Multi-expression - capture symbol, quantity, price in one metric
+    // All three are assigned by line 111, observe at line 114 (place_order call)
+    let line_multi = MAIN_LINE + OFFSET_ORDER_ID;
+    let metric4 = add_multi_expr_metric(
+        &client,
+        daemon_url,
+        connection_id,
+        &fixture_path,
+        line_multi,
+        &["symbol", "quantity", "price"],
+        "order_details",
+    );
+    if let Some(ref resp) = metric4 {
+        let id = resp.get("metricId").and_then(|v| v.as_i64()).unwrap_or(0);
+        println!(
+            "   Metric 4 (order_details @ line {}): ID={} [MULTI-EXPRESSION: symbol, quantity, price]",
+            line_multi, id
+        );
+    } else {
+        println!(
+            "   WARNING: Failed to add metric 4 (multi-expression) @ line {}",
+            line_multi
+        );
+    }
+
     println!();
 
     // Step 7: Wait and collect events
@@ -322,6 +347,12 @@ fn run(daemon_url: &str, fixture_dir: &PathBuf) -> i32 {
 
     let mut events_received = 0;
     let mut seen_events: HashSet<String> = HashSet::new();
+
+    let metric4_id = metric4
+        .as_ref()
+        .and_then(|m| m.get("metricId"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
 
     let metric_ids: Vec<(i64, &str)> = vec![
         (
@@ -371,8 +402,10 @@ fn run(daemon_url: &str, fixture_dir: &PathBuf) -> i32 {
                     events_received += 1;
 
                     let value = event
-                        .get("result")
-                        .and_then(|r| r.get("valueJson"))
+                        .get("values")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|v| v.get("valueJson"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("null");
                     let time_str = format_timestamp(ts);
@@ -408,6 +441,42 @@ fn run(daemon_url: &str, fixture_dir: &PathBuf) -> i32 {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Check for multi-expression events (metric 4)
+        if metric4_id > 0 {
+            if let Some(events) =
+                get_events(&client, daemon_url, metric4_id, 10, Some(test_start_time))
+            {
+                for event in events.as_array().unwrap_or(&vec![]) {
+                    let ts = event.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let event_key = format!("{}-{}", metric4_id, ts);
+                    if seen_events.contains(&event_key) {
+                        continue;
+                    }
+                    seen_events.insert(event_key);
+                    events_received += 1;
+
+                    // Multi-expression: values is an array of {expression, valueJson, ...}
+                    let time_str = format_timestamp(ts);
+                    if let Some(values) = event.get("values").and_then(|v| v.as_array()) {
+                        let parts: Vec<String> = values
+                            .iter()
+                            .map(|v| {
+                                let expr =
+                                    v.get("expression").and_then(|e| e.as_str()).unwrap_or("?");
+                                let vj = v.get("valueJson").and_then(|e| e.as_str()).unwrap_or("?");
+                                format!("{}={}", expr, vj)
+                            })
+                            .collect();
+                        println!(
+                            "   [EVENT] order_details: {} ({})",
+                            parts.join(", "),
+                            time_str
+                        );
                     }
                 }
             }
@@ -543,7 +612,7 @@ fn add_metric(
             "file": file_path,
             "line": line,
         },
-        "expression": expression,
+        "expressions": [expression],
         "language": "rust",
         "enabled": true,
     });
@@ -552,6 +621,37 @@ fn add_metric(
         Ok(resp) => Some(resp),
         Err(e) => {
             println!("   Error adding metric: {}", e);
+            None
+        }
+    }
+}
+
+fn add_multi_expr_metric(
+    client: &Client,
+    daemon_url: &str,
+    connection_id: &str,
+    file_path: &str,
+    line: i32,
+    expressions: &[&str],
+    name: &str,
+) -> Option<Value> {
+    let url = format!("{}/api/v1/metrics", daemon_url);
+    let body = json!({
+        "name": name,
+        "connectionId": connection_id,
+        "location": {
+            "file": file_path,
+            "line": line,
+        },
+        "expressions": expressions,
+        "language": "rust",
+        "enabled": true,
+    });
+
+    match api_post(client, &url, body) {
+        Ok(resp) => Some(resp),
+        Err(e) => {
+            println!("   Error adding multi-expression metric: {}", e);
             None
         }
     }
@@ -574,7 +674,7 @@ fn add_metric_with_introspection(
             "file": file_path,
             "line": line,
         },
-        "expression": expression,
+        "expressions": [expression],
         "language": "rust",
         "enabled": true,
         "captureStackTrace": true,

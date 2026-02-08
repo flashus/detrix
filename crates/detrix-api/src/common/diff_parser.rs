@@ -57,15 +57,19 @@ impl DiffParseResult {
 }
 
 // Regex to parse hunk headers: @@ -start,count +start,count @@
-static HUNK_HEADER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@").unwrap());
+static HUNK_HEADER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@")
+        .expect("Static regex pattern is valid")
+});
 
 // Regex to parse diff file header: diff --git a/path b/path
-static DIFF_HEADER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^diff --git a/(.+) b/(.+)$").unwrap());
+static DIFF_HEADER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^diff --git a/(.+) b/(.+)$").expect("Static regex pattern is valid")
+});
 
 // Regex for +++ b/path (alternative file detection)
-static FILE_HEADER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\+\+\+ b/(.+)$").unwrap());
+static FILE_HEADER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\+\+\+ b/(.+)$").expect("Static regex pattern is valid"));
 
 /// Parse a unified diff and extract debug statements.
 ///

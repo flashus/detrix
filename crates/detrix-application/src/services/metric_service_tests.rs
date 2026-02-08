@@ -411,7 +411,7 @@ mod tests {
                 file: test_py_path(),
                 line,
             },
-            expression: "x.value".to_string(),
+            expressions: vec!["x.value".to_string()],
             language: SourceLanguage::Python,
             enabled: true,
             mode: MetricMode::Stream,
@@ -538,14 +538,14 @@ mod tests {
 
         // Update the metric (complex expression skips file inspection)
         metric.id = Some(metric_id);
-        metric.expression = "updated_expression.value".to_string();
+        metric.expressions = vec!["updated_expression.value".to_string()];
         metric.enabled = false;
 
         service.update_metric(&metric).await.unwrap();
 
         // Verify update
         let retrieved = service.get_metric(metric_id).await.unwrap().unwrap();
-        assert_eq!(retrieved.expression, "updated_expression.value");
+        assert_eq!(retrieved.expression(), "updated_expression.value");
         assert!(!retrieved.enabled);
     }
 
@@ -971,7 +971,7 @@ mod tests {
                 file: test_py_path(),
                 line: 30,
             },
-            expression: "x.value".to_string(),
+            expressions: vec!["x.value".to_string()],
             language: SourceLanguage::Python,
             enabled: true,
             mode: MetricMode::Stream,

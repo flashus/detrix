@@ -19,8 +19,8 @@
 
 use detrix_core::{
     system_event::{SystemEvent, SystemEventType},
-    ConnectionId, ConnectionIdentity, Location, Metric, MetricEvent, MetricId, MetricMode,
-    SafetyLevel, SourceLanguage,
+    ConnectionId, ConnectionIdentity, ExpressionValue, Location, Metric, MetricEvent, MetricId,
+    MetricMode, SafetyLevel, SourceLanguage,
 };
 use std::path::PathBuf;
 
@@ -64,7 +64,7 @@ pub fn sample_metric(name: &str) -> Metric {
             file: test_py_path(),
             line: 30, // Line with x = Value()
         },
-        expression: "x.value".to_string(), // Complex expression to skip scope validation
+        expressions: vec!["x.value".to_string()], // Complex expression to skip scope validation
         language: SourceLanguage::Python,
         mode: MetricMode::Stream,
         enabled: true,
@@ -111,7 +111,7 @@ pub fn sample_metric_at(name: &str, file: &str, line: u32) -> Metric {
 /// Create a sample metric with a specific expression
 pub fn sample_metric_with_expression(name: &str, expression: &str) -> Metric {
     let mut metric = sample_metric(name);
-    metric.expression = expression.to_string();
+    metric.expressions = vec![expression.to_string()];
     metric
 }
 
@@ -144,7 +144,7 @@ pub fn sample_metric_for_language(name: &str, language: SourceLanguage) -> Metri
         file: file.to_string(),
         line,
     };
-    metric.expression = expression.to_string();
+    metric.expressions = vec![expression.to_string()];
     metric
 }
 
@@ -164,7 +164,7 @@ pub fn sample_metric_custom(
         file: file.to_string(),
         line,
     };
-    metric.expression = expression.to_string();
+    metric.expressions = vec![expression.to_string()];
     metric.language = language;
     metric
 }
@@ -186,10 +186,34 @@ pub fn sample_test_event() -> MetricEvent {
         timestamp: 1_733_590_800_123_456, // Fixed timestamp for deterministic tests
         thread_name: Some("MainThread".to_string()),
         thread_id: Some(12345),
-        value_json: r#"{"value": 42}"#.to_string(),
-        value_numeric: Some(42.0),
-        value_string: None,
-        value_boolean: None,
+        values: vec![ExpressionValue::with_numeric(
+            "test",
+            r#"{"value": 42}"#,
+            42.0,
+        )],
+        is_error: false,
+        error_type: None,
+        error_message: None,
+        request_id: None,
+        session_id: None,
+        stack_trace: None,
+        memory_snapshot: None,
+    }
+}
+
+/// Create a base metric event with default `None`/`false` fields.
+///
+/// All event factory functions delegate to this to avoid repetition.
+fn base_event(metric_id: u64) -> MetricEvent {
+    MetricEvent {
+        id: None,
+        metric_id: MetricId(metric_id),
+        metric_name: format!("metric_{}", metric_id),
+        connection_id: ConnectionId::from("test"),
+        timestamp: chrono::Utc::now().timestamp_micros(),
+        values: vec![],
+        thread_id: None,
+        thread_name: None,
         is_error: false,
         error_type: None,
         error_message: None,
@@ -202,98 +226,44 @@ pub fn sample_test_event() -> MetricEvent {
 
 /// Create a sample metric event
 pub fn sample_event(metric_id: u64, value: f64) -> MetricEvent {
-    MetricEvent {
-        id: None,
-        metric_id: MetricId(metric_id),
-        metric_name: format!("metric_{}", metric_id),
-        connection_id: ConnectionId::from("test"),
-        timestamp: chrono::Utc::now().timestamp_micros(),
-        value_json: value.to_string(),
-        value_numeric: Some(value),
-        value_string: None,
-        value_boolean: None,
-        thread_id: None,
-        thread_name: None,
-        is_error: false,
-        error_type: None,
-        error_message: None,
-        request_id: None,
-        session_id: None,
-        stack_trace: None,
-        memory_snapshot: None,
-    }
+    let mut event = base_event(metric_id);
+    event.values = vec![ExpressionValue::with_numeric(
+        "value",
+        value.to_string(),
+        value,
+    )];
+    event
 }
 
 /// Create a sample metric event with a string value
 pub fn sample_string_event(metric_id: u64, value: &str) -> MetricEvent {
-    MetricEvent {
-        id: None,
-        metric_id: MetricId(metric_id),
-        metric_name: format!("metric_{}", metric_id),
-        connection_id: ConnectionId::from("test"),
-        timestamp: chrono::Utc::now().timestamp_micros(),
-        value_json: format!("\"{}\"", value),
-        value_numeric: None,
-        value_string: Some(value.to_string()),
-        value_boolean: None,
-        thread_id: None,
-        thread_name: None,
-        is_error: false,
-        error_type: None,
-        error_message: None,
-        request_id: None,
-        session_id: None,
-        stack_trace: None,
-        memory_snapshot: None,
-    }
+    let mut event = base_event(metric_id);
+    event.values = vec![ExpressionValue::with_text(
+        "value",
+        format!("\"{}\"", value),
+        value,
+    )];
+    event
 }
 
 /// Create a sample metric event with a specific timestamp
 pub fn sample_event_at(metric_id: u64, value: f64, timestamp: i64) -> MetricEvent {
-    MetricEvent {
-        id: None,
-        metric_id: MetricId(metric_id),
-        metric_name: format!("metric_{}", metric_id),
-        connection_id: ConnectionId::from("test"),
-        timestamp,
-        value_json: value.to_string(),
-        value_numeric: Some(value),
-        value_string: None,
-        value_boolean: None,
-        thread_id: None,
-        thread_name: None,
-        is_error: false,
-        error_type: None,
-        error_message: None,
-        request_id: None,
-        session_id: None,
-        stack_trace: None,
-        memory_snapshot: None,
-    }
+    let mut event = base_event(metric_id);
+    event.timestamp = timestamp;
+    event.values = vec![ExpressionValue::with_numeric(
+        "value",
+        value.to_string(),
+        value,
+    )];
+    event
 }
 
 /// Create a sample metric event for a specific metric (with custom name)
 pub fn sample_event_for_metric(metric_id: u64, name: &str) -> MetricEvent {
-    MetricEvent {
-        id: None,
-        metric_id: MetricId(metric_id),
-        metric_name: name.to_string(),
-        connection_id: ConnectionId::from("test"),
-        timestamp: chrono::Utc::now().timestamp_micros(),
-        value_json: "42".to_string(),
-        value_numeric: Some(42.0),
-        value_string: None,
-        value_boolean: None,
-        thread_id: None,
-        thread_name: None,
-        is_error: false,
-        error_type: None,
-        error_message: None,
-        request_id: None,
-        session_id: None,
-        stack_trace: None,
-        memory_snapshot: None,
-    }
+    let mut event = base_event(metric_id);
+    event.metric_name = name.to_string();
+    event.values = vec![ExpressionValue::with_numeric("value", "42", 42.0)];
+    event
 }
 
 /// Create a sample connection identity with sensible test defaults
@@ -348,6 +318,6 @@ mod tests {
     fn test_sample_event() {
         let event = sample_event(1, 42.0);
         assert_eq!(event.metric_id, MetricId(1));
-        assert_eq!(event.value_numeric, Some(42.0));
+        assert_eq!(event.value_numeric(), Some(42.0));
     }
 }

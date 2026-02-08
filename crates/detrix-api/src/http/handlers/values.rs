@@ -69,7 +69,7 @@ pub async fn get_metric_value(
 
     // Parse value_json to serde_json::Value
     let value: serde_json::Value =
-        serde_json::from_str(&event.value_json).unwrap_or(serde_json::Value::Null);
+        serde_json::from_str(event.value_json()).unwrap_or(serde_json::Value::Null);
 
     Ok(Json(MetricValueResponse {
         metric_id: id,

@@ -29,9 +29,9 @@ pub struct AddMetricParams {
     )]
     pub line: Option<u32>,
     #[schemars(
-        description = "Expression to evaluate (e.g., user.id, {'a': x, 'b': y}). For Go: simple variables recommended; non-variadic function calls work but BLOCK process (variadic like fmt.Sprintf NOT supported)."
+        description = "Expression(s) to evaluate. Pass one string for a single expression, or multiple to capture several variables at the same line (e.g., [\"symbol\", \"quantity\", \"price\"]). For Go: simple variables recommended; non-variadic function calls work but BLOCK process (variadic like fmt.Sprintf NOT supported)."
     )]
-    pub expression: String,
+    pub expressions: Vec<String>,
     #[schemars(
         description = "Connection ID to use for this metric. Required. Get from create_connection response or list_connections."
     )]
@@ -141,8 +141,10 @@ pub struct GetMetricParams {
 pub struct UpdateMetricParams {
     #[schemars(description = "Name of the metric to update")]
     pub name: String,
-    #[schemars(description = "New expression to evaluate (optional)")]
-    pub expression: Option<String>,
+    #[schemars(
+        description = "New expression(s) to evaluate (optional). Replaces all existing expressions."
+    )]
+    pub expressions: Option<Vec<String>>,
     #[schemars(description = "New group for the metric (optional)")]
     pub group: Option<String>,
     #[schemars(description = "Enable or disable the metric (optional)")]
@@ -166,9 +168,9 @@ pub struct ObserveParams {
     pub file: String,
 
     #[schemars(
-        description = "Expression to capture (e.g., 'user.balance', 'len(items)'). For Go: simple variables recommended; non-variadic function calls work but BLOCK process (variadic like fmt.Sprintf NOT supported)."
+        description = "Expression(s) to capture (e.g., ['user.balance'] or ['symbol', 'quantity', 'price'] for multi-expression). For Go: simple variables recommended; non-variadic function calls work but BLOCK process (variadic like fmt.Sprintf NOT supported)."
     )]
-    pub expression: String,
+    pub expressions: Vec<String>,
 
     #[schemars(description = "Line number (optional - auto-finds best line if not specified)")]
     pub line: Option<u32>,

@@ -44,6 +44,13 @@ pub const SAFETY_TRUSTED: &str = "trusted";
 /// Maximum length of a metric name (1-255 characters)
 pub const MAX_METRIC_NAME_LEN: usize = 255;
 
+/// Delimiter for multi-expression values in logpoint output and hashing.
+/// ASCII Unit Separator (0x1F) - safe to use since it never appears in expression values.
+pub const MULTI_EXPR_DELIMITER: char = '\x1F';
+
+/// String form of `MULTI_EXPR_DELIMITER` for use in `join()` without heap allocation.
+pub const MULTI_EXPR_DELIMITER_STR: &str = "\x1F";
+
 /// Unique identifier for a metric (newtype for type safety)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MetricId(pub u64);
@@ -148,7 +155,7 @@ pub struct Metric {
     pub connection_id: ConnectionId, // Which connection this metric belongs to
     pub group: Option<String>,
     pub location: Location,
-    pub expression: String,
+    pub expressions: Vec<String>,
     pub language: SourceLanguage,
     pub enabled: bool,
     pub mode: MetricMode,
@@ -193,12 +200,7 @@ impl Metric {
         }
 
         // Must start with letter or underscore
-        if !name
-            .chars()
-            .next()
-            .map(|c| c.is_ascii_alphabetic() || c == '_')
-            .unwrap_or(false)
-        {
+        if !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
             return Err(Error::InvalidMetricName(
                 "Must start with letter or underscore".to_string(),
             ));
@@ -233,25 +235,42 @@ impl Metric {
         Ok(())
     }
 
-    /// Compute SHA256 hash of expression
+    /// Compute SHA256 hash of all expressions.
+    ///
+    /// Uses length-prefixed encoding (`len:expr`) to prevent collisions when
+    /// expressions contain the delimiter character.
     pub fn expression_hash(&self) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(self.expression.as_bytes());
+        for expr in &self.expressions {
+            hasher.update(format!("{}:", expr.len()).as_bytes());
+            hasher.update(expr.as_bytes());
+        }
         format!("{:x}", hasher.finalize())
+    }
+
+    /// Convenience: get the first expression (safe even if deserialized with empty vec)
+    pub fn expression(&self) -> &str {
+        self.expressions.first().map(String::as_str).unwrap_or("")
     }
 
     /// Create a new metric with validation
     ///
     /// Note: Expression length validation should be done at the service layer
-    /// where config is available. This only validates the name format.
+    /// where config is available. This only validates the name format and
+    /// that expressions is non-empty.
     pub fn new(
         name: String,
         connection_id: ConnectionId,
         location: Location,
-        expression: String,
+        expressions: Vec<String>,
         language: SourceLanguage,
     ) -> Result<Self> {
         Self::validate_name(&name)?;
+        if expressions.is_empty() {
+            return Err(Error::InvalidExpression(
+                "At least one expression is required".to_string(),
+            ));
+        }
 
         Ok(Metric {
             id: None,
@@ -259,7 +278,7 @@ impl Metric {
             connection_id,
             group: None,
             location,
-            expression,
+            expressions,
             language,
             enabled: true,
             mode: MetricMode::default(),
@@ -280,13 +299,21 @@ impl Metric {
         })
     }
 
-    /// Validate expression length against a maximum
+    /// Validate expression length against a maximum (checks each expression)
     pub fn validate_expression_length(expression: &str, max_length: usize) -> Result<()> {
         if expression.len() > max_length {
             return Err(Error::ExpressionTooLong {
                 len: expression.len(),
                 max: max_length,
             });
+        }
+        Ok(())
+    }
+
+    /// Validate all expressions' lengths against a maximum
+    pub fn validate_expressions_length(expressions: &[String], max_length: usize) -> Result<()> {
+        for expr in expressions {
+            Self::validate_expression_length(expr, max_length)?;
         }
         Ok(())
     }
@@ -349,18 +376,73 @@ mod tests {
             "test_metric".to_string(),
             ConnectionId::from("default"),
             loc,
-            "user.id".to_string(),
+            vec!["user.id".to_string()],
             SourceLanguage::Python,
         )
         .unwrap();
 
         assert_eq!(metric.name, "test_metric");
         assert_eq!(metric.location.line, 10);
-        assert_eq!(metric.expression, "user.id");
+        assert_eq!(metric.expression(), "user.id");
+        assert_eq!(metric.expressions, vec!["user.id".to_string()]);
         assert_eq!(metric.language, SourceLanguage::Python);
         assert!(metric.enabled);
         assert_eq!(metric.mode, MetricMode::Stream);
         assert_eq!(metric.safety_level, SafetyLevel::Strict);
+    }
+
+    #[test]
+    fn test_metric_single_expression() {
+        let metric = Metric::new(
+            "test_metric".to_string(),
+            ConnectionId::from("default"),
+            Location {
+                file: "test.py".to_string(),
+                line: 10,
+            },
+            vec!["x".to_string()],
+            SourceLanguage::Python,
+        )
+        .unwrap();
+
+        assert_eq!(metric.expression(), "x");
+        assert_eq!(metric.expressions.len(), 1);
+    }
+
+    #[test]
+    fn test_metric_multi_expressions() {
+        let metric = Metric::new(
+            "test_metric".to_string(),
+            ConnectionId::from("default"),
+            Location {
+                file: "test.py".to_string(),
+                line: 10,
+            },
+            vec!["x".to_string(), "y".to_string(), "z".to_string()],
+            SourceLanguage::Python,
+        )
+        .unwrap();
+
+        assert_eq!(metric.expressions.len(), 3);
+        assert_eq!(metric.expression(), "x");
+        assert_eq!(metric.expressions[1], "y");
+        assert_eq!(metric.expressions[2], "z");
+    }
+
+    #[test]
+    fn test_metric_new_empty_expressions_fails() {
+        let result = Metric::new(
+            "test_metric".to_string(),
+            ConnectionId::from("default"),
+            Location {
+                file: "test.py".to_string(),
+                line: 10,
+            },
+            vec![],
+            SourceLanguage::Python,
+        );
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::InvalidExpression(_)));
     }
 
     #[test]
@@ -373,7 +455,7 @@ mod tests {
             "123invalid".to_string(),
             ConnectionId::from("default"),
             loc,
-            "user.id".to_string(),
+            vec!["user.id".to_string()],
             SourceLanguage::Python,
         )
         .unwrap_err();
@@ -381,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn test_metric_expression_hash() {
+    fn test_metric_expression_hash_single() {
         let loc = Location {
             file: "test.py".to_string(),
             line: 10,
@@ -390,7 +472,7 @@ mod tests {
             "test_metric".to_string(),
             ConnectionId::from("default"),
             loc,
-            "user.id".to_string(),
+            vec!["user.id".to_string()],
             SourceLanguage::Python,
         )
         .unwrap();
@@ -406,11 +488,41 @@ mod tests {
                 file: "other.py".to_string(),
                 line: 20,
             },
-            "user.id".to_string(),
+            vec!["user.id".to_string()],
             SourceLanguage::Python,
         )
         .unwrap();
         assert_eq!(metric.expression_hash(), metric2.expression_hash());
+    }
+
+    #[test]
+    fn test_metric_expression_hash_multi() {
+        let single = Metric::new(
+            "m1".to_string(),
+            ConnectionId::from("default"),
+            Location {
+                file: "t.py".to_string(),
+                line: 1,
+            },
+            vec!["x".to_string()],
+            SourceLanguage::Python,
+        )
+        .unwrap();
+
+        let multi = Metric::new(
+            "m2".to_string(),
+            ConnectionId::from("default"),
+            Location {
+                file: "t.py".to_string(),
+                line: 1,
+            },
+            vec!["x".to_string(), "y".to_string()],
+            SourceLanguage::Python,
+        )
+        .unwrap();
+
+        // Single "x" vs multi "x|y" should have different hashes
+        assert_ne!(single.expression_hash(), multi.expression_hash());
     }
 
     #[test]

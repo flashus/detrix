@@ -240,6 +240,34 @@ pub fn find_detrix_binary(workspace_root: &std::path::Path) -> Option<PathBuf> {
 /// Global cache for built Rust binary - builds once and reuses across all tests
 static RUST_TRADING_BOT_PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
+/// Get the path where the Rust fixture binary is built.
+///
+/// Uses `cargo metadata` to resolve the actual target directory,
+/// respecting any user configuration (`.cargo/config.toml`, `CARGO_TARGET_DIR`, etc.).
+fn rust_fixture_binary_path(fixture_dir: &std::path::Path) -> Result<PathBuf, String> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(fixture_dir)
+        .output()
+        .map_err(|e| format!("Failed to run cargo metadata: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse cargo metadata: {}", e))?;
+
+    let target_dir = metadata["target_directory"]
+        .as_str()
+        .ok_or("target_directory not found in cargo metadata")?;
+
+    Ok(PathBuf::from(target_dir).join("debug/detrix_example_app"))
+}
+
 // Port counters for parallel tests - using random offset to avoid collisions between test runs
 static HTTP_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
 static GRPC_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
@@ -1299,7 +1327,6 @@ impl TestExecutor {
                     .parent() // src
                     .and_then(|p| p.parent()) // rust
                     .ok_or_else(|| "Invalid source path".to_string())?;
-                let binary_path = fixture_dir.join("target/debug/detrix_example_app");
 
                 eprintln!("Building Rust fixture at {:?}", fixture_dir);
 
@@ -1315,6 +1342,9 @@ impl TestExecutor {
                         String::from_utf8_lossy(&build_output.stderr)
                     ));
                 }
+
+                // Resolve binary path from cargo metadata (respects any target-dir config)
+                let binary_path = rust_fixture_binary_path(fixture_dir)?;
 
                 // Verify binary was created
                 if !binary_path.exists() {
@@ -1394,8 +1424,7 @@ impl TestExecutor {
             ));
         }
 
-        // Build Rust binary once and reuse across all tests
-        // The fixture is a Cargo project at fixtures/rust/
+        // Build Rust binary once and reuse across all tests (shared with start_lldb)
         let binary_path = RUST_TRADING_BOT_PATH
             .get_or_init(|| {
                 let source_file = std::path::Path::new(source_path);
@@ -1404,7 +1433,6 @@ impl TestExecutor {
                     .parent() // src
                     .and_then(|p| p.parent()) // rust
                     .ok_or_else(|| "Invalid source path".to_string())?;
-                let binary_path = fixture_dir.join("target/debug/detrix_example_app");
 
                 eprintln!("Building Rust fixture at {:?}", fixture_dir);
 
@@ -1420,6 +1448,9 @@ impl TestExecutor {
                         String::from_utf8_lossy(&build_output.stderr)
                     ));
                 }
+
+                // Resolve binary path from cargo metadata (respects any target-dir config)
+                let binary_path = rust_fixture_binary_path(fixture_dir)?;
 
                 // Verify binary was created
                 if !binary_path.exists() {

@@ -36,6 +36,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -322,6 +323,21 @@ scanLoop:
 	} else {
 		fmt.Println("   WARNING: Failed to add metric 4 (stack trace)")
 	}
+
+	// Metric 5: MULTI-EXPRESSION (line 125) - capture symbol, quantity, price simultaneously
+	// All three are in scope from lines 117-119, line 125 is after all assignments
+	// Tests multi-expression logpoint: one metric captures multiple variables at once
+	metric5 := addMultiExprMetric(connectionID, fixtureAppPath, 125,
+		[]string{"symbol", "quantity", "price"},
+		"order_details", "go")
+
+	var metric5ID float64
+	if metric5 != nil {
+		metric5ID, _ = metric5["metricId"].(float64)
+		fmt.Printf("   Metric 5 (order_details @ line 125): ID=%.0f [MULTI-EXPRESSION: symbol, quantity, price]\n", metric5ID)
+	} else {
+		fmt.Println("   WARNING: Failed to add metric 5 (multi-expression)")
+	}
 	fmt.Println()
 
 	// Step 7: Wait and collect events
@@ -345,10 +361,11 @@ scanLoop:
 			seenEvents[eventID] = true
 			eventsReceived++
 
-			result, _ := event["result"].(map[string]interface{})
 			value := ""
-			if result != nil {
-				value, _ = result["valueJson"].(string)
+			if values, ok := event["values"].([]interface{}); ok && len(values) > 0 {
+				if v, ok := values[0].(map[string]interface{}); ok {
+					value, _ = v["valueJson"].(string)
+				}
 			}
 			ts := formatTimestamp(event["timestamp"])
 			fmt.Printf("   [EVENT] %s: %s (%s)\n", metricName, value, ts)
@@ -373,12 +390,41 @@ scanLoop:
 		}
 	}
 
+	// Check multi-expression events
+	checkMultiExprEvents := func(metricID float64, metricName string) {
+		if metricID <= 0 {
+			return
+		}
+		events := getEvents(int(metricID), 10, sessionStartMicros)
+		for _, event := range events {
+			eventID := fmt.Sprintf("%.0f-%v", metricID, event["timestamp"])
+			if seenEvents[eventID] {
+				continue
+			}
+			seenEvents[eventID] = true
+			eventsReceived++
+
+			// Multi-expression: values is []{ expression, valueJson, ... }
+			values, _ := event["values"].([]interface{})
+			parts := make([]string, 0, len(values))
+			for _, v := range values {
+				val, _ := v.(map[string]interface{})
+				expr, _ := val["expression"].(string)
+				vj, _ := val["valueJson"].(string)
+				parts = append(parts, fmt.Sprintf("%s=%s", expr, vj))
+			}
+			ts := formatTimestamp(event["timestamp"])
+			fmt.Printf("   [EVENT] %s: %s (%s)\n", metricName, strings.Join(parts, ", "), ts)
+		}
+	}
+
 	for i := 0; i < 15; i++ {
 		time.Sleep(1 * time.Second)
 		checkEvents(metric1ID, "order_symbol")
 		checkEvents(metric2ID, "pnl_value")
 		checkEvents(metric3ID, "symbol_length")
 		checkEvents(metric4ID, "entry_price_with_stack")
+		checkMultiExprEvents(metric5ID, "order_details")
 	}
 
 	fmt.Println()
@@ -517,14 +563,40 @@ func addMetric(connectionID, filePath string, line int, expression, name, langua
 			"file": filePath,
 			"line": line,
 		},
-		"expression": expression,
-		"language":   language,
-		"enabled":    true,
+		"expressions": []string{expression},
+		"language":    language,
+		"enabled":     true,
 	}
 
 	resp, err := apiRequest(daemonURL+"/api/v1/metrics", "POST", data)
 	if err != nil {
 		fmt.Printf("   Error adding metric: %v\n", err)
+		return nil
+	}
+
+	result, ok := resp.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	return result
+}
+
+func addMultiExprMetric(connectionID, filePath string, line int, expressions []string, name, language string) map[string]interface{} {
+	data := map[string]interface{}{
+		"name":         name,
+		"connectionId": connectionID,
+		"location": map[string]interface{}{
+			"file": filePath,
+			"line": line,
+		},
+		"expressions": expressions,
+		"language":    language,
+		"enabled":     true,
+	}
+
+	resp, err := apiRequest(daemonURL+"/api/v1/metrics", "POST", data)
+	if err != nil {
+		fmt.Printf("   Error adding multi-expression metric: %v\n", err)
 		return nil
 	}
 
@@ -543,7 +615,7 @@ func addMetricWithIntrospection(connectionID, filePath string, line int, express
 			"file": filePath,
 			"line": line,
 		},
-		"expression":        expression,
+		"expressions":       []string{expression},
 		"language":          language,
 		"enabled":           true,
 		"captureStackTrace": true, // Forces breakpoint mode for function calls

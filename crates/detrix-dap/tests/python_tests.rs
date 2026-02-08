@@ -160,7 +160,7 @@ async fn test_debugpy_logpoint_setting() {
             file: "detrix_logpoint_test.py".to_string(),
             line: 4,
         },
-        expression: "f'symbol={symbol}, qty={quantity}'".to_string(),
+        expressions: vec!["f'symbol={symbol}, qty={quantity}'".to_string()],
         language: detrix_core::SourceLanguage::Python,
         enabled: true,
         mode: MetricMode::Stream,
@@ -256,7 +256,7 @@ print("Done")
             file: "detrix_event_test.py".to_string(),
             line: 4,
         },
-        expression: "f'symbol={symbol}, qty={quantity}, price={price}'".to_string(),
+        expressions: vec!["f'symbol={symbol}, qty={quantity}, price={price}'".to_string()],
         language: detrix_core::SourceLanguage::Python,
         enabled: true,
         mode: MetricMode::Stream,
@@ -288,7 +288,7 @@ print("Done")
     while start.elapsed() < collect_timeout && received_events.len() < 3 {
         match timeout(Duration::from_millis(500), event_rx.recv()).await {
             Ok(Some(event)) => {
-                eprintln!("Received event: {:?}", event.value_string);
+                eprintln!("Received event: {:?}", event.value_string());
                 received_events.push(event);
             }
             Ok(None) => {
@@ -313,10 +313,10 @@ print("Done")
 
     for event in &received_events {
         assert!(
-            event.value_string.is_some(),
+            event.value_string().is_some(),
             "Event should have value_string"
         );
-        let value = event.value_string.as_ref().unwrap();
+        let value = event.value_string().unwrap();
         eprintln!("Event value: {}", value);
 
         assert!(value.contains("symbol="), "Value should contain symbol");
@@ -493,7 +493,7 @@ time.sleep(60)
             file: "detrix_fstring_test.py".to_string(),
             line: 4,
         },
-        expression: "f'name={name!r}, count={count:03d}, value={value:.2f}'".to_string(),
+        expressions: vec!["f'name={name!r}, count={count:03d}, value={value:.2f}'".to_string()],
         language: detrix_core::SourceLanguage::Python,
         enabled: true,
         mode: MetricMode::Stream,
@@ -634,7 +634,7 @@ print("Done")
             file: "detrix_multiple_bp_test.py".to_string(),
             line: 4,
         },
-        expression: "symbol".to_string(), // String type
+        expressions: vec!["symbol".to_string()], // String type
         language: detrix_core::SourceLanguage::Python,
         enabled: true,
         mode: MetricMode::Stream,
@@ -670,7 +670,7 @@ print("Done")
             file: "detrix_multiple_bp_test.py".to_string(),
             line: 8,
         },
-        expression: "size".to_string(), // Integer type
+        expressions: vec!["size".to_string()], // Integer type
         language: detrix_core::SourceLanguage::Python,
         enabled: true,
         mode: MetricMode::Stream,
@@ -711,7 +711,8 @@ print("Done")
             Ok(Some(event)) => {
                 eprintln!(
                     "Received event: metric_id={}, value={:?}",
-                    event.metric_id.0, event.value_string
+                    event.metric_id.0,
+                    event.value_string()
                 );
                 if event.metric_id == MetricId(1) {
                     metric1_events.push(event);
@@ -754,7 +755,7 @@ print("Done")
 
     // Verify event content for metric1 (string values work)
     for event in &metric1_events {
-        let value = event.value_string.as_ref().expect("Should have value");
+        let value = event.value_string().expect("Should have value");
         eprintln!("Metric1 event value: {}", value);
         assert!(
             value.contains("BTCUSD") || value.contains("ETHUSD"),
@@ -769,7 +770,8 @@ print("Done")
     for event in &metric2_events {
         eprintln!(
             "Metric2 event: value_string={:?}, value_json={:?}",
-            event.value_string, event.value_json
+            event.value_string(),
+            event.value_json()
         );
         // Just verify we got an event - the value format varies by expression type
     }

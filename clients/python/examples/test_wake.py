@@ -85,7 +85,7 @@ def add_metric(
     expression: str,
     name: str,
 ) -> dict[str, Any] | None:
-    """Add a metric via daemon API."""
+    """Add a metric with a single expression via daemon API."""
     data = {
         "name": name,
         "connectionId": connection_id,
@@ -93,7 +93,33 @@ def add_metric(
             "file": file_path,
             "line": line,
         },
-        "expression": expression,
+        "expressions": [expression],
+        "language": "python",
+        "enabled": True,
+    }
+    return api_request(f"{DAEMON_URL}/api/v1/metrics", method="POST", data=data)
+
+
+def add_multi_expr_metric(
+    connection_id: str,
+    file_path: str,
+    line: int,
+    expressions: list[str],
+    name: str,
+) -> dict[str, Any] | None:
+    """Add a metric with multiple expressions via daemon API.
+
+    Multi-expression metrics capture several variables simultaneously at the
+    same line, producing one event with all values per hit.
+    """
+    data = {
+        "name": name,
+        "connectionId": connection_id,
+        "location": {
+            "file": file_path,
+            "line": line,
+        },
+        "expressions": expressions,
         "language": "python",
         "enabled": True,
     }
@@ -264,6 +290,22 @@ def main() -> int:
         print("   WARNING: Failed to add metric 2")
         metric2_id = None
 
+    # Metric 3: Multi-expression - capture symbol, quantity, price in one metric
+    # Available vars at line 106: symbol, quantity, price, order_id
+    metric3 = add_multi_expr_metric(
+        connection_id=connection_id,
+        file_path=TRADE_BOT_PATH,
+        line=106,  # entry_price = price (symbol, quantity, price in scope)
+        expressions=["symbol", "quantity", "price"],
+        name="order_details",
+    )
+    if metric3:
+        metric3_id = metric3.get("metricId")
+        print(f"   Metric 3 (order_details): ID={metric3_id} [MULTI-EXPRESSION: symbol, quantity, price]")
+    else:
+        print("   WARNING: Failed to add metric 3 (multi-expression)")
+        metric3_id = None
+
     print()
 
     # Step 7: Wait and collect events
@@ -285,9 +327,9 @@ def main() -> int:
                     continue
                 seen_events.add(event_id)
                 events_received += 1
-                # Value is nested in result.valueJson
-                result = event.get("result") or {}
-                value = result.get("valueJson", "") if isinstance(result, dict) else ""
+                # Value is in values[0].valueJson
+                values = event.get("values", [])
+                value = values[0].get("valueJson", "") if values else ""
                 ts = event.get("timestamp", 0)
                 # Convert microseconds to readable time if it's an int
                 if isinstance(ts, int) and ts > 0:
@@ -306,9 +348,9 @@ def main() -> int:
                     continue
                 seen_events.add(event_id)
                 events_received += 1
-                # Value is nested in result.valueJson
-                result = event.get("result") or {}
-                value = result.get("valueJson", "") if isinstance(result, dict) else ""
+                # Value is in values[0].valueJson
+                values = event.get("values", [])
+                value = values[0].get("valueJson", "") if values else ""
                 ts = event.get("timestamp", 0)
                 # Convert microseconds to readable time if it's an int
                 if isinstance(ts, int) and ts > 0:
@@ -317,6 +359,26 @@ def main() -> int:
                 else:
                     ts_str = str(ts)[:19]
                 print(f"   [EVENT] pnl_data: {value} ({ts_str})")
+
+        # Check for events on metric 3 (multi-expression)
+        if metric3_id:
+            events = get_events(metric3_id, limit=10, since_micros=session_start_micros)
+            for event in events:
+                event_id = event.get("metricId", 0) * 1000000 + event.get("timestamp", 0)
+                if event_id in seen_events:
+                    continue
+                seen_events.add(event_id)
+                events_received += 1
+                # Multi-expression: values is an array of {expression, valueJson, ...}
+                values = event.get("values", [])
+                parts = [f"{v.get('expression')}={v.get('valueJson', '?')}" for v in values]
+                ts = event.get("timestamp", 0)
+                if isinstance(ts, int) and ts > 0:
+                    from datetime import datetime
+                    ts_str = datetime.fromtimestamp(ts / 1_000_000).strftime("%H:%M:%S")
+                else:
+                    ts_str = str(ts)[:19]
+                print(f"   [EVENT] order_details: {', '.join(parts)} ({ts_str})")
 
     print()
     print(f"   Total events received: {events_received}")

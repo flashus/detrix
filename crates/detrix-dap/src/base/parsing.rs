@@ -3,9 +3,9 @@
 //! This module contains common parsing logic used by all language adapters
 //! for parsing logpoint output and creating metric events.
 
-use super::traits::{ThreadExtractor, ThreadInfo, DETRICS_PREFIX};
+use super::traits::{ThreadExtractor, ThreadInfo, DETRICS_PREFIX, MULTI_EXPR_DELIMITER};
 use crate::OutputEventBody;
-use detrix_core::{Metric, MetricEvent};
+use detrix_core::{ExpressionValue, Metric, MetricEvent, TypedValue};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -21,8 +21,8 @@ use tokio::sync::RwLock;
 pub struct LogpointParseResult {
     /// Metric name from the logpoint
     pub metric_name: String,
-    /// Raw value string after the `=`
-    pub value_str: String,
+    /// All value parts split by MULTI_EXPR_DELIMITER (single expr = 1 element)
+    pub value_parts: Vec<String>,
     /// Thread information extracted from output
     pub thread_info: ThreadInfo,
 }
@@ -67,11 +67,16 @@ pub fn parse_logpoint_core<E: ThreadExtractor>(
     }
 
     let metric_name = parts[0].to_string();
-    let value_str = parts[1].to_string();
+
+    // Split by multi-expression delimiter (single expr = 1 element)
+    let value_parts: Vec<String> = parts[1]
+        .split(MULTI_EXPR_DELIMITER)
+        .map(|s| s.to_string())
+        .collect();
 
     Some(LogpointParseResult {
         metric_name,
-        value_str,
+        value_parts,
         thread_info,
     })
 }
@@ -95,15 +100,55 @@ pub async fn create_metric_event_from_logpoint(
     let metrics = active_metrics.read().await;
     let metric = metrics
         .values()
-        .find(|m| m.name == parse_result.metric_name)?;
-    let metric_id = metric.id?;
+        .find(|m| m.name == parse_result.metric_name);
+    let metric = match metric {
+        Some(m) => m,
+        None => {
+            tracing::debug!(
+                "No active metric found for logpoint name '{}'",
+                parse_result.metric_name
+            );
+            return None;
+        }
+    };
+    let metric_id = match metric.id {
+        Some(id) => id,
+        None => {
+            tracing::debug!(
+                "Metric '{}' has no ID assigned, skipping event",
+                parse_result.metric_name
+            );
+            return None;
+        }
+    };
     let metric_name = metric.name.clone();
     let connection_id = metric.connection_id.clone();
+    let expressions = metric.expressions.clone();
     drop(metrics);
 
-    // Parse value using shared parser
-    let (value_json, value_numeric, value_string, value_boolean) =
-        parse_value(&parse_result.value_str);
+    // Warn if expression count doesn't match parsed value count (zip will truncate)
+    if expressions.len() != parse_result.value_parts.len() {
+        tracing::warn!(
+            "Expression/value count mismatch for metric '{}': {} expressions, {} values",
+            parse_result.metric_name,
+            expressions.len(),
+            parse_result.value_parts.len(),
+        );
+    }
+
+    // Zip metric expressions with parsed value parts to create ExpressionValues
+    let expression_values: Vec<ExpressionValue> = expressions
+        .iter()
+        .zip(parse_result.value_parts.iter())
+        .map(|(expr, val)| {
+            let (vj, typed) = parse_value(val);
+            ExpressionValue {
+                expression: expr.clone(),
+                value_json: vj,
+                typed_value: typed,
+            }
+        })
+        .collect();
 
     Some(MetricEvent {
         id: None,
@@ -113,10 +158,7 @@ pub async fn create_metric_event_from_logpoint(
         timestamp: MetricEvent::now_micros(),
         thread_name: parse_result.thread_info.thread_name.clone(),
         thread_id: parse_result.thread_info.thread_id,
-        value_json,
-        value_numeric,
-        value_string,
-        value_boolean,
+        values: expression_values,
         is_error: false,
         error_type: None,
         error_message: None,
@@ -131,33 +173,36 @@ pub async fn create_metric_event_from_logpoint(
 // Shared Error Handling Utilities
 // ============================================================================
 
-/// Parse a value string into MetricEvent fields with JSON type detection.
+/// Parse a value string into JSON and a typed value with JSON type detection.
 ///
 /// This is shared logic used by all language adapters for value parsing.
-/// It attempts to parse the value as JSON to extract typed fields.
+/// It attempts to parse the value as JSON to extract a typed value.
 ///
 /// # Returns
-/// A tuple of (value_json, value_numeric, value_string, value_boolean)
-pub fn parse_value(value_str: &str) -> (String, Option<f64>, Option<String>, Option<bool>) {
+/// A tuple of (value_json, typed_value)
+pub fn parse_value(value_str: &str) -> (String, Option<TypedValue>) {
     // Try to parse as JSON
     if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(value_str) {
         let value_json =
             serde_json::to_string(&json_value).unwrap_or_else(|_| value_str.to_string());
 
-        let value_numeric = json_value.as_f64();
-        let value_string = json_value.as_str().map(|s| s.to_string());
-        let value_boolean = json_value.as_bool();
+        let typed = if let Some(n) = json_value.as_f64() {
+            Some(TypedValue::Numeric(n))
+        } else if let Some(s) = json_value.as_str() {
+            Some(TypedValue::Text(s.to_string()))
+        } else {
+            json_value.as_bool().map(TypedValue::Boolean)
+        };
 
-        (value_json, value_numeric, value_string, value_boolean)
+        (value_json, typed)
     } else {
         // Fallback: treat as plain string, try numeric parse
-        let value_numeric = value_str.parse().ok();
-        (
-            value_str.to_string(),
-            value_numeric,
-            Some(value_str.to_string()),
-            None,
-        )
+        let typed = if let Ok(n) = value_str.parse::<f64>() {
+            Some(TypedValue::Numeric(n))
+        } else {
+            Some(TypedValue::Text(value_str.to_string()))
+        };
+        (value_str.to_string(), typed)
     }
 }
 

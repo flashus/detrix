@@ -11,7 +11,7 @@ pub fn metric_info_from_proto(m: detrix_api::generated::detrix::v1::MetricInfo) 
         group: m.group,
         location_file: m.location.clone().map(|l| l.file).unwrap_or_default(),
         location_line: m.location.map(|l| l.line).unwrap_or(0),
-        expression: m.expression,
+        expressions: m.expressions,
         language: m.language,
         enabled: m.enabled,
         mode: format!("{:?}", m.mode),

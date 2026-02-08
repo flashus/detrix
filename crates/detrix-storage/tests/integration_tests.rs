@@ -20,7 +20,7 @@ fn create_metric(name: &str, location: &str, expression: &str) -> Metric {
         name.to_string(),
         ConnectionId::from("default"),
         Location::parse(location).unwrap(),
-        expression.to_string(),
+        vec![expression.to_string()],
         SourceLanguage::Python,
     )
     .unwrap()
@@ -66,7 +66,7 @@ async fn test_metric_full_lifecycle() {
 
     // Update metric
     let mut updated = found;
-    updated.expression = "user.email".to_string();
+    updated.expressions = vec!["user.email".to_string()];
     updated.enabled = false;
     MetricRepository::update(&storage, &updated).await.unwrap();
 
@@ -75,7 +75,7 @@ async fn test_metric_full_lifecycle() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(after_update.expression, "user.email");
+    assert_eq!(after_update.expression(), "user.email");
     assert!(!after_update.enabled);
 
     // Delete metric
@@ -146,7 +146,10 @@ async fn test_event_full_lifecycle() {
         ConnectionId::from("default"),
         r#"{"result": 42}"#.to_string(),
     );
-    event.value_numeric = Some(42.0);
+    // Set numeric value on the first expression value
+    if let Some(first_val) = event.values.first_mut() {
+        first_val.typed_value = Some(detrix_core::TypedValue::Numeric(42.0));
+    }
     event.thread_name = Some("main".to_string());
     event.thread_id = Some(12345);
 
@@ -158,7 +161,7 @@ async fn test_event_full_lifecycle() {
         .await
         .unwrap();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].value_numeric, Some(42.0));
+    assert_eq!(events[0].value_numeric(), Some(42.0));
     assert_eq!(events[0].thread_name, Some("main".to_string()));
 
     // Count events
@@ -184,7 +187,9 @@ async fn test_event_batch_operations() {
                 ConnectionId::from("default"),
                 format!(r#"{{"value": {}}}"#, i),
             );
-            event.value_numeric = Some(i as f64);
+            if let Some(first_val) = event.values.first_mut() {
+                first_val.typed_value = Some(detrix_core::TypedValue::Numeric(i as f64));
+            }
             event
         })
         .collect();
@@ -330,7 +335,7 @@ async fn test_invalid_metric_data() {
         "123invalid".to_string(),
         ConnectionId::from("default"),
         Location::parse("@test.py#1").unwrap(),
-        "value".to_string(),
+        vec!["value".to_string()],
         SourceLanguage::Python,
     );
     assert!(result.is_err());
@@ -344,7 +349,7 @@ async fn test_invalid_metric_data() {
         "invalid@name".to_string(),
         ConnectionId::from("default"),
         Location::parse("@test.py#1").unwrap(),
-        "value".to_string(),
+        vec!["value".to_string()],
         SourceLanguage::Python,
     );
     assert!(result.is_err());
@@ -358,7 +363,7 @@ async fn test_invalid_metric_data() {
         "invalid--name".to_string(),
         ConnectionId::from("default"),
         Location::parse("@test.py#1").unwrap(),
-        "value".to_string(),
+        vec!["value".to_string()],
         SourceLanguage::Python,
     );
     assert!(result.is_err());
@@ -372,7 +377,7 @@ async fn test_invalid_metric_data() {
         "system".to_string(),
         ConnectionId::from("default"),
         Location::parse("@test.py#1").unwrap(),
-        "value".to_string(),
+        vec!["value".to_string()],
         SourceLanguage::Python,
     );
     assert!(result.is_err());
@@ -667,7 +672,9 @@ async fn test_dlq_e2e_recovery_full_flow() {
                 ConnectionId::from("default"),
                 format!(r#"{{"value": {}}}"#, i * 10),
             );
-            event.value_numeric = Some((i * 10) as f64);
+            if let Some(first_val) = event.values.first_mut() {
+                first_val.typed_value = Some(detrix_core::TypedValue::Numeric((i * 10) as f64));
+            }
             event
         })
         .collect();
@@ -737,7 +744,7 @@ async fn test_dlq_e2e_recovery_full_flow() {
     // Check all values are present (order may vary)
     let values: Vec<i64> = recovered_events
         .iter()
-        .filter_map(|e| e.value_numeric.map(|v| v as i64))
+        .filter_map(|e| e.value_numeric().map(|v| v as i64))
         .collect();
     assert!(values.contains(&0));
     assert!(values.contains(&10));
@@ -1167,7 +1174,7 @@ async fn test_audit_event_batch_save() {
     assert_eq!(all_events.len(), 3);
 
     // Check each type is present
-    let types: Vec<SystemEventType> = all_events.iter().map(|e| e.event_type.clone()).collect();
+    let types: Vec<SystemEventType> = all_events.iter().map(|e| e.event_type).collect();
     assert!(types.contains(&SystemEventType::ConfigUpdated));
     assert!(types.contains(&SystemEventType::ApiCallExecuted));
     assert!(types.contains(&SystemEventType::AuthenticationFailed));
@@ -1184,7 +1191,7 @@ async fn test_audit_event_find_since() {
 
     // Create events with specific timestamps
     for i in 0..5 {
-        let mut event = SystemEvent::config_updated(&format!("user-{}", i), "old", "new");
+        let mut event = SystemEvent::config_updated(format!("user-{}", i), "old", "new");
         event.timestamp = now + (i * 1_000_000); // 1 second apart
         SystemEventRepository::save(&storage, &event).await.unwrap();
     }
@@ -1250,7 +1257,7 @@ async fn test_audit_event_delete_older_than() {
 
     // Create old events (1 day ago)
     for i in 0..3 {
-        let mut event = SystemEvent::config_updated(&format!("old-user-{}", i), "old", "new");
+        let mut event = SystemEvent::config_updated(format!("old-user-{}", i), "old", "new");
         event.timestamp = now - (86400 * 1_000_000); // 1 day ago
         SystemEventRepository::save(&storage, &event).await.unwrap();
     }
@@ -1258,7 +1265,7 @@ async fn test_audit_event_delete_older_than() {
     // Create recent events
     for i in 0..2 {
         let mut event =
-            SystemEvent::api_call(&format!("new-client-{}", i), "GET", "/api", "test", None);
+            SystemEvent::api_call(format!("new-client-{}", i), "GET", "/api", "test", None);
         event.timestamp = now;
         SystemEventRepository::save(&storage, &event).await.unwrap();
     }

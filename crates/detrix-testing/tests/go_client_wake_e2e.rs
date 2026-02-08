@@ -152,7 +152,7 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     let req1 = serde_json::json!({
         "name": "order_symbol",
         "location": location1,
-        "expression": "symbol",
+        "expressions": ["symbol"],
         "connectionId": returned_connection_id,
         "language": "go",
         "enabled": true,
@@ -179,7 +179,7 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     let req2 = serde_json::json!({
         "name": "pnl_value",
         "location": location2,
-        "expression": "pnl",
+        "expressions": ["pnl"],
         "connectionId": returned_connection_id,
         "language": "go",
         "enabled": true,
@@ -209,7 +209,7 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     let req3 = serde_json::json!({
         "name": "symbol_length",
         "location": location3,
-        "expression": "len(symbol)",
+        "expressions": ["len(symbol)"],
         "connectionId": returned_connection_id,
         "language": "go",
         "enabled": true,
@@ -239,7 +239,7 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     let req4 = serde_json::json!({
         "name": "entry_price_with_stack",
         "location": location4,
-        "expression": "entryPrice",
+        "expressions": ["entryPrice"],
         "connectionId": returned_connection_id,
         "language": "go",
         "enabled": true,
@@ -308,7 +308,11 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
             reporter.step_failed(step, &format!("NO EVENTS! {} metrics must work!", mode));
             all_passed = false;
         } else {
-            let sample_value = events[0]["result"]["valueJson"].as_str().unwrap_or("N/A");
+            let sample_value = events[0]["values"]
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|v| v["valueJson"].as_str())
+                .unwrap_or("N/A");
             reporter.step_success(
                 step,
                 Some(&format!(

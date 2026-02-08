@@ -594,7 +594,9 @@ mod tests {
         let mut event = sample_event();
         // Make the value_json large enough to require chunking when uncompressed
         let large_value = "x".repeat(10000);
-        event.value_json = large_value;
+        if let Some(v) = event.values.first_mut() {
+            v.value_json = large_value;
+        }
 
         // Send should succeed with chunking
         output.send(&event).await.unwrap();
@@ -645,7 +647,9 @@ mod tests {
 
         // Create a large event
         let mut event = sample_event();
-        event.value_json = "x".repeat(10000);
+        if let Some(v) = event.values.first_mut() {
+            v.value_json = "x".repeat(10000);
+        }
 
         // Should fail because chunking is disabled
         let result = output.send(&event).await;

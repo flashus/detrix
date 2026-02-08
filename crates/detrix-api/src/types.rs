@@ -199,7 +199,7 @@ mod tests {
                 file: "test.py".to_string(),
                 line: 42,
             }),
-            expression: "x + y".to_string(),
+            expressions: vec!["x + y".to_string()],
             language: "python".to_string(),
             enabled: true,
             mode: Some(MetricMode {
@@ -249,7 +249,7 @@ mod tests {
             name: "test".to_string(),
             group: None,
             location: None,
-            expression: "x".to_string(),
+            expressions: vec!["x".to_string()],
             language: "python".to_string(),
             enabled: true,
             mode: Some(MetricMode {

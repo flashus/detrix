@@ -68,7 +68,7 @@ pub fn rest_request_to_add_metric_request(
         connection_id: req.connection_id.clone(),
         group: req.group.clone(),
         location,
-        expression: req.expression.clone(),
+        expressions: req.expressions.clone(),
         language: Some(language.to_string()), // Use connection's language (parameter)
         enabled: req.enabled,
         mode,

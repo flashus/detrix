@@ -346,18 +346,14 @@ impl ConnectionRepository for SqliteStorage {
 fn row_to_connection(row: &sqlx::sqlite::SqliteRow) -> Result<Connection> {
     let id: String = row.try_get("id")?;
     let name: Option<String> = row.try_get("name")?;
-    let workspace_root: String = row
-        .try_get("workspace_root")
-        .unwrap_or_else(|_| "/unknown".to_string());
-    let hostname: String = row
-        .try_get("hostname")
-        .unwrap_or_else(|_| "unknown".to_string());
+    let workspace_root: String = row.try_get("workspace_root")?;
+    let hostname: String = row.try_get("hostname")?;
     let host: String = row.try_get("host")?;
     let port: i64 = row.try_get("port")?;
     let language: String = row.try_get("language")?;
     let status_str: String = row.try_get("status")?;
     let auto_reconnect: i64 = row.try_get("auto_reconnect")?;
-    let safe_mode: i64 = row.try_get("safe_mode").unwrap_or(0);
+    let safe_mode: i64 = row.try_get("safe_mode")?;
     let created_at: i64 = row.try_get("created_at")?;
     let last_connected_at: Option<i64> = row.try_get("last_connected_at")?;
     let last_active: i64 = row.try_get("last_active")?;

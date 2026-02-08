@@ -116,7 +116,7 @@ pub async fn run(
             name: name.clone(),
             location,
             line: Some(line.line),
-            expression: line.expression.clone(),
+            expressions: vec![line.expression.clone()],
             connection_id: connection_id.clone(),
             group: args.group.clone(),
             enabled: true,

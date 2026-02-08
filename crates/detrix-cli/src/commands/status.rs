@@ -82,7 +82,10 @@ async fn print_verbose_details(_formatter: &Formatter, endpoints: &DaemonEndpoin
         for m in &metrics {
             println!(
                 "  {} @ {}#{} → {}",
-                m.name, m.location_file, m.location_line, m.expression
+                m.name,
+                m.location_file,
+                m.location_line,
+                m.expressions.join(", ")
             );
         }
     }

@@ -63,7 +63,7 @@ fn proto_metric_to_client_metric(m: ProtoMetricInfo) -> MetricInfo {
     MetricInfo {
         name: m.name,
         location,
-        expression: m.expression,
+        expressions: m.expressions,
         group: m.group,
         enabled: m.enabled,
         mode: proto_mode_to_string(&m.mode),
@@ -150,11 +150,13 @@ impl RestClient {
                 let now = chrono::Utc::now().timestamp_micros();
                 let age_seconds = (now - e.timestamp) / 1_000_000;
 
-                // Check result oneof for value or error
-                let (value, is_error) = match e.result {
-                    Some(detrix_api::metric_event::Result::ValueJson(v)) => (v, false),
-                    Some(detrix_api::metric_event::Result::Error(_)) => (String::new(), true),
-                    None => (String::new(), false),
+                // Extract value from values vec or error
+                let (value, is_error) = if let Some(ref err) = e.error {
+                    (err.error_message.clone(), true)
+                } else if let Some(first_val) = e.values.first() {
+                    (first_val.value_json.clone(), false)
+                } else {
+                    (String::new(), false)
                 };
 
                 // Convert introspection data using proto types
@@ -172,6 +174,7 @@ impl RestClient {
                     is_error,
                     stack_trace,
                     memory_snapshot,
+                    values: vec![],
                     extra: std::collections::HashMap::new(),
                 }
             })
@@ -480,7 +483,7 @@ impl ApiClient for RestClient {
             connection_id: request.connection_id,
             group: request.group,
             location: ProtoLocation { file, line },
-            expression: request.expression,
+            expressions: request.expressions,
             language: None, // Language derived from connection, not from request
             enabled: request.enabled.unwrap_or(true), // Default to enabled if not specified
             mode,
@@ -696,11 +699,13 @@ impl ApiClient for RestClient {
                 let now = chrono::Utc::now().timestamp_micros();
                 let age_seconds = (now - e.timestamp) / 1_000_000;
 
-                // Check result oneof for value or error
-                let (value, is_error) = match e.result {
-                    Some(detrix_api::metric_event::Result::ValueJson(v)) => (v, false),
-                    Some(detrix_api::metric_event::Result::Error(_)) => (String::new(), true),
-                    None => (String::new(), false),
+                // Extract value from values vec or error
+                let (value, is_error) = if let Some(ref err) = e.error {
+                    (err.error_message.clone(), true)
+                } else if let Some(first_val) = e.values.first() {
+                    (first_val.value_json.clone(), false)
+                } else {
+                    (String::new(), false)
                 };
 
                 // Convert introspection data using proto types
@@ -710,6 +715,18 @@ impl ApiClient for RestClient {
                     .as_ref()
                     .map(proto_to_core_memory_snapshot);
 
+                // Convert proto ExpressionValue to JSON for EventInfo
+                let values: Vec<serde_json::Value> = e
+                    .values
+                    .iter()
+                    .map(|v| {
+                        serde_json::json!({
+                            "expression": v.expression,
+                            "valueJson": v.value_json,
+                        })
+                    })
+                    .collect();
+
                 EventInfo {
                     metric_name: e.metric_name,
                     value,
@@ -718,6 +735,7 @@ impl ApiClient for RestClient {
                     is_error,
                     stack_trace,
                     memory_snapshot,
+                    values,
                     extra: std::collections::HashMap::new(),
                 }
             })
@@ -1073,7 +1091,7 @@ mod tests {
                 file: "test.py".to_string(),
                 line: 42,
             },
-            expression: "x + y".to_string(),
+            expressions: vec!["x + y".to_string()],
             language: None, // Derived from connection
             enabled: true,
             mode: "stream".to_string(),
@@ -1114,7 +1132,7 @@ mod tests {
                 file: "test.py".to_string(),
                 line: 42,
             },
-            expression: "x".to_string(),
+            expressions: vec!["x".to_string()],
             language: None, // Derived from connection
             enabled: true,
             mode: "stream".to_string(),

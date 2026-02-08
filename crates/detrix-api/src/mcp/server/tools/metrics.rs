@@ -21,7 +21,7 @@ pub struct ObserveResult {
     pub metric_name: String,
     pub file: String,
     pub line: u32,
-    pub expression: String,
+    pub expressions: Vec<String>,
     pub connection_id: String,
     pub line_content: String,
     pub line_source: &'static str,
@@ -32,10 +32,11 @@ pub struct ObserveResult {
 impl ObserveResult {
     /// Build human-readable message for MCP response
     pub fn build_message(&self) -> String {
+        let expr_display = self.expressions.join(", ");
         let mut message = format!(
             "✓ Observing '{}' at {}:{}\n\
              Metric: {} (ID: {})",
-            self.expression, self.file, self.line, self.metric_name, self.metric_id.0
+            expr_display, self.file, self.line, self.metric_name, self.metric_id.0
         );
 
         if !self.line_content.is_empty() {
@@ -63,7 +64,7 @@ impl ObserveResult {
             metric_name: &self.metric_name,
             file: &self.file,
             line: self.line,
-            expression: &self.expression,
+            expressions: &self.expressions,
             connection_id: &self.connection_id,
             line_content: &self.line_content,
             line_source: self.line_source,
@@ -89,7 +90,7 @@ pub async fn observe_impl(
 ) -> Result<ObserveResult, McpError> {
     let ObserveParams {
         file,
-        expression,
+        expressions,
         line,
         connection_id,
         name,
@@ -115,6 +116,17 @@ pub async fn observe_impl(
         .mcp_context("Failed to get connection")?
         .ok_or_else(|| McpError::internal_error("Connection disappeared after validation", None))?;
 
+    // Validate expressions are non-empty
+    if expressions.is_empty() {
+        return Err(McpError::invalid_params(
+            "At least one expression is required",
+            None,
+        ));
+    }
+
+    // Use first expression for line-finding and name generation
+    let first_expr = expressions[0].clone();
+
     // Step 2: Determine line number
     let (final_line, line_content, alternatives, line_source) = if let Some(l) = line {
         // User provided explicit line
@@ -122,13 +134,13 @@ pub async fn observe_impl(
     } else {
         // Auto-find best line
         let (l, content, alts) =
-            helpers::metrics::find_best_line(&file, &expression, find_variable.as_deref())?;
+            helpers::metrics::find_best_line(&file, &first_expr, find_variable.as_deref())?;
         (l, content, alts, "auto_found")
     };
 
     // Step 3: Generate metric name if not provided
     let metric_name = name
-        .unwrap_or_else(|| helpers::metrics::generate_metric_name(&expression, &file, final_line));
+        .unwrap_or_else(|| helpers::metrics::generate_metric_name(&first_expr, &file, final_line));
 
     // Step 4: Get defaults from config and build metric
     let config = state.config_service.get_config().await;
@@ -137,7 +149,7 @@ pub async fn observe_impl(
         conn_id.clone(),
         file.clone(),
         final_line,
-        expression.clone(),
+        expressions.clone(),
         connection.language,
     )
     .with_defaults(&config.defaults)
@@ -161,7 +173,7 @@ pub async fn observe_impl(
         metric_name,
         file,
         line: final_line,
-        expression,
+        expressions,
         connection_id: conn_id.to_string(),
         line_content,
         line_source,
@@ -180,7 +192,7 @@ pub struct AddMetricResult {
     pub name: String,
     pub file: String,
     pub line: u32,
-    pub expression: String,
+    pub expressions: Vec<String>,
     pub connection_id: String,
     pub warnings: Vec<String>,
 }
@@ -189,8 +201,11 @@ impl AddMetricResult {
     /// Build human-readable message for MCP response
     pub fn build_message(&self) -> String {
         let mut message = format!(
-            "Metric '{}' added at {}:{}\nExpression: {}",
-            self.name, self.file, self.line, self.expression
+            "Metric '{}' added at {}:{}\nExpressions: {}",
+            self.name,
+            self.file,
+            self.line,
+            self.expressions.join(", ")
         );
 
         for warning in &self.warnings {
@@ -209,7 +224,7 @@ impl AddMetricResult {
             "parsed": {
                 "file": self.file,
                 "line": self.line,
-                "expression": self.expression,
+                "expressions": self.expressions,
                 "connection_id": self.connection_id,
             },
             "location": format!("@{}#{}", self.file, self.line),
@@ -225,7 +240,7 @@ pub async fn add_metric_impl(
 ) -> Result<AddMetricResult, McpError> {
     // Keep copies for response
     let metric_name = params.name.clone();
-    let metric_expression = params.expression.clone();
+    let metric_expressions = params.expressions.clone();
     let connection_id_str = params.connection_id.clone();
     let replace_flag = params.replace.unwrap_or(false);
 
@@ -313,7 +328,7 @@ pub async fn add_metric_impl(
         name: metric_name,
         file: parsed_file,
         line: parsed_line,
-        expression: metric_expression,
+        expressions: metric_expressions,
         connection_id: connection_id_str,
         warnings,
     })
@@ -506,7 +521,7 @@ pub async fn enable_from_diff_impl(
             conn_id.clone(),
             parsed.file.clone(),
             parsed.line,
-            parsed.expression.clone(),
+            vec![parsed.expression.clone()],
             connection.language,
         )
         .with_group(group.clone())

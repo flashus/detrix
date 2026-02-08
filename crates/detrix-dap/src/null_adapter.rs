@@ -81,7 +81,7 @@ mod tests {
                 file: "test.py".to_string(),
                 line: 10,
             },
-            expression: "x".to_string(),
+            expressions: vec!["x".to_string()],
             language: SourceLanguage::Python,
             mode: MetricMode::Stream,
             enabled: true,

@@ -32,6 +32,7 @@ pub use entities::{
     AnchorStatus,
     CapturedStackTrace,
     CapturedVariable,
+    ExpressionValue,
     GroupInfo,
     ImpureCall,
     Location,
@@ -54,6 +55,7 @@ pub use entities::{
     SourceLanguage,
     StackFrame,
     StackTraceSlice,
+    TypedValue,
     // Metric name constants
     MAX_METRIC_NAME_LEN,
     // Mode type constants
@@ -62,6 +64,9 @@ pub use entities::{
     MODE_SAMPLE_INTERVAL,
     MODE_STREAM,
     MODE_THROTTLE,
+    // Multi-expression delimiter
+    MULTI_EXPR_DELIMITER,
+    MULTI_EXPR_DELIMITER_STR,
     // Safety level constants
     SAFETY_STRICT,
     SAFETY_TRUSTED,

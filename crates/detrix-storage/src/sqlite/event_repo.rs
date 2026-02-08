@@ -5,11 +5,11 @@ use crate::json_helpers::{deserialize_optional, serialize_optional};
 use async_trait::async_trait;
 use detrix_application::EventRepository;
 use detrix_config::constants::SQLITE_MAX_VARIABLES;
-use detrix_core::entities::{MetricEvent, MetricId};
+use detrix_core::entities::{ExpressionValue, MetricEvent, MetricId};
 use detrix_core::error::Result;
 use detrix_core::ConnectionId;
 use sqlx::Row;
-use tracing::{trace, warn};
+use tracing::trace;
 
 #[async_trait]
 impl EventRepository for SqliteStorage {
@@ -20,15 +20,18 @@ impl EventRepository for SqliteStorage {
         let memory_snapshot_json =
             serialize_optional(&event.memory_snapshot, "memory_snapshot", &context);
 
+        // Serialize multi-expression values as JSON
+        let values_json = serde_json::to_string(&event.values)?;
+
         let id = sqlx::query(
             r#"
             INSERT INTO metric_events (
                 metric_id, metric_name, connection_id, timestamp, thread_name, thread_id,
-                value_json, value_numeric, value_string, value_boolean,
+                values_json,
                 is_error, error_type, error_message, error_traceback,
                 request_id, session_id, stack_trace_json, memory_snapshot_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(event.metric_id.0 as i64) // SQLite only supports i64
@@ -37,10 +40,7 @@ impl EventRepository for SqliteStorage {
         .bind(event.timestamp)
         .bind(&event.thread_name)
         .bind(event.thread_id)
-        .bind(&event.value_json)
-        .bind(event.value_numeric)
-        .bind(&event.value_string)
-        .bind(event.value_boolean.map(|b| if b { 1 } else { 0 }))
+        .bind(&values_json)
         .bind(event.is_error)
         .bind(&event.error_type)
         .bind(&event.error_message)
@@ -62,8 +62,8 @@ impl EventRepository for SqliteStorage {
         }
 
         // SQLite has a variable limit (SQLITE_MAX_VARIABLE_NUMBER, default 999)
-        // With 18 columns per event, we can safely batch ~55 events (55 * 18 = 990 < 999)
-        const COLUMNS_PER_EVENT: usize = 18;
+        // With 15 columns per event, we can safely batch ~66 events (66 * 15 = 990 < 999)
+        const COLUMNS_PER_EVENT: usize = 15;
         const CHUNK_SIZE: usize = SQLITE_MAX_VARIABLES / COLUMNS_PER_EVENT;
 
         let mut all_ids = Vec::with_capacity(events.len());
@@ -73,42 +73,41 @@ impl EventRepository for SqliteStorage {
 
         for chunk in events.chunks(CHUNK_SIZE) {
             // Build multi-value INSERT: INSERT INTO ... VALUES (?,?,...), (?,?,...), ...
-            let placeholders: Vec<String> = chunk
-                .iter()
-                .map(|_| "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)".to_string())
-                .collect();
+            let placeholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            let joined = vec![placeholder; chunk.len()].join(", ");
 
             let query = format!(
                 r#"
                 INSERT INTO metric_events (
                     metric_id, metric_name, connection_id, timestamp, thread_name, thread_id,
-                    value_json, value_numeric, value_string, value_boolean,
+                    values_json,
                     is_error, error_type, error_message, error_traceback,
                     request_id, session_id, stack_trace_json, memory_snapshot_json
                 )
                 VALUES {}
                 "#,
-                placeholders.join(", ")
+                joined
             );
 
-            // Pre-serialize all introspection data so references live long enough
-            let introspection_data: Vec<(Option<String>, Option<String>)> = chunk
+            // Pre-serialize all introspection and values data so references live long enough
+            let serialized_data: Vec<(Option<String>, Option<String>, String)> = chunk
                 .iter()
-                .map(|event| {
+                .map(|event| -> Result<_> {
                     let context = format!("metric_id={}", event.metric_id.0);
                     let stack_trace_json =
                         serialize_optional(&event.stack_trace, "stack_trace", &context);
                     let memory_snapshot_json =
                         serialize_optional(&event.memory_snapshot, "memory_snapshot", &context);
-                    (stack_trace_json, memory_snapshot_json)
+                    let values_json = serde_json::to_string(&event.values)?;
+                    Ok((stack_trace_json, memory_snapshot_json, values_json))
                 })
-                .collect();
+                .collect::<Result<Vec<_>>>()?;
 
             let mut query_builder = sqlx::query(&query);
 
             // Bind all parameters for all events in this chunk
-            for (event, (stack_trace_json, memory_snapshot_json)) in
-                chunk.iter().zip(introspection_data.iter())
+            for (event, (stack_trace_json, memory_snapshot_json, values_json)) in
+                chunk.iter().zip(serialized_data.iter())
             {
                 query_builder = query_builder
                     .bind(event.metric_id.0 as i64) // SQLite only supports i64
@@ -117,10 +116,7 @@ impl EventRepository for SqliteStorage {
                     .bind(event.timestamp)
                     .bind(&event.thread_name)
                     .bind(event.thread_id)
-                    .bind(&event.value_json)
-                    .bind(event.value_numeric)
-                    .bind(&event.value_string)
-                    .bind(event.value_boolean.map(|b| if b { 1 } else { 0 }))
+                    .bind(values_json)
                     .bind(event.is_error)
                     .bind(&event.error_type)
                     .bind(&event.error_message)
@@ -165,8 +161,7 @@ impl EventRepository for SqliteStorage {
         .fetch_all(self.pool())
         .await?;
 
-        let events: Result<Vec<MetricEvent>> = rows.iter().map(row_to_event).collect();
-        events
+        rows.iter().map(row_to_event).collect()
     }
 
     async fn find_by_metric_id_since(
@@ -189,8 +184,7 @@ impl EventRepository for SqliteStorage {
         .fetch_all(self.pool())
         .await?;
 
-        let events: Result<Vec<MetricEvent>> = rows.iter().map(row_to_event).collect();
-        events
+        rows.iter().map(row_to_event).collect()
     }
 
     async fn find_by_metric_ids(
@@ -217,8 +211,7 @@ impl EventRepository for SqliteStorage {
 
         let rows = query_builder.fetch_all(self.pool()).await?;
 
-        let events: Result<Vec<MetricEvent>> = rows.iter().map(row_to_event).collect();
-        events
+        rows.iter().map(row_to_event).collect()
     }
 
     async fn find_by_metric_id_and_time_range(
@@ -243,8 +236,7 @@ impl EventRepository for SqliteStorage {
         .fetch_all(self.pool())
         .await?;
 
-        let events: Result<Vec<MetricEvent>> = rows.iter().map(row_to_event).collect();
-        events
+        rows.iter().map(row_to_event).collect()
     }
 
     async fn count_by_metric_id(&self, metric_id: MetricId) -> Result<i64> {
@@ -271,8 +263,7 @@ impl EventRepository for SqliteStorage {
             .fetch_all(self.pool())
             .await?;
 
-        let events: Result<Vec<MetricEvent>> = rows.iter().map(row_to_event).collect();
-        events
+        rows.iter().map(row_to_event).collect()
     }
 
     async fn delete_older_than(&self, timestamp_micros: i64) -> Result<u64> {
@@ -313,32 +304,25 @@ fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<MetricEvent> {
     let timestamp: i64 = row.try_get("timestamp")?;
     let thread_name: Option<String> = row.try_get("thread_name")?;
     let thread_id: Option<i64> = row.try_get("thread_id")?;
-    let value_json: String = row.try_get("value_json")?;
-    let metric_name: String = row.try_get("metric_name").unwrap_or_else(|e| {
-        warn!(metric_id = metric_id, error = %e, "metric_name column missing or unreadable, using empty string");
-        String::new()
-    });
+    let metric_name: String = row.try_get("metric_name").unwrap_or_default();
     let connection_id: String = row.try_get("connection_id")?;
-    let value_numeric: Option<f64> = row.try_get("value_numeric")?;
-    let value_string: Option<String> = row.try_get("value_string")?;
-    let value_boolean_int: Option<i64> = row.try_get("value_boolean")?;
     let is_error: bool = row.try_get("is_error")?;
     let error_type: Option<String> = row.try_get("error_type")?;
     let error_message: Option<String> = row.try_get("error_message")?;
     let request_id: Option<String> = row.try_get("request_id")?;
 
-    let value_boolean = value_boolean_int.map(|v| v != 0);
+    // Read multi-expression values JSON (canonical column)
+    let values_json_str: String = row.try_get("values_json")?;
+    let values: Vec<ExpressionValue> = serde_json::from_str(&values_json_str).map_err(|e| {
+        detrix_core::error::Error::Database(format!(
+            "Failed to parse values_json for event {}: {}",
+            id, e
+        ))
+    })?;
 
     // Parse introspection data from JSON columns
-    let stack_trace_json: Option<String> = row.try_get("stack_trace_json").unwrap_or_else(|e| {
-        trace!(metric_id = metric_id, error = %e, "stack_trace_json column not found");
-        None
-    });
-    let memory_snapshot_json: Option<String> =
-        row.try_get("memory_snapshot_json").unwrap_or_else(|e| {
-            trace!(metric_id = metric_id, error = %e, "memory_snapshot_json column not found");
-            None
-        });
+    let stack_trace_json: Option<String> = row.try_get("stack_trace_json").unwrap_or(None);
+    let memory_snapshot_json: Option<String> = row.try_get("memory_snapshot_json").unwrap_or(None);
 
     let context = format!("metric_id={}", metric_id);
     let stack_trace = deserialize_optional(stack_trace_json.as_deref(), "stack_trace", &context);
@@ -353,10 +337,7 @@ fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<MetricEvent> {
         timestamp,
         thread_name,
         thread_id,
-        value_json,
-        value_numeric,
-        value_string,
-        value_boolean,
+        values,
         is_error,
         error_type,
         error_message,
@@ -393,7 +374,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].value_json, r#"{"user_id":123}"#);
+        assert_eq!(events[0].value_json(), r#"{"user_id":123}"#);
     }
 
     #[tokio::test]
@@ -602,10 +583,7 @@ mod proptest_tests {
             timestamp,
             thread_name: Some("test".to_string()),
             thread_id: Some(1),
-            value_json: r#"{"test": true}"#.to_string(),
-            value_numeric: Some(1.0),
-            value_string: None,
-            value_boolean: None,
+            values: vec![ExpressionValue::with_numeric("", r#"{"test": true}"#, 1.0)],
             is_error: false,
             error_type: None,
             error_message: None,

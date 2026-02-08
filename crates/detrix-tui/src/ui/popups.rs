@@ -275,7 +275,7 @@ fn render_metric_details(frame: &mut Frame, app: &App, metric_id: u64) {
             ]),
             Line::from(vec![
                 Span::styled("Expression: ", app.theme.normal),
-                Span::styled(&metric.expression, app.theme.value),
+                Span::styled(metric.expressions.join(", "), app.theme.value),
             ]),
             Line::from(""),
             Line::from(vec![
@@ -359,7 +359,7 @@ fn render_event_details(frame: &mut Frame, app: &App, idx: usize) {
         } else {
             lines.push(Line::from(Span::styled("Value:", app.theme.header)));
             // Pretty print JSON
-            let value_str = format_json_pretty(&event.value_json);
+            let value_str = format_json_pretty(event.value_json());
             for line in value_str.lines() {
                 lines.push(Line::from(Span::styled(line.to_string(), app.theme.value)));
             }

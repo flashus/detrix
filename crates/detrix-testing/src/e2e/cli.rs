@@ -168,7 +168,7 @@ struct CliMetricResponse {
     /// Some CLI outputs use "location_line" separately
     #[serde(default)]
     location_line: Option<u32>,
-    expression: String,
+    expressions: Vec<String>,
     group: Option<String>,
     enabled: bool,
     #[serde(default)]
@@ -208,11 +208,18 @@ struct CliEventResponse {
     age_seconds: i64,
     #[serde(default)]
     is_error: bool,
+    /// Multi-expression values (CLI outputs "values_json" field with value strings)
+    #[serde(default)]
+    values_json: Vec<String>,
 }
 
 impl CliEventResponse {
     fn get_value(&self) -> String {
-        self.value_json.clone().unwrap_or_default()
+        // Try value_json first, then first entry from values_json
+        self.value_json
+            .clone()
+            .or_else(|| self.values_json.first().cloned())
+            .unwrap_or_default()
     }
 
     fn get_timestamp_iso(&self) -> String {
@@ -507,11 +514,14 @@ impl ApiClient for CliClient {
             request.name.clone(),
             "--location".to_string(),
             request.location.clone(),
-            "--expression".to_string(),
-            request.expression.clone(),
             "--connection".to_string(),
             request.connection_id.clone(),
         ];
+        // Add each expression as a separate --expressions argument
+        for expr in &request.expressions {
+            args.push("--expressions".to_string());
+            args.push(expr.clone());
+        }
 
         if let Some(group) = &request.group {
             args.push("--group".to_string());
@@ -567,7 +577,7 @@ impl ApiClient for CliClient {
         Ok(ApiResponse::new(MetricInfo {
             name: metric.name,
             location,
-            expression: metric.expression,
+            expressions: metric.expressions,
             group: metric.group,
             enabled: metric.enabled,
             mode: metric.mode,
@@ -592,7 +602,7 @@ impl ApiClient for CliClient {
                     MetricInfo {
                         name: m.name,
                         location,
-                        expression: m.expression,
+                        expressions: m.expressions,
                         group: m.group,
                         enabled: m.enabled,
                         mode: m.mode,
@@ -627,6 +637,17 @@ impl ApiClient for CliClient {
                 .map(|e| {
                     let value = e.get_value();
                     let timestamp_iso = e.get_timestamp_iso();
+                    // Convert CLI values_json strings to JSON objects
+                    let values: Vec<serde_json::Value> = e
+                        .values_json
+                        .iter()
+                        .map(|vj| {
+                            serde_json::json!({
+                                "valueJson": vj,
+                            })
+                        })
+                        .collect();
+
                     EventInfo {
                         metric_name: e.metric_name,
                         value,
@@ -635,6 +656,7 @@ impl ApiClient for CliClient {
                         is_error: e.is_error,
                         stack_trace: None,
                         memory_snapshot: None,
+                        values,
                         extra: Default::default(),
                     }
                 })

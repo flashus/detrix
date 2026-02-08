@@ -26,7 +26,7 @@ pub async fn create_test_metric(name: &str) -> Metric {
             file: "test.py".to_string(),
             line,
         },
-        "user.id".to_string(),
+        vec!["user.id".to_string()],
         SourceLanguage::Python,
     )
     .unwrap()
@@ -47,7 +47,7 @@ async fn test_metric_save_and_find() {
         .unwrap()
         .unwrap();
     assert_eq!(found.name, "test_metric");
-    assert_eq!(found.expression, "user.id");
+    assert_eq!(found.expression(), "user.id");
     assert_eq!(found.language, SourceLanguage::Python);
     assert!(found.enabled);
     assert_eq!(found.mode, MetricMode::Stream);
@@ -96,7 +96,7 @@ async fn test_metric_update() {
         .await
         .unwrap()
         .unwrap();
-    found.expression = "order.total".to_string();
+    found.expressions = vec!["order.total".to_string()];
     found.enabled = false;
 
     MetricRepository::update(&storage, &found).await.unwrap();
@@ -105,7 +105,7 @@ async fn test_metric_update() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(updated.expression, "order.total");
+    assert_eq!(updated.expression(), "order.total");
     assert!(!updated.enabled);
 }
 
@@ -149,7 +149,7 @@ async fn test_metric_duplicate_location_fails_by_default() {
             file: "test.py".to_string(),
             line: 100,
         },
-        "user.id".to_string(),
+        vec!["user.id".to_string()],
         SourceLanguage::Python,
     )
     .unwrap();
@@ -165,7 +165,7 @@ async fn test_metric_duplicate_location_fails_by_default() {
             file: "test.py".to_string(),
             line: 100, // Same line!
         },
-        "order.total".to_string(),
+        vec!["order.total".to_string()],
         SourceLanguage::Python,
     )
     .unwrap();
@@ -187,7 +187,7 @@ async fn test_metric_duplicate_location_upserts_when_enabled() {
             file: "test.py".to_string(),
             line: 200,
         },
-        "user.id".to_string(),
+        vec!["user.id".to_string()],
         SourceLanguage::Python,
     )
     .unwrap();
@@ -204,7 +204,7 @@ async fn test_metric_duplicate_location_upserts_when_enabled() {
             file: "test.py".to_string(),
             line: 200, // Same line!
         },
-        "updated.expression".to_string(),
+        vec!["updated.expression".to_string()],
         SourceLanguage::Python,
     )
     .unwrap();
@@ -224,7 +224,8 @@ async fn test_metric_duplicate_location_upserts_when_enabled() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        found.expression, "updated.expression",
+        found.expression(),
+        "updated.expression",
         "Expression should be updated by upsert"
     );
     assert_eq!(
@@ -249,7 +250,7 @@ async fn test_metric_same_name_different_locations_allowed() {
             file: "test.py".to_string(),
             line: 100,
         },
-        "user.id".to_string(),
+        vec!["user.id".to_string()],
         SourceLanguage::Python,
     )
     .unwrap();
@@ -265,7 +266,7 @@ async fn test_metric_same_name_different_locations_allowed() {
             file: "test.py".to_string(),
             line: 200, // Different line
         },
-        "order.total".to_string(),
+        vec!["order.total".to_string()],
         SourceLanguage::Python,
     )
     .unwrap();

@@ -311,7 +311,7 @@ impl StreamingService for StreamingServiceImpl {
         Ok(Response::new(MetricValue {
             metric_id: metric_id.0,
             metric_name,
-            value_json: event.value_json,
+            value_json: event.value_json().to_string(),
             timestamp: event.timestamp,
             metadata: None,
         }))

@@ -198,7 +198,7 @@ fn create_add_metric_request(
             file: file_path,
             line,
         }),
-        expression: "x.value".to_string(),
+        expressions: vec!["x.value".to_string()],
         language: Some("python".to_string()),
         enabled: true,
         mode: Some(MetricMode {
@@ -262,6 +262,55 @@ async fn test_metric_add_and_get() {
 }
 
 #[tokio::test]
+async fn test_add_metric_with_multiple_expressions() {
+    let server = TestServer::start().await.expect("Failed to start server");
+    let mut client = server
+        .metrics_client()
+        .await
+        .expect("Failed to create client");
+
+    // Add a metric with 3 expressions
+    let mut request =
+        create_add_metric_request("multi_expr_metric", "test.py", 10, &server.connection_id);
+    request.expressions = vec![
+        "x.value".to_string(),
+        "y.count".to_string(),
+        "z.status".to_string(),
+    ];
+    let response = client.add_metric(request).await.expect("AddMetric failed");
+    let metric = response.into_inner();
+
+    assert!(metric.metric_id > 0, "Metric ID should be positive");
+    assert_eq!(metric.name, "multi_expr_metric");
+
+    // Verify expressions are returned in AddMetric response
+    assert_eq!(metric.expressions.len(), 3);
+    assert_eq!(metric.expressions[0], "x.value");
+    assert_eq!(metric.expressions[1], "y.count");
+    assert_eq!(metric.expressions[2], "z.status");
+
+    // Verify expressions are also returned via GetMetric
+    let get_response = client
+        .get_metric(GetMetricRequest {
+            identifier: Some(
+                detrix_api::generated::detrix::v1::get_metric_request::Identifier::Name(
+                    "multi_expr_metric".to_string(),
+                ),
+            ),
+            metadata: None,
+        })
+        .await
+        .expect("GetMetric failed");
+    let found = get_response.into_inner();
+    assert_eq!(found.expressions.len(), 3);
+    assert_eq!(found.expressions[0], "x.value");
+    assert_eq!(found.expressions[1], "y.count");
+    assert_eq!(found.expressions[2], "z.status");
+
+    server.shutdown();
+}
+
+#[tokio::test]
 async fn test_metric_add_and_get_by_name() {
     let server = TestServer::start().await.expect("Failed to start server");
     let mut client = server
@@ -309,7 +358,7 @@ async fn test_metric_update() {
     // Update the metric (complex expression skips file inspection)
     let update_request = UpdateMetricRequest {
         metric_id,
-        expression: Some("y.updated".to_string()),
+        expressions: vec!["y.updated".to_string()],
         enabled: Some(false),
         mode: None,
         condition: Some("y > 0".to_string()),
@@ -897,7 +946,7 @@ async fn test_update_metric_not_found() {
     // Try to update non-existent metric
     let update_request = UpdateMetricRequest {
         metric_id: 99999,
-        expression: Some("new_expr".to_string()),
+        expressions: vec!["new_expr".to_string()],
         enabled: None,
         mode: None,
         condition: None,
@@ -1349,7 +1398,7 @@ async fn test_full_metric_lifecycle() {
     // 3. Update metric (complex expression skips file inspection)
     let update_request = UpdateMetricRequest {
         metric_id,
-        expression: Some("value.lifecycle".to_string()),
+        expressions: vec!["value.lifecycle".to_string()],
         enabled: None,
         mode: None,
         condition: None,

@@ -24,7 +24,7 @@ max_age_days = 30
 name = "order_placed"
 connection_id = "trading-bot"
 location = { file = "fixtures/python/detrix_example_app.py", line = 20 }
-expression = "f'symbol={symbol}, qty={quantity}, price={price}'"
+expressions = ["f'symbol={symbol}, qty={quantity}, price={price}'"]
 language = "python"
 enabled = true
 mode = { mode = "stream" }
@@ -34,7 +34,7 @@ safety_level = "strict"
 name = "position_updated"
 connection_id = "trading-bot"
 location = { file = "fixtures/python/detrix_example_app.py", line = 30 }
-expression = "f'symbol={symbol}, size={position_size}, pnl={unrealized_pnl}'"
+expressions = ["f'symbol={symbol}, size={position_size}, pnl={unrealized_pnl}'"]
 language = "python"
 enabled = true
 mode = { mode = "throttle", max_per_second = 10 }
@@ -44,7 +44,7 @@ safety_level = "strict"
 name = "trade_executed"
 connection_id = "trading-bot"
 location = { file = "fixtures/python/detrix_example_app.py", line = 40 }
-expression = "f'filled_qty={filled_quantity}, avg_price={average_price}'"
+expressions = ["f'filled_qty={filled_quantity}, avg_price={average_price}'"]
 language = "python"
 enabled = true
 mode = { mode = "stream" }

@@ -151,7 +151,7 @@ pub trait DapTestFixture: Send + Sync + 'static {
                 file: format!("test_script.{}", Self::file_extension()),
                 line,
             },
-            expression: expression.to_string(),
+            expressions: vec![expression.to_string()],
             language: Self::adapter_language(),
             enabled: true,
             mode: MetricMode::Stream,
@@ -214,6 +214,7 @@ pub trait DapTestFixture: Send + Sync + 'static {
 /// ```
 /// Internal module for macro-generated tests
 /// This avoids import conflicts when tests use their own imports
+#[allow(unused_imports)]
 pub mod generated_tests {
     pub use super::{
         get_test_port, register_test_process, unregister_test_process, wait_for_port,

@@ -78,12 +78,15 @@ impl MetricRepository for SqliteStorage {
 
         let anchor_status_str = metric.anchor_status.to_string();
 
+        // Serialize expressions as JSON array for the new column
+        let expressions_json = serde_json::to_string(&metric.expressions)?;
+
         // For upsert mode, we need RETURNING to get the ID (could be existing or new)
         // For non-upsert mode, we use execute() + last_insert_rowid() which is simpler
         let id = if upsert {
             let query = r#"
             INSERT INTO metrics (
-                name, connection_id, group_name, location, expression, expression_hash, language,
+                name, connection_id, group_name, location, expressions_json, expression_hash, language,
                 enabled, mode_type, mode_config, condition_expr, safety_level,
                 created_at, updated_at, created_by,
                 capture_stack_trace, stack_trace_ttl, stack_trace_slice,
@@ -97,7 +100,7 @@ impl MetricRepository for SqliteStorage {
             ON CONFLICT(location, connection_id) DO UPDATE SET
                 name = excluded.name,
                 group_name = excluded.group_name,
-                expression = excluded.expression,
+                expressions_json = excluded.expressions_json,
                 expression_hash = excluded.expression_hash,
                 language = excluded.language,
                 enabled = excluded.enabled,
@@ -131,7 +134,7 @@ impl MetricRepository for SqliteStorage {
                 .bind(&metric.connection_id.0)
                 .bind(&metric.group)
                 .bind(metric.location.to_string_format())
-                .bind(&metric.expression)
+                .bind(&expressions_json)
                 .bind(metric.expression_hash())
                 .bind(metric.language.as_str())
                 .bind(metric.enabled)
@@ -148,7 +151,6 @@ impl MetricRepository for SqliteStorage {
                 .bind(metric.capture_memory_snapshot)
                 .bind(snapshot_scope_str)
                 .bind(metric.snapshot_ttl.map(|t| t as i64))
-                // Anchor columns (?22-?32)
                 .bind(&anchor_symbol)
                 .bind(anchor_symbol_kind.map(|k| k as i64))
                 .bind(&anchor_symbol_range)
@@ -168,7 +170,7 @@ impl MetricRepository for SqliteStorage {
             // Plain INSERT - use execute() + last_insert_rowid() for simplicity
             let query = r#"
             INSERT INTO metrics (
-                name, connection_id, group_name, location, expression, expression_hash, language,
+                name, connection_id, group_name, location, expressions_json, expression_hash, language,
                 enabled, mode_type, mode_config, condition_expr, safety_level,
                 created_at, updated_at, created_by,
                 capture_stack_trace, stack_trace_ttl, stack_trace_slice,
@@ -186,7 +188,7 @@ impl MetricRepository for SqliteStorage {
                 .bind(&metric.connection_id.0)
                 .bind(&metric.group)
                 .bind(metric.location.to_string_format())
-                .bind(&metric.expression)
+                .bind(&expressions_json)
                 .bind(metric.expression_hash())
                 .bind(metric.language.as_str())
                 .bind(metric.enabled)
@@ -203,7 +205,6 @@ impl MetricRepository for SqliteStorage {
                 .bind(metric.capture_memory_snapshot)
                 .bind(snapshot_scope_str)
                 .bind(metric.snapshot_ttl.map(|t| t as i64))
-                // Anchor columns (?22-?32)
                 .bind(&anchor_symbol)
                 .bind(anchor_symbol_kind.map(|k| k as i64))
                 .bind(&anchor_symbol_range)
@@ -354,13 +355,16 @@ impl MetricRepository for SqliteStorage {
 
         let anchor_status_str = metric.anchor_status.to_string();
 
+        // Serialize expressions as JSON array for the new column
+        let expressions_json = serde_json::to_string(&metric.expressions)?;
+
         let result = sqlx::query(
             r#"
             UPDATE metrics SET
                 name = ?,
                 group_name = ?,
                 location = ?,
-                expression = ?,
+                expressions_json = ?,
                 expression_hash = ?,
                 language = ?,
                 enabled = ?,
@@ -386,7 +390,7 @@ impl MetricRepository for SqliteStorage {
         .bind(&metric.name)
         .bind(&metric.group)
         .bind(metric.location.to_string_format())
-        .bind(&metric.expression)
+        .bind(&expressions_json)
         .bind(metric.expression_hash())
         .bind(metric.language.as_str())
         .bind(metric.enabled)
@@ -609,8 +613,15 @@ pub(crate) fn row_to_metric(row: &sqlx::sqlite::SqliteRow) -> Result<Metric> {
     let connection_id: String = row.try_get("connection_id")?;
     let group_name: Option<String> = row.try_get("group_name")?;
     let location: String = row.try_get("location")?;
-    let expression: String = row.try_get("expression")?;
     let language: String = row.try_get("language")?;
+
+    let expressions_json: String = row.try_get("expressions_json")?;
+    let expressions: Vec<String> = serde_json::from_str(&expressions_json).map_err(|e| {
+        detrix_core::error::Error::Database(format!(
+            "Failed to parse expressions_json for metric {}: {}",
+            name, e
+        ))
+    })?;
     let enabled: bool = row.try_get("enabled")?;
     let mode_type: String = row.try_get("mode_type")?;
     let mode_config: Option<String> = row.try_get("mode_config")?;
@@ -781,7 +792,7 @@ pub(crate) fn row_to_metric(row: &sqlx::sqlite::SqliteRow) -> Result<Metric> {
         connection_id: detrix_core::ConnectionId::from(connection_id),
         group: group_name,
         location,
-        expression,
+        expressions,
         language,
         enabled,
         mode,

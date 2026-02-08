@@ -201,11 +201,18 @@ impl McpClient {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string(),
-                            expression: m
-                                .get("expression")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string(),
+                            expressions: if let Some(arr) =
+                                m.get("expressions").and_then(|v| v.as_array())
+                            {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            } else if let Some(expr) = m.get("expression").and_then(|v| v.as_str())
+                            {
+                                vec![expr.to_string()]
+                            } else {
+                                vec![]
+                            },
                             group: m
                                 .get("group")
                                 .and_then(|v| v.as_str())
@@ -1003,7 +1010,7 @@ impl ApiClient for McpClient {
         let mut args = json!({
             "name": request.name,
             "location": request.location,
-            "expression": request.expression,
+            "expressions": request.expressions,
             "connection_id": request.connection_id
         });
 
@@ -1074,7 +1081,7 @@ impl ApiClient for McpClient {
         Ok(ApiResponse::new(MetricInfo {
             name: name.to_string(),
             location: String::new(),
-            expression: String::new(),
+            expressions: vec![],
             group: None,
             enabled: true,
             mode: None,
@@ -1295,7 +1302,7 @@ impl ApiClient for McpClient {
     async fn observe(&self, request: ObserveRequest) -> ApiResult<ObserveResponse> {
         let mut args = json!({
             "file": request.file,
-            "expression": request.expression
+            "expressions": request.expressions
         });
 
         // Add optional parameters

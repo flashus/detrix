@@ -3,7 +3,7 @@
 //! Provides a client for connecting to the Detrix WebSocket endpoint
 //! and receiving real-time metric events.
 
-use detrix_core::{CapturedStackTrace, MemorySnapshot};
+use detrix_core::{CapturedStackTrace, ExpressionValue, MemorySnapshot};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::time::Duration;
@@ -13,11 +13,12 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 /// WebSocket event message received from the server
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EventMessage {
     pub metric_id: i64,
     pub metric_name: String,
     pub timestamp: i64,
-    pub value_json: String,
+    pub values: Vec<ExpressionValue>,
     /// Captured stack trace (if introspection enabled)
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub stack_trace: Option<CapturedStackTrace>,
@@ -186,12 +187,13 @@ mod tests {
 
     #[test]
     fn test_event_message_deserialize() {
-        let json =
-            r#"{"metric_id": 1, "metric_name": "test", "timestamp": 123, "value_json": "{}"}"#;
+        let json = r#"{"metricId": 1, "metricName": "test", "timestamp": 123, "values": [{"expression": "x", "valueJson": "42"}]}"#;
         let event: EventMessage = serde_json::from_str(json).unwrap();
         assert_eq!(event.metric_id, 1);
         assert_eq!(event.metric_name, "test");
         assert_eq!(event.timestamp, 123);
-        assert_eq!(event.value_json, "{}");
+        assert_eq!(event.values.len(), 1);
+        assert_eq!(event.values[0].expression, "x");
+        assert_eq!(event.values[0].value_json, "42");
     }
 }

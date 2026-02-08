@@ -43,9 +43,9 @@ pub struct AddArgs {
     #[arg(long, short)]
     location: String,
 
-    /// Expression to evaluate at the location
-    #[arg(long, short)]
-    expression: String,
+    /// Expression(s) to evaluate at the location (can specify multiple)
+    #[arg(long, short, num_args = 1..)]
+    expressions: Vec<String>,
 
     /// Connection ID to use for this metric
     #[arg(long, short = 'C')]
@@ -104,7 +104,7 @@ async fn add(endpoints: &DaemonEndpoints, args: AddArgs, formatter: &Formatter) 
         name: args.name.clone(),
         location: args.location,
         line: None,
-        expression: args.expression,
+        expressions: args.expressions,
         connection_id: args.connection,
         group: args.group,
         enabled: args.enabled,
