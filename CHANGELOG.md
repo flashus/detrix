@@ -5,6 +5,25 @@ All notable changes to Detrix will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-02-10
+
+### Added
+- **Multi-expression metrics**: Single metric can observe multiple expressions
+  simultaneously (`expressions: ["symbol", "quantity", "price"]`)
+- `ExpressionValue` type with typed projections (numeric, string, boolean)
+- GELF output includes per-expression custom fields (`_expr_N_name`, `_expr_N_value`)
+- Configurable `max_expressions_per_metric` limit (default: 20)
+
+### Breaking Changes
+- **WebSocket API**: Field names changed from snake_case to camelCase
+  (`metric_id` -> `metricId`, `stack_trace` -> `stackTrace`)
+- **gRPC/Proto**: `expression` (singular) replaced with `expressions` (repeated)
+- **REST API**: `expression` field replaced with `expressions` array
+- **Database**: Schema consolidated. Requires clean install from v1.0.
+
+### Fixed
+- Expression safety validation now enforced on config-file metric imports
+
 ## [1.0.0] - 2026-01-27
 
 ### Added

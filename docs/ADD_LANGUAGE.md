@@ -306,7 +306,7 @@ impl JavaScriptAdapter {
 }
 ```
 
-All logpoint formats use: `DETRICS:metric_name={expression}`
+All logpoint formats use: `DETRICS:metric_name={expr1}\x1F{expr2}\x1F...` (expressions delimited by ASCII Unit Separator `\x1F`)
 
 ### 3. Create Safety Config with Function Classification
 

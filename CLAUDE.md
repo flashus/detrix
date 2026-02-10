@@ -24,7 +24,7 @@ Add under a new
 
 **Detrix** is an LLM-first dynamic observability platform that enables developers and AI agents to add metrics to any line of code without redeployment.
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 **Language:** Rust (edition 2021, rust-version 1.80)
 **Architecture:** Clean Architecture with Domain-Driven Design
 
@@ -110,7 +110,7 @@ Use these terms consistently:
 | Term | Definition | NOT |
 |------|------------|-----|
 | **Metric** | An observation point in code | logpoint, probe, observation |
-| **Expression** | Code to evaluate at the observation point | code snippet, query |
+| **Expression** | Code to evaluate at the observation point; a metric can have multiple expressions | code snippet, query |
 | **Location** | File path + line number (`@file.py#127`) | path, position |
 | **Adapter** | DAP debug adapter for a language | debugger, connector |
 | **Logpoint** | DAP breakpoint with logMessage (no pause) | breakpoint, watchpoint |
@@ -302,7 +302,7 @@ detrix/
 │   ├── detrix-cli/            # UI: CLI + composition root
 │   ├── detrix-testing/        # Testing: mocks & fixtures
 │   └── detrix-tui/            # UI: Terminal dashboard
-├── clients/                   # SDK clients
+├── clients/                   # Detrix clients
 │   ├── go/                    # Go client
 │   ├── python/                # Python client
 │   └── rust/                  # Rust client

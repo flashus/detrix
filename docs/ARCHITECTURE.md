@@ -1,6 +1,6 @@
 # Detrix Architecture
 
-**Version:** 1.0.0 | **Last Updated:** January 2026
+**Version:** 1.1.0 | **Last Updated:** February 2026
 
 Detrix is an LLM-first dynamic observability platform that enables developers and AI agents to add metrics to any line of code without redeployment or code changes.
 
@@ -185,7 +185,7 @@ detrix-testing    → detrix-ports, detrix-core, detrix-application (test mocks)
 - `PythonOutputParser` - Python/debugpy specifics
 - `GoOutputParser` - Go/delve specifics
 - `RustOutputParser` - Rust/lldb-dap specifics
-- All use same logpoint format: `DETRICS:name={expression}`
+- All use same logpoint format: `DETRICS:name={expr1}\x1F{expr2}\x1F...` (expressions delimited by ASCII Unit Separator)
 
 **detrix-lsp** - LSP-based purity analysis (optional)
 - Call hierarchy traversal for user-defined functions
@@ -231,7 +231,7 @@ detrix-testing    → detrix-ports, detrix-core, detrix-application (test mocks)
 ## Key Concepts
 
 ### Metric
-An observation point in your code, defined by location + expression.
+An observation point in your code, defined by location + one or more expressions.
 
 ```rust
 Metric {
@@ -240,12 +240,14 @@ Metric {
         file_path: "@auth.py",
         line_number: 42
     },
-    expression: "user.id",
+    expressions: vec!["user.id", "user.role"],
     mode: CaptureMode::Stream,
     enabled: true,
     ...
 }
 ```
+
+A single metric can capture multiple expressions simultaneously. Each captured event contains an `ExpressionValue` per expression with typed projections (numeric, string, boolean).
 
 ### Logpoint
 A DAP breakpoint with `logMessage` that captures values **without pausing execution**. Detrix converts metrics to logpoints using DAP protocol.
@@ -256,11 +258,13 @@ A DAP breakpoint with `logMessage` that captures values **without pausing execut
 A DAP adapter connection to a running process. One Detrix daemon can manage multiple connections simultaneously (e.g., Python app + Go service + Rust binary).
 
 ### Event
-A captured value when a logpoint fires. Contains:
+Captured values when a logpoint fires. Contains:
 - Metric ID
-- Captured value
+- One or more `ExpressionValue` entries (one per expression in the metric)
 - Timestamp
 - Optional: stack trace, memory snapshot
+
+Each `ExpressionValue` includes the expression string, raw JSON value, and an optional typed projection (numeric, string, or boolean).
 
 ## DAP Adapter Pattern
 
@@ -274,7 +278,7 @@ pub trait OutputParser: Send + Sync + 'static {
         active_metrics: &Arc<RwLock<HashMap<String, Metric>>>,
     ) -> Option<MetricEvent>;
 
-    /// Build logpoint message (default: DETRICS:name={expr})
+    /// Build logpoint message (DETRICS:name={expr1}\x1F{expr2}\x1F...)
     fn build_logpoint_message(metric: &Metric) -> String;
 
     /// Whether debugger needs explicit continue after connect
@@ -445,6 +449,10 @@ detrix/
 │   │       ├── adapters.rs    # MockDapAdapter, StatefulMockDapAdapter
 │   │       └── repositories.rs# MockMetricRepository, MockEventRepository, etc.
 │   └── detrix-tui/            # Terminal UI (experimental)
+├── clients/                   # Detrix clients
+│   ├── python/                # Python client (pip install detrix)
+│   ├── go/                    # Go client
+│   └── rust/                  # Rust client (detrix-client crate)
 ├── fixtures/                  # Example apps for testing
 ├── skills/                    # Claude Code skill
 └── docs/
@@ -505,6 +513,7 @@ When contributing to Detrix:
 ## Resources
 
 - [Installation Guide](INSTALL.md)
+- [CLI Reference](CLI.md)
 - [Adding Languages](ADD_LANGUAGE.md)
 - [GitHub Repository](https://github.com/flashus/detrix)
 - [GitHub Issues](https://github.com/flashus/detrix/issues)

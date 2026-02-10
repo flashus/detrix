@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "detrix-api"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "detrix-application"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1030,7 +1030,7 @@ dependencies = [
 
 [[package]]
 name = "detrix-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1066,7 +1066,7 @@ dependencies = [
 
 [[package]]
 name = "detrix-config"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "detrix-core",
  "dirs",
@@ -1080,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "detrix-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "proptest",
@@ -1094,7 +1094,7 @@ dependencies = [
 
 [[package]]
 name = "detrix-dap"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "detrix-application",
@@ -1114,7 +1114,7 @@ dependencies = [
 
 [[package]]
 name = "detrix-logging"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "detrix-config",
  "filetime",
@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "detrix-lsp"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "detrix-application",
@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "detrix-output"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "detrix-config",
@@ -1164,7 +1164,7 @@ dependencies = [
 
 [[package]]
 name = "detrix-ports"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "detrix-storage"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "detrix-application",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "detrix-testing"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "detrix-tui"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "color-eyre",
