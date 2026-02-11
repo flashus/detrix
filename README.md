@@ -61,12 +61,12 @@ No print statements were added. No code was modified. No restarts. The agent obs
                            │
         ┌──────────────────┼──────────────────┐
         │                  │                  │
-   ┌────▼────┐       ┌────▼────┐       ┌────▼────┐
+   ┌────▼─────┐       ┌────▼─────┐       ┌────▼─────┐
    │   MCP    │       │  REST    │       │   DAP    │
    │  Server  │       │  gRPC    │       │ Adapters │
    └────┬─────┘       └────┬─────┘       └────┬─────┘
         │                  │                  │
-   ┌────▼────┐       ┌────▼────┐       ┌────▼────┐
+   ┌────▼─────┐       ┌────▼─────┐       ┌────▼─────┐
    │  Claude  │       │   CLI    │       │ debugpy  │
    │  Cursor  │       │   Web    │       │  delve   │
    │Windsurf  │       │   Apps   │       │ lldb-dap │
