@@ -204,7 +204,8 @@ func isPortBindError(err error) bool {
 func (m *Manager) waitForReady(host string, port int, proc *os.Process) error {
 	deadline := time.Now().Add(m.Timeout)
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	checkInterval := 100 * time.Millisecond
+	const readyCheckInterval = 100 * time.Millisecond
+	checkInterval := readyCheckInterval
 
 	for time.Now().Before(deadline) {
 		// Check if process died
@@ -269,4 +270,3 @@ func (m *Manager) Kill(proc *Process) error {
 		return nil
 	}
 }
-

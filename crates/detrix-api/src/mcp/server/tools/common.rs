@@ -87,7 +87,9 @@ impl MetricBuilder {
     }
 
     pub fn build(self) -> Metric {
-        let ttl = self.ttl_seconds.map(|t| t as u64);
+        let ttl = self
+            .ttl_seconds
+            .and_then(|t| if t > 0 { Some(t as u64) } else { None });
         Metric {
             id: None,
             name: self.name,

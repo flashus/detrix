@@ -196,7 +196,8 @@ pub async fn stop(pid_file_path: &PathBuf, poll_interval_ms: u64) -> Result<()> 
         use nix::sys::signal::{kill, Signal};
         use nix::unistd::Pid;
 
-        kill(Pid::from_raw(pid as i32), Signal::SIGTERM)
+        let pid_i32 = i32::try_from(pid).context("PID out of i32 range")?;
+        kill(Pid::from_raw(pid_i32), Signal::SIGTERM)
             .context("Failed to send SIGTERM to daemon")?;
     }
 
@@ -232,7 +233,8 @@ pub async fn stop(pid_file_path: &PathBuf, poll_interval_ms: u64) -> Result<()> 
         use nix::sys::signal::{kill, Signal};
         use nix::unistd::Pid;
 
-        kill(Pid::from_raw(pid as i32), Signal::SIGKILL)
+        let pid_i32 = i32::try_from(pid).context("PID out of i32 range")?;
+        kill(Pid::from_raw(pid_i32), Signal::SIGKILL)
             .context("Failed to send SIGKILL to daemon")?;
     }
 

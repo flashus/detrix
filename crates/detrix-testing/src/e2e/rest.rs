@@ -17,7 +17,7 @@ use detrix_api::{
     // REST handler DTOs (now have both Serialize and Deserialize)
     http::handlers::{
         ConfigResponse, CreateMetricRequest as RestCreateMetricRequest, CreateMetricResponse,
-        GroupOperationResponse, HealthResponse, PaginatedMetricsResponse,
+        DisconnectAllResponse, GroupOperationResponse, HealthResponse, PaginatedMetricsResponse,
         StackTraceSliceDto as RestStackTraceSliceDto, StatusResponse, WakeResponse,
     },
     // ErrorResponse for parsing API errors
@@ -254,10 +254,16 @@ impl ApiClient for RestClient {
         .with_raw(raw))
     }
 
-    async fn wake(&self) -> ApiResult<String> {
+    async fn wake(&self, app_url: &str, daemon_url: Option<&str>) -> ApiResult<String> {
+        let mut body = serde_json::json!({ "appUrl": app_url });
+        if let Some(url) = daemon_url {
+            body["daemonUrl"] = serde_json::json!(url);
+        }
+
         let response = self
             .client
             .post(format!("{}/api/v1/wake", self.base_url))
+            .json(&body)
             .send()
             .await
             .map_err(|e| ApiError::new(format!("Wake request failed: {}", e)))?;
@@ -267,7 +273,6 @@ impl ApiClient for RestClient {
             .await
             .map_err(|e| ApiError::new(format!("Failed to read response: {}", e)))?;
 
-        // REST API returns different format than proto - use REST-specific DTO
         let wake: WakeResponse = serde_json::from_str(&raw).map_err(|e| {
             ApiError::new(format!("Failed to parse wake response: {}", e)).with_raw(raw.clone())
         })?;
@@ -275,10 +280,13 @@ impl ApiClient for RestClient {
         Ok(ApiResponse::new(format!("{}: {}", wake.status, wake.message)).with_raw(raw))
     }
 
-    async fn sleep(&self) -> ApiResult<String> {
+    async fn sleep(&self, app_url: &str) -> ApiResult<String> {
+        let body = serde_json::json!({ "appUrl": app_url });
+
         let response = self
             .client
             .post(format!("{}/api/v1/sleep", self.base_url))
+            .json(&body)
             .send()
             .await
             .map_err(|e| ApiError::new(format!("Sleep request failed: {}", e)))?;
@@ -288,12 +296,32 @@ impl ApiClient for RestClient {
             .await
             .map_err(|e| ApiError::new(format!("Failed to read response: {}", e)))?;
 
-        // SleepResponse is proto-generated with both Serialize and Deserialize
         let sleep: SleepResponse = serde_json::from_str(&raw).map_err(|e| {
             ApiError::new(format!("Failed to parse sleep response: {}", e)).with_raw(raw.clone())
         })?;
 
         Ok(ApiResponse::new(format!("{}: {}", sleep.status, sleep.message)).with_raw(raw))
+    }
+
+    async fn disconnect_all(&self) -> ApiResult<String> {
+        let response = self
+            .client
+            .post(format!("{}/api/v1/disconnect_all", self.base_url))
+            .send()
+            .await
+            .map_err(|e| ApiError::new(format!("Disconnect all request failed: {}", e)))?;
+
+        let raw = response
+            .text()
+            .await
+            .map_err(|e| ApiError::new(format!("Failed to read response: {}", e)))?;
+
+        let result: DisconnectAllResponse = serde_json::from_str(&raw).map_err(|e| {
+            ApiError::new(format!("Failed to parse disconnect_all response: {}", e))
+                .with_raw(raw.clone())
+        })?;
+
+        Ok(ApiResponse::new(format!("{}: {}", result.status, result.message)).with_raw(raw))
     }
 
     // ========================================================================

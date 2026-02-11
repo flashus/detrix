@@ -29,6 +29,9 @@ pub struct InternalState {
     /// Control plane host.
     pub control_host: String,
 
+    /// Advertise host for daemon registration (if different from control_host).
+    pub advertise_host: Option<String>,
+
     /// Configured control port (0 = auto).
     pub control_port: u16,
 
@@ -78,6 +81,7 @@ impl Default for InternalState {
             state: ClientState::Sleeping,
             name: String::new(),
             control_host: "127.0.0.1".to_string(),
+            advertise_host: None,
             control_port: 0,
             actual_control_port: 0,
             debug_port: 0,

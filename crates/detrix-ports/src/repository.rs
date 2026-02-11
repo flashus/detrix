@@ -243,6 +243,16 @@ pub trait ConnectionRepository: Send + Sync {
     async fn delete_disconnected(&self) -> Result<u64>;
 }
 
+/// Minimal read-only lookup for connections.
+///
+/// A narrow trait extracted from `ConnectionService` so that `RemoteAppService`
+/// depends on an abstraction rather than a concrete service type.
+#[async_trait]
+pub trait ConnectionLookup: Send + Sync {
+    /// Retrieve a connection by its UUID, or None if not found.
+    async fn get_connection(&self, id: &ConnectionId) -> Result<Option<Connection>>;
+}
+
 /// Repository for system events (crashes, connections, metric CRUD)
 ///
 /// Used for:

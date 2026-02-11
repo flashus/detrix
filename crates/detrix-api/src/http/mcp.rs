@@ -9,11 +9,11 @@
 
 use crate::mcp::{
     AcknowledgeEventsParams, AddMetricParams, CloseConnectionParams, CreateConnectionParams,
-    DetrixServer, EnableFromDiffParams, GetConfigParams, GetConnectionParams, GetMetricParams,
-    GroupParams, InspectFileParams, ListConnectionsParams, ListGroupsParams, ListMetricsParams,
-    ObserveParams, QueryMetricsParams, QuerySystemEventsParams, RemoveMetricParams,
-    ToggleMetricParams, UpdateConfigParams, UpdateMetricParams, ValidateConfigParams,
-    ValidateExpressionParams,
+    DetrixServer, DisconnectAllParams, EnableFromDiffParams, GetConfigParams, GetConnectionParams,
+    GetMetricParams, GroupParams, InspectFileParams, ListConnectionsParams, ListGroupsParams,
+    ListMetricsParams, ObserveParams, QueryMetricsParams, QuerySystemEventsParams,
+    RemoveMetricParams, SleepParams, ToggleMetricParams, UpdateConfigParams, UpdateMetricParams,
+    ValidateConfigParams, ValidateExpressionParams, WakeParams,
 };
 use crate::mcp_client_tracker::{McpClientId, ParentProcessInfo};
 use crate::state::ApiState;
@@ -75,7 +75,7 @@ fn extract_parent_process_info(headers: &HeaderMap) -> Option<ParentProcessInfo>
 /// ```ignore
 /// http_tool_router!(mcp_server, arguments, tool_name,
 ///     // Tools without parameters
-///     { wake, sleep, get_status },
+///     { get_status },
 ///     // Tools with parameters: tool_name => ParamType
 ///     { add_metric => AddMetricParams, remove_metric => RemoveMetricParams }
 /// )
@@ -92,7 +92,7 @@ macro_rules! http_tool_router {
     ) => {
         paste::paste! {
             match $tool_name {
-                // No-param tools: "wake" => mcp_server.call_wake().await
+                // No-param tools: "get_status" => mcp_server.call_get_status().await
                 $(
                     stringify!($no_param) => $server.[<call_ $no_param>]().await,
                 )*
@@ -129,14 +129,15 @@ macro_rules! http_router_tool_names {
 pub const HTTP_ROUTER_TOOLS: &[&str] = http_router_tool_names!(
     // Tools without parameters (must match http_tool_router! below)
     {
-        wake,
-        sleep,
         get_status,
         reload_config,
         get_mcp_usage
     },
     // Tools with parameters (must match http_tool_router! below)
     {
+        wake => (),
+        sleep => (),
+        disconnect_all => (),
         add_metric => (),
         remove_metric => (),
         toggle_metric => (),
@@ -376,14 +377,15 @@ async fn handle_tools_call(mcp_server: DetrixServer, id: Option<Value>, params: 
     let result = http_tool_router!(mcp_server, arguments, tool_name,
         // Tools without parameters
         {
-            wake,
-            sleep,
             get_status,
             reload_config,
             get_mcp_usage
         },
         // Tools with parameters: tool_name => ParamType
         {
+            wake => WakeParams,
+            sleep => SleepParams,
+            disconnect_all => DisconnectAllParams,
             add_metric => AddMetricParams,
             remove_metric => RemoveMetricParams,
             toggle_metric => ToggleMetricParams,
@@ -523,7 +525,6 @@ mod tests {
         let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(tool_names.contains(&"add_metric"));
         assert!(tool_names.contains(&"list_metrics"));
-        assert!(tool_names.contains(&"wake"));
         assert!(tool_names.contains(&"create_connection"));
     }
 
@@ -552,14 +553,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mcp_handler_tools_call_wake() {
+    async fn test_mcp_handler_tools_call_get_status() {
         let (state, _temp_dir) = create_test_state().await;
 
         let request = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "tools/call",
             "params": {
-                "name": "wake",
+                "name": "get_status",
                 "arguments": {}
             },
             "id": 1
@@ -567,7 +568,7 @@ mod tests {
 
         let headers = HeaderMap::new();
         let result = mcp_handler(State(state), headers, Json(request)).await;
-        assert!(result.is_ok(), "tools/call wake should succeed");
+        assert!(result.is_ok(), "tools/call get_status should succeed");
 
         let response = result.unwrap().0;
         assert_eq!(response["jsonrpc"], "2.0");

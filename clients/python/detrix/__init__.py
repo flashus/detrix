@@ -72,6 +72,7 @@ def init(
     *,
     name: str = "",
     control_host: str = "127.0.0.1",
+    advertise_host: str | None = None,
     control_port: int = 0,
     debug_port: int = 0,
     daemon_url: str = "http://127.0.0.1:8090",
@@ -88,6 +89,9 @@ def init(
     Args:
         name: Connection name (default: "detrix-client-{pid}")
         control_host: Host for control plane server (default: 127.0.0.1)
+        advertise_host: Host sent to daemon for registration. If set, overrides
+            control_host in registration. Useful in Docker/cloud where bind
+            address (0.0.0.0) differs from reachable address (container hostname).
         control_port: Port for control plane (0 = auto-assign)
         debug_port: Port for debugpy (0 = auto-assign when waking)
         daemon_url: URL of the Detrix daemon (default: http://127.0.0.1:8090)
@@ -101,6 +105,7 @@ def init(
         - DETRIX_HEALTH_CHECK_TIMEOUT
         - DETRIX_REGISTER_TIMEOUT
         - DETRIX_UNREGISTER_TIMEOUT
+        - DETRIX_HOST (advertise host for Docker/cloud)
 
         Function arguments take precedence over environment variables.
 
@@ -116,6 +121,7 @@ def init(
         _init_inner(
             name=name,
             control_host=control_host,
+            advertise_host=advertise_host,
             control_port=control_port,
             debug_port=debug_port,
             daemon_url=daemon_url,
@@ -131,6 +137,7 @@ def _init_inner(
     *,
     name: str,
     control_host: str,
+    advertise_host: str | None,
     control_port: int,
     debug_port: int,
     daemon_url: str,
@@ -179,17 +186,11 @@ def _init_inner(
                 raise ConfigError(f"Invalid {env_name}: {env_val!r}") from e
         return 0
 
-    resolved_control_port = resolve_port(
-        control_port, "control_port", "DETRIX_CONTROL_PORT"
-    )
-    resolved_debug_port = resolve_port(
-        debug_port, "debug_port", "DETRIX_DEBUG_PORT"
-    )
+    resolved_control_port = resolve_port(control_port, "control_port", "DETRIX_CONTROL_PORT")
+    resolved_debug_port = resolve_port(debug_port, "debug_port", "DETRIX_DEBUG_PORT")
 
     # Resolve timeout configuration
-    def resolve_timeout(
-        param_value: float, env_key: str, env_name: str, default: float
-    ) -> float:
+    def resolve_timeout(param_value: float, env_key: str, env_name: str, default: float) -> float:
         """Resolve timeout value from parameter or environment variable.
 
         Args:
@@ -231,6 +232,9 @@ def _init_inner(
         unregister_timeout, "unregister_timeout", "DETRIX_UNREGISTER_TIMEOUT", 2.0
     )
 
+    # Resolve advertise host from parameter or environment
+    resolved_advertise_host = advertise_host or env_config.get("advertise_host") or None
+
     # Generate connection name
     connection_name = generate_connection_name(resolved_name)
 
@@ -239,6 +243,7 @@ def _init_inner(
     with state.lock:
         state.name = connection_name
         state.control_host = resolved_control_host
+        state.advertise_host = resolved_advertise_host  # type: ignore[assignment]
         state.control_port = resolved_control_port
         state.debug_port = resolved_debug_port
         state.daemon_url = resolved_daemon_url
@@ -249,6 +254,13 @@ def _init_inner(
         state.verify_ssl = env_config.get("verify_ssl", True)  # type: ignore[assignment]
         state.ca_bundle = env_config.get("ca_bundle")  # type: ignore[assignment]
         state.state = State.SLEEPING
+
+    # Create cached HTTP daemon client for connection reuse
+    state.http_client = HttpDaemonClient(
+        resolved_daemon_url,
+        verify_ssl=state.verify_ssl,
+        ca_bundle=state.ca_bundle,
+    )
 
     # Start control server
     actual_port = start_control_server(resolved_control_host, resolved_control_port)

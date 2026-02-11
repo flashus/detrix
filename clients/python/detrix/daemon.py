@@ -286,13 +286,9 @@ class HttpDaemonClient:
                 f"{e.response.reason_phrase}"
             ) from e
         except httpx.ConnectError as e:
-            raise DaemonError(
-                f"Cannot connect to daemon at {self.base_url}: {e}"
-            ) from e
+            raise DaemonError(f"Cannot connect to daemon at {self.base_url}: {e}") from e
         except httpx.HTTPError as e:
-            raise DaemonError(
-                f"Cannot connect to daemon at {self.base_url}: {e}"
-            ) from e
+            raise DaemonError(f"Cannot connect to daemon at {self.base_url}: {e}") from e
 
     def unregister(
         self,

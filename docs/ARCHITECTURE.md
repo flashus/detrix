@@ -345,7 +345,8 @@ Three-layer validation before expressions are evaluated:
 **Connections (4):** `create_connection`, `list_connections`, `get_connection`, `close_connection`
 **Diagnostics (2):** `validate_expression`, `inspect_file`
 **Configuration (4):** `get_config`, `update_config`, `validate_config`, `reload_config`
-**System (4):** `wake`, `sleep`, `get_status`, `get_mcp_usage`
+**System (2):** `get_status`, `get_mcp_usage`
+**Remote (2):** `wake`, `sleep`
 
 ### REST API Endpoints (Complete)
 

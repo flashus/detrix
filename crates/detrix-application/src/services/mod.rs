@@ -17,12 +17,14 @@ pub mod file_watcher_service;
 pub mod jwt_validator;
 pub mod mcp_usage_service;
 pub mod metric_service;
+pub mod remote_app_service;
 pub mod shutdown;
 pub mod streaming_service;
 pub mod system_event_service;
 
 pub use adapter_lifecycle_manager::{
-    AdapterLifecycleManager, ManagedAdapterInfo, ManagedAdapterStatus, StartAdapterResult,
+    AdapterLifecycleManager, DisconnectAllResult, ManagedAdapterInfo, ManagedAdapterStatus,
+    StartAdapterResult,
 };
 pub use anchor_service::{
     AnchorServiceConfig, DefaultAnchorService, LspSymbolLookup, LspSymbolLookupRef, NullLspLookup,
@@ -49,6 +51,9 @@ pub use jwt_validator::{Audience, JwksValidator, JwtClaims, JwtError};
 
 // Dead-letter queue recovery
 pub use dlq_recovery_service::{DlqRecoveryService, DlqStats};
+
+// Remote app control
+pub use remote_app_service::RemoteAppService;
 
 // Graceful shutdown utilities
 pub use shutdown::{GracefulShutdownHandle, ShutdownReceiver};

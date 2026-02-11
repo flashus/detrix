@@ -171,6 +171,8 @@ impl E2ETestServer {
             &detrix_config::LimitsConfig::default(),
             None,
             None, // No separate DLQ storage in tests
+            None,
+            None, // No auth token in tests
         );
 
         // Connect to debugpy using ConnectionService

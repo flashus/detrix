@@ -12,6 +12,7 @@ pub const MCP_DISCONNECT: &str = "/mcp/disconnect";
 
 pub const API_V1_WAKE: &str = "/api/v1/wake";
 pub const API_V1_SLEEP: &str = "/api/v1/sleep";
+pub const API_V1_DISCONNECT_ALL: &str = "/api/v1/disconnect_all";
 pub const API_V1_STATUS: &str = "/api/v1/status";
 
 pub const API_V1_METRICS: &str = "/api/v1/metrics";

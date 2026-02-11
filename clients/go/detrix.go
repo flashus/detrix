@@ -58,6 +58,12 @@ type Config struct {
 	// ControlHost is the host for the control plane server (default: "127.0.0.1")
 	ControlHost string
 
+	// AdvertiseHost is the host sent to the detrix server for registration.
+	// If set, this is used instead of ControlHost when registering with the detrix server.
+	// Useful in Docker/cloud where bind address (0.0.0.0) differs from
+	// the reachable address (container hostname).
+	AdvertiseHost string
+
 	// ControlPort is the port for the control plane (0 = auto-assign)
 	ControlPort int
 
@@ -114,8 +120,8 @@ type ClientState = generated.ClientState
 
 // Re-export status constants for convenience.
 const (
-	WakeStatusAwake        = generated.Awake
-	WakeStatusAlreadyAwake = generated.AlreadyAwake
+	WakeStatusAwake            = generated.Awake
+	WakeStatusAlreadyAwake     = generated.AlreadyAwake
 	SleepStatusSleeping        = generated.SleepResponseStatusSleeping
 	SleepStatusAlreadySleeping = generated.SleepResponseStatusAlreadySleeping
 )
@@ -127,11 +133,19 @@ var (
 	delveManager  *delve.Manager
 )
 
+// Default timeout values for client operations.
+const (
+	defaultHealthCheckTimeout = 2 * time.Second
+	defaultRegisterTimeout    = 5 * time.Second
+	defaultUnregisterTimeout  = 2 * time.Second
+	defaultDelveStartTimeout  = 10 * time.Second
+)
+
 // Common errors
 var (
-	ErrNotInitialized   = errors.New("detrix client not initialized")
+	ErrNotInitialized     = errors.New("detrix client not initialized")
 	ErrAlreadyInitialized = errors.New("detrix client already initialized")
-	ErrWakeInProgress   = errors.New("wake operation already in progress")
+	ErrWakeInProgress     = errors.New("wake operation already in progress")
 )
 
 // Init initializes the Detrix client.
@@ -171,6 +185,7 @@ func Init(cfg Config) error {
 	s.Lock()
 	s.Name = state.GenerateConnectionName(cfg.Name)
 	s.ControlHost = cfg.ControlHost
+	s.AdvertiseHost = cfg.AdvertiseHost
 	s.ControlPort = cfg.ControlPort
 	s.DebugPort = cfg.DebugPort
 	s.DaemonURL = cfg.DaemonURL
@@ -185,15 +200,19 @@ func Init(cfg Config) error {
 	s.Unlock()
 
 	// Initialize components
-	var err2 error
-	daemonClient, err2 = daemon.NewClient(nil) // nil = use defaults (VerifyTLS: true)
-	if err2 != nil {
-		return fmt.Errorf("failed to create daemon client: %w", err2)
-	}
 	delveManager = delve.NewManager(delvePath, cfg.DelveStartTimeout)
 
 	// Discover auth token
 	authToken := auth.DiscoverToken(cfg.DetrixHome)
+
+	var err2 error
+	daemonClient, err2 = daemon.NewClient(&daemon.ClientOptions{
+		VerifyTLS: true,
+		Token:     authToken,
+	})
+	if err2 != nil {
+		return fmt.Errorf("failed to create daemon client: %w", err2)
+	}
 
 	// Create and start control server
 	controlServer = control.NewServer(
@@ -281,6 +300,7 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 		targetDaemonURL = s.DaemonURL
 	}
 	debugHost := s.ControlHost
+	advertiseHost := s.AdvertiseHost
 	debugPort := s.DebugPort
 	name := s.Name
 	detrixHome := s.DetrixHome
@@ -325,8 +345,13 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 	}
 
 	// 2e. Register with daemon
+	// Use advertise_host if set (for Docker/cloud), otherwise use control_host
+	registrationHost := debugHost
+	if advertiseHost != "" {
+		registrationHost = advertiseHost
+	}
 	connID, err := daemonClient.Register(targetDaemonURL, daemon.RegisterRequest{
-		Host:          debugHost,
+		Host:          registrationHost,
 		Port:          delveProc.Port,
 		Language:      "go",
 		Name:          name,
@@ -460,6 +485,9 @@ func resolveConfig(cfg Config) Config {
 	if cfg.ControlHost == "" {
 		cfg.ControlHost = getEnvOrDefault("DETRIX_CONTROL_HOST", "127.0.0.1")
 	}
+	if cfg.AdvertiseHost == "" {
+		cfg.AdvertiseHost = os.Getenv("DETRIX_HOST")
+	}
 	if cfg.DaemonURL == "" {
 		cfg.DaemonURL = getEnvOrDefault("DETRIX_DAEMON_URL", "http://127.0.0.1:8090")
 	}
@@ -473,34 +501,46 @@ func resolveConfig(cfg Config) Config {
 		cfg.DetrixHome = os.Getenv("DETRIX_HOME")
 	}
 
-	// Port overrides
+	// Port overrides (validate range 0-65535)
 	if cfg.ControlPort == 0 {
 		if v := os.Getenv("DETRIX_CONTROL_PORT"); v != "" {
 			if port, err := strconv.Atoi(v); err == nil {
-				cfg.ControlPort = port
+				if port >= 0 && port <= 65535 {
+					cfg.ControlPort = port
+				} else {
+					slog.Warn("invalid DETRIX_CONTROL_PORT value, must be 0-65535", "value", port)
+				}
+			} else {
+				slog.Warn("invalid DETRIX_CONTROL_PORT value", "value", v, "error", err)
 			}
 		}
 	}
 	if cfg.DebugPort == 0 {
 		if v := os.Getenv("DETRIX_DEBUG_PORT"); v != "" {
 			if port, err := strconv.Atoi(v); err == nil {
-				cfg.DebugPort = port
+				if port >= 0 && port <= 65535 {
+					cfg.DebugPort = port
+				} else {
+					slog.Warn("invalid DETRIX_DEBUG_PORT value, must be 0-65535", "value", port)
+				}
+			} else {
+				slog.Warn("invalid DETRIX_DEBUG_PORT value", "value", v, "error", err)
 			}
 		}
 	}
 
 	// Timeout defaults (with env var overrides)
 	if cfg.HealthCheckTimeout == 0 {
-		cfg.HealthCheckTimeout = getEnvDurationOrDefault("DETRIX_HEALTH_CHECK_TIMEOUT", 2*time.Second)
+		cfg.HealthCheckTimeout = getEnvDurationOrDefault("DETRIX_HEALTH_CHECK_TIMEOUT", defaultHealthCheckTimeout)
 	}
 	if cfg.RegisterTimeout == 0 {
-		cfg.RegisterTimeout = getEnvDurationOrDefault("DETRIX_REGISTER_TIMEOUT", 5*time.Second)
+		cfg.RegisterTimeout = getEnvDurationOrDefault("DETRIX_REGISTER_TIMEOUT", defaultRegisterTimeout)
 	}
 	if cfg.UnregisterTimeout == 0 {
-		cfg.UnregisterTimeout = getEnvDurationOrDefault("DETRIX_UNREGISTER_TIMEOUT", 2*time.Second)
+		cfg.UnregisterTimeout = getEnvDurationOrDefault("DETRIX_UNREGISTER_TIMEOUT", defaultUnregisterTimeout)
 	}
 	if cfg.DelveStartTimeout == 0 {
-		cfg.DelveStartTimeout = 10 * time.Second
+		cfg.DelveStartTimeout = defaultDelveStartTimeout
 	}
 
 	return cfg
@@ -516,8 +556,13 @@ func getEnvOrDefault(key, defaultValue string) string {
 func getEnvDurationOrDefault(key string, defaultValue time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if secs, err := strconv.ParseFloat(v, 64); err == nil {
+			if secs <= 0 {
+				slog.Warn("invalid timeout value, must be positive", "env", key, "value", secs)
+				return defaultValue
+			}
 			return time.Duration(secs * float64(time.Second))
 		}
+		slog.Warn("invalid timeout value", "env", key, "value", v)
 	}
 	return defaultValue
 }

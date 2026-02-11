@@ -39,6 +39,13 @@ impl MetricsService for MetricsServiceImpl {
         system::handle_sleep(&self.state, request).await
     }
 
+    async fn disconnect_all(
+        &self,
+        request: Request<DisconnectAllRequest>,
+    ) -> Result<Response<DisconnectAllResponse>, Status> {
+        system::handle_disconnect_all(&self.state, request).await
+    }
+
     async fn get_status(
         &self,
         request: Request<StatusRequest>,

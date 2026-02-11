@@ -224,22 +224,25 @@ impl PidFile {
         &self.ports
     }
 
-    /// Check if daemon is running without acquiring lock
+    /// Check if daemon is running
     ///
     /// # Returns
     ///
     /// - `Some(pid)` if daemon is running with given PID
-    /// - `None` if PID file doesn't exist or lock can be acquired (stale)
+    /// - `None` if PID file doesn't exist or daemon process is not alive
     pub fn is_running(path: impl AsRef<Path>) -> Result<Option<u32>> {
         Ok(Self::read_info(path)?.map(|info| info.pid))
     }
 
     /// Read daemon info (PID and port) from PID file
     ///
+    /// Uses flock as the primary mechanism on Unix, with process liveness check as backup.
+    /// On Windows, uses process checking only.
+    ///
     /// # Returns
     ///
-    /// - `Some(PidInfo)` if daemon is running
-    /// - `None` if PID file doesn't exist or lock can be acquired (stale)
+    /// - `Some(PidInfo)` if daemon is running (verified by flock and/or process check)
+    /// - `None` if PID file doesn't exist, or the PID process is no longer alive
     pub fn read_info(path: impl AsRef<Path>) -> Result<Option<PidInfo>> {
         let path = path.as_ref();
 
@@ -298,12 +301,15 @@ impl PidFile {
                     // File opened successfully, try to acquire lock
                     match file.try_lock_exclusive() {
                         Ok(_) => {
-                            // Lock acquired - file is stale (previous crash)
+                            // Lock acquired - file may be stale (previous crash).
+                            // However, flock can be temporarily unavailable during daemon
+                            // initialization on some platforms, so verify the process is
+                            // actually not running before declaring stale.
                             drop(file);
-                            Ok(None)
+                            Ok(verify_daemon_running(pid_info))
                         }
                         Err(_) => {
-                            // Lock failed - check if daemon is actually running
+                            // Lock failed - daemon holds lock, verify process is alive
                             let info = pid_info.or_else(|| read_pid_info_from_file(&file).ok());
                             Ok(verify_daemon_running(info))
                         }

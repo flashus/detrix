@@ -75,7 +75,8 @@ inspect_file(file_path="auth.py", line=42)  # see available vars at line
 **Connections:** `list_connections`, `get_connection`, `close_connection`
 **Diagnostics:** `validate_expression`
 **Config:** `get_config`, `update_config`, `validate_config`, `reload_config`
-**System:** `wake`, `sleep`, `get_status`, `get_mcp_usage`
+**System:** `get_status`, `get_mcp_usage`
+**Remote:** `wake`, `sleep`
 
 ## Capture Modes
 

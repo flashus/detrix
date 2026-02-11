@@ -20,7 +20,9 @@
 mod adapters;
 mod repositories;
 
-pub use adapters::{MockDapAdapter, MockDapAdapterFactory, StatefulMockDapAdapter};
+pub use adapters::{
+    MockDapAdapter, MockDapAdapterFactory, MockRemoteAppControl, StatefulMockDapAdapter,
+};
 pub use repositories::{
     MockConnectionRepository, MockDlqRepository, MockEventRepository, MockMetricRepository,
     MockSystemEventRepository,

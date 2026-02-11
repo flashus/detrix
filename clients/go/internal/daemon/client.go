@@ -21,6 +21,7 @@ const maxResponseSize = 1 << 20
 // Client is an HTTP client for the Detrix daemon.
 type Client struct {
 	httpClient *http.Client
+	token      string
 }
 
 // ClientOptions configures the daemon client.
@@ -31,6 +32,9 @@ type ClientOptions struct {
 	CABundle string
 	// Timeout is the request timeout (default: 30s).
 	Timeout time.Duration
+	// Token is the authentication token for daemon API requests.
+	// When set, sent as Authorization: Bearer header on all requests.
+	Token string
 }
 
 // NewClient creates a new daemon client.
@@ -65,7 +69,15 @@ func NewClient(opts *ClientOptions) (*Client, error) {
 			Timeout:   opts.Timeout,
 			Transport: transport,
 		},
+		token: opts.Token,
 	}, nil
+}
+
+// setAuth sets the Authorization header if a token is configured.
+func (c *Client) setAuth(req *http.Request) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
 }
 
 // HealthCheck checks if the daemon is reachable.
@@ -128,6 +140,7 @@ func (c *Client) Register(daemonURL string, req RegisterRequest, timeout time.Du
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	c.setAuth(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -166,6 +179,7 @@ func (c *Client) Unregister(daemonURL string, connectionID string, timeout time.
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

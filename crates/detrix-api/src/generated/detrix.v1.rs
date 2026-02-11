@@ -287,42 +287,77 @@ impl McpErrorCode {
 #[serde(rename_all = "camelCase")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WakeRequest {
-    #[prost(message, optional, tag = "1")]
+    /// URL of the app's control plane
+    #[prost(string, tag = "1")]
+    pub app_url: ::prost::alloc::string::String,
+    /// optional: daemon URL to pass to the app
+    #[prost(string, tag = "2")]
+    pub daemon_url: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
     pub metadata: ::core::option::Option<RequestMetadata>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WakeResponse {
-    /// "active"
     #[prost(string, tag = "1")]
     pub status: ::prost::alloc::string::String,
-    #[prost(uint32, tag = "2")]
-    pub metrics_loaded: u32,
-    #[prost(message, optional, tag = "3")]
+    #[prost(string, tag = "2")]
+    pub app_url: ::prost::alloc::string::String,
+    /// optional: connection_id if app registered
+    #[prost(string, tag = "3")]
+    pub connection_id: ::prost::alloc::string::String,
+    /// optional: debug port
+    #[prost(int32, tag = "4")]
+    pub debug_port: i32,
+    #[prost(string, tag = "5")]
+    pub message: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "6")]
     pub metadata: ::core::option::Option<ResponseMetadata>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SleepRequest {
-    #[prost(message, optional, tag = "1")]
+    /// URL of the app's control plane
+    #[prost(string, tag = "1")]
+    pub app_url: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
     pub metadata: ::core::option::Option<RequestMetadata>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SleepResponse {
-    /// "sleeping"
+    #[prost(string, tag = "1")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub app_url: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub message: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub metadata: ::core::option::Option<ResponseMetadata>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DisconnectAllRequest {
+    #[prost(message, optional, tag = "1")]
+    pub metadata: ::core::option::Option<RequestMetadata>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DisconnectAllResponse {
+    /// "disconnected" or "partial_failure"
     #[prost(string, tag = "1")]
     pub status: ::prost::alloc::string::String,
     #[prost(uint32, tag = "2")]
-    pub metrics_saved: u32,
-    #[prost(message, optional, tag = "3")]
-    pub metadata: ::core::option::Option<ResponseMetadata>,
-    /// Human-readable message (e.g., "All adapters stopped")
-    #[prost(string, tag = "4")]
+    pub adapters_stopped: u32,
+    #[prost(string, tag = "3")]
     pub message: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub metadata: ::core::option::Option<ResponseMetadata>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -785,16 +820,16 @@ pub struct ValidateExpressionResponse {
     pub is_safe: bool,
     #[prost(string, tag = "2")]
     pub expression: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "4")]
+    #[prost(message, optional, tag = "3")]
     pub metadata: ::core::option::Option<ResponseMetadata>,
     /// Language that was validated
-    #[prost(string, tag = "5")]
+    #[prost(string, tag = "4")]
     pub language: ::prost::alloc::string::String,
     /// List of violations (reasons why expression is unsafe)
-    #[prost(string, repeated, tag = "6")]
+    #[prost(string, repeated, tag = "5")]
     pub violations: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     /// List of warnings (non-blocking issues)
-    #[prost(string, repeated, tag = "7")]
+    #[prost(string, repeated, tag = "6")]
     pub warnings: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -974,6 +1009,30 @@ pub mod metrics_service_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("detrix.v1.MetricsService", "Sleep"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn disconnect_all(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DisconnectAllRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DisconnectAllResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/detrix.v1.MetricsService/DisconnectAll",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("detrix.v1.MetricsService", "DisconnectAll"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn get_status(
@@ -1391,6 +1450,13 @@ pub mod metrics_service_server {
             &self,
             request: tonic::Request<super::SleepRequest>,
         ) -> std::result::Result<tonic::Response<super::SleepResponse>, tonic::Status>;
+        async fn disconnect_all(
+            &self,
+            request: tonic::Request<super::DisconnectAllRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DisconnectAllResponse>,
+            tonic::Status,
+        >;
         async fn get_status(
             &self,
             request: tonic::Request<super::StatusRequest>,
@@ -1641,6 +1707,51 @@ pub mod metrics_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SleepSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/detrix.v1.MetricsService/DisconnectAll" => {
+                    #[allow(non_camel_case_types)]
+                    struct DisconnectAllSvc<T: MetricsService>(pub Arc<T>);
+                    impl<
+                        T: MetricsService,
+                    > tonic::server::UnaryService<super::DisconnectAllRequest>
+                    for DisconnectAllSvc<T> {
+                        type Response = super::DisconnectAllResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DisconnectAllRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MetricsService>::disconnect_all(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DisconnectAllSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

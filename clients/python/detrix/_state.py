@@ -3,6 +3,13 @@
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
+
+
+# Default timeout values (seconds) for client operations
+DEFAULT_HEALTH_CHECK_TIMEOUT = 2.0
+DEFAULT_REGISTER_TIMEOUT = 5.0
+DEFAULT_UNREGISTER_TIMEOUT = 2.0
 
 
 class State(Enum):
@@ -55,6 +62,7 @@ class ClientState:
     state: State = State.SLEEPING
     name: str = ""
     control_host: str = "127.0.0.1"
+    advertise_host: str | None = None
     control_port: int = 0
     debug_port: int = 0
     daemon_url: str = "http://127.0.0.1:8090"
@@ -64,29 +72,40 @@ class ClientState:
     debug_port_active: bool = False
     detrix_home: str | None = None
     # Timeout configuration (seconds)
-    health_check_timeout: float = 2.0
-    register_timeout: float = 5.0
-    unregister_timeout: float = 2.0
+    health_check_timeout: float = DEFAULT_HEALTH_CHECK_TIMEOUT
+    register_timeout: float = DEFAULT_REGISTER_TIMEOUT
+    unregister_timeout: float = DEFAULT_UNREGISTER_TIMEOUT
     # SSL configuration
     verify_ssl: bool = True
     ca_bundle: str | None = None
     lock: threading.RLock = field(default_factory=threading.RLock)
     wake_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Cached HTTP client for daemon communication (created during init, avoids
+    # creating a new httpx.Client per operation). Typed as Any to avoid circular import.
+    http_client: Any = field(default=None, repr=False)
 
 
 # Global singleton state
 _client_state: ClientState | None = None
+_state_lock = threading.Lock()
 
 
 def get_state() -> ClientState:
-    """Get the global client state, creating if needed."""
+    """Get the global client state, creating if needed.
+
+    Thread-safe: uses a lock to prevent multiple threads from creating
+    separate ClientState instances during concurrent initialization.
+    """
     global _client_state
     if _client_state is None:
-        _client_state = ClientState()
+        with _state_lock:
+            if _client_state is None:
+                _client_state = ClientState()
     return _client_state
 
 
 def reset_state() -> None:
     """Reset global state (for testing)."""
     global _client_state
-    _client_state = None
+    with _state_lock:
+        _client_state = None

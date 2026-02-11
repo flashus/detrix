@@ -2,17 +2,18 @@
 
 use super::helpers::{metric_info_from_proto, parse_location};
 use super::types::{
-    AddMetricParams, ConfigValidationResult, DaemonInfoDto, ExpressionValidationResult, GroupInfo,
-    InspectFileInfo, McpClientDto, McpErrorCount, McpUsageInfo, McpWorkflowStats, MetricInfo,
-    ParentProcessDto, StatusInfo, WakeInfo,
+    AddMetricParams, ConfigValidationResult, DaemonInfoDto, DisconnectAllInfo,
+    ExpressionValidationResult, GroupInfo, InspectFileInfo, McpClientDto, McpErrorCount,
+    McpUsageInfo, McpWorkflowStats, MetricInfo, ParentProcessDto, StatusInfo, WakeInfo,
 };
 use anyhow::{Context, Result};
 use detrix_api::generated::detrix::v1::{
     metric_mode::Mode, metrics_service_client::MetricsServiceClient, AddMetricRequest,
-    GetMcpUsageRequest, GetMetricRequest, GroupRequest, InspectFileRequest, ListGroupsRequest,
-    ListMetricsRequest, Location, MetricMode, ReloadConfigRequest, RemoveMetricRequest,
-    RequestMetadata, SleepRequest, StatusRequest, StreamMode, UpdateConfigRequest,
-    UpdateMetricRequest, ValidateConfigRequest, ValidateExpressionRequest, WakeRequest,
+    DisconnectAllRequest, GetMcpUsageRequest, GetMetricRequest, GroupRequest, InspectFileRequest,
+    ListGroupsRequest, ListMetricsRequest, Location, MetricMode, ReloadConfigRequest,
+    RemoveMetricRequest, RequestMetadata, SleepRequest, StatusRequest, StreamMode,
+    UpdateConfigRequest, UpdateMetricRequest, ValidateConfigRequest, ValidateExpressionRequest,
+    WakeRequest,
 };
 use detrix_api::grpc::AuthChannel;
 use detrix_core::SAFETY_STRICT;
@@ -326,9 +327,11 @@ impl MetricsClient {
         })
     }
 
-    /// Wake the system
-    pub async fn wake(&mut self) -> Result<WakeInfo> {
+    /// Wake a remote app
+    pub async fn wake(&mut self, app_url: &str, daemon_url: Option<&str>) -> Result<WakeInfo> {
         let request = WakeRequest {
+            app_url: app_url.to_string(),
+            daemon_url: daemon_url.unwrap_or_default().to_string(),
             metadata: Some(RequestMetadata::default()),
         };
 
@@ -341,13 +344,24 @@ impl MetricsClient {
 
         Ok(WakeInfo {
             status: response.status,
-            metrics_loaded: response.metrics_loaded,
+            app_url: response.app_url,
+            connection_id: if response.connection_id.is_empty() {
+                None
+            } else {
+                Some(response.connection_id)
+            },
+            debug_port: if response.debug_port == 0 {
+                None
+            } else {
+                Some(response.debug_port)
+            },
         })
     }
 
-    /// Sleep the system
-    pub async fn sleep(&mut self) -> Result<()> {
+    /// Sleep a remote app
+    pub async fn sleep(&mut self, app_url: &str) -> Result<()> {
         let request = SleepRequest {
+            app_url: app_url.to_string(),
             metadata: Some(RequestMetadata::default()),
         };
 
@@ -357,6 +371,25 @@ impl MetricsClient {
             .context("Failed to sleep via gRPC")?;
 
         Ok(())
+    }
+
+    /// Disconnect all local adapters
+    pub async fn disconnect_all(&mut self) -> Result<DisconnectAllInfo> {
+        let request = DisconnectAllRequest {
+            metadata: Some(RequestMetadata::default()),
+        };
+
+        let response = self
+            .client
+            .disconnect_all(request)
+            .await
+            .context("Failed to disconnect all via gRPC")?
+            .into_inner();
+
+        Ok(DisconnectAllInfo {
+            status: response.status,
+            adapters_stopped: response.adapters_stopped,
+        })
     }
 
     // ========================================================================

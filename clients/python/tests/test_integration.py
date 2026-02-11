@@ -45,11 +45,15 @@ class MockDaemonHandler(BaseHTTPRequestHandler):
             self.send_response(201)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({
-                "connectionId": conn_id,
-                "host": data.get("host"),
-                "port": data.get("port"),
-            }).encode())
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "connectionId": conn_id,
+                        "host": data.get("host"),
+                        "port": data.get("port"),
+                    }
+                ).encode()
+            )
         else:
             self.send_response(404)
             self.end_headers()
@@ -99,7 +103,7 @@ class TestClientLifecycle:
         status = detrix.status()
 
         assert status["state"] == "sleeping"
-        assert status["name"].startswith("test-service-")
+        assert status["name"] == "test-service"
         assert status["control_port"] > 0
 
     def test_init_twice_raises(self):
@@ -124,7 +128,7 @@ class TestClientLifecycle:
         detrix.shutdown()
         detrix.init(name="test-2")
         status = detrix.status()
-        assert status["name"].startswith("test-2-")
+        assert status["name"] == "test-2"
 
 
 class TestAwakeState:
@@ -193,5 +197,3 @@ class TestSleepState:
         status = detrix.status()
         assert status["state"] == "sleeping"
         assert status["connection_id"] is None
-
-

@@ -159,7 +159,10 @@ impl SystemEventService {
     /// Deletes events older than `retention_hours` hours.
     /// Returns the number of events deleted.
     pub async fn run_time_retention_cleanup(&self, retention_hours: u32) -> Result<u64> {
-        let cutoff = Utc::now().timestamp_micros() - (retention_hours as i64 * 3600 * 1_000_000);
+        let cutoff = Utc::now().timestamp_micros()
+            - (retention_hours as i64)
+                .saturating_mul(3600)
+                .saturating_mul(1_000_000);
 
         let deleted = self.delete_older_than(cutoff).await?;
 

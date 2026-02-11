@@ -36,6 +36,8 @@
 use detrix_testing::e2e::unified::*;
 #[allow(unused_imports)]
 use detrix_testing::generate_tests_all_backends;
+#[allow(unused_imports)]
+use detrix_testing::generate_tests_single_backend;
 
 // ============================================================================
 // BASIC TESTS - Run on all backends (MCP, gRPC, REST)
@@ -47,9 +49,6 @@ generate_tests_all_backends! {
         // Health & Status
         health_check => scenario_health_check,
         get_status => scenario_get_status,
-        wake => scenario_wake,
-        sleep => scenario_sleep,
-        wake_sleep_cycle => scenario_wake_sleep_cycle,
 
         // Lists (empty results are OK)
         list_connections => scenario_list_connections,
@@ -93,6 +92,17 @@ generate_tests_all_backends! {
 
         // Concurrent requests
         concurrent_requests => scenario_concurrent_requests,
+    ]
+}
+
+// ============================================================================
+// DISCONNECT_ALL TESTS - Server-side operation (all backends)
+// Wake/sleep require a remote app URL and mock server — tested separately.
+// ============================================================================
+
+generate_tests_all_backends! {
+    basic: [
+        disconnect_all => scenario_disconnect_all,
     ]
 }
 

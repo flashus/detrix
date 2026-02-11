@@ -6,6 +6,15 @@ use std::time::Duration;
 
 use crate::Error;
 
+/// Default timeout for daemon health checks.
+const DEFAULT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+/// Default timeout for connection registration.
+const DEFAULT_REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default timeout for connection unregistration.
+const DEFAULT_UNREGISTER_TIMEOUT: Duration = Duration::from_secs(2);
+/// Default timeout for lldb-dap to start.
+const DEFAULT_LLDB_START_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Configuration for the Detrix client.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -14,6 +23,12 @@ pub struct Config {
 
     /// Control plane bind host (default: "127.0.0.1")
     pub control_host: String,
+
+    /// Advertise host for registration with daemon.
+    /// If set, this host is sent to the daemon instead of `control_host`.
+    /// Useful in Docker/cloud where bind address (0.0.0.0) differs from
+    /// the reachable address (container hostname).
+    pub advertise_host: Option<String>,
 
     /// Control plane port (0 = auto-assign)
     pub control_port: u16,
@@ -52,17 +67,18 @@ impl Default for Config {
         Self {
             name: None,
             control_host: "127.0.0.1".to_string(),
+            advertise_host: None,
             control_port: 0,
             debug_port: 0,
             daemon_url: "http://127.0.0.1:8090".to_string(),
             lldb_dap_path: None,
             detrix_home: None,
             safe_mode: false,
-            health_check_timeout: Duration::from_secs(2),
+            health_check_timeout: DEFAULT_HEALTH_CHECK_TIMEOUT,
             // Aligned with Python/Go: 5s is sufficient for registration
-            register_timeout: Duration::from_secs(5),
-            unregister_timeout: Duration::from_secs(2),
-            lldb_start_timeout: Duration::from_secs(10),
+            register_timeout: DEFAULT_REGISTER_TIMEOUT,
+            unregister_timeout: DEFAULT_UNREGISTER_TIMEOUT,
+            lldb_start_timeout: DEFAULT_LLDB_START_TIMEOUT,
         }
     }
 }
@@ -92,6 +108,15 @@ impl Config {
             if let Ok(host) = env::var("DETRIX_CONTROL_HOST") {
                 if !host.is_empty() {
                     self.control_host = host;
+                }
+            }
+        }
+
+        // Advertise host (for Docker/cloud: the reachable hostname)
+        if self.advertise_host.is_none() {
+            if let Ok(host) = env::var("DETRIX_HOST") {
+                if !host.is_empty() {
+                    self.advertise_host = Some(host);
                 }
             }
         }
@@ -142,17 +167,17 @@ impl Config {
         }
 
         // Timeout overrides (values in seconds, e.g. "2.0")
-        if self.health_check_timeout == Duration::from_secs(2) {
+        if self.health_check_timeout == DEFAULT_HEALTH_CHECK_TIMEOUT {
             if let Some(d) = Self::parse_duration_env("DETRIX_HEALTH_CHECK_TIMEOUT") {
                 self.health_check_timeout = d;
             }
         }
-        if self.register_timeout == Duration::from_secs(5) {
+        if self.register_timeout == DEFAULT_REGISTER_TIMEOUT {
             if let Some(d) = Self::parse_duration_env("DETRIX_REGISTER_TIMEOUT") {
                 self.register_timeout = d;
             }
         }
-        if self.unregister_timeout == Duration::from_secs(2) {
+        if self.unregister_timeout == DEFAULT_UNREGISTER_TIMEOUT {
             if let Some(d) = Self::parse_duration_env("DETRIX_UNREGISTER_TIMEOUT") {
                 self.unregister_timeout = d;
             }

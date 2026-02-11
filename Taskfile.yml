@@ -54,6 +54,7 @@ tasks:
     cmds:
       - task: clients:generate-all
       - task: format
+      - task: clients:format
       - task: lint
       - task: tests:test
       - task: clients:test

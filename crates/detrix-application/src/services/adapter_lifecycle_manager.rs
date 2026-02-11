@@ -28,6 +28,17 @@ use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, instrument, trace, warn};
 
+/// Result of a disconnect_all operation (protocol-agnostic).
+///
+/// Used by REST, gRPC and MCP handlers to build their protocol-specific responses.
+#[derive(Debug, Clone)]
+pub struct DisconnectAllResult {
+    /// Number of adapters that were active when disconnect was initiated
+    pub adapters_stopped: usize,
+    /// Whether some adapters failed to stop cleanly
+    pub partial_failure: bool,
+}
+
 /// Status of a managed adapter
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagedAdapterStatus {
@@ -562,8 +573,12 @@ impl AdapterLifecycleManager {
             );
 
             // Wait for the pending start to complete (poll with timeout)
-            let max_wait = std::time::Duration::from_secs(30);
-            let poll_interval = std::time::Duration::from_millis(100);
+            let max_wait = std::time::Duration::from_millis(
+                detrix_config::constants::DEFAULT_CONNECTION_TIMEOUT_MS,
+            );
+            let poll_interval = std::time::Duration::from_millis(
+                detrix_config::constants::DEFAULT_DAEMON_POLL_INTERVAL_MS,
+            );
             let start = std::time::Instant::now();
 
             while self.pending_starts.contains_key(&connection_id) {
@@ -1321,6 +1336,26 @@ impl AdapterLifecycleManager {
 
         info!("All adapters stopped");
         Ok(())
+    }
+
+    /// Disconnect all adapters and return a protocol-agnostic result.
+    ///
+    /// This is the shared implementation used by REST, gRPC and MCP handlers.
+    pub async fn disconnect_all(&self) -> DisconnectAllResult {
+        let adapters_stopped = self.adapter_count().await;
+
+        let partial_failure = match self.stop_all().await {
+            Ok(_) => false,
+            Err(e) => {
+                warn!(error = %e, "Failed to stop all adapters during disconnect_all");
+                true
+            }
+        };
+
+        DisconnectAllResult {
+            adapters_stopped,
+            partial_failure,
+        }
     }
 
     /// Subscribe to the event broadcast channel

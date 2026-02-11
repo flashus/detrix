@@ -197,6 +197,8 @@ pub enum ConversionError {
     MissingField { field: String },
     #[error("Invalid language '{language}': {reason}")]
     InvalidLanguage { language: String, reason: String },
+    #[error("Invalid field '{field}': {reason}")]
+    InvalidField { field: String, reason: String },
 }
 
 /// Convert core Metric to MetricInfo (for listing)
@@ -723,7 +725,10 @@ pub fn proto_to_core_connection(
         workspace_root: proto.workspace_root.clone(),
         hostname: proto.hostname.clone(),
         host: proto.host.clone(),
-        port: proto.port as u16,
+        port: u16::try_from(proto.port).map_err(|_| ConversionError::InvalidField {
+            field: "port".to_string(),
+            reason: format!("port {} out of valid range (0-65535)", proto.port),
+        })?,
         language,
         status,
         auto_reconnect: proto.auto_reconnect,

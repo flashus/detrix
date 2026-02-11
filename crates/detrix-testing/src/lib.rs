@@ -57,5 +57,6 @@ pub mod proptest_config;
 
 pub use mocks::{
     MockConnectionRepository, MockDapAdapter, MockDapAdapterFactory, MockDlqRepository,
-    MockEventRepository, MockMetricRepository, MockSystemEventRepository, StatefulMockDapAdapter,
+    MockEventRepository, MockMetricRepository, MockRemoteAppControl, MockSystemEventRepository,
+    StatefulMockDapAdapter,
 };

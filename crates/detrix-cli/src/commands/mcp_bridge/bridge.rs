@@ -84,7 +84,7 @@ impl McpBridge {
             &self.config.daemon_host,
             &config_path.to_string_lossy(),
             &pid_file,
-            self.config.daemon_port,
+            self.config.config_port,
         )
         .await
         .context("Failed to restart daemon")?;

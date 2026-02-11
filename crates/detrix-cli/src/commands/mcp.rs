@@ -140,7 +140,7 @@ pub async fn run(
                             &config.api.rest.host,
                             &config_path_str,
                             &config.daemon.pid_file,
-                            daemon_port,
+                            config.api.rest.port,
                         )
                         .await?;
                         (config.api.rest.host.clone(), port)
@@ -158,7 +158,7 @@ pub async fn run(
                 &config.api.rest.host,
                 &config_path_str,
                 &config.daemon.pid_file,
-                daemon_port,
+                config.api.rest.port,
             )
             .await?;
             (config.api.rest.host.clone(), port)
@@ -170,7 +170,7 @@ pub async fn run(
                 &config.api.rest.host,
                 &config_path_str,
                 &config.daemon.pid_file,
-                daemon_port,
+                config.api.rest.port,
             )
             .await?;
             (config.api.rest.host.clone(), port)
@@ -187,6 +187,7 @@ pub async fn run(
         Some(config_path.clone()),
         Some(config.daemon.pid_file.clone()),
         &config.mcp,
+        config.api.rest.port,
     )
     .await
 }
@@ -283,17 +284,24 @@ async fn run_direct(config_path: &str, config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Read daemon PID and port from PID file.
+///
+/// Returns `Some((pid, port))` if the PID file contains a valid running daemon with a port.
+/// Returns `None` if the PID file is missing, stale, or has no port yet.
+fn read_daemon_port(pid_file: &std::path::Path) -> Option<(u32, u16)> {
+    PidFile::read_info(pid_file)
+        .ok()
+        .flatten()
+        .and_then(|info| info.port().map(|port| (info.pid, port)))
+}
+
 /// Wait for a daemon to become healthy
 ///
 /// Used when daemon is found via PID file but not responding yet (still starting up).
 /// Also checks PID file for updated port information in case daemon chooses a different port.
 ///
 /// Returns the actual port once daemon is healthy.
-async fn wait_for_daemon_healthy(
-    host: &str,
-    initial_port: u16,
-    pid_file: &std::path::PathBuf,
-) -> Result<u16> {
+async fn wait_for_daemon_healthy(host: &str, initial_port: u16, pid_file: &Path) -> Result<u16> {
     use detrix_config::constants::{
         DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS, DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS,
     };
@@ -303,24 +311,19 @@ async fn wait_for_daemon_healthy(
     for i in 0..max_iterations {
         tokio::time::sleep(Duration::from_millis(DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS)).await;
 
-        // Check if PID file has been updated with a port
-        let port_to_check = if let Ok(Some(pid_info)) = PidFile::read_info(pid_file) {
-            pid_info.port().unwrap_or(initial_port)
-        } else {
-            initial_port
-        };
+        let port = read_daemon_port(pid_file)
+            .map(|(_, port)| port)
+            .unwrap_or(initial_port);
 
-        // Check if daemon is healthy on this port
-        if is_daemon_healthy(host, port_to_check).await {
+        if is_daemon_healthy(host, port).await {
             info!(
                 "Daemon became healthy on port {} after {}ms",
-                port_to_check,
+                port,
                 (i + 1) * DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS
             );
-            return Ok(port_to_check);
+            return Ok(port);
         }
 
-        // Log progress every 5 seconds
         if i % 50 == 49 {
             debug!(
                 "Waiting for daemon to become healthy... ({}/{} seconds)",
@@ -349,7 +352,7 @@ async fn wait_for_daemon_healthy(
 pub async fn spawn_daemon_for_mcp(
     host: &str,
     config_path: &str,
-    pid_file: &std::path::PathBuf,
+    pid_file: &Path,
     fallback_port: u16,
 ) -> Result<u16> {
     use std::fs::OpenOptions;
@@ -429,23 +432,25 @@ pub async fn spawn_daemon_for_mcp(
     for i in 0..max_iterations {
         tokio::time::sleep(Duration::from_millis(DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS)).await;
 
-        // Check PID file for actual port
-        if let Ok(Some(pid_info)) = PidFile::read_info(pid_file) {
-            if let Some(port) = pid_info.port() {
-                // Port is in PID file - verify daemon is healthy
-                if is_daemon_healthy(host, port).await {
-                    info!(
-                        "Daemon started on port {} (PID: {}) after {}ms",
-                        port,
-                        pid_info.pid,
-                        (i + 1) * DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS
-                    );
-                    return Ok(port);
-                }
+        // Check PID file for daemon port, then verify health
+        if let Some((pid, port)) = read_daemon_port(pid_file) {
+            if is_daemon_healthy(host, port).await {
+                info!(
+                    "Daemon started on port {} (PID: {}) after {}ms",
+                    port,
+                    pid,
+                    (i + 1) * DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS
+                );
+                return Ok(port);
             }
+            if i % 10 == 0 {
+                info!("Poll {}: PID={}, port={}, not healthy yet", i, pid, port);
+            }
+        } else if i % 10 == 0 {
+            info!("Poll {}: waiting for daemon PID file...", i);
         }
 
-        // Fallback: also check the expected port (in case PID file is slow to update)
+        // Fallback: check the configured port (in case PID file is slow to update)
         if is_daemon_healthy(host, fallback_port).await {
             info!(
                 "Daemon healthy on fallback port {} after {}ms",
@@ -455,9 +460,8 @@ pub async fn spawn_daemon_for_mcp(
             return Ok(fallback_port);
         }
 
-        // Log progress every 5 seconds
         if i % 50 == 49 {
-            debug!(
+            info!(
                 "Waiting for daemon to become healthy... ({}/{} seconds)",
                 (i + 1) / 10,
                 DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS

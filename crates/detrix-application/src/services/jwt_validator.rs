@@ -172,7 +172,9 @@ impl JwksValidator {
             .ok_or(JwtError::JwksUrlNotConfigured)?;
 
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(
+                detrix_config::constants::DEFAULT_JWKS_FETCH_TIMEOUT_SECS,
+            ))
             .build()?;
 
         info!(

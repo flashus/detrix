@@ -12,6 +12,7 @@ service MetricsService {
   // Runtime control
   rpc Wake(WakeRequest) returns (WakeResponse);
   rpc Sleep(SleepRequest) returns (SleepResponse);
+  rpc DisconnectAll(DisconnectAllRequest) returns (DisconnectAllResponse);
   rpc GetStatus(StatusRequest) returns (StatusResponse);
 
   // Metric management
@@ -46,25 +47,41 @@ service MetricsService {
 // ============================================================
 
 message WakeRequest {
-  RequestMetadata metadata = 1;
+  string app_url = 1;           // URL of the app's control plane
+  string daemon_url = 2;        // optional: daemon URL to pass to the app
+  RequestMetadata metadata = 3;
 }
 
 message WakeResponse {
-  string status = 1;           // "active"
-  uint32 metrics_loaded = 2;
-  ResponseMetadata metadata = 3;
+  string status = 1;
+  string app_url = 2;
+  string connection_id = 3;     // optional: connection_id if app registered
+  int32 debug_port = 4;         // optional: debug port
+  string message = 5;
+  ResponseMetadata metadata = 6;
 }
 
 message SleepRequest {
-  RequestMetadata metadata = 1;
+  string app_url = 1;           // URL of the app's control plane
+  RequestMetadata metadata = 2;
 }
 
 message SleepResponse {
-  string status = 1;           // "sleeping"
-  uint32 metrics_saved = 2;
-  ResponseMetadata metadata = 3;
-  // Human-readable message (e.g., "All adapters stopped")
-  string message = 4;
+  string status = 1;
+  string app_url = 2;
+  string message = 3;
+  ResponseMetadata metadata = 4;
+}
+
+message DisconnectAllRequest {
+  RequestMetadata metadata = 1;
+}
+
+message DisconnectAllResponse {
+  string status = 1;            // "disconnected" or "partial_failure"
+  uint32 adapters_stopped = 2;
+  string message = 3;
+  ResponseMetadata metadata = 4;
 }
 
 message StatusRequest {
@@ -327,13 +344,13 @@ message ValidateExpressionRequest {
 message ValidateExpressionResponse {
   bool is_safe = 1;
   string expression = 2;
-  ResponseMetadata metadata = 4;
+  ResponseMetadata metadata = 3;
   // Language that was validated
-  string language = 5;
+  string language = 4;
   // List of violations (reasons why expression is unsafe)
-  repeated string violations = 6;
+  repeated string violations = 5;
   // List of warnings (non-blocking issues)
-  repeated string warnings = 7;
+  repeated string warnings = 6;
 }
 
 message InspectFileRequest {

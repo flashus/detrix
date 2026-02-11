@@ -37,6 +37,7 @@ _debugpy_port: int | None = None
 def _get_debugpy() -> Any:
     """Lazy import of debugpy."""
     import debugpy
+
     return debugpy
 
 

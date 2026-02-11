@@ -15,8 +15,8 @@ pub struct BridgeConfig {
     pub daemon_url: String,
     /// Daemon host (for health checks and reconnection)
     pub daemon_host: String,
-    /// Daemon port (for reconnection)
-    pub daemon_port: u16,
+    /// Port from config file (for restart fallback — the port the daemon is configured to use)
+    pub config_port: u16,
     /// HTTP timeout in milliseconds
     pub timeout_ms: u64,
     /// Heartbeat interval in seconds (how often to ping daemon)
@@ -39,7 +39,7 @@ impl Default for BridgeConfig {
         Self {
             daemon_url: format!("http://{}:{}", DEFAULT_API_HOST, DEFAULT_REST_PORT),
             daemon_host: DEFAULT_API_HOST.to_string(),
-            daemon_port: DEFAULT_REST_PORT,
+            config_port: DEFAULT_REST_PORT,
             timeout_ms: DEFAULT_MCP_BRIDGE_TIMEOUT_MS,
             heartbeat_interval_secs: DEFAULT_MCP_BRIDGE_HEARTBEAT_INTERVAL_SECS,
             heartbeat_max_failures: DEFAULT_MCP_HEARTBEAT_MAX_FAILURES,

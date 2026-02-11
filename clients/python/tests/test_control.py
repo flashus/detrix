@@ -105,7 +105,7 @@ class TestWakeEndpoint:
             fetch_json(
                 f"{control_server}/detrix/wake",
                 method="POST",
-                data={"daemon_url": "http://127.0.0.1:1"}
+                data={"daemon_url": "http://127.0.0.1:1"},
             )
             pytest.fail("Expected error")
         except urllib.error.HTTPError as e:

@@ -436,6 +436,13 @@ impl ConnectionService {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::ports::ConnectionLookup for ConnectionService {
+    async fn get_connection(&self, id: &ConnectionId) -> Result<Option<Connection>> {
+        self.connection_repo.find_by_id(id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Tests are in tests/connection_service_tests.rs

@@ -51,17 +51,20 @@ def get_free_port() -> int:
 
 
 def generate_connection_name(name: str) -> str:
-    """Generate a connection name with PID suffix.
+    """Generate a connection name.
+
+    If a name is provided, uses it as-is (consistent with Go and Rust clients).
+    If empty, generates a default name as "detrix-client-{pid}".
 
     Args:
-        name: Base name for the connection
+        name: Connection name. If empty, auto-generates with PID.
 
     Returns:
-        Connection name in format "{name}-{pid}"
+        Connection name string
     """
-    pid = os.getpid()
-    base_name = name or "detrix-client"
-    return f"{base_name}-{pid}"
+    if name:
+        return name
+    return f"detrix-client-{os.getpid()}"
 
 
 def get_env_config() -> dict[str, str | bool | None]:
@@ -92,6 +95,7 @@ def get_env_config() -> dict[str, str | bool | None]:
 
     return {
         "name": os.environ.get("DETRIX_NAME"),
+        "advertise_host": os.environ.get("DETRIX_HOST"),
         "control_host": os.environ.get("DETRIX_CONTROL_HOST"),
         "control_port": os.environ.get("DETRIX_CONTROL_PORT"),
         "debug_port": os.environ.get("DETRIX_DEBUG_PORT"),

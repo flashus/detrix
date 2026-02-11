@@ -38,14 +38,15 @@ type ClientState struct {
 	sync.RWMutex
 
 	// Configuration (set once in Init)
-	Name        string
-	ControlHost string
-	ControlPort int
-	DebugPort   int
-	DaemonURL   string
-	DelvePath   string
-	DetrixHome  string
-	SafeMode    bool // SafeMode: only logpoints allowed, no breakpoint operations
+	Name          string
+	ControlHost   string
+	AdvertiseHost string // Host sent to daemon for registration (if different from ControlHost)
+	ControlPort   int
+	DebugPort     int
+	DaemonURL     string
+	DelvePath     string
+	DetrixHome    string
+	SafeMode      bool // SafeMode: only logpoints allowed, no breakpoint operations
 
 	// Timeouts (in milliseconds for simplicity)
 	HealthCheckTimeoutMs int

@@ -21,9 +21,10 @@
 use detrix_api::generated::detrix::v1::{
     metrics_service_client::MetricsServiceClient, metrics_service_server::MetricsServiceServer,
     streaming_service_client::StreamingServiceClient,
-    streaming_service_server::StreamingServiceServer, AddMetricRequest, GetMetricRequest,
-    GroupRequest, ListMetricsRequest, Location, MetricMode, QueryRequest, RemoveMetricRequest,
-    StreamAllRequest, StreamMode, ToggleMetricRequest, UpdateMetricRequest,
+    streaming_service_server::StreamingServiceServer, AddMetricRequest, DisconnectAllRequest,
+    GetMetricRequest, GroupRequest, ListMetricsRequest, Location, MetricMode, QueryRequest,
+    RemoveMetricRequest, StatusRequest, StreamAllRequest, StreamMode, ToggleMetricRequest,
+    UpdateMetricRequest,
 };
 use detrix_api::grpc::{MetricsServiceImpl, StreamingServiceImpl};
 use detrix_api::ApiState;
@@ -90,6 +91,8 @@ impl TestServer {
             &detrix_config::LimitsConfig::default(),
             None,
             None, // No separate DLQ storage in tests
+            None,
+            None, // No auth token in tests
         );
 
         // Create a mock connection so metrics can be added
@@ -1478,6 +1481,64 @@ async fn test_full_metric_lifecycle() {
     };
     let result = client.get_metric(get_request).await;
     assert!(result.is_err());
+
+    server.shutdown();
+}
+
+// ============================================================================
+// disconnect_all and get_status Tests (H6)
+// ============================================================================
+
+#[tokio::test]
+async fn test_grpc_disconnect_all() {
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
+    let mut client = MetricsServiceClient::connect(format!("http://{}", server.addr))
+        .await
+        .expect("Failed to connect to server");
+
+    let response = client
+        .disconnect_all(DisconnectAllRequest { metadata: None })
+        .await
+        .expect("DisconnectAll failed");
+
+    let inner = response.into_inner();
+    assert_eq!(inner.status, "disconnected");
+    // TestServer creates a mock connection, so at least 1 adapter was stopped
+    assert!(
+        inner.adapters_stopped >= 1,
+        "Expected at least 1 adapter stopped, got {}",
+        inner.adapters_stopped
+    );
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_grpc_get_status_idle() {
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
+    let mut client = MetricsServiceClient::connect(format!("http://{}", server.addr))
+        .await
+        .expect("Failed to connect to server");
+
+    let response = client
+        .get_status(StatusRequest { metadata: None })
+        .await
+        .expect("GetStatus failed");
+
+    let inner = response.into_inner();
+    assert_eq!(
+        inner.mode, "active",
+        "Mode should be 'active' since test server creates a mock connection"
+    );
+    // uptime_seconds is u64 so always >= 0, just verify it's set
+    assert!(
+        inner.uptime_seconds < 60,
+        "Uptime should be under 60s for fresh server"
+    );
 
     server.shutdown();
 }

@@ -50,6 +50,9 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+# HTTP client (for wake_app remote calls)
+reqwest.workspace = true
+
 # Utilities
 chrono.workspace = true
 uuid.workspace = true
@@ -78,6 +81,7 @@ tokio-stream.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
 detrix-testing = { path = "../detrix-testing" }
+wiremock.workspace = true
 # Infrastructure crates for integration tests (not used in production code)
 detrix-storage = { path = "../detrix-storage" }
 detrix-dap = { path = "../detrix-dap" }

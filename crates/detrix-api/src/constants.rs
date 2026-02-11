@@ -16,6 +16,10 @@ pub mod status {
     pub const FOUND: &str = "found";
     /// System is active
     pub const ACTIVE: &str = "active";
-    /// System is sleeping
-    pub const SLEEPING: &str = "sleeping";
+    /// System is idle (no active connections)
+    pub const IDLE: &str = "idle";
+    /// All adapters disconnected successfully
+    pub const DISCONNECTED: &str = "disconnected";
+    /// Some adapters failed to stop
+    pub const PARTIAL_FAILURE: &str = "partial_failure";
 }

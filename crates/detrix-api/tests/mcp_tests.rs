@@ -60,6 +60,8 @@ impl McpTestFixture {
             &detrix_config::LimitsConfig::default(),
             None,
             None, // No separate DLQ storage in tests
+            None,
+            None, // No auth token in tests
         );
 
         let state = Arc::new(

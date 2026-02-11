@@ -9,13 +9,26 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from ._generated import SleepResponse, SleepStatus, WakeResponse, WakeStatus
-from ._state import State, get_state
+from ._state import ClientState, State, get_state
 from .auth import discover_auth_token
-from .daemon import check_daemon_health, register_connection, unregister_connection
+from .daemon import HttpDaemonClient
 from .debugger import sleep_debugger, wake_debugger
 from .errors import DaemonError, DebuggerError
 
 _logger = logging.getLogger("detrix.operations")
+
+
+def _get_daemon_client(
+    state: "ClientState",
+    daemon_url: str,
+    verify_ssl: bool = True,
+    ca_bundle: str | None = None,
+) -> HttpDaemonClient:
+    """Get the cached daemon client if URL matches, otherwise create a temporary one."""
+    cached = state.http_client
+    if cached is not None and cached.base_url == daemon_url.rstrip("/"):
+        return cached
+    return HttpDaemonClient(daemon_url, verify_ssl=verify_ssl, ca_bundle=ca_bundle)
 
 
 def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeResponse:
@@ -67,8 +80,7 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
                     )
                 if parsed.scheme not in ("http", "https"):
                     raise DaemonError(
-                        f"Invalid daemon_url scheme: {parsed.scheme!r}. "
-                        "Must be 'http' or 'https'"
+                        f"Invalid daemon_url scheme: {parsed.scheme!r}. Must be 'http' or 'https'"
                     )
 
             # Mark as WAKING so status() shows transitional state
@@ -77,6 +89,7 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
 
             # Capture config for use outside lock
             control_host = state.control_host
+            advertise_host = state.advertise_host
             debug_port = state.debug_port
             connection_name = state.name
             detrix_home_path = state.detrix_home
@@ -87,16 +100,12 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
 
         # Phase 2: Network I/O (no lock held - status() won't block)
         try:
+            # Reuse cached daemon client when possible (avoids new httpx.Client per call)
+            client = _get_daemon_client(state, effective_daemon_url, verify_ssl, ca_bundle)
+
             # Check daemon health
-            if not check_daemon_health(
-                effective_daemon_url,
-                timeout=health_timeout,
-                verify_ssl=verify_ssl,
-                ca_bundle=ca_bundle,
-            ):
-                raise DaemonError(
-                    f"Cannot connect to daemon at {effective_daemon_url}"
-                )
+            if not client.health_check(timeout=health_timeout):
+                raise DaemonError(f"Cannot connect to daemon at {effective_daemon_url}")
 
             # Start debugpy (debugpy handles port=0 atomically)
             success, actual_port = wake_debugger(control_host, debug_port)
@@ -108,16 +117,15 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
             token = discover_auth_token(detrix_home)
 
             # Register connection with daemon
+            # Use advertise_host if set (for Docker/cloud), otherwise use control_host
+            registration_host = advertise_host or control_host
             try:
-                connection_id = register_connection(
-                    daemon_url=effective_daemon_url,
-                    host=control_host,
+                connection_id = client.register(
+                    host=registration_host,
                     port=actual_port,
                     connection_id=connection_name,
                     token=token,
                     timeout=reg_timeout,
-                    verify_ssl=verify_ssl,
-                    ca_bundle=ca_bundle,
                 )
             except DaemonError:
                 # debugpy started but registration failed
@@ -179,22 +187,26 @@ def do_sleep() -> SleepResponse:
         verify_ssl = state.verify_ssl
         ca_bundle = state.ca_bundle
 
-    # If waking, wait for wake to complete first
+    # If waking, wait for wake to complete first, then re-read state
+    # (connection_id may have been set by the completed wake operation)
     if is_waking:
         with state.wake_lock:
             pass  # Wait for wake to complete
+        # Re-read connection info that may have changed during wake
+        with state.lock:
+            connection_id = state.connection_id
+            daemon_url_for_unreg = state.daemon_url
 
     # Unregister connection (best effort, outside lock)
     if connection_id and daemon_url_for_unreg:
         detrix_home = Path(detrix_home_str) if detrix_home_str else None
         token = discover_auth_token(detrix_home)
-        unregister_connection(
-            daemon_url=daemon_url_for_unreg,
+        # Reuse cached daemon client when possible
+        client = _get_daemon_client(state, daemon_url_for_unreg, verify_ssl, ca_bundle)
+        client.unregister(
             connection_id=connection_id,
             token=token,
             timeout=unreg_timeout,
-            verify_ssl=verify_ssl,
-            ca_bundle=ca_bundle,
         )
 
     # Mark debugger as stopped (note: port remains open due to debugpy limitation)

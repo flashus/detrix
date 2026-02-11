@@ -63,6 +63,7 @@ nix.workspace = true
 
 [dev-dependencies]
 regex.workspace = true
+fs2.workspace = true
 
 [lints]
 workspace = true

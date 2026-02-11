@@ -1,6 +1,5 @@
 """Tests for state management."""
 
-
 from detrix._state import ClientState, State, get_state, reset_state
 
 

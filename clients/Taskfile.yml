@@ -138,10 +138,17 @@ tasks:
     cmds:
       - uv run mypy detrix
 
-  python-check:
-    desc: Run all Python checks (lint, typecheck, test)
+  python-format-check:
+    desc: Check Python client formatting
     dir: python
     cmds:
+      - uv run ruff format --check detrix tests
+
+  python-check:
+    desc: Run all Python checks (fmt, lint, typecheck, test)
+    dir: python
+    cmds:
+      - task: python-format-check
       - task: python-lint
       - task: python-typecheck
       - task: python-test
@@ -169,10 +176,23 @@ tasks:
     cmds:
       - golangci-lint run
 
-  go-check:
-    desc: Run all Go checks (build, lint, test)
+  go-format:
+    desc: Format Go client code
     dir: go
     cmds:
+      - gofmt -w .
+
+  go-format-check:
+    desc: Check Go client formatting
+    dir: go
+    cmds:
+      - test -z "$(gofmt -l .)" || (echo "Go files need formatting:" && gofmt -l . && exit 1)
+
+  go-check:
+    desc: Run all Go checks (fmt, build, lint, test)
+    dir: go
+    cmds:
+      - task: go-format-check
       - task: go-build
       - task: go-lint
       - task: go-test
@@ -225,6 +245,22 @@ tasks:
   # ============================================================================
   # All Clients
   # ============================================================================
+
+  format:
+    desc: Format all client code (Python, Go, Rust)
+    cmds:
+      - task: python-format
+      - task: go-format
+      - task: rust-fmt
+      - echo "✅ All client code formatted"
+
+  format-check:
+    desc: Check formatting for all clients
+    cmds:
+      - task: python-format-check
+      - task: go-format-check
+      - task: rust-fmt-check
+      - echo "✅ All client formatting OK"
 
   test:
     desc: Run all client tests (Python, Go, and Rust)
@@ -300,6 +336,11 @@ tasks:
   # ============================================================================
   # Clean
   # ============================================================================
+
+  publish:
+    desc: Publish client SDKs to registries (PyPI, crates.io, pkg.go.dev)
+    cmds:
+      - python3 publish.py {{.CLI_ARGS}}
 
   clean:
     desc: Clean generated files

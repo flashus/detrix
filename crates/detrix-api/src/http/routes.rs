@@ -29,11 +29,11 @@ use super::paths;
 use super::websocket::websocket_handler;
 use crate::http::handlers::{
     add_metric, cleanup_connections, close_connection, create_connection, delete_metric,
-    disable_group, disable_metric, enable_group, enable_metric, get_config, get_connection,
-    get_mcp_usage, get_metric, get_metric_history, get_metric_value, health_check, inspect_file,
-    list_connections, list_group_metrics, list_groups, list_metrics, prometheus_metrics,
-    query_events, reload_config, sleep, status, update_config, update_metric, validate_config,
-    validate_expression, wake,
+    disable_group, disable_metric, disconnect_all, enable_group, enable_metric, get_config,
+    get_connection, get_mcp_usage, get_metric, get_metric_history, get_metric_value, health_check,
+    inspect_file, list_connections, list_group_metrics, list_groups, list_metrics,
+    prometheus_metrics, query_events, reload_config, sleep, status, update_config, update_metric,
+    validate_config, validate_expression, wake,
 };
 use crate::state::ApiState;
 use axum::{
@@ -289,6 +289,7 @@ pub fn create_router_with_jwt_validator(
         // System control endpoints
         .route(paths::API_V1_WAKE, post(wake))
         .route(paths::API_V1_SLEEP, post(sleep))
+        .route(paths::API_V1_DISCONNECT_ALL, post(disconnect_all))
         .route(paths::API_V1_STATUS, get(status))
         // REST API v1 - Metrics
         .route(paths::API_V1_METRICS, get(list_metrics).post(add_metric))
@@ -354,8 +355,7 @@ pub fn create_router_with_jwt_validator(
 
     if auth.is_enabled() {
         // Validate auth configuration before starting
-        auth.validate()
-            .map_err(|e| RouterConfigError::Auth(e.to_string()))?;
+        auth.validate().map_err(RouterConfigError::Auth)?;
         info!(
             mode = ?auth.mode,
             public_endpoints = ?auth.public_endpoints,
@@ -372,7 +372,7 @@ pub fn create_router_with_jwt_validator(
         // Validate rate limiting configuration before building governor config
         rate_limit
             .validate()
-            .map_err(|e| RouterConfigError::RateLimit(e.to_string()))?;
+            .map_err(RouterConfigError::RateLimit)?;
 
         let localhost_exempt = rate_limit.localhost_exempt;
         info!(

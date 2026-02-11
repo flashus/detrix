@@ -665,7 +665,9 @@ pub async fn run(
         }
     }
 
-    // PID file will be automatically released when pid_file_guard is dropped
+    // Explicitly drop the PID file guard here to ensure the flock is held
+    // for the daemon's entire lifetime (not dropped early at last use site).
+    drop(pid_file_guard);
     if daemon {
         info!("✓ PID file released");
     }

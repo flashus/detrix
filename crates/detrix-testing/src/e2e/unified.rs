@@ -306,35 +306,49 @@ pub async fn scenario_get_status<C: ApiClient>(
     TestScenarios::get_status(&ctx.client, &ctx.reporter).await
 }
 
-/// Wake scenario
-pub async fn scenario_wake<C: ApiClient>(ctx: &UnifiedTestContext<C>) -> Result<(), ApiError> {
-    let step = ctx.reporter.step_start("Wake", "Wake the daemon");
-    ctx.reporter.step_request("wake", None);
+/// Wake scenario (requires mock app URL)
+pub async fn scenario_wake<C: ApiClient>(
+    ctx: &UnifiedTestContext<C>,
+    app_url: &str,
+) -> Result<(), ApiError> {
+    let step = ctx.reporter.step_start("Wake", "Wake remote app");
+    ctx.reporter.step_request("wake", Some(app_url));
 
-    let response = ctx.client.wake().await?;
+    let response = ctx.client.wake(app_url, None).await?;
     ctx.reporter
         .step_response("OK", Some(&format!("status={}", response.data)));
-    ctx.reporter.step_success(step, Some("Daemon woke up"));
+    ctx.reporter.step_success(step, Some("Wake sent"));
     Ok(())
 }
 
-/// Sleep scenario
-pub async fn scenario_sleep<C: ApiClient>(ctx: &UnifiedTestContext<C>) -> Result<(), ApiError> {
-    let step = ctx.reporter.step_start("Sleep", "Put the daemon to sleep");
-    ctx.reporter.step_request("sleep", None);
+/// Sleep scenario (requires mock app URL)
+pub async fn scenario_sleep<C: ApiClient>(
+    ctx: &UnifiedTestContext<C>,
+    app_url: &str,
+) -> Result<(), ApiError> {
+    let step = ctx.reporter.step_start("Sleep", "Sleep remote app");
+    ctx.reporter.step_request("sleep", Some(app_url));
 
-    let response = ctx.client.sleep().await?;
+    let response = ctx.client.sleep(app_url).await?;
     ctx.reporter
         .step_response("OK", Some(&format!("status={}", response.data)));
-    ctx.reporter.step_success(step, Some("Daemon sleeping"));
+    ctx.reporter.step_success(step, Some("Sleep sent"));
     Ok(())
 }
 
-/// Wake/sleep cycle scenario
+/// Wake/sleep cycle scenario (requires mock app URL)
 pub async fn scenario_wake_sleep_cycle<C: ApiClient>(
     ctx: &UnifiedTestContext<C>,
+    app_url: &str,
 ) -> Result<(), ApiError> {
-    TestScenarios::wake_sleep_cycle(&ctx.client, &ctx.reporter).await
+    TestScenarios::wake_sleep_cycle(&ctx.client, &ctx.reporter, app_url).await
+}
+
+/// Disconnect all scenario
+pub async fn scenario_disconnect_all<C: ApiClient>(
+    ctx: &UnifiedTestContext<C>,
+) -> Result<(), ApiError> {
+    TestScenarios::disconnect_all(&ctx.client, &ctx.reporter).await
 }
 
 /// List connections scenario
@@ -1325,15 +1339,16 @@ pub async fn scenario_comprehensive_coverage<C: ApiClient>(
         failures.push(format!("get_status: {}", e));
     }
 
-    ctx.reporter.info("Testing wake...");
-    if let Err(e) = ctx.client.wake().await {
-        failures.push(format!("wake: {}", e));
+    // Test disconnect_all (server-side operation, works without remote app)
+    ctx.reporter.info("Testing disconnect_all...");
+    if let Err(e) = ctx.client.disconnect_all().await {
+        failures.push(format!("disconnect_all: {}", e));
     }
 
-    ctx.reporter.info("Testing sleep...");
-    if let Err(e) = ctx.client.sleep().await {
-        failures.push(format!("sleep: {}", e));
-    }
+    // Wake/sleep require a real remote app URL — skipped in basic tests.
+    // Use scenario_wake/scenario_sleep with a mock server for integration tests.
+    ctx.reporter
+        .info("Skipping wake/sleep (requires remote app URL)");
 
     // Connections
     ctx.reporter.section("CONNECTIONS");

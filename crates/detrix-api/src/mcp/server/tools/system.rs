@@ -14,7 +14,7 @@ use crate::state::ApiState;
 use detrix_application::{
     FileInspectionRequest, FileInspectionService, UsageSnapshot, ValidationResult,
 };
-use detrix_core::{ConnectionId, SafetyLevel, SourceLanguage};
+use detrix_core::{ConnectionId, SafetyLevel};
 use rmcp::model::Content;
 use rmcp::ErrorData as McpError;
 use std::sync::Arc;
@@ -147,12 +147,26 @@ impl AcknowledgeEventsResult {
     }
 }
 
-/// Result when no event IDs provided
-pub struct NoEventIdsProvided;
+/// Outcome of acknowledge_events operation
+pub enum AcknowledgeOutcome {
+    /// Events were successfully acknowledged
+    Success(AcknowledgeEventsResult),
+    /// System events are not configured
+    NotConfigured,
+    /// No event IDs were provided
+    NoEventIds,
+}
 
-impl NoEventIdsProvided {
-    pub fn build_message(&self) -> &'static str {
-        "No event IDs provided to acknowledge."
+impl AcknowledgeOutcome {
+    /// Build human-readable message for MCP response
+    pub fn build_message(&self) -> String {
+        match self {
+            AcknowledgeOutcome::Success(result) => result.build_message(),
+            AcknowledgeOutcome::NotConfigured => {
+                SystemEventsNotConfigured.build_message().to_string()
+            }
+            AcknowledgeOutcome::NoEventIds => "No event IDs provided to acknowledge.".to_string(),
+        }
     }
 }
 
@@ -160,18 +174,15 @@ impl NoEventIdsProvided {
 pub async fn acknowledge_events_impl(
     state: &Arc<ApiState>,
     params: AcknowledgeEventsParams,
-) -> Result<
-    Result<AcknowledgeEventsResult, Result<SystemEventsNotConfigured, NoEventIdsProvided>>,
-    McpError,
-> {
+) -> Result<AcknowledgeOutcome, McpError> {
     // Check if system event repository is available
     let repo = match &state.system_event_repository {
         Some(repo) => repo,
-        None => return Ok(Err(Ok(SystemEventsNotConfigured))),
+        None => return Ok(AcknowledgeOutcome::NotConfigured),
     };
 
     if params.event_ids.is_empty() {
-        return Ok(Err(Err(NoEventIdsProvided)));
+        return Ok(AcknowledgeOutcome::NoEventIds);
     }
 
     let acknowledged = repo
@@ -179,7 +190,7 @@ pub async fn acknowledge_events_impl(
         .await
         .mcp_context("Failed to acknowledge events")?;
 
-    Ok(Ok(AcknowledgeEventsResult {
+    Ok(AcknowledgeOutcome::Success(AcknowledgeEventsResult {
         acknowledged,
         requested: params.event_ids.len(),
     }))
@@ -240,7 +251,11 @@ impl GetMcpUsageResult {
         ));
 
         // Add recommendations if there are issues
-        if snapshot.success_rate < 0.9 && snapshot.total_calls > 10 {
+        const RECOMMENDATION_SUCCESS_RATE_THRESHOLD: f64 = 0.9;
+        const RECOMMENDATION_MIN_CALLS: u64 = 10;
+        if snapshot.success_rate < RECOMMENDATION_SUCCESS_RATE_THRESHOLD
+            && snapshot.total_calls > RECOMMENDATION_MIN_CALLS
+        {
             output.push_str("\n⚠️ Recommendations:\n");
             if snapshot.workflow.no_connection > 0 {
                 output.push_str("  - Always call create_connection first before adding metrics\n");
@@ -317,9 +332,6 @@ pub fn validate_expression_impl(
 
 /// Result of inspect_file operation
 pub struct InspectFileResult {
-    /// Detected source language (available for future use)
-    #[allow(dead_code)]
-    pub language: SourceLanguage,
     pub messages: Vec<Content>,
 }
 
@@ -337,5 +349,9 @@ pub fn inspect_file_impl(params: InspectFileParams) -> Result<InspectFileResult,
         .mcp_context("File inspection failed")?;
 
     let messages = format_inspection_result(language, result, &params.file_path);
-    Ok(InspectFileResult { language, messages })
+    let mut all_messages = vec![Content::text(format!("Detected language: {}", language))];
+    all_messages.extend(messages);
+    Ok(InspectFileResult {
+        messages: all_messages,
+    })
 }

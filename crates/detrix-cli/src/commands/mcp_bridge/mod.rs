@@ -56,6 +56,7 @@ pub async fn run_bridge(
     config_path: Option<PathBuf>,
     pid_file: Option<PathBuf>,
     mcp_config: &detrix_config::McpBridgeConfig,
+    config_port: u16,
 ) -> Result<()> {
     // Discover auth token for daemon authentication
     let auth_token = discover_auth_token();
@@ -69,7 +70,7 @@ pub async fn run_bridge(
     let config = BridgeConfig {
         daemon_url: format!("http://{}:{}", daemon_host, daemon_port),
         daemon_host: daemon_host.to_string(),
-        daemon_port,
+        config_port,
         timeout_ms: mcp_config.bridge_timeout_ms,
         auth_token,
         config_path,

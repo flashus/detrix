@@ -112,11 +112,23 @@ enum Commands {
         verbose: bool,
     },
 
-    /// Wake the system (start observing)
-    Wake,
+    /// Wake a remote app's Detrix client
+    Wake {
+        /// URL of the app's control plane (e.g., 'http://my-app:8091')
+        app_url: String,
+        /// Optional daemon URL to pass to the app
+        #[arg(long)]
+        daemon_url: Option<String>,
+    },
 
-    /// Sleep the system (pause observing)
-    Sleep,
+    /// Sleep a remote app's Detrix client
+    Sleep {
+        /// URL of the app's control plane (e.g., 'http://my-app:8091')
+        app_url: String,
+    },
+
+    /// Disconnect all local debugger adapters
+    DisconnectAll,
 
     /// Manage configuration
     Config {
@@ -391,11 +403,33 @@ async fn main() -> Result<()> {
             commands::status::run(require_ctx()?, cli.format, cli.quiet, cli.no_color, verbose)
                 .await
         }
-        Commands::Wake => {
-            commands::status::wake(require_ctx()?, cli.format, cli.quiet, cli.no_color).await
+        Commands::Wake {
+            app_url,
+            daemon_url,
+        } => {
+            commands::status::wake(
+                require_ctx()?,
+                &app_url,
+                daemon_url.as_deref(),
+                cli.format,
+                cli.quiet,
+                cli.no_color,
+            )
+            .await
         }
-        Commands::Sleep => {
-            commands::status::sleep(require_ctx()?, cli.format, cli.quiet, cli.no_color).await
+        Commands::Sleep { app_url } => {
+            commands::status::sleep(
+                require_ctx()?,
+                &app_url,
+                cli.format,
+                cli.quiet,
+                cli.no_color,
+            )
+            .await
+        }
+        Commands::DisconnectAll => {
+            commands::status::disconnect_all(require_ctx()?, cli.format, cli.quiet, cli.no_color)
+                .await
         }
         Commands::Config { action } => {
             commands::config::run(require_ctx()?, action, cli.format, cli.quiet, cli.no_color).await

@@ -74,7 +74,10 @@ pub(crate) fn is_process_running(pid: u32) -> bool {
     }
     // On Unix, send signal 0 (None) to check if process exists without actually signaling
     // This returns Ok if process exists (and we have permission), Err otherwise
-    kill(Pid::from_raw(pid as i32), None).is_ok()
+    let Ok(pid_i32) = i32::try_from(pid) else {
+        return false;
+    };
+    kill(Pid::from_raw(pid_i32), None).is_ok()
 }
 
 /// Check if a PID is a running detrix daemon process

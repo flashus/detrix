@@ -164,7 +164,7 @@ pub async fn observe_impl(
         .metric_service
         .add_metric(metric, false) // Don't replace by default
         .await
-        .map_err(|e| McpError::internal_error(format!("Failed to add metric: {}", e), None))?;
+        .mcp_context("Failed to add metric")?;
 
     let warnings: Vec<String> = outcome.warnings.iter().map(|w| w.to_string()).collect();
 
@@ -307,8 +307,8 @@ pub async fn add_metric_impl(
     );
     proto_request.language = Some(connection.language.to_string());
 
-    let metric = add_request_to_metric(&proto_request)
-        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+    let metric =
+        add_request_to_metric(&proto_request).mcp_invalid_params("Invalid metric parameters")?;
 
     // Check workflow
     state.context.mcp_usage.check_workflow_for_add_metric();
@@ -319,7 +319,7 @@ pub async fn add_metric_impl(
         .metric_service
         .add_metric(metric, replace_flag)
         .await
-        .map_err(|e| McpError::internal_error(format!("Failed to add metric: {}", e), None))?;
+        .mcp_context("Failed to add metric")?;
 
     let warnings: Vec<String> = outcome.warnings.iter().map(|w| w.to_string()).collect();
 

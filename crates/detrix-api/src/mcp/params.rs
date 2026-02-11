@@ -239,6 +239,40 @@ pub struct EnableFromDiffParams {
 }
 
 // ============================================================================
+// Wake Parameter Types
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "Wake an app's Detrix client via its control plane. The app starts its debugger and registers with this Detrix server."
+)]
+pub struct WakeParams {
+    #[schemars(
+        description = "URL of the app's control plane (e.g., 'http://my-app:8091'). The wake request is sent to {app_url}/detrix/wake."
+    )]
+    pub app_url: String,
+    #[schemars(
+        description = "Daemon URL to pass to the app (optional). If not provided, the app uses its configured daemon URL. In Docker, typically 'http://detrix:8090'."
+    )]
+    pub daemon_url: Option<String>,
+}
+
+// ============================================================================
+// Sleep Parameter Types
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "Sleep an app's Detrix client via its control plane. The app stops its debugger and unregisters from this Detrix server."
+)]
+pub struct SleepParams {
+    #[schemars(
+        description = "URL of the app's control plane (e.g., 'http://my-app:8091'). The sleep request is sent to {app_url}/detrix/sleep."
+    )]
+    pub app_url: String,
+}
+
+// ============================================================================
 // Connection Management Parameter Types
 // ============================================================================
 
@@ -326,7 +360,7 @@ pub struct ValidateExpressionParams {
     description = "Parameters for inspecting a file to find correct metric placement. Use BEFORE add_metric to find the right line for your expression."
 )]
 pub struct InspectFileParams {
-    #[schemars(description = "Path to the Python file to inspect")]
+    #[schemars(description = "Path to the source file to inspect (Python, Go, or Rust)")]
     pub file_path: String,
     #[schemars(
         description = "Show variables available at this line number (use to verify metric placement)"
@@ -420,3 +454,13 @@ pub struct AcknowledgeEventsParams {
     #[schemars(description = "Event IDs to acknowledge")]
     pub event_ids: Vec<i64>,
 }
+
+// ============================================================================
+// Disconnect All Parameter Types
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "Disconnect all local debugger adapters. Stops all active debug sessions. Metrics remain configured and will be re-enabled when connections are re-established."
+)]
+pub struct DisconnectAllParams {}

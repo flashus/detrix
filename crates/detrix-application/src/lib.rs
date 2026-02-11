@@ -88,15 +88,15 @@ pub use error::{
 
 // Re-export port types from detrix-ports for convenience
 pub use detrix_ports::{
-    AnchorService, AnchorServiceRef, ConnectionRepository, ConnectionRepositoryRef, DapAdapter,
-    DapAdapterFactory, DapAdapterFactoryRef, DapAdapterRef, DlqEntry, DlqEntryStatus,
-    DlqRepository, DlqRepositoryRef, ErrorCountRow, EventOutput, EventOutputRef, EventRepository,
-    EventRepositoryRef, FileEvent, FileWatcher, FileWatcherConfig, FileWatcherRef, GroupSummary,
-    McpUsageRepository, McpUsageRepositoryRef, MetricFilter, MetricRepository, MetricRepositoryRef,
-    NullFileWatcher, NullOutput, PurityAnalyzer, PurityAnalyzerRef, PurityCache, PurityCacheEntry,
-    PurityCacheKey, PurityCacheRef, PurityCacheStats, RemoveMetricResult, SetMetricResult,
-    SourceContext, SymbolInfo, SystemEventRepository, SystemEventRepositoryRef, ToggleMetricResult,
-    ToolCountRow, UsageStats,
+    AnchorService, AnchorServiceRef, ConnectionLookup, ConnectionLookupRef, ConnectionRepository,
+    ConnectionRepositoryRef, DapAdapter, DapAdapterFactory, DapAdapterFactoryRef, DapAdapterRef,
+    DlqEntry, DlqEntryStatus, DlqRepository, DlqRepositoryRef, ErrorCountRow, EventOutput,
+    EventOutputRef, EventRepository, EventRepositoryRef, FileEvent, FileWatcher, FileWatcherConfig,
+    FileWatcherRef, GroupSummary, McpUsageRepository, McpUsageRepositoryRef, MetricFilter,
+    MetricRepository, MetricRepositoryRef, NullFileWatcher, NullOutput, PurityAnalyzer,
+    PurityAnalyzerRef, PurityCache, PurityCacheEntry, PurityCacheKey, PurityCacheRef,
+    PurityCacheStats, RemoveMetricResult, SetMetricResult, SourceContext, SymbolInfo,
+    SystemEventRepository, SystemEventRepositoryRef, ToggleMetricResult, ToolCountRow, UsageStats,
 };
 
 // Thread-safe reference to expression validator (defined here since ExpressionValidator is in this crate)
@@ -105,12 +105,12 @@ pub use safety::{ExpressionValidator, PythonValidator, ValidationResult, Validat
 pub use services::{
     AdapterLifecycleManager, AnchorServiceConfig, Audience, CallTimer, CodeContext, CodeLine,
     ConfigService, ConfigUpdateResult, ConnectionService, DefaultAnchorService,
-    EnvironmentCheckResult, EnvironmentService, EventCaptureService, FileChangeResult,
-    FileInspectionRequest, FileInspectionResult, FileInspectionService, FileOverview,
-    JwksValidator, JwtClaims, JwtError, LanguageCapabilities, LineInspectionResult,
+    DisconnectAllResult, EnvironmentCheckResult, EnvironmentService, EventCaptureService,
+    FileChangeResult, FileInspectionRequest, FileInspectionResult, FileInspectionService,
+    FileOverview, JwksValidator, JwtClaims, JwtError, LanguageCapabilities, LineInspectionResult,
     LspSymbolLookup, LspSymbolLookupRef, ManagedAdapterInfo, ManagedAdapterStatus, McpErrorCode,
     McpUsageCounters, McpUsageEvent, McpUsageService, MetricService, NotifyFileWatcher,
-    NullLspLookup, SourceLanguage, StreamingService, SystemEventService, TextSearchMatch,
-    UsageSnapshot, VariableDefinition, VariableSearchResult, WorkflowStats,
+    NullLspLookup, RemoteAppService, SourceLanguage, StreamingService, SystemEventService,
+    TextSearchMatch, UsageSnapshot, VariableDefinition, VariableSearchResult, WorkflowStats,
     RESTART_REQUIRED_FIELDS,
 };

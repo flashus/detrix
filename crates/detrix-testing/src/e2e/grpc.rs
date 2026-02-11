@@ -277,13 +277,17 @@ impl ApiClient for GrpcClient {
         }))
     }
 
-    async fn wake(&self) -> ApiResult<String> {
+    async fn wake(&self, app_url: &str, daemon_url: Option<&str>) -> ApiResult<String> {
         let mut client = GrpcClient::new(self.grpc_port);
         client.connect().await?;
 
         let response = client
             .metrics_client()?
-            .wake(WakeRequest { metadata: None })
+            .wake(WakeRequest {
+                app_url: app_url.to_string(),
+                daemon_url: daemon_url.unwrap_or_default().to_string(),
+                metadata: None,
+            })
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?
             .into_inner();
@@ -291,13 +295,30 @@ impl ApiClient for GrpcClient {
         Ok(ApiResponse::new(response.status))
     }
 
-    async fn sleep(&self) -> ApiResult<String> {
+    async fn sleep(&self, app_url: &str) -> ApiResult<String> {
         let mut client = GrpcClient::new(self.grpc_port);
         client.connect().await?;
 
         let response = client
             .metrics_client()?
-            .sleep(detrix_api::SleepRequest { metadata: None })
+            .sleep(detrix_api::SleepRequest {
+                app_url: app_url.to_string(),
+                metadata: None,
+            })
+            .await
+            .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?
+            .into_inner();
+
+        Ok(ApiResponse::new(response.status))
+    }
+
+    async fn disconnect_all(&self) -> ApiResult<String> {
+        let mut client = GrpcClient::new(self.grpc_port);
+        client.connect().await?;
+
+        let response = client
+            .metrics_client()?
+            .disconnect_all(detrix_api::DisconnectAllRequest { metadata: None })
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?
             .into_inner();

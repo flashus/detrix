@@ -72,11 +72,13 @@ static INIT_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLoc
 static CONTROL_SERVER: std::sync::OnceLock<std::sync::Mutex<Option<ControlServer>>> =
     std::sync::OnceLock::new();
 
-/// Global daemon client instance.
-static DAEMON_CLIENT: std::sync::OnceLock<DaemonClient> = std::sync::OnceLock::new();
+/// Global daemon client instance (resettable on shutdown for re-initialization).
+static DAEMON_CLIENT: std::sync::OnceLock<std::sync::Mutex<Option<DaemonClient>>> =
+    std::sync::OnceLock::new();
 
-/// Global LLDB manager instance.
-static LLDB_MANAGER: std::sync::OnceLock<LldbManager> = std::sync::OnceLock::new();
+/// Global LLDB manager instance (resettable on shutdown for re-initialization).
+static LLDB_MANAGER: std::sync::OnceLock<std::sync::Mutex<Option<LldbManager>>> =
+    std::sync::OnceLock::new();
 
 /// Initialize the Detrix client.
 ///
@@ -139,6 +141,7 @@ pub fn init(config: Config) -> Result<()> {
 
         guard.name = config.connection_name();
         guard.control_host = config.control_host.clone();
+        guard.advertise_host = config.advertise_host.clone();
         guard.control_port = config.control_port;
         guard.debug_port = config.debug_port;
         guard.daemon_url = config.daemon_url.clone();
@@ -170,13 +173,19 @@ pub fn init(config: Config) -> Result<()> {
         guard.state = ClientState::Sleeping;
     }
 
-    // Initialize daemon client
+    // Initialize daemon client (resettable via Mutex<Option<T>>)
     let daemon_client = DaemonClient::new(None)?;
-    let _ = DAEMON_CLIENT.set(daemon_client);
+    let dc_holder = DAEMON_CLIENT.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = dc_holder.lock() {
+        *guard = Some(daemon_client);
+    }
 
-    // Initialize LLDB manager
-    let _ = LLDB_MANAGER
-        .get_or_init(|| LldbManager::new(lldb_dap_path.clone(), config.lldb_start_timeout));
+    // Initialize LLDB manager (resettable via Mutex<Option<T>>)
+    let lldb_manager = LldbManager::new(lldb_dap_path.clone(), config.lldb_start_timeout);
+    let lm_holder = LLDB_MANAGER.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = lm_holder.lock() {
+        *guard = Some(lldb_manager);
+    }
 
     // Discover auth token
     let auth_token = auth::discover_token(config.detrix_home_path().as_deref());
@@ -341,6 +350,18 @@ pub fn shutdown() -> Result<()> {
         }
     }
 
+    // Clear daemon client and lldb manager for re-initialization
+    if let Some(holder) = DAEMON_CLIENT.get() {
+        if let Ok(mut guard) = holder.lock() {
+            *guard = None;
+        }
+    }
+    if let Some(holder) = LLDB_MANAGER.get() {
+        if let Ok(mut guard) = holder.lock() {
+            *guard = None;
+        }
+    }
+
     // Reset state
     state::reset();
 
@@ -369,6 +390,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
         current_state,
         target_daemon_url,
         debug_host,
+        advertise_host,
         debug_port,
         name,
         detrix_home,
@@ -384,6 +406,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
             guard.state,
             target_url,
             guard.control_host.clone(),
+            guard.advertise_host.clone(),
             guard.debug_port,
             guard.name.clone(),
             guard.detrix_home.clone(),
@@ -424,15 +447,27 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
         }
     };
 
+    // Acquire daemon client and lldb manager locks for the operation.
+    // Safe to hold for the duration because wake_lock already serializes access.
+    let dc_holder = DAEMON_CLIENT.get().ok_or(Error::NotInitialized)?;
+    let dc_guard = dc_holder
+        .lock()
+        .map_err(|_| Error::ControlPlaneError("daemon client lock poisoned".to_string()))?;
+    let daemon_client = dc_guard.as_ref().ok_or(Error::NotInitialized)?;
+
+    let lm_holder = LLDB_MANAGER.get().ok_or(Error::NotInitialized)?;
+    let lm_guard = lm_holder
+        .lock()
+        .map_err(|_| Error::ControlPlaneError("lldb manager lock poisoned".to_string()))?;
+    let lldb_manager = lm_guard.as_ref().ok_or(Error::NotInitialized)?;
+
     // Check daemon health
-    let daemon_client = DAEMON_CLIENT.get().ok_or(Error::NotInitialized)?;
     if let Err(e) = daemon_client.health_check(&target_daemon_url, health_timeout) {
         revert_state();
         return Err(e);
     }
 
     // Spawn lldb-dap and attach
-    let lldb_manager = LLDB_MANAGER.get().ok_or(Error::NotInitialized)?;
     let lldb_process = match lldb_manager.spawn_and_attach(&debug_host, debug_port) {
         Ok(p) => p,
         Err(e) => {
@@ -467,11 +502,13 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
         });
 
     // Register with daemon
+    // Use advertise_host if set (for Docker/cloud), otherwise use control_host
     // Pass our PID so the daemon can use AttachPid mode with lldb-dap
+    let registration_host = advertise_host.unwrap_or(debug_host);
     let connection_id = match daemon_client.register(
         &target_daemon_url,
         RegisterRequest {
-            host: debug_host,
+            host: registration_host,
             port: actual_debug_port,
             language: "rust".to_string(),
             name: name.clone(),
@@ -557,16 +594,24 @@ fn sleep_handler() -> Result<SleepResponse> {
 
     // Unregister from daemon (best effort)
     if let Some(conn_id) = connection_id {
-        if let Some(daemon_client) = DAEMON_CLIENT.get() {
-            daemon_client.unregister(&daemon_url, &conn_id, unregister_timeout);
+        if let Some(holder) = DAEMON_CLIENT.get() {
+            if let Ok(guard) = holder.lock() {
+                if let Some(daemon_client) = guard.as_ref() {
+                    daemon_client.unregister(&daemon_url, &conn_id, unregister_timeout);
+                }
+            }
         }
     }
 
     // Kill lldb-dap process
     if let Some(mut process) = state::take_lldb_process() {
-        if let Some(lldb_manager) = LLDB_MANAGER.get() {
-            if let Err(e) = lldb_manager.kill(&mut process) {
-                warn!("Failed to kill lldb-dap: {}", e);
+        if let Some(holder) = LLDB_MANAGER.get() {
+            if let Ok(guard) = holder.lock() {
+                if let Some(lldb_manager) = guard.as_ref() {
+                    if let Err(e) = lldb_manager.kill(&mut process) {
+                        warn!("Failed to kill lldb-dap: {}", e);
+                    }
+                }
             }
         }
     }

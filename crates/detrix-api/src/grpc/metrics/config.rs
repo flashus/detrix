@@ -1,5 +1,6 @@
 //! Config handlers: reload_config, validate_config, get_config, update_config
 
+use crate::error::ToStatusResult;
 use crate::generated::detrix::v1::{
     ConfigResponse, GetConfigRequest, ReloadConfigRequest, ReloadConfigResponse,
     UpdateConfigRequest, ValidateConfigRequest, ValidationResponse,
@@ -95,14 +96,10 @@ pub async fn handle_get_config(
     if let Some(path) = req.path {
         // Return specific config section as TOML
         let toml_content = match path.as_str() {
-            "api" => toml::to_string_pretty(&config.api)
-                .map_err(|e| Status::internal(format!("Failed to serialize config: {}", e)))?,
-            "limits" => toml::to_string_pretty(&config.limits)
-                .map_err(|e| Status::internal(format!("Failed to serialize config: {}", e)))?,
-            "safety" => toml::to_string_pretty(&config.safety)
-                .map_err(|e| Status::internal(format!("Failed to serialize config: {}", e)))?,
-            "storage" => toml::to_string_pretty(&config.storage)
-                .map_err(|e| Status::internal(format!("Failed to serialize config: {}", e)))?,
+            "api" => toml::to_string_pretty(&config.api).to_status()?,
+            "limits" => toml::to_string_pretty(&config.limits).to_status()?,
+            "safety" => toml::to_string_pretty(&config.safety).to_status()?,
+            "storage" => toml::to_string_pretty(&config.storage).to_status()?,
             _ => {
                 return Err(Status::not_found(format!(
                     "Config path '{}' not found. Available paths: api, limits, safety, storage",
@@ -119,8 +116,7 @@ pub async fn handle_get_config(
     }
 
     // Return the full config as TOML (redacted for security)
-    let toml_content = toml::to_string_pretty(&config)
-        .map_err(|e| Status::internal(format!("Failed to serialize config: {}", e)))?;
+    let toml_content = toml::to_string_pretty(&config).to_status()?;
 
     let config_path = state.config_service.config_path();
     Ok(Response::new(ConfigResponse {

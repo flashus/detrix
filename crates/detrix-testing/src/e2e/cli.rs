@@ -369,13 +369,23 @@ impl ApiClient for CliClient {
         }))
     }
 
-    async fn wake(&self) -> ApiResult<String> {
-        let output = self.run_command(&["wake"]).await?;
+    async fn wake(&self, app_url: &str, daemon_url: Option<&str>) -> ApiResult<String> {
+        let mut args = vec!["wake", app_url];
+        if let Some(url) = daemon_url {
+            args.push("--daemon-url");
+            args.push(url);
+        }
+        let output = self.run_command(&args).await?;
         Ok(ApiResponse::new(output.trim().to_string()))
     }
 
-    async fn sleep(&self) -> ApiResult<String> {
-        let output = self.run_command(&["sleep"]).await?;
+    async fn sleep(&self, app_url: &str) -> ApiResult<String> {
+        let output = self.run_command(&["sleep", app_url]).await?;
+        Ok(ApiResponse::new(output.trim().to_string()))
+    }
+
+    async fn disconnect_all(&self) -> ApiResult<String> {
+        let output = self.run_command(&["disconnect-all"]).await?;
         Ok(ApiResponse::new(output.trim().to_string()))
     }
 

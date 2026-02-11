@@ -123,9 +123,8 @@ pub async fn create_connection(
 
     // Build connection identity from request
     // Note: name, workspace_root, hostname are required fields
-    let port = crate::common::validate_port(payload.port).map_err(HttpError::bad_request)?;
-    let language =
-        crate::common::parse_language(&payload.language).map_err(HttpError::bad_request)?;
+    let port = crate::common::validate_port(payload.port).http_bad_request()?;
+    let language = crate::common::parse_language(&payload.language).http_bad_request()?;
     let identity = detrix_core::ConnectionIdentity::new(
         payload.name,
         language,

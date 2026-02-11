@@ -6,7 +6,6 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 - This is primarily a Rust codebase. Ensure `cargo check` and `cargo clippy` pass after making changes.
 - When modifying Rust code, follow idiomatic patterns: prefer `Result` over panics, use `?` operator for error propagation, and leverage the type system.
-Add under a new 
 
 ## Workflows
 
@@ -88,7 +87,7 @@ logger.debug(f"Amount: {amount}")
 
 ```
 detrix-cli        → can depend on ALL crates
-detrix-api        → detrix-application, detrix-ports, detrix-core
+detrix-api        → detrix-application, detrix-core, detrix-config
 detrix-application→ detrix-ports, detrix-core, detrix-config ONLY
 detrix-ports      → detrix-core, detrix-config ONLY
 detrix-storage    → detrix-ports, detrix-core, detrix-application* (implements traits)
@@ -306,11 +305,13 @@ detrix/
 │   ├── go/                    # Go client
 │   ├── python/                # Python client
 │   └── rust/                  # Rust client
+├── docker/                    # Docker E2E infrastructure
 ├── fixtures/                  # Example apps for testing
 ├── skills/detrix/             # Claude Code skill
 └── docs/
     ├── ARCHITECTURE.md        # Full architecture guide
     ├── ADD_LANGUAGE.md        # Adding language support
+    ├── PUBLISHING.md          # Client publishing guide
     └── INSTALL.md             # Installation guide
 ```
 
@@ -391,7 +392,7 @@ Prevents: `eval()`, `exec()`, file I/O, network calls, sensitive variable access
 | Protocol | Status | Port | Purpose |
 |----------|--------|------|---------|
 | gRPC | ✅ Complete | 50061 | High-performance RPC |
-| MCP | ✅ Complete | stdio | LLM integration (28 tools) |
+| MCP | ✅ Complete | stdio | LLM integration (29 tools) |
 | REST | ✅ Complete | 8090 | HTTP/JSON API (30+ endpoints) |
 | WebSocket | ✅ Complete | 8090 | Real-time event streaming |
 
@@ -403,7 +404,8 @@ Prevents: `eval()`, `exec()`, file I/O, network calls, sensitive variable access
 - Configuration management + hot reload
 - Expression validation + file inspection
 - Prometheus metrics + health checks
-- System control (wake/sleep/status)
+- System control (status/disconnect_all)
+- Remote app control (wake/sleep)
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#rest-api-endpoints-complete) for full endpoint list.
 

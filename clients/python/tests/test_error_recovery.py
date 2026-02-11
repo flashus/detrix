@@ -66,9 +66,7 @@ class ErrorDaemonHandler(BaseHTTPRequestHandler):
             self.send_response(ErrorDaemonHandler.error_code)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(
-                json.dumps({"error": ErrorDaemonHandler.error_message}).encode()
-            )
+            self.wfile.write(json.dumps({"error": ErrorDaemonHandler.error_message}).encode())
         else:
             self.send_response(404)
             self.end_headers()
@@ -103,7 +101,9 @@ class WorkingDaemonHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(
-                json.dumps({"connectionId": data.get("name", data.get("connectionId", "mock-conn"))}).encode()
+                json.dumps(
+                    {"connectionId": data.get("name", data.get("connectionId", "mock-conn"))}
+                ).encode()
             )
         else:
             self.send_response(404)
@@ -331,7 +331,7 @@ class TestRecoveryAfterErrors:
         detrix.init(name="test-2")
 
         status = detrix.status()
-        assert status["name"].startswith("test-2-")
+        assert status["name"] == "test-2"
 
     def test_multiple_failed_wakes(self):
         """Test multiple failed wake attempts don't corrupt state."""

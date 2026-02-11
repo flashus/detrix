@@ -65,12 +65,11 @@ pub async fn create_connection_impl(
         .hostname
         .unwrap_or_else(crate::common::resolve_hostname);
 
-    let language = crate::common::parse_language(&params.language)
-        .map_err(|e| McpError::invalid_params(e, None))?;
+    let language =
+        crate::common::parse_language(&params.language).mcp_invalid_params("Invalid language")?;
     let identity = detrix_core::ConnectionIdentity::new(name, language, workspace_root, hostname);
 
-    let port =
-        crate::common::validate_port(params.port).map_err(|e| McpError::invalid_params(e, None))?;
+    let port = crate::common::validate_port(params.port).mcp_invalid_params("Invalid port")?;
 
     match connection_service
         .create_connection(

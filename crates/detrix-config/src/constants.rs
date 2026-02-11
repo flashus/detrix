@@ -135,6 +135,19 @@ pub const DEFAULT_GELF_TCP_CONNECT_TIMEOUT_MS: u64 = 5_000;
 /// GELF TCP write timeout
 pub const DEFAULT_GELF_TCP_WRITE_TIMEOUT_MS: u64 = 10_000;
 
+/// Remote app HTTP client timeout (wake/sleep proxy)
+pub const DEFAULT_REMOTE_APP_TIMEOUT_MS: u64 = 30_000;
+
+/// Allowed URL schemes for remote app control (SSRF prevention)
+pub const ALLOWED_REMOTE_APP_URL_SCHEMES: &[&str] = &["http", "https"];
+
+/// Maximum number of polling attempts when verifying wake connection
+pub const DEFAULT_REMOTE_APP_POLL_MAX_RETRIES: u32 = 10;
+/// Interval between wake/sleep polling attempts (milliseconds)
+pub const DEFAULT_REMOTE_APP_POLL_INTERVAL_MS: u64 = 500;
+/// JWKS fetch HTTP timeout (seconds)
+pub const DEFAULT_JWKS_FETCH_TIMEOUT_SECS: u64 = 10;
+
 /// AST/safety analysis timeout
 pub const DEFAULT_ANALYSIS_TIMEOUT_MS: u64 = 5_000;
 

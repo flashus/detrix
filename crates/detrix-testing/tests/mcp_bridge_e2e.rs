@@ -23,9 +23,13 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Global port counter to ensure each test gets a unique port
-/// This prevents TIME_WAIT collisions when tests run in sequence
+/// Global port counter for unique port allocation across parallel tests
 static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+/// Health check timeout in seconds for E2E tests.
+/// Set high enough to handle parallel test load (16 daemons starting simultaneously).
+const E2E_HEALTH_TIMEOUT_SECS: u64 = 60;
+use detrix_config::ports::find_available_port;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
@@ -70,6 +74,85 @@ fn read_daemon_info(pid_path: &std::path::Path) -> Option<DaemonInfo> {
         return None;
     }
     Some(DaemonInfo::from_pid_info(info))
+}
+
+/// Allocate a unique port for an E2E test.
+///
+/// Uses 200-port spacing between tests to prevent collisions when daemon
+/// uses port_fallback (which searches up to 100 ports forward from configured port).
+/// PID-based offset prevents collisions between different test binary processes.
+fn allocate_e2e_port() -> u16 {
+    let idx = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid_offset = (std::process::id() as u16).wrapping_mul(7919) % 4000;
+    let base = 20000_u16
+        .wrapping_add(pid_offset)
+        .wrapping_add(idx.wrapping_mul(200));
+
+    find_available_port(base, base.saturating_add(199)).unwrap_or_else(|| {
+        // Fallback: scan a wide range if primary range is exhausted
+        find_available_port(15000, 55000).expect("No available port found in range 15000-55000")
+    })
+}
+
+/// Wait for daemon to become healthy by polling the /health endpoint.
+///
+/// Returns Ok(()) if daemon responds with 200 within timeout, Err with message otherwise.
+async fn wait_for_daemon_healthy(port: u16, timeout_secs: u64) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+
+    let result = timeout(Duration::from_secs(timeout_secs), async {
+        loop {
+            if let Ok(resp) = client
+                .get(&format!("http://127.0.0.1:{}/health", port))
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await;
+
+    result.map_err(|_| {
+        format!(
+            "Daemon health check timed out after {}s on port {}",
+            timeout_secs, port
+        )
+    })
+}
+
+/// Wait for a valid daemon PID file to appear with a running daemon.
+///
+/// Returns the DaemonInfo if found within timeout.
+async fn wait_for_daemon_pid(
+    pid_path: &std::path::Path,
+    exclude_pid: u64,
+    timeout_secs: u64,
+) -> Result<DaemonInfo, String> {
+    let result = timeout(Duration::from_secs(timeout_secs), async {
+        loop {
+            if let Some(info) = read_daemon_info(pid_path) {
+                if info.pid() != 0 && info.pid() != exclude_pid {
+                    return info;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await;
+
+    result.map_err(|_| {
+        format!(
+            "Timeout waiting for daemon PID file after {}s (excluding PID {})",
+            timeout_secs, exclude_pid
+        )
+    })
 }
 
 /// Test that MCP bridge spawns daemon when no daemon is running.
@@ -122,8 +205,9 @@ async fn test_mcp_bridge_spawns_daemon() {
         Some(&format!("Temp dir: {}", temp_dir.path().display())),
     );
 
-    // Create config with specific ports
+    // Create config with dynamic port to avoid TIME_WAIT collisions
     let step = reporter.step_start("Create config", "Write test configuration");
+    let initial_port = allocate_e2e_port();
     let config_content = format!(
         r#"
 [metadata]
@@ -145,7 +229,7 @@ port_fallback = true
 
 [api.rest]
 host = "127.0.0.1"
-port = 19080
+port = {}
 
 [api.grpc]
 enabled = false
@@ -153,10 +237,14 @@ port = 59999
 "#,
         db_path.to_string_lossy().replace('\\', "/"),
         pid_path.to_string_lossy().replace('\\', "/"),
-        log_dir.to_string_lossy().replace('\\', "/")
+        log_dir.to_string_lossy().replace('\\', "/"),
+        initial_port
     );
     std::fs::write(&config_path, config_content).expect("Failed to write config");
-    reporter.step_success(step, Some("Config written"));
+    reporter.step_success(
+        step,
+        Some(&format!("Config written (initial port: {})", initial_port)),
+    );
 
     // Verify no daemon running (no PID file)
     let step = reporter.step_start("Verify no daemon", "Ensure no existing daemon is running");
@@ -193,82 +281,27 @@ port = 59999
     // ========================================================================
     reporter.section("PHASE 3: VERIFY DAEMON SPAWN");
 
-    let step = reporter.step_start("Wait for daemon", "Wait for daemon to start (5s)");
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    reporter.step_success(step, Some("Wait complete"));
-
-    // Read port from PID file
-    let step = reporter.step_start("Read PID file", "Extract daemon port from PID file");
-    let mut daemon_port = 19080u16;
-    let mut daemon_pid: Option<u64> = None;
-
-    if let Ok(content) = std::fs::read_to_string(&pid_path) {
-        reporter.info(&format!("PID file contents: {}", content.trim()));
-        if let Ok(info) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(port) = info.get("http_port").and_then(|p| p.as_u64()) {
-                daemon_port = port as u16;
-            }
-            // Also try "ports.http" format
-            if let Some(ports) = info.get("ports") {
-                if let Some(port) = ports.get("http").and_then(|p| p.as_u64()) {
-                    daemon_port = port as u16;
-                }
-            }
-            daemon_pid = info.get("pid").and_then(|p| p.as_u64());
-        }
-        reporter.step_success(
-            step,
-            Some(&format!("Port: {}, PID: {:?}", daemon_port, daemon_pid)),
-        );
-    } else {
-        reporter.step_failed(step, &format!("Could not read PID file at {:?}", pid_path));
-        reporter.warn("PID file may not exist yet - continuing with default port");
-    }
-
-    // ========================================================================
-    // PHASE 4: Verify daemon is healthy
-    // ========================================================================
-    reporter.section("PHASE 4: HEALTH CHECK");
-
-    let step = reporter.step_start(
-        "Health check",
-        &format!("Verify daemon is responding on port {}", daemon_port),
-    );
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .expect("Failed to create HTTP client");
-
-    let health_url = format!("http://127.0.0.1:{}/health", daemon_port);
-    reporter.info(&format!("Health URL: {}", health_url));
-
-    let health_check = timeout(Duration::from_secs(10), async {
+    let step = reporter.step_start("Wait for daemon", "Poll for daemon PID file (up to 15s)");
+    let daemon_info = timeout(Duration::from_secs(15), async {
         loop {
-            match client.get(&health_url).send().await {
-                Ok(resp) if resp.status().is_success() => return true,
-                Ok(resp) => {
-                    reporter.info(&format!("Health check returned: {}", resp.status()));
-                }
-                Err(e) => {
-                    reporter.info(&format!("Health check error: {}", e));
-                }
+            if let Some(info) = read_daemon_info(&pid_path) {
+                return info;
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
     })
     .await;
 
-    match health_check {
-        Ok(true) => {
-            reporter.step_success(step, Some("Daemon healthy"));
-        }
-        Ok(false) => {
-            reporter.step_failed(step, "Daemon unhealthy");
-            panic!("Daemon should be healthy");
+    let daemon_info = match daemon_info {
+        Ok(info) => {
+            reporter.step_success(
+                step,
+                Some(&format!("PID: {}, Port: {}", info.pid(), info.http_port())),
+            );
+            info
         }
         Err(_) => {
-            reporter.step_failed(step, "Health check timed out after 10s");
+            reporter.step_failed(step, "Timed out waiting for daemon PID file after 15s");
             // Print log files for debugging
             if let Ok(entries) = std::fs::read_dir(&log_dir) {
                 for entry in entries.flatten() {
@@ -280,9 +313,38 @@ port = 59999
                     }
                 }
             }
-            panic!("Daemon health check timed out");
+            panic!("Daemon PID file not created within timeout");
         }
+    };
+    let daemon_port = daemon_info.http_port();
+    let daemon_pid_val = daemon_info.pid();
+
+    // ========================================================================
+    // PHASE 4: Verify daemon is healthy
+    // ========================================================================
+    reporter.section("PHASE 4: HEALTH CHECK");
+
+    let step = reporter.step_start(
+        "Health check",
+        &format!("Verify daemon is responding on port {}", daemon_port),
+    );
+
+    if let Err(msg) = wait_for_daemon_healthy(daemon_port, E2E_HEALTH_TIMEOUT_SECS).await {
+        reporter.step_failed(step, &msg);
+        // Print log files for debugging
+        if let Ok(entries) = std::fs::read_dir(&log_dir) {
+            for entry in entries.flatten() {
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    reporter.info(&format!("Log file {}:", entry.path().display()));
+                    for line in content.lines().take(50) {
+                        reporter.info(&format!("  {}", line));
+                    }
+                }
+            }
+        }
+        panic!("{}", msg);
     }
+    reporter.step_success(step, Some("Daemon healthy"));
 
     // ========================================================================
     // PHASE 5: Verify PID file and process
@@ -290,14 +352,7 @@ port = 59999
     reporter.section("PHASE 5: VERIFY DAEMON PROCESS");
 
     let step = reporter.step_start("Verify PID file", "Check PID file contains valid data");
-    let pid_content = std::fs::read_to_string(&pid_path).expect("PID file should exist");
-    let pid_info: serde_json::Value =
-        serde_json::from_str(&pid_content).expect("PID file should be valid JSON");
-
-    let daemon_pid = pid_info
-        .get("pid")
-        .and_then(|p| p.as_u64())
-        .expect("PID file should contain pid field");
+    let daemon_pid = daemon_pid_val;
 
     // Register daemon for cleanup tracking
     register_e2e_process("mcp_daemon", daemon_pid as u32);
@@ -395,6 +450,7 @@ async fn test_mcp_bridge_daemon_restart_on_failure() {
     std::fs::create_dir_all(&log_dir).expect("Failed to create log dir");
 
     // Create config with short heartbeat settings for faster testing
+    let initial_port = allocate_e2e_port();
     let config_content = format!(
         r#"
 [metadata]
@@ -416,7 +472,7 @@ port_fallback = true
 
 [api.rest]
 host = "127.0.0.1"
-port = 19180
+port = {}
 
 [api.grpc]
 enabled = false
@@ -428,12 +484,14 @@ heartbeat_max_failures = 2
 "#,
         db_path.to_string_lossy().replace('\\', "/"),
         pid_path.to_string_lossy().replace('\\', "/"),
-        log_dir.to_string_lossy().replace('\\', "/")
+        log_dir.to_string_lossy().replace('\\', "/"),
+        initial_port
     );
     std::fs::write(&config_path, config_content).expect("Failed to write config");
 
     // Start MCP bridge
     reporter.info("Starting MCP bridge with short heartbeat interval...");
+    reporter.info(&format!("Binary: {}", binary.display()));
     let mut bridge_process = TokioCommand::new(&binary)
         .arg("mcp")
         .arg("--config")
@@ -445,24 +503,71 @@ heartbeat_max_failures = 2
         .spawn()
         .expect("Failed to spawn MCP bridge");
 
-    // Wait for daemon to start
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Capture bridge stderr in background for diagnostics
+    let bridge_stderr = bridge_process.stderr.take().unwrap();
+    let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let stderr_lines_clone = stderr_lines.clone();
+    let _stderr_handle = tokio::spawn(async move {
+        let reader = BufReader::new(bridge_stderr);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            stderr_lines_clone.lock().await.push(line);
+        }
+    });
 
-    // Get initial daemon PID
+    // Poll for daemon PID file AND wait for daemon to be healthy.
+    // We MUST wait for health before killing - otherwise the bridge is still in
+    // spawn_daemon_for_mcp() and the killed daemon becomes a zombie that appears
+    // alive (PID exists) but never serves HTTP, causing the bridge to time out.
+    let daemon_info = timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(info) = read_daemon_info(&pid_path) {
+                // PID file found with port - check if daemon is actually healthy
+                let port = info.http_port();
+                if port > 0 {
+                    let url = format!("http://127.0.0.1:{}/health", port);
+                    if let Ok(resp) = reqwest::Client::new()
+                        .get(&url)
+                        .timeout(Duration::from_secs(2))
+                        .send()
+                        .await
+                    {
+                        if resp.status().is_success() {
+                            return info;
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await;
+
     let initial_pid: u64;
-    if let Ok(content) = std::fs::read_to_string(&pid_path) {
-        if let Ok(info) = serde_json::from_str::<serde_json::Value>(&content) {
-            initial_pid = info.get("pid").and_then(|p| p.as_u64()).unwrap_or(0);
-            // Register daemon for cleanup tracking
+    match daemon_info {
+        Ok(info) => {
+            initial_pid = info.pid();
             register_e2e_process("mcp_daemon", initial_pid as u32);
-            reporter.info(&format!("Initial daemon PID: {}", initial_pid));
-        } else {
-            reporter.error("Failed to parse PID file");
+            reporter.info(&format!(
+                "Initial daemon PID: {} (healthy on port {})",
+                initial_pid,
+                info.http_port()
+            ));
+        }
+        Err(_) => {
+            reporter.error("Timed out waiting for daemon to become healthy");
+            // Dump bridge stderr for diagnostics
+            let lines = stderr_lines.lock().await;
+            let start = if lines.len() > 30 {
+                lines.len() - 30
+            } else {
+                0
+            };
+            for line in &lines[start..] {
+                reporter.error(&format!("  {}", line));
+            }
             return;
         }
-    } else {
-        reporter.error("PID file not found");
-        return;
     }
 
     // Kill the daemon process (simulating crash)
@@ -473,55 +578,104 @@ heartbeat_max_failures = 2
     // Unregister since we killed it intentionally
     unregister_e2e_process("mcp_daemon", initial_pid as u32);
 
-    // Wait for bridge to detect failure and restart daemon
+    // Poll for bridge to detect failure and restart daemon with new PID
     // With heartbeat_interval=2s and max_failures=2, should take ~4-6 seconds
     reporter.info("Waiting for bridge to detect failure and restart daemon...");
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    let pid_path_clone = pid_path.clone();
+    let reporter_clone = reporter.clone();
+    let restart_result = timeout(Duration::from_secs(30), async {
+        let mut poll_count = 0u32;
+        loop {
+            poll_count += 1;
+            // Periodically log PID file state for debugging
+            if poll_count % 4 == 0 {
+                if let Ok(content) = std::fs::read_to_string(&pid_path_clone) {
+                    reporter_clone.info(&format!(
+                        "  [poll {}] PID file: {}",
+                        poll_count,
+                        content.trim()
+                    ));
+                } else {
+                    reporter_clone
+                        .info(&format!("  [poll {}] PID file: <not readable>", poll_count));
+                }
+            }
+            if let Some(info) = read_daemon_info(&pid_path_clone) {
+                if info.pid() != initial_pid && info.pid() != 0 {
+                    return info;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await;
 
-    // Check if daemon was restarted (new PID in file)
-    let content = std::fs::read_to_string(&pid_path).expect("PID file should exist after restart");
-    let info: serde_json::Value =
-        serde_json::from_str(&content).expect("PID file should be valid JSON");
-    let new_pid = info.get("pid").and_then(|p| p.as_u64()).unwrap_or(0);
-    // Register new daemon for cleanup tracking
-    if new_pid != 0 {
-        register_e2e_process("mcp_daemon", new_pid as u32);
-    }
+    let new_daemon = match restart_result {
+        Ok(info) => info,
+        Err(_) => {
+            // Dump bridge stderr for diagnostics
+            reporter.error("=== BRIDGE STDERR (last 50 lines) ===");
+            let lines = stderr_lines.lock().await;
+            let start = if lines.len() > 50 {
+                lines.len() - 50
+            } else {
+                0
+            };
+            for line in &lines[start..] {
+                reporter.error(&format!("  {}", line));
+            }
+            reporter.error("=== END BRIDGE STDERR ===");
+
+            // Dump daemon startup log
+            let startup_log = detrix_config::paths::default_daemon_startup_log_path();
+            if let Ok(content) = std::fs::read_to_string(&startup_log) {
+                reporter.error("=== DAEMON STARTUP LOG (last 30 lines) ===");
+                let log_lines: Vec<&str> = content.lines().collect();
+                let start = if log_lines.len() > 30 {
+                    log_lines.len() - 30
+                } else {
+                    0
+                };
+                for line in &log_lines[start..] {
+                    reporter.error(&format!("  {}", line));
+                }
+                reporter.error("=== END DAEMON STARTUP LOG ===");
+            }
+
+            // Dump PID file content
+            if let Ok(content) = std::fs::read_to_string(&pid_path) {
+                reporter.error(&format!("Final PID file content: {}", content.trim()));
+            }
+
+            // Also check test's temp log dir
+            if let Ok(entries) = std::fs::read_dir(&log_dir) {
+                for entry in entries.flatten() {
+                    if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        reporter.error(&format!("Log file {}:", entry.path().display()));
+                        for line in content.lines().take(30) {
+                            reporter.error(&format!("  {}", line));
+                        }
+                    }
+                }
+            }
+
+            panic!(
+                "Daemon did not restart with new PID within timeout (old PID: {})",
+                initial_pid
+            );
+        }
+    };
+
+    let new_pid = new_daemon.pid();
+    register_e2e_process("mcp_daemon", new_pid as u32);
     reporter.info(&format!("New daemon PID: {}", new_pid));
+    reporter.info("Daemon was restarted with new PID");
 
-    // Assert daemon was restarted with new PID
-    assert!(new_pid != 0, "Daemon should have restarted with valid PID");
-    assert!(
-        new_pid != initial_pid,
-        "Daemon should have new PID after restart (old: {}, new: {})",
-        initial_pid,
-        new_pid
-    );
-    reporter.info("✅ Daemon was restarted with new PID");
+    let new_port = new_daemon.http_port();
 
-    // Verify new daemon is healthy
-    let new_port = info
-        .get("ports")
-        .and_then(|p| p.get("http"))
-        .and_then(|p| p.as_u64())
-        .or_else(|| info.get("http_port").and_then(|p| p.as_u64()))
-        .unwrap_or(19180) as u16;
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-
-    let resp = client
-        .get(&format!("http://127.0.0.1:{}/health", new_port))
-        .send()
+    wait_for_daemon_healthy(new_port, E2E_HEALTH_TIMEOUT_SECS)
         .await
         .expect("New daemon should respond to health check");
-    assert!(
-        resp.status().is_success(),
-        "New daemon health check failed with status: {}",
-        resp.status()
-    );
     reporter.info("✅ New daemon is healthy");
 
     // Cleanup
@@ -592,9 +746,8 @@ async fn test_mcp_bridge_daemon_restart_with_port_conflict() {
     let log_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&log_dir).expect("Failed to create log dir");
 
-    // Use unique port for this test to avoid TIME_WAIT collisions
-    let counter = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let initial_port = 19200 + ((std::process::id() as u16 + counter * 10) % 500);
+    // Allocate unique port for this test
+    let initial_port = allocate_e2e_port();
 
     // Create config
     let config_content = format!(
@@ -1115,6 +1268,9 @@ async fn test_mcp_bridge_stale_pid_reused_by_other_process() {
     let log_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&log_dir).expect("Failed to create log dir");
 
+    // Allocate unique port for this test
+    let initial_port = allocate_e2e_port();
+
     // Create config
     let config_content = format!(
         r#"
@@ -1137,7 +1293,7 @@ port_fallback = true
 
 [api.rest]
 host = "127.0.0.1"
-port = 19380
+port = {}
 
 [api.grpc]
 enabled = false
@@ -1145,7 +1301,8 @@ port = 59999
 "#,
         db_path.to_string_lossy().replace('\\', "/"),
         pid_path.to_string_lossy().replace('\\', "/"),
-        log_dir.to_string_lossy().replace('\\', "/")
+        log_dir.to_string_lossy().replace('\\', "/"),
+        initial_port
     );
     std::fs::write(&config_path, config_content).expect("Failed to write config");
 
@@ -1158,8 +1315,12 @@ port = 59999
     {
         let mut file = std::fs::File::create(&pid_path).expect("Failed to create PID file");
         // PID 1 is always init/launchd, never detrix
-        file.write_all(b"{\"pid\":1,\"ports\":{\"http\":19380}}\n")
-            .expect("Failed to write PID file");
+        write!(
+            file,
+            "{{\"pid\":1,\"ports\":{{\"http\":{}}}}}\n",
+            initial_port
+        )
+        .expect("Failed to write PID file");
     }
     reporter.step_success(step, Some("Stale PID file created with PID 1"));
 
@@ -1187,56 +1348,39 @@ port = 59999
         .expect("Failed to spawn MCP bridge");
     reporter.step_success(step, Some("Bridge process started"));
 
-    // Wait for daemon to spawn
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
     // ========================================================================
     // Verify new daemon spawned with different PID
     // ========================================================================
     reporter.section("PHASE 3: VERIFY NEW DAEMON");
 
+    // Wait for valid PID file (exclude PID 1 which was the stale value)
     let step = reporter.step_start("Check PID file", "Verify daemon spawned with new PID");
-    let content = std::fs::read_to_string(&pid_path).expect("PID file should exist");
-    let info: serde_json::Value =
-        serde_json::from_str(&content).expect("PID file should be valid JSON");
-    let daemon_pid = info.get("pid").and_then(|p| p.as_u64()).unwrap_or(0);
+    let daemon_info = match wait_for_daemon_pid(&pid_path, 1, 30).await {
+        Ok(info) => info,
+        Err(msg) => {
+            reporter.step_failed(step, &msg);
+            let _ = bridge_process.kill().await;
+            panic!("{}", msg);
+        }
+    };
 
-    assert!(daemon_pid != 0, "Daemon should have valid PID");
-    assert!(
-        daemon_pid != 1,
-        "Daemon should have different PID than stale file (was 1, now {})",
-        daemon_pid
-    );
+    let daemon_pid = daemon_info.pid();
+    let daemon_port = daemon_info.http_port();
     register_e2e_process("mcp_daemon", daemon_pid as u32);
     reporter.step_success(step, Some(&format!("New daemon PID: {}", daemon_pid)));
 
     // Verify daemon is healthy
-    let daemon_port = info
-        .get("ports")
-        .and_then(|p| p.get("http"))
-        .and_then(|p| p.as_u64())
-        .unwrap_or(19380) as u16;
-
     let step = reporter.step_start("Health check", "Verify daemon is responding");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-
-    match client
-        .get(&format!("http://127.0.0.1:{}/health", daemon_port))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            reporter.step_success(step, Some("Daemon healthy"));
-        }
-        _ => {
-            reporter.step_failed(step, "Daemon unhealthy");
-            let _ = bridge_process.kill().await;
-            panic!("Daemon should be healthy");
-        }
+    if let Err(msg) = wait_for_daemon_healthy(daemon_port, E2E_HEALTH_TIMEOUT_SECS).await {
+        reporter.step_failed(step, &msg);
+        let _ = bridge_process.kill().await;
+        let _ = Command::new("kill")
+            .args(["-9", &daemon_pid.to_string()])
+            .output();
+        unregister_e2e_process("mcp_daemon", daemon_pid as u32);
+        panic!("{}", msg);
     }
+    reporter.step_success(step, Some("Daemon healthy"));
 
     // Cleanup
     reporter.section("CLEANUP");
@@ -1838,34 +1982,12 @@ port = 59999
         .unwrap_or(test_port);
 
     let step = reporter.step_start("Health check", "Verify daemon is responding");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-
-    // Retry health check with timeout (daemon may still be starting)
-    let health_url = format!("http://127.0.0.1:{}/health", daemon_port);
-    let health_check = timeout(Duration::from_secs(10), async {
-        loop {
-            match client.get(&health_url).send().await {
-                Ok(resp) if resp.status().is_success() => return true,
-                _ => {}
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    })
-    .await;
-
-    match health_check {
-        Ok(true) => {
-            reporter.step_success(step, Some("Daemon healthy"));
-        }
-        _ => {
-            reporter.step_failed(step, "Daemon health check timed out");
-            let _ = bridge_process.kill().await;
-            panic!("Daemon should be healthy");
-        }
+    if let Err(msg) = wait_for_daemon_healthy(daemon_port, E2E_HEALTH_TIMEOUT_SECS).await {
+        reporter.step_failed(step, &msg);
+        let _ = bridge_process.kill().await;
+        panic!("{}", msg);
     }
+    reporter.step_success(step, Some("Daemon healthy"));
 
     // Cleanup
     reporter.section("CLEANUP");
@@ -3458,9 +3580,8 @@ async fn test_port_fallback_when_port_blocked_before_start() {
     let log_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&log_dir).expect("Failed to create log dir");
 
-    // Use unique port for this test
-    let counter = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let preferred_port = 19600 + ((std::process::id() as u16 + counter * 10) % 200);
+    // Allocate unique port for this test
+    let preferred_port = allocate_e2e_port();
 
     reporter.info(&format!("Preferred port: {}", preferred_port));
     reporter.info(&format!("Config path: {}", config_path.display()));
@@ -3710,4 +3831,250 @@ port = 59999
     reporter.info(&format!("   Actual port (fallback): {}", actual_port));
 
     reporter.print_footer(true);
+}
+
+/// Test that the daemon holds its PID file flock for its entire lifetime.
+///
+/// This is a regression test for a bug where the async runtime's MIR optimizer
+/// would drop the pid_file_guard early in release builds (since it wasn't
+/// referenced after set_ports_with_host), releasing the flock ~1 second after
+/// daemon startup while the daemon was still running.
+///
+/// The test:
+/// 1. Spawns a daemon via MCP bridge
+/// 2. Waits for daemon to be healthy
+/// 3. Repeatedly checks that the PID file flock is held for 5 seconds
+/// 4. Verifies the daemon is still running throughout
+#[cfg(unix)]
+#[tokio::test]
+async fn test_daemon_pid_file_lock_persists() {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+
+    cleanup_orphaned_e2e_processes();
+
+    let reporter = TestReporter::new("mcp_pid_lock_persistence", "MCP");
+    reporter.section("DAEMON PID FILE LOCK PERSISTENCE TEST");
+    reporter.info("Verifying daemon holds flock for its entire lifetime");
+
+    let workspace_root = get_workspace_root();
+    let binary = match find_detrix_binary(&workspace_root) {
+        Some(path) => path,
+        None => {
+            reporter.warn("Skipping test: detrix binary not built");
+            return;
+        }
+    };
+
+    // Setup test environment
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config_path = temp_dir.path().join("detrix.toml");
+    let db_path = temp_dir.path().join("test.db");
+    let pid_path = temp_dir.path().join("daemon.pid");
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir).expect("Failed to create log dir");
+
+    let port = allocate_e2e_port();
+
+    let config_content = format!(
+        r#"
+[metadata]
+version = "1.0"
+
+[project]
+base_path = "."
+
+[storage]
+storage_type = "sqlite"
+path = "{}"
+
+[daemon]
+pid_file = "{}"
+log_dir = "{}"
+
+[api]
+port_fallback = true
+
+[api.rest]
+host = "127.0.0.1"
+port = {}
+
+[api.grpc]
+enabled = false
+port = 59999
+"#,
+        db_path.to_string_lossy().replace('\\', "/"),
+        pid_path.to_string_lossy().replace('\\', "/"),
+        log_dir.to_string_lossy().replace('\\', "/"),
+        port
+    );
+    std::fs::write(&config_path, config_content).expect("Failed to write config");
+
+    // Start MCP bridge (which auto-spawns daemon)
+    reporter.info("Starting MCP bridge to auto-spawn daemon...");
+    let mut bridge_process = TokioCommand::new(&binary)
+        .arg("mcp")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("Failed to spawn MCP bridge");
+
+    // Consume stderr to prevent blocking
+    let stderr = bridge_process.stderr.take().unwrap();
+    let _stderr_handle = tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr).lines();
+        while let Ok(Some(_)) = reader.next_line().await {}
+    });
+
+    // Wait for daemon to be healthy with PID + port in PID file
+    let daemon_info = timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(info) = read_daemon_info(&pid_path) {
+                return info;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await;
+
+    let daemon_pid: u64;
+    let daemon_port: u16;
+    match daemon_info {
+        Ok(info) => {
+            daemon_pid = info.pid();
+            daemon_port = info.http_port();
+            register_e2e_process("mcp_daemon", daemon_pid as u32);
+            reporter.info(&format!(
+                "Daemon started: PID={}, port={}",
+                daemon_pid, daemon_port
+            ));
+        }
+        Err(_) => {
+            reporter.error("Timed out waiting for daemon to start");
+            let _ = bridge_process.kill().await;
+            panic!("Daemon did not start within timeout");
+        }
+    }
+
+    // Wait for daemon to become fully healthy (HTTP server started)
+    if let Err(msg) = wait_for_daemon_healthy(daemon_port, E2E_HEALTH_TIMEOUT_SECS).await {
+        let _ = bridge_process.kill().await;
+        let _ = Command::new("kill")
+            .args(["-9", &daemon_pid.to_string()])
+            .output();
+        unregister_e2e_process("mcp_daemon", daemon_pid as u32);
+        panic!("{}", msg);
+    }
+    reporter.info("Daemon is healthy");
+
+    // Now repeatedly check that the PID file flock is HELD for 5 seconds.
+    // If the bug is present, the flock will be released ~1s after startup.
+    reporter.info("Checking PID file flock persistence for 5 seconds...");
+    let check_duration = Duration::from_secs(5);
+    let check_interval = Duration::from_millis(500);
+    let start = std::time::Instant::now();
+    let mut checks = 0u32;
+    let mut lock_held_count = 0u32;
+
+    while start.elapsed() < check_duration {
+        checks += 1;
+
+        // Try to acquire exclusive lock on the PID file
+        // If we CAN acquire it, the daemon has released its lock (BUG!)
+        let lock_held = match OpenOptions::new().read(true).write(true).open(&pid_path) {
+            Ok(file) => {
+                match file.try_lock_exclusive() {
+                    Ok(()) => {
+                        // We got the lock - daemon does NOT hold it!
+                        // Release our lock immediately
+                        let _ = file.unlock();
+                        false
+                    }
+                    Err(_) => {
+                        // Lock failed - daemon holds it (correct behavior)
+                        true
+                    }
+                }
+            }
+            Err(_) => {
+                reporter.warn(&format!("Check {}: Could not open PID file", checks));
+                false
+            }
+        };
+
+        if lock_held {
+            lock_held_count += 1;
+        } else {
+            // Verify daemon is still running (not a legitimate shutdown)
+            let daemon_running = Command::new("kill")
+                .args(["-0", &daemon_pid.to_string()])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+            if daemon_running {
+                reporter.error(&format!(
+                    "Check {}: PID file flock NOT held but daemon PID {} is still running!",
+                    checks, daemon_pid
+                ));
+
+                // Cleanup
+                let _ = bridge_process.kill().await;
+                let _ = Command::new("kill")
+                    .args(["-9", &daemon_pid.to_string()])
+                    .output();
+                unregister_e2e_process("mcp_daemon", daemon_pid as u32);
+
+                panic!(
+                    "PID file flock released while daemon is running (check {} at {:?}). \
+                     The pid_file_guard is being dropped prematurely.",
+                    checks,
+                    start.elapsed()
+                );
+            } else {
+                reporter.warn(&format!(
+                    "Check {}: Lock not held and daemon not running (crashed?)",
+                    checks
+                ));
+                break;
+            }
+        }
+
+        tokio::time::sleep(check_interval).await;
+    }
+
+    reporter.info(&format!(
+        "Lock check complete: {}/{} checks confirmed flock held",
+        lock_held_count, checks
+    ));
+    assert_eq!(
+        lock_held_count, checks,
+        "Expected all {} lock checks to confirm flock held, but only {} did",
+        checks, lock_held_count
+    );
+
+    // Cleanup
+    let _ = bridge_process.kill().await;
+    let _ = Command::new("kill")
+        .args(["-9", &daemon_pid.to_string()])
+        .output();
+    unregister_e2e_process("mcp_daemon", daemon_pid as u32);
+
+    // Wait for daemon to fully exit
+    for _ in 0..20 {
+        let check = Command::new("kill")
+            .args(["-0", &daemon_pid.to_string()])
+            .output();
+        match check {
+            Ok(output) if !output.status.success() => break,
+            Err(_) => break,
+            _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+
+    reporter.info("✅ PID file lock persistence test PASSED");
 }

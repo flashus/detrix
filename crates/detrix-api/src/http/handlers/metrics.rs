@@ -299,8 +299,7 @@ pub async fn add_metric(
         rest_request_to_add_metric_request(&payload, &safety_level, connection.language);
 
     // 2. Convert Proto → Core Metric (shared conversion from grpc/conversions.rs)
-    let metric =
-        add_request_to_metric(&proto_request).map_err(|e| HttpError::bad_request(e.to_string()))?;
+    let metric = add_request_to_metric(&proto_request).http_bad_request()?;
 
     // Call service (ALL business logic happens here)
     let outcome = state

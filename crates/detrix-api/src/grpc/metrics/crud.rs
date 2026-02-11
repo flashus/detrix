@@ -32,7 +32,7 @@ pub async fn handle_add_metric(
             .connection_service
             .get_connection(&conn_id)
             .await
-            .map_err(|e| Status::internal(format!("Failed to get connection: {}", e)))?
+            .to_status()?
             .ok_or_else(|| {
                 Status::not_found(format!("Connection '{}' not found", req.connection_id))
             })?;

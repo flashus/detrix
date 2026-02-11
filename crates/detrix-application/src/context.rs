@@ -22,12 +22,12 @@
 
 use crate::ports::{
     ConnectionRepositoryRef, DapAdapterFactoryRef, DlqRepositoryRef, EventOutputRef,
-    EventRepositoryRef, MetricRepositoryRef,
+    EventRepositoryRef, MetricRepositoryRef, RemoteAppControlRef,
 };
 use crate::safety::ValidatorRegistry;
 use crate::services::{
     AdapterLifecycleManager, AnchorServiceConfig, ConnectionService, DefaultAnchorService,
-    EventCaptureService, McpUsageService, MetricService, StreamingService,
+    EventCaptureService, McpUsageService, MetricService, RemoteAppService, StreamingService,
 };
 use detrix_config::{
     AdapterConnectionConfig, AnchorConfig, ApiConfig, DaemonConfig, LimitsConfig, SafetyConfig,
@@ -62,6 +62,9 @@ pub struct AppContext {
 
     /// MCP usage tracking service for tool usage analytics
     pub mcp_usage: Arc<McpUsageService>,
+
+    /// Remote app control service (optional — only when HTTP client is available)
+    pub remote_app_service: Option<Arc<RemoteAppService>>,
 }
 
 impl AppContext {
@@ -81,6 +84,8 @@ impl AppContext {
     /// * `limits_config` - Limits configuration (max metrics, expression length)
     /// * `output` - Optional event output (e.g., Graylog/GELF)
     /// * `dlq_repo` - Optional dead-letter queue repository (separate from main storage)
+    /// * `remote_control` - Optional remote app control implementation (HTTP client)
+    /// * `auth_token` - Optional authentication token for remote app control (e.g. from DETRIX_TOKEN env var, read in CLI layer)
     ///
     /// Note: In practice, `metric_storage` and `event_storage` often point to the
     /// same underlying storage (e.g., SqliteStorage), but they're separate parameters
@@ -100,6 +105,8 @@ impl AppContext {
         limits_config: &LimitsConfig,
         output: Option<EventOutputRef>,
         dlq_repo: Option<DlqRepositoryRef>,
+        remote_control: Option<RemoteAppControlRef>,
+        auth_token: Option<String>,
     ) -> Self {
         // Create broadcast channels for real-time events
         let (event_tx, _) = broadcast::channel::<MetricEvent>(api_config.event_buffer_capacity);
@@ -141,6 +148,15 @@ impl AppContext {
         // Create the MCP usage service for tool analytics
         let mcp_usage = Arc::new(McpUsageService::new());
 
+        // Create the remote app service if a remote control impl is provided
+        let remote_app_service = remote_control.map(|rc| {
+            Arc::new(RemoteAppService::new(
+                rc,
+                Arc::clone(&connection_service) as detrix_ports::ConnectionLookupRef,
+                auth_token,
+            ))
+        });
+
         // Build StreamingService using builder pattern
         let mut streaming_builder =
             StreamingService::builder(event_storage, metric_storage.clone())
@@ -175,6 +191,7 @@ impl AppContext {
             connection_service,
             adapter_lifecycle_manager,
             mcp_usage,
+            remote_app_service,
         }
     }
 
@@ -199,6 +216,8 @@ impl AppContext {
             &LimitsConfig::default(),
             None,
             None, // No separate DLQ storage
+            None, // No remote app control
+            None, // No auth token
         )
     }
 

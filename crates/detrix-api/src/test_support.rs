@@ -43,6 +43,8 @@ pub async fn create_test_state() -> (Arc<ApiState>, TempDir) {
         &detrix_config::LimitsConfig::default(),
         None,
         None, // No separate DLQ storage in tests
+        None,
+        None, // No auth token in tests
     );
 
     let state = Arc::new(ApiState::builder(context, storage).build());

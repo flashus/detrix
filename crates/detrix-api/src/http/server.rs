@@ -2,6 +2,7 @@
 
 use super::routes::{create_router_with_config, create_router_with_jwt_validator};
 use crate::state::ApiState;
+use anyhow::Context;
 use detrix_application::JwksValidator;
 // IntoMakeServiceWithConnectInfo is used via the Router::into_make_service_with_connect_info method
 #[allow(unused_imports)]
@@ -69,7 +70,7 @@ impl HttpServer {
         // Bind TCP listener
         let listener = TcpListener::bind(self.addr)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to bind HTTP server: {}", e))?;
+            .context("Failed to bind HTTP server")?;
 
         info!("✓ HTTP server listening on {}", self.addr);
         info!("   REST API: http://{}/api/v1/metrics", self.addr);
@@ -126,7 +127,7 @@ impl HttpServer {
         // Bind TCP listener
         let listener = TcpListener::bind(self.addr)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to bind HTTP server: {}", e))?;
+            .context("Failed to bind HTTP server")?;
 
         info!("✓ HTTP server listening on {}", self.addr);
         info!("   REST API: http://{}/api/v1/metrics", self.addr);

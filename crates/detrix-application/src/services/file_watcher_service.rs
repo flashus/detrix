@@ -112,14 +112,6 @@ impl NotifyFileWatcher {
     }
 }
 
-impl Default for NotifyFileWatcher {
-    fn default() -> Self {
-        Self::new()
-            .expect("Failed to create default file watcher")
-            .0
-    }
-}
-
 #[async_trait]
 impl FileWatcher for NotifyFileWatcher {
     async fn watch(&self, path: PathBuf) -> detrix_core::Result<()> {

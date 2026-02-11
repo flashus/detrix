@@ -344,6 +344,8 @@ mod tests {
             &detrix_config::LimitsConfig::default(),
             None,
             None, // No separate DLQ storage in tests
+            None,
+            None, // No auth token in tests
         );
 
         (context, storage as EventRepositoryRef, temp_dir)

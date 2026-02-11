@@ -44,11 +44,15 @@ class MockDaemonHandler(BaseHTTPRequestHandler):
             self.send_response(201)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({
-                "connectionId": data.get("name", data.get("connectionId", "test-conn")),
-                "host": data.get("host"),
-                "port": data.get("port"),
-            }).encode())
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "connectionId": data.get("name", data.get("connectionId", "test-conn")),
+                        "host": data.get("host"),
+                        "port": data.get("port"),
+                    }
+                ).encode()
+            )
         else:
             self.send_response(404)
             self.end_headers()
@@ -160,6 +164,7 @@ class TestConvenienceFunctionsAcceptSslParams:
     def test_check_daemon_health_accepts_ssl_params(self):
         """Verify check_daemon_health signature includes SSL params."""
         import inspect
+
         sig = inspect.signature(check_daemon_health)
         assert "verify_ssl" in sig.parameters
         assert "ca_bundle" in sig.parameters
@@ -167,6 +172,7 @@ class TestConvenienceFunctionsAcceptSslParams:
     def test_register_connection_accepts_ssl_params(self):
         """Verify register_connection signature includes SSL params."""
         import inspect
+
         sig = inspect.signature(register_connection)
         assert "verify_ssl" in sig.parameters
         assert "ca_bundle" in sig.parameters
@@ -174,6 +180,7 @@ class TestConvenienceFunctionsAcceptSslParams:
     def test_unregister_connection_accepts_ssl_params(self):
         """Verify unregister_connection signature includes SSL params."""
         import inspect
+
         sig = inspect.signature(unregister_connection)
         assert "verify_ssl" in sig.parameters
         assert "ca_bundle" in sig.parameters

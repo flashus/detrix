@@ -337,25 +337,21 @@ impl<T> ConfigTomlResultExt<T> for std::result::Result<T, toml::de::Error> {
     }
 
     fn toml_serialize_current(self) -> Result<T> {
-        // This is for de::Error, not used for serialization
-        unreachable!("toml_serialize_current called on de::Error")
+        Err(ConfigError::TomlSerialize("toml_serialize_current called on de::Error".into()).into())
     }
 
     fn toml_serialize_for_file(self) -> Result<T> {
-        // This is for de::Error, not used for serialization
-        unreachable!("toml_serialize_for_file called on de::Error")
+        Err(ConfigError::TomlSerialize("toml_serialize_for_file called on de::Error".into()).into())
     }
 }
 
 impl<T> ConfigTomlResultExt<T> for std::result::Result<T, toml::ser::Error> {
     fn toml_parse_partial(self) -> Result<T> {
-        // This is for ser::Error, not used for parsing
-        unreachable!("toml_parse_partial called on ser::Error")
+        Err(ConfigError::TomlParse("toml_parse_partial called on ser::Error".into()).into())
     }
 
     fn toml_parse_current(self) -> Result<T> {
-        // This is for ser::Error, not used for parsing
-        unreachable!("toml_parse_current called on ser::Error")
+        Err(ConfigError::TomlParse("toml_parse_current called on ser::Error".into()).into())
     }
 
     fn toml_serialize_current(self) -> Result<T> {

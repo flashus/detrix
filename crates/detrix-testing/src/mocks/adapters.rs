@@ -308,3 +308,83 @@ impl DapAdapterFactory for MockDapAdapterFactory {
         Ok(Arc::new(MockDapAdapter::new()) as DapAdapterRef)
     }
 }
+
+// ============================================================================
+// Mock Remote App Control
+// ============================================================================
+
+use detrix_ports::{RemoteAppControl, RemoteSleepResponse, RemoteWakeResponse};
+
+/// Configurable mock for the `RemoteAppControl` port trait.
+///
+/// Use `new()` for success scenarios and `failing()` for error scenarios.
+/// Tracks call counts for verification.
+pub struct MockRemoteAppControl {
+    wake_response: std::sync::Mutex<Result<RemoteWakeResponse>>,
+    sleep_response: std::sync::Mutex<Result<RemoteSleepResponse>>,
+    wake_calls: AtomicUsize,
+    sleep_calls: AtomicUsize,
+}
+
+impl MockRemoteAppControl {
+    /// Create a mock that returns successful responses.
+    pub fn new(wake_response: RemoteWakeResponse, sleep_response: RemoteSleepResponse) -> Self {
+        Self {
+            wake_response: std::sync::Mutex::new(Ok(wake_response)),
+            sleep_response: std::sync::Mutex::new(Ok(sleep_response)),
+            wake_calls: AtomicUsize::new(0),
+            sleep_calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// Create a mock that always returns an error.
+    pub fn failing(msg: &str) -> Self {
+        let msg = msg.to_string();
+        Self {
+            wake_response: std::sync::Mutex::new(Err(detrix_core::Error::RemoteApp(msg.clone()))),
+            sleep_response: std::sync::Mutex::new(Err(detrix_core::Error::RemoteApp(msg))),
+            wake_calls: AtomicUsize::new(0),
+            sleep_calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// Number of times `wake_app` was called.
+    pub fn wake_calls(&self) -> usize {
+        self.wake_calls.load(Ordering::SeqCst)
+    }
+
+    /// Number of times `sleep_app` was called.
+    pub fn sleep_calls(&self) -> usize {
+        self.sleep_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RemoteAppControl for MockRemoteAppControl {
+    async fn wake_app(
+        &self,
+        _app_url: &str,
+        _daemon_url: Option<&str>,
+        _auth_token: Option<&str>,
+    ) -> Result<RemoteWakeResponse> {
+        self.wake_calls.fetch_add(1, Ordering::SeqCst);
+        let guard = self.wake_response.lock().unwrap();
+        match &*guard {
+            Ok(r) => Ok(r.clone()),
+            Err(e) => Err(detrix_core::Error::RemoteApp(e.to_string())),
+        }
+    }
+
+    async fn sleep_app(
+        &self,
+        _app_url: &str,
+        _auth_token: Option<&str>,
+    ) -> Result<RemoteSleepResponse> {
+        self.sleep_calls.fetch_add(1, Ordering::SeqCst);
+        let guard = self.sleep_response.lock().unwrap();
+        match &*guard {
+            Ok(r) => Ok(r.clone()),
+            Err(e) => Err(detrix_core::Error::RemoteApp(e.to_string())),
+        }
+    }
+}

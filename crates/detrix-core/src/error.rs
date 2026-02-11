@@ -119,6 +119,10 @@ pub enum ErrorCode {
     /// Unauthorized (6001)
     Unauthorized = 6001,
 
+    // Remote app errors (7xxx)
+    /// Remote app error (7001)
+    RemoteAppError = 7001,
+
     // Generic (9xxx)
     /// Internal error (9001)
     InternalError = 9001,
@@ -230,6 +234,9 @@ impl ErrorCode {
             // Security - authentication/authorization failures
             ErrorCode::Unauthorized => ErrorCategory::Security,
 
+            // Remote app - retryable (network calls to remote apps)
+            ErrorCode::RemoteAppError => ErrorCategory::Retryable,
+
             // Internal - server-side issues
             ErrorCode::InternalError => ErrorCategory::Internal,
             ErrorCode::StorageError => ErrorCategory::Internal,
@@ -297,6 +304,9 @@ impl ErrorCode {
 
             // Auth errors (6xxx)
             ErrorCode::Unauthorized => "UNAUTHORIZED",
+
+            // Remote app errors (7xxx)
+            ErrorCode::RemoteAppError => "REMOTE_APP_ERROR",
 
             // Generic errors (9xxx)
             ErrorCode::InternalError => "INTERNAL_ERROR",
@@ -481,6 +491,10 @@ pub enum Error {
     // Output errors (GELF, etc.)
     #[error("Output error: {0}")]
     Output(String),
+
+    // Remote app control errors (wake/sleep proxy)
+    #[error("Remote app error: {0}")]
+    RemoteApp(String),
 }
 
 impl Error {
@@ -517,6 +531,9 @@ impl Error {
             Error::Io(_) => ErrorCode::IoError,
             Error::Serialization(_) => ErrorCode::SerializationError,
             Error::Output(_) => ErrorCode::OutputError,
+
+            // Remote app errors (7xxx)
+            Error::RemoteApp(_) => ErrorCode::RemoteAppError,
         }
     }
 

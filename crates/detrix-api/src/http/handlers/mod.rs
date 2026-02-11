@@ -40,7 +40,9 @@ pub use groups::{
     disable_group, enable_group, list_group_metrics, list_groups, GroupOperationResponse,
 };
 pub use health::{health_check, prometheus_metrics, HealthResponse};
-pub use lifecycle::{sleep, status, wake, StatusResponse, WakeResponse};
+pub use lifecycle::{
+    disconnect_all, sleep, status, wake, DisconnectAllResponse, StatusResponse, WakeResponse,
+};
 pub use metrics::{
     add_metric, delete_metric, get_metric, list_metrics, query_events, CreateMetricRequest,
     CreateMetricResponse, ListMetricsQuery, PaginatedMetricsResponse, QueryEventsParams,

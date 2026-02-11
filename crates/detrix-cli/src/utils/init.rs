@@ -7,7 +7,7 @@
 //! Follows Clean Architecture - this is where all the infrastructure wiring happens.
 
 use anyhow::{Context, Result};
-use detrix_application::ports::{DlqRepositoryRef, EventOutputRef};
+use detrix_application::ports::{DlqRepositoryRef, EventOutputRef, RemoteAppControlRef};
 use detrix_application::{
     middleware::ReconnectingAdapterFactory, AppContext, ConnectionRepositoryRef,
     DapAdapterFactoryRef, EventRepositoryRef, MetricRepositoryRef,
@@ -72,6 +72,18 @@ impl InfrastructureComponents {
         // Convert DlqStorage to DlqRepositoryRef if available
         let dlq_repo: Option<DlqRepositoryRef> = self.dlq_storage.map(|s| s as DlqRepositoryRef);
 
+        // Create HttpRemoteAppControl for wake/sleep proxy to remote apps
+        let remote_control: Option<RemoteAppControlRef> =
+            match detrix_api::remote_app_control::HttpRemoteAppControl::new(
+                daemon_config.remote_app_timeout_ms,
+            ) {
+                Ok(ctrl) => Some(Arc::new(ctrl) as RemoteAppControlRef),
+                Err(e) => {
+                    detrix_logging::warn!("Failed to create remote app control: {}", e);
+                    None
+                }
+            };
+
         let app_context = AppContext::new(
             Arc::clone(&self.storage) as MetricRepositoryRef,
             Arc::clone(&self.storage) as EventRepositoryRef,
@@ -86,6 +98,8 @@ impl InfrastructureComponents {
             limits_config,
             output,
             dlq_repo,
+            remote_control,
+            std::env::var("DETRIX_TOKEN").ok(),
         );
         AppContextWithStorage {
             app_context,

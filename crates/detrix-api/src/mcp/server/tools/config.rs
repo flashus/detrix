@@ -2,6 +2,7 @@
 //!
 //! These tools manage Detrix runtime configuration.
 
+use crate::mcp::error::ToMcpResult;
 use crate::mcp::params::{GetConfigParams, UpdateConfigParams, ValidateConfigParams};
 use crate::state::ApiState;
 use rmcp::ErrorData as McpError;
@@ -31,9 +32,7 @@ pub async fn get_config_impl(
     // Redact sensitive fields before returning
     let config = state.config_service.get_config().await.redacted();
 
-    let config_toml = toml::to_string_pretty(&config).map_err(|e| {
-        McpError::internal_error(format!("Failed to serialize config: {}", e), None)
-    })?;
+    let config_toml = toml::to_string_pretty(&config).mcp_context("Failed to serialize config")?;
 
     Ok(GetConfigResult { config_toml })
 }
@@ -82,7 +81,7 @@ pub async fn update_config_impl(
         .config_service
         .update_config(&params.config_toml, persist)
         .await
-        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        .mcp_invalid_params("Config update failed")?;
 
     Ok(UpdateConfigResult {
         persisted: result.persisted,
@@ -147,9 +146,7 @@ pub async fn reload_config_impl(state: &Arc<ApiState>) -> Result<ReloadConfigRes
                 .config_service
                 .reload_from_file(path)
                 .await
-                .map_err(|e| {
-                    McpError::internal_error(format!("Failed to reload config: {}", e), None)
-                })?;
+                .mcp_context("Failed to reload config")?;
 
             Ok(ReloadConfigResult {
                 config_path: path.display().to_string(),

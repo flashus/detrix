@@ -48,6 +48,8 @@ impl TestFixture {
             &detrix_config::LimitsConfig::default(),
             None,
             None, // No separate DLQ storage in tests
+            None,
+            None, // No auth token in tests
         );
 
         let state = Arc::new(ApiState::builder(context, storage).build());
@@ -610,14 +612,11 @@ async fn test_validate_expression_safe() {
 }
 
 #[tokio::test]
-async fn test_wake_and_sleep() {
+async fn test_get_status() {
     let fixture = TestFixture::new().await;
 
-    let wake_result = fixture.server.wake().await;
-    assert!(wake_result.is_ok());
-
-    let sleep_result = fixture.server.sleep().await;
-    assert!(sleep_result.is_ok());
+    let status_result = fixture.server.get_status().await;
+    assert!(status_result.is_ok());
 }
 
 #[tokio::test]
@@ -1016,5 +1015,86 @@ diff --git a/{file} b/{file}
     assert!(
         expressions.contains(&"user.email"),
         "Expected 'user.email' expression"
+    );
+}
+
+// ============================================================================
+// disconnect_all and get_status Tests (H6)
+// ============================================================================
+
+#[tokio::test]
+async fn test_disconnect_all_tool() {
+    let fixture = TestFixture::new().await;
+
+    let params = crate::mcp::params::DisconnectAllParams {};
+    let result = fixture.server.disconnect_all(Parameters(params)).await;
+
+    assert!(
+        result.is_ok(),
+        "disconnect_all should succeed: {:?}",
+        result.err()
+    );
+
+    let tool_result = result.unwrap();
+    // Should contain a message about adapters stopped
+    let text = tool_result
+        .content
+        .iter()
+        .filter_map(|c| match &c.raw {
+            rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("disconnected") || text.contains("adapters_stopped"),
+        "Response should mention disconnect status, got: {}",
+        text
+    );
+}
+
+#[tokio::test]
+async fn test_get_status_idle_mode() {
+    let fixture = TestFixture::new().await;
+
+    let result = fixture.server.get_status().await;
+    assert!(
+        result.is_ok(),
+        "get_status should succeed: {:?}",
+        result.err()
+    );
+
+    let tool_result = result.unwrap();
+    let text = tool_result
+        .content
+        .iter()
+        .filter_map(|c| match &c.raw {
+            rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Verify "idle" mode (not "sleeping") and key fields present
+    assert!(
+        text.contains("\"mode\"") || text.contains("mode"),
+        "Response should contain mode field, got: {}",
+        text
+    );
+    assert!(
+        !text.contains("sleeping"),
+        "Status should not contain 'sleeping' for daemon status, got: {}",
+        text
+    );
+    // Verify comprehensive status fields are present
+    assert!(
+        text.contains("uptime") || text.contains("uptime_seconds"),
+        "Response should contain uptime, got: {}",
+        text
+    );
+    assert!(
+        text.contains("enabled_metrics") || text.contains("total_metrics"),
+        "Response should contain metrics info, got: {}",
+        text
     );
 }

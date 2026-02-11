@@ -847,14 +847,24 @@ impl ApiClient for McpClient {
         .with_raw(json.to_string()))
     }
 
-    async fn wake(&self) -> ApiResult<String> {
-        let json = self.call("wake", json!({})).await?;
+    async fn wake(&self, app_url: &str, daemon_url: Option<&str>) -> ApiResult<String> {
+        let mut args = json!({ "app_url": app_url });
+        if let Some(url) = daemon_url {
+            args["daemon_url"] = json!(url);
+        }
+        let json = self.call("wake", args).await?;
         let text = self.extract_text(&json).unwrap_or_default();
         Ok(ApiResponse::new(text).with_raw(json.to_string()))
     }
 
-    async fn sleep(&self) -> ApiResult<String> {
-        let json = self.call("sleep", json!({})).await?;
+    async fn sleep(&self, app_url: &str) -> ApiResult<String> {
+        let json = self.call("sleep", json!({ "app_url": app_url })).await?;
+        let text = self.extract_text(&json).unwrap_or_default();
+        Ok(ApiResponse::new(text).with_raw(json.to_string()))
+    }
+
+    async fn disconnect_all(&self) -> ApiResult<String> {
+        let json = self.call("disconnect_all", json!({})).await?;
         let text = self.extract_text(&json).unwrap_or_default();
         Ok(ApiResponse::new(text).with_raw(json.to_string()))
     }

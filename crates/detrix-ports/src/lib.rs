@@ -25,6 +25,7 @@ mod file_watcher;
 mod mcp_usage;
 mod output;
 mod purity;
+mod remote_app;
 mod repository;
 
 pub use adapter::{
@@ -41,9 +42,10 @@ pub use file_watcher::{
 pub use mcp_usage::{ErrorCountRow, McpUsageRepository, ToolCountRow, UsageStats};
 pub use output::{EventOutput, NullOutput, OutputStats};
 pub use purity::PurityAnalyzer;
+pub use remote_app::{RemoteAppControl, RemoteSleepResponse, RemoteWakeResponse};
 pub use repository::{
-    ConnectionRepository, EventRepository, GroupSummary, MetricFilter, MetricRepository,
-    SystemEventRepository,
+    ConnectionLookup, ConnectionRepository, EventRepository, GroupSummary, MetricFilter,
+    MetricRepository, SystemEventRepository,
 };
 
 // Type aliases for convenience
@@ -75,3 +77,9 @@ pub type McpUsageRepositoryRef = Arc<dyn McpUsageRepository + Send + Sync>;
 
 /// Thread-safe reference to a dead-letter queue repository
 pub type DlqRepositoryRef = Arc<dyn DlqRepository + Send + Sync>;
+
+/// Thread-safe reference to a remote app control implementation
+pub type RemoteAppControlRef = Arc<dyn RemoteAppControl + Send + Sync>;
+
+/// Thread-safe reference to a connection lookup
+pub type ConnectionLookupRef = Arc<dyn ConnectionLookup + Send + Sync>;
