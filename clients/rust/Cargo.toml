@@ -2,12 +2,14 @@
 exclude = ["xtask"]
 
 [package]
-name = "detrix-client"
-version = "0.1.0"
+name = "detrix-rs"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Detrix client library for debug-on-demand observability in Rust applications"
 license = "MIT"
+readme = "README.md"
+documentation = "https://docs.rs/detrix-rs"
 repository = "https://github.com/flashus/detrix"
 keywords = ["debugging", "observability", "lldb", "dap"]
 categories = ["development-tools::debugging"]
@@ -56,7 +58,7 @@ expect_used = "warn"
 panic = "warn"
 
 [lib]
-name = "detrix_client"
+name = "detrix_rs"
 path = "src/lib.rs"
 
 [[example]]

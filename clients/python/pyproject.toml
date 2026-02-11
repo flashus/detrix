@@ -1,6 +1,6 @@
 [project]
 name = "detrix-py"
-version = "0.1.0"
+version = "1.0.0"
 description = "Python client for Detrix - debug-on-demand observability with zero overhead"
 readme = "README.md"
 license = "MIT"
@@ -10,7 +10,7 @@ authors = [
 ]
 keywords = ["debugging", "observability", "debugpy", "dap", "metrics"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",

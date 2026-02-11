@@ -12,12 +12,12 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Enable detrix-client integration (for client E2E tests)
-client = ["dep:detrix-client"]
+# Enable detrix-rs integration (for client E2E tests)
+client = ["dep:detrix-rs"]
 
 [dependencies]
 # Optional: only included when "client" feature is enabled
-detrix-client = { path = "../../clients/rust", optional = true }
+detrix-rs = { path = "../../clients/rust", optional = true }
 # ctrlc is always available since it's pure Rust
 ctrlc = "3.4"
 

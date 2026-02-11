@@ -75,8 +75,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "detrix-client"
+name = "detrix-example-app"
 version = "0.1.0"
+dependencies = [
+ "ctrlc",
+ "detrix-rs",
+]
+
+[[package]]
+name = "detrix-rs"
+version = "1.0.0"
 dependencies = [
  "dirs",
  "hostname",
@@ -91,14 +99,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "detrix-example-app"
-version = "0.1.0"
-dependencies = [
- "ctrlc",
- "detrix-client",
 ]
 
 [[package]]

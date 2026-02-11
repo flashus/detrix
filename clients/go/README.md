@@ -43,6 +43,29 @@ func main() {
 }
 ```
 
+## Try It
+
+Run the end-to-end example that simulates an AI agent: starts a sample app, wakes it, adds metrics, and captures events.
+
+```bash
+# 1. Start the Detrix server
+detrix serve --daemon
+
+# 2. Build the Go fixture app (from clients/go/)
+cd ../../fixtures/go && go build -gcflags="all=-N -l" -o detrix_example_app . && cd ../../clients/go
+
+# 3. Run the agent simulation
+go run ./examples/test_wake --daemon-port 8090
+```
+
+Other examples in `examples/`:
+
+| Example | Description | Run |
+|---------|-------------|-----|
+| `basic_usage` | Init / wake / sleep cycle | `go run ./examples/basic_usage` |
+| `trade_bot` | Long-running app with embedded client | `go run ./examples/trade_bot` |
+| `test_wake` | Agent simulation (starts app, wakes, observes) | `go run ./examples/test_wake` |
+
 ## API
 
 ### `Init(cfg Config) error`
@@ -101,14 +124,17 @@ detrix.Shutdown()
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DETRIX_CLIENT_ENABLED` | Enable client (for fixtures) | - |
-| `DETRIX_CLIENT_NAME` | Connection name | `detrix-client-{pid}` |
+| `DETRIX_NAME` | Connection name | `detrix-client-{pid}` |
 | `DETRIX_DAEMON_URL` | Daemon URL | `http://127.0.0.1:8090` |
 | `DETRIX_CONTROL_HOST` | Control plane host | `127.0.0.1` |
 | `DETRIX_CONTROL_PORT` | Control plane port | `0` (auto) |
 | `DETRIX_DEBUG_PORT` | Debug adapter port | `0` (auto) |
 | `DETRIX_TOKEN` | Auth token for remote access | - |
 | `DETRIX_DELVE_PATH` | Path to dlv binary | searches PATH |
+| `DETRIX_HOME` | Detrix home directory | `~/detrix` |
+| `DETRIX_HEALTH_CHECK_TIMEOUT` | Health check timeout (seconds) | `2.0` |
+| `DETRIX_REGISTER_TIMEOUT` | Registration timeout (seconds) | `5.0` |
+| `DETRIX_UNREGISTER_TIMEOUT` | Unregistration timeout (seconds) | `2.0` |
 
 ## Control Plane API
 
@@ -284,51 +310,6 @@ cat /proc/sys/kernel/yama/ptrace_scope
 ### macOS
 
 May need to grant Developer Tools access in System Preferences → Security & Privacy.
-
-## Examples
-
-The `examples/` directory contains runnable examples:
-
-### basic_usage
-
-Demonstrates the full init/wake/sleep/shutdown cycle:
-
-```bash
-# Requires daemon running: detrix serve --daemon
-go run ./examples/basic_usage
-```
-
-### trade_bot
-
-Long-running trading bot with Detrix client integration:
-
-```bash
-go run ./examples/trade_bot
-# Or with custom daemon URL:
-go run ./examples/trade_bot --daemon-url http://127.0.0.1:9999
-```
-
-The bot prints its control plane URL. An agent can wake it with:
-```bash
-curl -X POST http://127.0.0.1:<port>/detrix/wake
-```
-
-### test_wake
-
-Agent simulation test that:
-1. Starts the Go fixture app as a subprocess
-2. Wakes the Detrix client via control plane
-3. Adds metrics and collects events
-
-```bash
-# Requires daemon running: detrix serve --daemon
-# First build the fixture app:
-cd ../../fixtures/go && go build -gcflags="all=-N -l" -o detrix_example_app .
-cd ../../clients/go
-
-# Run the test:
-go run ./examples/test_wake --daemon-port 8090
-```
 
 ## Testing
 

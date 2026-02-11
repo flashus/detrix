@@ -9,10 +9,19 @@ Debug-on-demand observability library for Rust applications. Enables AI-powered 
 - **Production-safe**: Non-breaking observation points (logpoints) that don't pause execution
 - **Clean lifecycle**: Unlike Python's debugpy, LLDB can be fully stopped on sleep
 
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+detrix-rs = "1.0.0"
+```
+
 ## Quick Start
 
 ```rust
-use detrix::{self, Config};
+use detrix_rs::{self as detrix, Config};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize client (starts control plane, stays SLEEPING)
@@ -35,6 +44,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Try It
+
+Run the end-to-end example that simulates an AI agent: builds a sample app, wakes it, adds metrics, and captures events.
+
+```bash
+# 1. Start the Detrix server
+detrix serve --daemon
+
+# 2. Run the agent simulation (from clients/rust/)
+cargo run --example test_wake -- --daemon-port 8090
+```
+
+Other examples in `examples/`:
+
+| Example | Description | Run |
+|---------|-------------|-----|
+| `basic_usage` | Init / wake / sleep cycle | `cargo run --example basic_usage` |
+| `trade_bot` | Long-running app with embedded client | `cargo run --example trade_bot` |
+| `test_wake` | Agent simulation (builds app, wakes, observes) | `cargo run --example test_wake` |
+
 ## Architecture
 
 ```
@@ -42,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 │  Rust Application Process                                           │
 │  ┌─────────────────────────────────────────────────────────────────┐│
 │  │ Application Code                                                 ││
-│  │   use detrix;                                                   ││
+│  │   use detrix_rs as detrix;                                       ││
 │  │   detrix::init(Config::default())?;                             ││
 │  └─────────────────────────────────────────────────────────────────┘│
 │  ┌─────────────────────────────────────────────────────────────────┐│
@@ -76,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Initialization
 
 ```rust
-use detrix::{self, Config};
+use detrix_rs::{self as detrix, Config};
 use std::time::Duration;
 
 // With defaults
@@ -147,13 +176,17 @@ detrix::shutdown()?;
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DETRIX_CLIENT_NAME` | Connection name | `detrix-client-{pid}` |
+| `DETRIX_NAME` | Connection name | `detrix-client-{pid}` |
 | `DETRIX_DAEMON_URL` | Daemon URL | `http://127.0.0.1:8090` |
 | `DETRIX_CONTROL_HOST` | Control plane bind host | `127.0.0.1` |
 | `DETRIX_CONTROL_PORT` | Control plane port | `0` (auto) |
 | `DETRIX_DEBUG_PORT` | Debug adapter port | `0` (auto) |
 | `DETRIX_TOKEN` | Auth token for remote access | - |
 | `DETRIX_LLDB_DAP_PATH` | Path to lldb-dap binary | searches PATH |
+| `DETRIX_HOME` | Detrix home directory | `~/detrix` |
+| `DETRIX_HEALTH_CHECK_TIMEOUT` | Health check timeout (seconds) | `2.0` |
+| `DETRIX_REGISTER_TIMEOUT` | Registration timeout (seconds) | `5.0` |
+| `DETRIX_UNREGISTER_TIMEOUT` | Unregistration timeout (seconds) | `2.0` |
 
 ## Requirements
 
