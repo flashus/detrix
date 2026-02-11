@@ -140,12 +140,16 @@ var (
 // The client starts in SLEEPING state.
 //
 // Configuration can also be provided via environment variables:
-//   - DETRIX_CLIENT_NAME
+//   - DETRIX_NAME
 //   - DETRIX_DAEMON_URL
 //   - DETRIX_CONTROL_HOST
 //   - DETRIX_CONTROL_PORT
 //   - DETRIX_DEBUG_PORT
 //   - DETRIX_DELVE_PATH
+//   - DETRIX_HOME
+//   - DETRIX_HEALTH_CHECK_TIMEOUT (seconds, e.g. "2.0")
+//   - DETRIX_REGISTER_TIMEOUT (seconds, e.g. "5.0")
+//   - DETRIX_UNREGISTER_TIMEOUT (seconds, e.g. "2.0")
 //
 // Function parameters take precedence over environment variables.
 func Init(cfg Config) error {
@@ -460,10 +464,13 @@ func resolveConfig(cfg Config) Config {
 		cfg.DaemonURL = getEnvOrDefault("DETRIX_DAEMON_URL", "http://127.0.0.1:8090")
 	}
 	if cfg.Name == "" {
-		cfg.Name = os.Getenv("DETRIX_CLIENT_NAME")
+		cfg.Name = os.Getenv("DETRIX_NAME")
 	}
 	if cfg.DelvePath == "" {
 		cfg.DelvePath = os.Getenv("DETRIX_DELVE_PATH")
+	}
+	if cfg.DetrixHome == "" {
+		cfg.DetrixHome = os.Getenv("DETRIX_HOME")
 	}
 
 	// Port overrides
@@ -482,15 +489,15 @@ func resolveConfig(cfg Config) Config {
 		}
 	}
 
-	// Timeout defaults
+	// Timeout defaults (with env var overrides)
 	if cfg.HealthCheckTimeout == 0 {
-		cfg.HealthCheckTimeout = 2 * time.Second
+		cfg.HealthCheckTimeout = getEnvDurationOrDefault("DETRIX_HEALTH_CHECK_TIMEOUT", 2*time.Second)
 	}
 	if cfg.RegisterTimeout == 0 {
-		cfg.RegisterTimeout = 5 * time.Second
+		cfg.RegisterTimeout = getEnvDurationOrDefault("DETRIX_REGISTER_TIMEOUT", 5*time.Second)
 	}
 	if cfg.UnregisterTimeout == 0 {
-		cfg.UnregisterTimeout = 2 * time.Second
+		cfg.UnregisterTimeout = getEnvDurationOrDefault("DETRIX_UNREGISTER_TIMEOUT", 2*time.Second)
 	}
 	if cfg.DelveStartTimeout == 0 {
 		cfg.DelveStartTimeout = 10 * time.Second
@@ -502,6 +509,15 @@ func resolveConfig(cfg Config) Config {
 func getEnvOrDefault(key, defaultValue string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return defaultValue
+}
+
+func getEnvDurationOrDefault(key string, defaultValue time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if secs, err := strconv.ParseFloat(v, 64); err == nil {
+			return time.Duration(secs * float64(time.Second))
+		}
 	}
 	return defaultValue
 }

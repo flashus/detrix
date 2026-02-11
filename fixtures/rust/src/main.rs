@@ -31,7 +31,7 @@ use std::time::{Duration, SystemTime};
 use std::env;
 
 #[cfg(feature = "client")]
-use detrix_client::{self as detrix, Config};
+use detrix_rs::{self as detrix, Config};
 
 /// Print to stderr (avoids broken pipe panics when stdout is closed)
 macro_rules! log {

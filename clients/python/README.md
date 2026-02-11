@@ -14,10 +14,10 @@ The Detrix Python client enables your application to be observed by the [Detrix]
 
 ```bash
 # Using uv (recommended)
-uv add detrix
+uv add detrix-py
 
 # Using pip
-pip install detrix
+pip install detrix-py
 ```
 
 ## Quick Start
@@ -58,6 +58,26 @@ detrix.wake()
 detrix.sleep()
 ```
 
+## Try It
+
+Run the end-to-end example that simulates an AI agent: starts a sample app, wakes it, adds metrics, and captures events.
+
+```bash
+# 1. Start the Detrix server
+detrix serve --daemon
+
+# 2. Run the agent simulation (from clients/python/)
+uv run python examples/test_wake.py --daemon-port 8090
+```
+
+Other examples in `examples/`:
+
+| Example | Description | Run |
+|---------|-------------|-----|
+| `basic_usage.py` | Init / wake / sleep cycle | `uv run python examples/basic_usage.py` |
+| `trade_bot_detrix.py` | Long-running app with embedded client | `uv run python examples/trade_bot_detrix.py` |
+| `test_wake.py` | Agent simulation (starts app, wakes, observes) | `uv run python examples/test_wake.py` |
+
 ## API Reference
 
 ### `detrix.init(**kwargs)`
@@ -94,12 +114,6 @@ Get current client status.
 }
 ```
 
-### `detrix.warm() -> bool`
-
-Pre-load debugpy into memory for faster wake.
-
-Transitions: `SLEEPING → WARM`
-
 ### `detrix.wake(daemon_url: str = None) -> dict`
 
 Start debugger and register with daemon.
@@ -131,20 +145,15 @@ Stop control server and cleanup. Call `init()` again to reinitialize.
 ## State Machine
 
 ```
-    ┌───────────────────────────────────────────────┐
-    │                                               │
-    ▼                                              │
-┌──────────┐    warm()    ┌──────┐    wake()     ┌───────┐
-│ SLEEPING │ ──────────► │ WARM │ ────────────►│ AWAKE │
-└──────────┘              └──────┘               └───────┘
-    ▲                        │                     │
-    │                         │                     │
-    │     sleep()             │      sleep()        │
-    └─────────────────────────┴─────────────────────┘
+┌──────────┐         wake()          ┌───────┐
+│ SLEEPING │ ──────────────────────►│ AWAKE │
+└──────────┘                         └───────┘
+    ▲                                   │
+    │              sleep()               │
+    └────────────────────────────────────┘
 ```
 
 - **SLEEPING**: No debugger loaded, zero overhead
-- **WARM**: debugpy loaded but not listening
 - **AWAKE**: debugpy listening, registered with daemon
 
 ## Control Plane HTTP Endpoints
@@ -156,7 +165,6 @@ The client exposes a local HTTP server for management:
 | `/detrix/health`  | GET | Health check |
 | `/detrix/status`  | GET | Get current status |
 | `/detrix/info`    | GET | Get process info |
-| `/detrix/warm`    | POST | Load debugpy |
 | `/detrix/wake`    | POST | Start debugger + register |
 | `/detrix/sleep`   | POST | Stop debugger + unregister |
 

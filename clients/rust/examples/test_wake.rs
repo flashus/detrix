@@ -163,7 +163,7 @@ fn run(daemon_url: &str, fixture_dir: &PathBuf) -> i32 {
         .current_dir(fixture_dir)
         .env("DETRIX_CLIENT_ENABLED", "1")
         .env("DETRIX_DAEMON_URL", daemon_url)
-        .env("DETRIX_CLIENT_NAME", "trade-bot")
+        .env("DETRIX_NAME", "trade-bot")
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()

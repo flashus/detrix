@@ -7,19 +7,19 @@
 //! # Quick Start
 //!
 //! ```no_run
-//! use detrix_client::Config;
+//! use detrix_rs::Config;
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Initialize client (starts control plane, stays SLEEPING)
-//!     detrix_client::init(Config::default())?;
+//!     detrix_rs::init(Config::default())?;
 //!
 //!     // Your application code runs normally...
 //!
 //!     // When debugging is needed, call /detrix/wake on the control plane
 //!     // Or programmatically:
-//!     // detrix_client::wake()?;
+//!     // detrix_rs::wake()?;
 //!
-//!     detrix_client::shutdown()?;
+//!     detrix_rs::shutdown()?;
 //!     Ok(())
 //! }
 //! ```
@@ -86,12 +86,16 @@ static LLDB_MANAGER: std::sync::OnceLock<LldbManager> = std::sync::OnceLock::new
 /// # Configuration
 ///
 /// Configuration can be provided via the `Config` struct or environment variables:
-/// - `DETRIX_CLIENT_NAME` - Connection name
+/// - `DETRIX_NAME` - Connection name
 /// - `DETRIX_DAEMON_URL` - Daemon URL
 /// - `DETRIX_CONTROL_HOST` - Control plane bind host
 /// - `DETRIX_CONTROL_PORT` - Control plane port
 /// - `DETRIX_DEBUG_PORT` - Debug adapter port
 /// - `DETRIX_LLDB_DAP_PATH` - Path to lldb-dap binary
+/// - `DETRIX_HOME` - Detrix home directory
+/// - `DETRIX_HEALTH_CHECK_TIMEOUT` - Health check timeout (seconds, e.g. "2.0")
+/// - `DETRIX_REGISTER_TIMEOUT` - Registration timeout (seconds, e.g. "5.0")
+/// - `DETRIX_UNREGISTER_TIMEOUT` - Unregistration timeout (seconds, e.g. "2.0")
 ///
 /// # Errors
 ///
@@ -103,13 +107,13 @@ static LLDB_MANAGER: std::sync::OnceLock<LldbManager> = std::sync::OnceLock::new
 /// # Example
 ///
 /// ```no_run
-/// use detrix_client::{self, Config};
+/// use detrix_rs::{self, Config};
 ///
-/// detrix_client::init(Config {
+/// detrix_rs::init(Config {
 ///     name: Some("my-service".to_string()),
 ///     ..Config::default()
 /// })?;
-/// # Ok::<(), detrix_client::Error>(())
+/// # Ok::<(), detrix_rs::Error>(())
 /// ```
 pub fn init(config: Config) -> Result<()> {
     let _init_guard = INIT_LOCK
@@ -266,12 +270,12 @@ pub fn status() -> StatusResponse {
 /// # Example
 ///
 /// ```no_run
-/// use detrix_client;
+/// use detrix_rs;
 ///
-/// let response = detrix_client::wake()?;
+/// let response = detrix_rs::wake()?;
 /// println!("Debug port: {}", response.debug_port);
 /// println!("Connection ID: {}", response.connection_id);
-/// # Ok::<(), detrix_client::Error>(())
+/// # Ok::<(), detrix_rs::Error>(())
 /// ```
 pub fn wake() -> Result<WakeResponse> {
     wake_with_url(None)
@@ -296,11 +300,11 @@ pub fn wake_with_url(daemon_url: impl Into<Option<String>>) -> Result<WakeRespon
 /// # Example
 ///
 /// ```no_run
-/// use detrix_client;
+/// use detrix_rs;
 ///
-/// let response = detrix_client::sleep()?;
-/// assert_eq!(response.status, detrix_client::SleepResponseStatus::Sleeping);
-/// # Ok::<(), detrix_client::Error>(())
+/// let response = detrix_rs::sleep()?;
+/// assert_eq!(response.status, detrix_rs::SleepResponseStatus::Sleeping);
+/// # Ok::<(), detrix_rs::Error>(())
 /// ```
 pub fn sleep() -> Result<SleepResponse> {
     sleep_handler()

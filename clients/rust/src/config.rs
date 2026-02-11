@@ -80,7 +80,7 @@ impl Config {
     pub fn with_env_overrides(mut self) -> Self {
         // Name
         if self.name.is_none() {
-            if let Ok(name) = env::var("DETRIX_CLIENT_NAME") {
+            if let Ok(name) = env::var("DETRIX_NAME") {
                 if !name.is_empty() {
                     self.name = Some(name);
                 }
@@ -141,7 +141,32 @@ impl Config {
             }
         }
 
+        // Timeout overrides (values in seconds, e.g. "2.0")
+        if self.health_check_timeout == Duration::from_secs(2) {
+            if let Some(d) = Self::parse_duration_env("DETRIX_HEALTH_CHECK_TIMEOUT") {
+                self.health_check_timeout = d;
+            }
+        }
+        if self.register_timeout == Duration::from_secs(5) {
+            if let Some(d) = Self::parse_duration_env("DETRIX_REGISTER_TIMEOUT") {
+                self.register_timeout = d;
+            }
+        }
+        if self.unregister_timeout == Duration::from_secs(2) {
+            if let Some(d) = Self::parse_duration_env("DETRIX_UNREGISTER_TIMEOUT") {
+                self.unregister_timeout = d;
+            }
+        }
+
         self
+    }
+
+    /// Parse a duration from an environment variable (value in seconds, e.g. "2.0").
+    fn parse_duration_env(key: &str) -> Option<Duration> {
+        env::var(key)
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(Duration::from_secs_f64)
     }
 
     /// Generate the connection name.

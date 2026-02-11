@@ -252,6 +252,20 @@ tasks:
       - |
         cd .. && cargo test -p detrix-testing client_tests --release -- --nocapture
 
+  client-example:
+    desc: Run all test_wake examples (Rust, Python, Go) — requires 'detrix serve --daemon'
+    cmds:
+      - echo "▶ Running Rust test_wake..."
+      - cd rust && cargo run --example test_wake -- --daemon-port 8090
+      - echo ""
+      - echo "▶ Running Python test_wake..."
+      - cd python && uv run python examples/test_wake.py --daemon-port 8090
+      - echo ""
+      - echo "▶ Running Go test_wake..."
+      - cd go && go run ./examples/test_wake --daemon-port 8090
+      - echo ""
+      - echo "✅ All client examples completed"
+
   # ============================================================================
   # Development Helpers
   # ============================================================================

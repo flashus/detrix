@@ -13,7 +13,7 @@
 use std::thread;
 use std::time::Duration;
 
-use detrix_client::{self as detrix, Config};
+use detrix_rs::{self as detrix, Config};
 use rand::Rng;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

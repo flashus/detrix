@@ -112,7 +112,7 @@ That's the only manual step. From here, the agent handles everything: connecting
 
 ## Detrix Clients
 
-For production and long-running services, embed the Detrix client directly. It adds a lightweight control plane that lets an agent wake the debugger on demand -- no manual debugger startup required.
+For production and long-running services, embed the Detrix client directly. It adds a lightweight control plane that lets an agent wake the debugger on demand -- zero overhead when not in use, no manual debugger startup required.
 
 ```python
 import detrix
@@ -124,13 +124,24 @@ detrix.init(name="my-app")   # Starts control plane HTTP server. Zero overhead.
 #   POST /detrix/sleep → stops debugger, back to zero overhead
 ```
 
-The agent controls the full lifecycle: wake when it needs to investigate, observe, then sleep when done. Zero overhead when not in use.
+The agent controls the full lifecycle: wake when it needs to investigate, observe, then sleep when done.
+
+Alternatively, you can [start the debugger manually](#getting-started) and let the agent attach directly -- useful for quick debugging sessions.
+
+| | Client Embed | Attach to debugger |
+|--|-----------|----------------|
+| **Setup** | `detrix.init()` in your app | Start debugger manually |
+| **Debugger lifecycle** | Agent manages (wake/sleep) | You manage |
+| **Overhead when idle** | Zero -- no debugger loaded | Debugger always running |
+| **Best for** | Production, long-running services | Quick debugging sessions |
 
 | Language | Install | Docs |
 |----------|---------|------|
-| Python | `pip install detrix` | [Python Client](clients/python/README.md) |
+| Python | `pip install detrix-py` | [Python Client](clients/python/README.md) |
 | Go | `go get github.com/flashus/detrix/clients/go` | [Go Client](clients/go/README.md) |
-| Rust | `detrix-client = "0.1.0"` in Cargo.toml | [Rust Client](clients/rust/README.md) |
+| Rust | `detrix-rs = "1.0.0"` in Cargo.toml | [Rust Client](clients/rust/README.md) |
+
+See the [Clients Manual](docs/CLIENTS.md) for full documentation, configuration, and publishing details.
 
 ---
 
@@ -228,6 +239,6 @@ MIT License - see [LICENSE](LICENSE) file.
 
 ---
 
-- [Installation Guide](docs/INSTALL.md) | [CLI Reference](docs/CLI.md) | [Architecture](docs/ARCHITECTURE.md) | [Adding Language Support](docs/ADD_LANGUAGE.md) | [GitHub Issues](https://github.com/flashus/detrix/issues)
+- [Installation Guide](docs/INSTALL.md) | [CLI Reference](docs/CLI.md) | [Clients Manual](docs/CLIENTS.md) | [Architecture](docs/ARCHITECTURE.md) | [Adding Language Support](docs/ADD_LANGUAGE.md) | [GitHub Issues](https://github.com/flashus/detrix/issues)
 
 **Built with Rust for developers and AI agents.**

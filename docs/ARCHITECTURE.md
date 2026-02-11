@@ -450,9 +450,9 @@ detrix/
 │   │       └── repositories.rs# MockMetricRepository, MockEventRepository, etc.
 │   └── detrix-tui/            # Terminal UI (experimental)
 ├── clients/                   # Detrix clients
-│   ├── python/                # Python client (pip install detrix)
-│   ├── go/                    # Go client
-│   └── rust/                  # Rust client (detrix-client crate)
+│   ├── python/                # Python client (detrix-py on PyPI)
+│   ├── go/                    # Go client (github.com/flashus/detrix/clients/go)
+│   └── rust/                  # Rust client (detrix-rs on crates.io)
 ├── fixtures/                  # Example apps for testing
 ├── skills/                    # Claude Code skill
 └── docs/

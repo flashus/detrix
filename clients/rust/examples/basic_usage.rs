@@ -14,7 +14,7 @@
 use std::thread;
 use std::time::Duration;
 
-use detrix_client::{self as detrix, Config};
+use detrix_rs::{self as detrix, Config};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing for debug output

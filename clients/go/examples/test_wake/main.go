@@ -126,7 +126,7 @@ func run(fixtureDir string) int {
 	proc.Env = append(os.Environ(),
 		"DETRIX_CLIENT_ENABLED=1",
 		"DETRIX_DAEMON_URL="+daemonURL,
-		"DETRIX_CLIENT_NAME=trade-bot",
+		"DETRIX_NAME=trade-bot",
 	)
 
 	stdout, err := proc.StdoutPipe()
