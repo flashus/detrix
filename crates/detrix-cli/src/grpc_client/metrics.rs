@@ -545,6 +545,7 @@ impl MetricsClient {
             line,
             find_variable: find_variable.map(|v| v.to_string()),
             metadata: Some(RequestMetadata::default()),
+            connection_id: None,
         };
 
         let response = self

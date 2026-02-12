@@ -206,4 +206,6 @@ pub struct FileInspectionRequest {
     pub line: Option<u32>,
     /// Optional variable to find
     pub find_variable: Option<String>,
+    /// Optional workspace root for resolving relative paths
+    pub workspace_root: Option<String>,
 }

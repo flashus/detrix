@@ -33,7 +33,7 @@ pub use config_service::{ConfigService, ConfigUpdateResult, RESTART_REQUIRED_FIE
 pub use connection_service::ConnectionService;
 pub use environment_service::{EnvironmentCheckResult, EnvironmentService};
 pub use event_capture_service::EventCaptureService;
-pub use file_inspection_service::FileInspectionService;
+pub use file_inspection_service::{resolve_file_path, FileInspectionService};
 pub use file_inspection_types::{
     CodeContext, CodeLine, FileInspectionRequest, FileInspectionResult, FileOverview,
     LanguageCapabilities, LineInspectionResult, SourceLanguage, TextSearchMatch,

@@ -9,6 +9,7 @@ use crate::mcp::helpers;
 use crate::mcp::params::{AddMetricParams, EnableFromDiffParams, ObserveParams};
 use crate::mcp::proto_adapters::mcp_params_to_add_metric_request;
 use crate::state::ApiState;
+use detrix_application::resolve_file_path;
 use detrix_core::{ConnectionId, MetricId};
 use rmcp::ErrorData as McpError;
 use std::sync::Arc;
@@ -124,25 +125,33 @@ pub async fn observe_impl(
         ));
     }
 
+    // Step 2: Resolve file path against connection's workspace_root
+    let workspace_root = connection.valid_workspace_root();
+    let file = resolve_file_path(&file, workspace_root);
+
     // Use first expression for line-finding and name generation
     let first_expr = expressions[0].clone();
 
-    // Step 2: Determine line number
+    // Step 3: Determine line number
     let (final_line, line_content, alternatives, line_source) = if let Some(l) = line {
         // User provided explicit line
         (l, String::new(), Vec::new(), "user_provided")
     } else {
         // Auto-find best line
-        let (l, content, alts) =
-            helpers::metrics::find_best_line(&file, &first_expr, find_variable.as_deref())?;
+        let (l, content, alts) = helpers::metrics::find_best_line(
+            &file,
+            &first_expr,
+            find_variable.as_deref(),
+            workspace_root,
+        )?;
         (l, content, alts, "auto_found")
     };
 
-    // Step 3: Generate metric name if not provided
+    // Step 4: Generate metric name if not provided
     let metric_name = name
         .unwrap_or_else(|| helpers::metrics::generate_metric_name(&first_expr, &file, final_line));
 
-    // Step 4: Get defaults from config and build metric
+    // Step 5: Get defaults from config and build metric
     let config = state.config_service.get_config().await;
     let metric = MetricBuilder::new(
         metric_name.clone(),
@@ -292,6 +301,10 @@ pub async fn add_metric_impl(
             None,
         ));
     }
+
+    // Resolve file path against connection's workspace_root
+    let workspace_root = connection.valid_workspace_root();
+    let parsed_file = resolve_file_path(&parsed_file, workspace_root);
 
     // Get default safety level from config
     let config = state.config_service.get_config().await;
@@ -503,6 +516,9 @@ pub async fn enable_from_diff_impl(
         .mcp_context("Failed to get connection")?
         .ok_or_else(|| McpError::internal_error("Connection disappeared after validation", None))?;
 
+    // Resolve workspace_root for relative paths in diff
+    let workspace_root = connection.valid_workspace_root();
+
     // Track results
     let mut added_metrics: Vec<AddedMetric> = Vec::new();
     let mut failed_metrics: Vec<FailedMetric> = Vec::new();
@@ -513,13 +529,14 @@ pub async fn enable_from_diff_impl(
             continue;
         }
 
+        let resolved_file = resolve_file_path(&parsed.file, workspace_root);
         let metric_name =
-            helpers::metrics::generate_metric_name(&parsed.expression, &parsed.file, parsed.line);
+            helpers::metrics::generate_metric_name(&parsed.expression, &resolved_file, parsed.line);
 
         let metric = MetricBuilder::new(
             metric_name.clone(),
             conn_id.clone(),
-            parsed.file.clone(),
+            resolved_file.clone(),
             parsed.line,
             vec![parsed.expression.clone()],
             connection.language,
@@ -537,14 +554,14 @@ pub async fn enable_from_diff_impl(
             Ok(outcome) => {
                 added_metrics.push(AddedMetric {
                     name: metric_name,
-                    file: parsed.file.clone(),
+                    file: resolved_file,
                     line: parsed.line,
                     id: outcome.value.0,
                 });
             }
             Err(e) => {
                 failed_metrics.push(FailedMetric {
-                    file: parsed.file.clone(),
+                    file: resolved_file,
                     line: parsed.line,
                     statement: parsed.original_statement.clone(),
                     error: e.to_string(),

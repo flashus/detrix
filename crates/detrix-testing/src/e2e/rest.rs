@@ -890,6 +890,7 @@ impl ApiClient for RestClient {
             line,
             find_variable: find_variable.map(String::from),
             metadata: None,
+            connection_id: None,
         };
 
         let response = self

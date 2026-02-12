@@ -103,14 +103,14 @@ pub use detrix_ports::{
 pub type ExpressionValidatorRef = std::sync::Arc<dyn safety::ExpressionValidator + Send + Sync>;
 pub use safety::{ExpressionValidator, PythonValidator, ValidationResult, ValidatorRegistry};
 pub use services::{
-    AdapterLifecycleManager, AnchorServiceConfig, Audience, CallTimer, CodeContext, CodeLine,
-    ConfigService, ConfigUpdateResult, ConnectionService, DefaultAnchorService,
-    DisconnectAllResult, EnvironmentCheckResult, EnvironmentService, EventCaptureService,
-    FileChangeResult, FileInspectionRequest, FileInspectionResult, FileInspectionService,
-    FileOverview, JwksValidator, JwtClaims, JwtError, LanguageCapabilities, LineInspectionResult,
-    LspSymbolLookup, LspSymbolLookupRef, ManagedAdapterInfo, ManagedAdapterStatus, McpErrorCode,
-    McpUsageCounters, McpUsageEvent, McpUsageService, MetricService, NotifyFileWatcher,
-    NullLspLookup, RemoteAppService, SourceLanguage, StreamingService, SystemEventService,
-    TextSearchMatch, UsageSnapshot, VariableDefinition, VariableSearchResult, WorkflowStats,
-    RESTART_REQUIRED_FIELDS,
+    resolve_file_path, AdapterLifecycleManager, AnchorServiceConfig, Audience, CallTimer,
+    CodeContext, CodeLine, ConfigService, ConfigUpdateResult, ConnectionService,
+    DefaultAnchorService, DisconnectAllResult, EnvironmentCheckResult, EnvironmentService,
+    EventCaptureService, FileChangeResult, FileInspectionRequest, FileInspectionResult,
+    FileInspectionService, FileOverview, JwksValidator, JwtClaims, JwtError, LanguageCapabilities,
+    LineInspectionResult, LspSymbolLookup, LspSymbolLookupRef, ManagedAdapterInfo,
+    ManagedAdapterStatus, McpErrorCode, McpUsageCounters, McpUsageEvent, McpUsageService,
+    MetricService, NotifyFileWatcher, NullLspLookup, RemoteAppService, SourceLanguage,
+    StreamingService, SystemEventService, TextSearchMatch, UsageSnapshot, VariableDefinition,
+    VariableSearchResult, WorkflowStats, RESTART_REQUIRED_FIELDS,
 };

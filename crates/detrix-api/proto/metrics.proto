@@ -358,6 +358,7 @@ message InspectFileRequest {
   optional uint32 line = 2;    // If provided, inspect specific line (1-based)
   optional string find_variable = 3;  // If provided, search for variable occurrences
   RequestMetadata metadata = 4;
+  optional string connection_id = 5;  // If provided, resolve relative paths against connection's workspace_root
 }
 
 message InspectFileResponse {

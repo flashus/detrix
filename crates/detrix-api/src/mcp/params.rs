@@ -21,7 +21,7 @@ pub struct AddMetricParams {
     #[schemars(description = "Unique metric name (letters, numbers, underscore, dash)")]
     pub name: String,
     #[schemars(
-        description = "File path with optional line number. Formats: 'file.py#123', '@file.py#123', '\"expr\"@file.py#123', or 'file.py' with separate line parameter"
+        description = "File path with optional line number. Formats: 'file.py#123', '@file.py#123', or 'file.py' with separate line parameter."
     )]
     pub location: String,
     #[schemars(
@@ -164,7 +164,9 @@ pub struct UpdateMetricParams {
     description = "Observe a value in code. Simplest way to add metrics - auto-finds line if not specified."
 )]
 pub struct ObserveParams {
-    #[schemars(description = "File path to observe (relative or absolute)")]
+    #[schemars(
+        description = "File path to observe (e.g., '/home/user/project/app.py' or 'app.py')."
+    )]
     pub file: String,
 
     #[schemars(
@@ -172,7 +174,9 @@ pub struct ObserveParams {
     )]
     pub expressions: Vec<String>,
 
-    #[schemars(description = "Line number (optional - auto-finds best line if not specified)")]
+    #[schemars(
+        description = "Line number (optional - auto-finds best line if not specified). Auto-detection prefers usage lines over assignment lines for correct logpoint placement."
+    )]
     pub line: Option<u32>,
 
     #[schemars(
@@ -360,7 +364,7 @@ pub struct ValidateExpressionParams {
     description = "Parameters for inspecting a file to find correct metric placement. Use BEFORE add_metric to find the right line for your expression."
 )]
 pub struct InspectFileParams {
-    #[schemars(description = "Path to the source file to inspect (Python, Go, or Rust)")]
+    #[schemars(description = "Path to the source file to inspect (Python, Go, or Rust).")]
     pub file_path: String,
     #[schemars(
         description = "Show variables available at this line number (use to verify metric placement)"
@@ -370,6 +374,10 @@ pub struct InspectFileParams {
         description = "Find where this variable is defined/assigned (e.g., 'pnl', 'user', 'response')"
     )]
     pub find_variable: Option<String>,
+    #[schemars(
+        description = "Connection ID for resolving relative file paths against the connection's workspace root (optional - auto-selects if only one connection exists)"
+    )]
+    pub connection_id: Option<String>,
 }
 
 // ============================================================================

@@ -24,19 +24,28 @@ pub async fn handle_add_metric(
         req.safety_level = config.safety.default_safety_level().as_str().to_string();
     }
 
+    // Fetch connection for language derivation and path resolution
+    let conn_id = detrix_core::ConnectionId::from(req.connection_id.as_str());
+    let connection = state
+        .context
+        .connection_service
+        .get_connection(&conn_id)
+        .await
+        .to_status()?
+        .ok_or_else(|| {
+            Status::not_found(format!("Connection '{}' not found", req.connection_id))
+        })?;
+
+    // Resolve relative file path against connection's workspace_root
+    if let Some(ref mut location) = req.location {
+        location.file = detrix_application::resolve_file_path(
+            &location.file,
+            connection.valid_workspace_root(),
+        );
+    }
+
     // If language is not provided, derive it from the connection (same pattern as MCP/REST)
     if req.language.as_ref().map_or(true, |l| l.is_empty()) {
-        let conn_id = detrix_core::ConnectionId::from(req.connection_id.as_str());
-        let connection = state
-            .context
-            .connection_service
-            .get_connection(&conn_id)
-            .await
-            .to_status()?
-            .ok_or_else(|| {
-                Status::not_found(format!("Connection '{}' not found", req.connection_id))
-            })?;
-
         req.language = Some(connection.language.to_string());
     }
 

@@ -132,6 +132,7 @@ pub mod metrics {
         file: &str,
         expression: &str,
         find_variable: Option<&str>,
+        workspace_root: Option<&str>,
     ) -> Result<(u32, String, Vec<(u32, String)>), McpError> {
         // Determine what to search for
         let search_var = find_variable
@@ -158,6 +159,7 @@ pub mod metrics {
             file_path: file.to_string(),
             line: None,
             find_variable: Some(search_var.clone()),
+            workspace_root: workspace_root.map(|s| s.to_string()),
         };
 
         let (_lang, result) = service.inspect(request).map_err(|e| {

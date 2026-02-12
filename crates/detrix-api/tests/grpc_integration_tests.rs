@@ -22,9 +22,9 @@ use detrix_api::generated::detrix::v1::{
     metrics_service_client::MetricsServiceClient, metrics_service_server::MetricsServiceServer,
     streaming_service_client::StreamingServiceClient,
     streaming_service_server::StreamingServiceServer, AddMetricRequest, DisconnectAllRequest,
-    GetMetricRequest, GroupRequest, ListMetricsRequest, Location, MetricMode, QueryRequest,
-    RemoveMetricRequest, StatusRequest, StreamAllRequest, StreamMode, ToggleMetricRequest,
-    UpdateMetricRequest,
+    GetMetricRequest, GroupRequest, InspectFileRequest, ListMetricsRequest, Location, MetricMode,
+    QueryRequest, RemoveMetricRequest, StatusRequest, StreamAllRequest, StreamMode,
+    ToggleMetricRequest, UpdateMetricRequest,
 };
 use detrix_api::grpc::{MetricsServiceImpl, StreamingServiceImpl};
 use detrix_api::ApiState;
@@ -34,7 +34,7 @@ use detrix_application::{
 };
 use detrix_config::ApiConfig;
 use detrix_storage::{SqliteConfig, SqliteStorage};
-use detrix_testing::fixtures::{app_py_path, test_py_path};
+use detrix_testing::fixtures::{app_py_path, fixtures_dir, test_py_path};
 use detrix_testing::MockDapAdapterFactory;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -146,6 +146,79 @@ impl TestServer {
         });
 
         // Wait for server to be ready
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        Ok(Self {
+            addr,
+            shutdown_tx,
+            _temp_dir: temp_dir,
+            connection_id: connection_id.to_string(),
+        })
+    }
+
+    /// Start a new test server with custom workspace_root for path resolution tests
+    async fn start_with_workspace(workspace_root: &str) -> anyhow::Result<Self> {
+        let temp_dir = TempDir::new()?;
+        let db_path = temp_dir.path().join("test.db");
+
+        let sqlite_config = SqliteConfig {
+            path: db_path,
+            pool_size: 5,
+            busy_timeout_ms: 3000,
+        };
+        let storage = Arc::new(SqliteStorage::new(&sqlite_config).await?);
+        let mock_factory = Arc::new(MockDapAdapterFactory::new());
+
+        let context = AppContext::new(
+            Arc::clone(&storage) as MetricRepositoryRef,
+            Arc::clone(&storage) as EventRepositoryRef,
+            Arc::clone(&storage) as ConnectionRepositoryRef,
+            mock_factory as DapAdapterFactoryRef,
+            &ApiConfig::default(),
+            &detrix_config::SafetyConfig::default(),
+            &detrix_config::StorageConfig::default(),
+            &detrix_config::DaemonConfig::default(),
+            &detrix_config::AdapterConnectionConfig::default(),
+            &detrix_config::AnchorConfig::default(),
+            &detrix_config::LimitsConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let identity = detrix_core::ConnectionIdentity::new(
+            "default",
+            detrix_core::SourceLanguage::Python,
+            workspace_root,
+            "test-host",
+        );
+        let connection_id = context
+            .connection_service
+            .create_connection("127.0.0.1".to_string(), 5678, identity, None, None, false)
+            .await?;
+
+        let state = Arc::new(ApiState::builder(context, storage).build());
+
+        let metrics_service = MetricsServiceImpl::new(Arc::clone(&state));
+        let streaming_service = StreamingServiceImpl::new(Arc::clone(&state));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let incoming = TcpListenerStream::new(listener);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(MetricsServiceServer::new(metrics_service))
+                .add_service(StreamingServiceServer::new(streaming_service))
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("Server failed");
+        });
+
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         Ok(Self {
@@ -1538,6 +1611,181 @@ async fn test_grpc_get_status_idle() {
     assert!(
         inner.uptime_seconds < 60,
         "Uptime should be under 60s for fresh server"
+    );
+
+    server.shutdown();
+}
+
+// ============================================================================
+// Relative Path Resolution Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_add_metric_relative_path() {
+    // Server with workspace_root pointing to fixtures directory
+    let workspace = fixtures_dir().to_string_lossy().to_string();
+    let server = TestServer::start_with_workspace(&workspace)
+        .await
+        .expect("Server failed to start");
+    let mut client = server.metrics_client().await.expect("Client failed");
+
+    // Use relative path "test.py" — should resolve against workspace_root
+    let request = AddMetricRequest {
+        name: "rel_path_metric".to_string(),
+        group: Some("test_group".to_string()),
+        location: Some(Location {
+            file: "test.py".to_string(), // Relative path
+            line: 30,
+        }),
+        expressions: vec!["x.value".to_string()],
+        language: Some("python".to_string()),
+        enabled: true,
+        mode: Some(MetricMode {
+            mode: Some(detrix_api::generated::detrix::v1::metric_mode::Mode::Stream(StreamMode {})),
+        }),
+        condition: None,
+        safety_level: "strict".to_string(),
+        metadata: None,
+        connection_id: server.connection_id.clone(),
+        replace: None,
+        capture_stack_trace: None,
+        stack_trace_ttl: None,
+        stack_trace_slice: None,
+        capture_memory_snapshot: None,
+        snapshot_scope: None,
+        snapshot_ttl: None,
+    };
+
+    let response = client
+        .add_metric(request)
+        .await
+        .expect("add_metric with relative path should succeed");
+
+    let inner = response.into_inner();
+    assert!(inner.metric_id > 0, "Metric should be created");
+
+    // Verify the stored location has resolved absolute path
+    let location = inner.location.expect("Response should have location");
+    assert!(
+        std::path::Path::new(&location.file).is_absolute(),
+        "Stored file path should be absolute: {}",
+        location.file
+    );
+    assert!(
+        location.file.contains("fixtures"),
+        "Resolved path should contain fixtures dir: {}",
+        location.file
+    );
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_inspect_file_relative_path() {
+    let workspace = fixtures_dir().to_string_lossy().to_string();
+    let server = TestServer::start_with_workspace(&workspace)
+        .await
+        .expect("Server failed to start");
+    let mut client = server.metrics_client().await.expect("Client failed");
+
+    // inspect_file with relative path + connection_id
+    let request = InspectFileRequest {
+        file_path: "test.py".to_string(), // Relative path
+        line: Some(30),
+        find_variable: None,
+        metadata: None,
+        connection_id: Some(server.connection_id.clone()),
+    };
+
+    let response = client
+        .inspect_file(request)
+        .await
+        .expect("inspect_file with relative path should succeed");
+
+    let inner = response.into_inner();
+    assert!(inner.success, "Inspection should succeed");
+    assert!(
+        !inner.content.is_empty(),
+        "Response should contain inspection content"
+    );
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_inspect_file_relative_path_auto_select() {
+    // With only one connection, inspect_file should auto-select for path resolution
+    let workspace = fixtures_dir().to_string_lossy().to_string();
+    let server = TestServer::start_with_workspace(&workspace)
+        .await
+        .expect("Server failed to start");
+    let mut client = server.metrics_client().await.expect("Client failed");
+
+    let request = InspectFileRequest {
+        file_path: "auth.py".to_string(), // Relative path
+        line: None,
+        find_variable: Some("user".to_string()),
+        metadata: None,
+        connection_id: None, // Auto-select
+    };
+
+    let response = client
+        .inspect_file(request)
+        .await
+        .expect("inspect_file with auto-select should succeed");
+
+    let inner = response.into_inner();
+    assert!(inner.success, "Inspection should succeed with auto-select");
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_add_metric_absolute_path_still_works() {
+    // Verify absolute paths still work when workspace_root is set
+    let workspace = fixtures_dir().to_string_lossy().to_string();
+    let server = TestServer::start_with_workspace(&workspace)
+        .await
+        .expect("Server failed to start");
+    let mut client = server.metrics_client().await.expect("Client failed");
+
+    let absolute_path = test_py_path();
+    let request = AddMetricRequest {
+        name: "abs_path_metric".to_string(),
+        group: Some("test_group".to_string()),
+        location: Some(Location {
+            file: absolute_path.clone(), // Absolute path
+            line: 30,
+        }),
+        expressions: vec!["x.value".to_string()],
+        language: Some("python".to_string()),
+        enabled: true,
+        mode: Some(MetricMode {
+            mode: Some(detrix_api::generated::detrix::v1::metric_mode::Mode::Stream(StreamMode {})),
+        }),
+        condition: None,
+        safety_level: "strict".to_string(),
+        metadata: None,
+        connection_id: server.connection_id.clone(),
+        replace: None,
+        capture_stack_trace: None,
+        stack_trace_ttl: None,
+        stack_trace_slice: None,
+        capture_memory_snapshot: None,
+        snapshot_scope: None,
+        snapshot_ttl: None,
+    };
+
+    let response = client
+        .add_metric(request)
+        .await
+        .expect("add_metric with absolute path should succeed");
+
+    let inner = response.into_inner();
+    let location = inner.location.expect("Response should have location");
+    assert_eq!(
+        location.file, absolute_path,
+        "Absolute path should be preserved unchanged"
     );
 
     server.shutdown();

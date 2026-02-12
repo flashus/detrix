@@ -42,3 +42,40 @@ pub fn resolve_hostname() -> String {
         .and_then(|h| h.into_string().ok())
         .unwrap_or_else(|| "unknown".to_string())
 }
+
+/// Resolve workspace_root from an optional connection_id, with auto-select fallback.
+///
+/// If `connection_id` is provided, looks up that connection's workspace_root.
+/// If not provided, auto-selects the workspace_root from the single active connection.
+/// Returns `None` if no connection is found, multiple connections exist, or workspace is invalid.
+///
+/// Used by inspect_file handlers across MCP, REST, and gRPC to resolve relative file paths.
+pub async fn resolve_workspace_root(
+    state: &crate::state::ApiState,
+    connection_id: Option<&str>,
+) -> Option<String> {
+    if let Some(conn_id_str) = connection_id {
+        let conn_id = detrix_core::ConnectionId::new(conn_id_str);
+        let connection = state
+            .context
+            .connection_service
+            .get_connection(&conn_id)
+            .await
+            .ok()
+            .flatten()?;
+        connection.valid_workspace_root().map(|s| s.to_string())
+    } else {
+        // Auto-select if only one connection exists
+        let connections = state
+            .context
+            .connection_service
+            .list_connections()
+            .await
+            .unwrap_or_default();
+        if connections.len() == 1 {
+            connections[0].valid_workspace_root().map(|s| s.to_string())
+        } else {
+            None
+        }
+    }
+}

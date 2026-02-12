@@ -17,7 +17,7 @@ def control_server():
     reset_state()
     state = get_state()
     state.name = "test-service-123"
-    state.daemon_url = "http://127.0.0.1:8090"
+    state.daemon_url = "http://127.0.0.1:1"  # Port 1 is reserved, nothing listens on it
 
     port = start_control_server("127.0.0.1", 0)
     state.actual_control_port = port
@@ -58,7 +58,7 @@ class TestStatusEndpoint:
         result = fetch_json(f"{control_server}/detrix/status")
         assert result["state"] == "sleeping"
         assert result["name"] == "test-service-123"
-        assert result["daemon_url"] == "http://127.0.0.1:8090"
+        assert result["daemon_url"] == "http://127.0.0.1:1"
 
 
 class TestInfoEndpoint:

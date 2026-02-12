@@ -793,6 +793,7 @@ impl ApiClient for GrpcClient {
                 line,
                 find_variable: find_variable.map(|s| s.to_string()),
                 metadata: None,
+                connection_id: None,
             })
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?

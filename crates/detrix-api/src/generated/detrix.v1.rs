@@ -846,6 +846,9 @@ pub struct InspectFileRequest {
     pub find_variable: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "4")]
     pub metadata: ::core::option::Option<RequestMetadata>,
+    /// If provided, resolve relative paths against connection's workspace_root
+    #[prost(string, optional, tag = "5")]
+    pub connection_id: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

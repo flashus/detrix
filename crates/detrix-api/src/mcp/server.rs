@@ -382,7 +382,7 @@ impl DetrixServer {
         Parameters(params): Parameters<InspectFileParams>,
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("inspect_file");
-        match tools::inspect_file_impl(params) {
+        match tools::inspect_file_impl(&self.state, params).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 Ok(CallToolResult::success(result.messages))
@@ -909,6 +909,9 @@ impl rmcp::ServerHandler for DetrixServer {
                  The `observe` tool auto-finds the line and creates the metric!\n\n\
                  ## Location Format (for add_metric)\n\
                  `file.py#line` or `@file.py#line` (@ optional)\n\n\
+                 ## File Paths\n\
+                 All file paths (observe, add_metric, inspect_file) accept **absolute or relative** paths.\n\
+                 Relative paths are resolved against the connection's workspace_root.\n\n\
                  ## Auto Features\n\
                  - Single connection? Automatically selected!\n\
                  - No line specified? Auto-found from expression!\n\

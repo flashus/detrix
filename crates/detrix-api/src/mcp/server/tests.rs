@@ -7,7 +7,7 @@ use detrix_application::{
 use detrix_config::ApiConfig;
 use detrix_core::ConnectionId;
 use detrix_storage::{SqliteConfig, SqliteStorage};
-use detrix_testing::fixtures::{auth_py_path, test_py_path};
+use detrix_testing::fixtures::{auth_py_path, fixtures_dir, test_py_path};
 use detrix_testing::MockDapAdapterFactory;
 use rmcp::handler::server::wrapper::Parameters;
 use std::sync::Arc;
@@ -64,12 +64,21 @@ impl TestFixture {
 
     /// Create a mock connection for tests that require a debugger connection
     async fn with_mock_connection(&self) -> ConnectionId {
+        self.with_mock_connection_with_workspace("/test-workspace")
+            .await
+    }
+
+    /// Create a mock connection with a custom workspace_root
+    ///
+    /// Use `fixtures_dir().to_string_lossy()` as workspace to test relative path resolution
+    /// against real fixture files.
+    async fn with_mock_connection_with_workspace(&self, workspace_root: &str) -> ConnectionId {
         // Use the connection_service to create a connection (saves to DB and starts adapter)
         // MockDapAdapterFactory will create a MockDapAdapter
         let identity = detrix_core::ConnectionIdentity::new(
             "test",
             detrix_core::SourceLanguage::Python,
-            "/test-workspace",
+            workspace_root,
             "test-host",
         );
         self.state
@@ -1096,5 +1105,374 @@ async fn test_get_status_idle_mode() {
         text.contains("enabled_metrics") || text.contains("total_metrics"),
         "Response should contain metrics info, got: {}",
         text
+    );
+}
+
+// ============================================================================
+// Relative Path Resolution Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_add_metric_relative_path() {
+    let fixture = TestFixture::new().await;
+    let workspace = fixtures_dir().to_string_lossy().to_string();
+    let conn_id = fixture
+        .with_mock_connection_with_workspace(&workspace)
+        .await;
+
+    // Use relative path "auth.py" — should resolve to {fixtures_dir}/auth.py
+    let params = AddMetricParams {
+        name: "rel_path_metric".to_string(),
+        location: "auth.py#127".to_string(), // Relative path
+        line: None,
+        expressions: vec!["user.id".to_string()],
+        connection_id: conn_id.to_string(),
+        group: None,
+        enabled: true,
+        mode: None,
+        sample_rate: None,
+        sample_interval_seconds: None,
+        max_per_second: None,
+        capture_stack_trace: None,
+        stack_trace_ttl: None,
+        stack_trace_full: None,
+        stack_trace_head: None,
+        stack_trace_tail: None,
+        capture_memory_snapshot: None,
+        snapshot_scope: None,
+        snapshot_ttl: None,
+        replace: None,
+    };
+
+    let result = fixture.server.add_metric(Parameters(params)).await;
+    assert!(
+        result.is_ok(),
+        "add_metric with relative path should succeed: {:?}",
+        result.err()
+    );
+
+    // Verify the stored metric has the resolved absolute path
+    let metrics = fixture
+        .state
+        .context
+        .metric_service
+        .list_metrics()
+        .await
+        .unwrap();
+    assert_eq!(metrics.len(), 1);
+    assert!(
+        metrics[0].location.file.contains("fixtures"),
+        "Stored file path should be resolved to absolute: {}",
+        metrics[0].location.file
+    );
+    assert!(
+        std::path::Path::new(&metrics[0].location.file).is_absolute(),
+        "Stored file path should be absolute: {}",
+        metrics[0].location.file
+    );
+}
+
+#[tokio::test]
+async fn test_add_metric_relative_path_with_separate_line() {
+    let fixture = TestFixture::new().await;
+    let workspace = fixtures_dir().to_string_lossy().to_string();
+    let conn_id = fixture
+        .with_mock_connection_with_workspace(&workspace)
+        .await;
+
+    // Use relative path without line in location, line provided separately
+    let params = AddMetricParams {
+        name: "rel_path_sep_line".to_string(),
+        location: "test.py".to_string(), // Relative path, no line
+        line: Some(30),                  // Line provided separately
+        expressions: vec!["x.value".to_string()],
+        connection_id: conn_id.to_string(),
+        group: None,
+        enabled: true,
+        mode: None,
+        sample_rate: None,
+        sample_interval_seconds: None,
+        max_per_second: None,
+        capture_stack_trace: None,
+        stack_trace_ttl: None,
+        stack_trace_full: None,
+        stack_trace_head: None,
+        stack_trace_tail: None,
+        capture_memory_snapshot: None,
+        snapshot_scope: None,
+        snapshot_ttl: None,
+        replace: None,
+    };
+
+    let result = fixture.server.add_metric(Parameters(params)).await;
+    assert!(
+        result.is_ok(),
+        "add_metric with relative path + separate line should succeed: {:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+async fn test_observe_relative_path() {
+    let fixture = TestFixture::new().await;
+    let workspace = fixtures_dir().to_string_lossy().to_string();
+    let conn_id = fixture
+        .with_mock_connection_with_workspace(&workspace)
+        .await;
+
+    let params = ObserveParams {
+        file: "auth.py".to_string(), // Relative path
+        expressions: vec!["user.id".to_string()],
+        line: Some(127),
+        connection_id: Some(conn_id.to_string()),
+        name: Some("observe_rel".to_string()),
+        find_variable: None,
+        group: None,
+        capture_stack_trace: None,
+        capture_memory_snapshot: None,
+        ttl_seconds: None,
+    };
+
+    let result = fixture.server.observe(Parameters(params)).await;
+    assert!(
+        result.is_ok(),
+        "observe with relative path should succeed: {:?}",
+        result.err()
+    );
+
+    // Verify the stored metric has resolved absolute path
+    let metrics = fixture
+        .state
+        .context
+        .metric_service
+        .list_metrics()
+        .await
+        .unwrap();
+    assert_eq!(metrics.len(), 1);
+    assert!(
+        std::path::Path::new(&metrics[0].location.file).is_absolute(),
+        "Stored file path should be absolute: {}",
+        metrics[0].location.file
+    );
+}
+
+#[tokio::test]
+async fn test_observe_relative_path_auto_connection() {
+    let fixture = TestFixture::new().await;
+    let workspace = fixtures_dir().to_string_lossy().to_string();
+    // Create single connection — should be auto-selected
+    let _conn_id = fixture
+        .with_mock_connection_with_workspace(&workspace)
+        .await;
+
+    let params = ObserveParams {
+        file: "auth.py".to_string(), // Relative path
+        expressions: vec!["user.id".to_string()],
+        line: Some(127),
+        connection_id: None, // Auto-select single connection
+        name: Some("observe_rel_auto".to_string()),
+        find_variable: None,
+        group: None,
+        capture_stack_trace: None,
+        capture_memory_snapshot: None,
+        ttl_seconds: None,
+    };
+
+    let result = fixture.server.observe(Parameters(params)).await;
+    assert!(
+        result.is_ok(),
+        "observe with relative path + auto-connection should succeed: {:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+async fn test_observe_filename_only() {
+    // Test with just a filename (no directory prefix), resolved via workspace_root
+    let fixture = TestFixture::new().await;
+    let workspace = fixtures_dir().to_string_lossy().to_string();
+    let conn_id = fixture
+        .with_mock_connection_with_workspace(&workspace)
+        .await;
+
+    let params = ObserveParams {
+        file: "test.py".to_string(), // Just filename
+        expressions: vec!["x.value".to_string()],
+        line: Some(30),
+        connection_id: Some(conn_id.to_string()),
+        name: Some("observe_filename".to_string()),
+        find_variable: None,
+        group: None,
+        capture_stack_trace: None,
+        capture_memory_snapshot: None,
+        ttl_seconds: None,
+    };
+
+    let result = fixture.server.observe(Parameters(params)).await;
+    assert!(
+        result.is_ok(),
+        "observe with filename-only should succeed: {:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+async fn test_inspect_file_relative_path_with_connection() {
+    let fixture = TestFixture::new().await;
+    let workspace = fixtures_dir().to_string_lossy().to_string();
+    let conn_id = fixture
+        .with_mock_connection_with_workspace(&workspace)
+        .await;
+
+    let params = InspectFileParams {
+        file_path: "test.py".to_string(), // Relative path
+        line: Some(30),
+        find_variable: None,
+        connection_id: Some(conn_id.to_string()),
+    };
+
+    let result = fixture.server.inspect_file(Parameters(params)).await;
+    assert!(
+        result.is_ok(),
+        "inspect_file with relative path + connection_id should succeed: {:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+async fn test_inspect_file_relative_path_auto_select() {
+    let fixture = TestFixture::new().await;
+    let workspace = fixtures_dir().to_string_lossy().to_string();
+    // Create single connection — should be auto-selected for path resolution
+    let _conn_id = fixture
+        .with_mock_connection_with_workspace(&workspace)
+        .await;
+
+    let params = InspectFileParams {
+        file_path: "auth.py".to_string(), // Relative path
+        line: None,
+        find_variable: Some("user".to_string()),
+        connection_id: None, // Auto-select single connection
+    };
+
+    let result = fixture.server.inspect_file(Parameters(params)).await;
+    assert!(
+        result.is_ok(),
+        "inspect_file with relative path + auto-select should succeed: {:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+async fn test_inspect_file_find_variable_relative_path() {
+    let fixture = TestFixture::new().await;
+    let workspace = fixtures_dir().to_string_lossy().to_string();
+    let conn_id = fixture
+        .with_mock_connection_with_workspace(&workspace)
+        .await;
+
+    let params = InspectFileParams {
+        file_path: "auth.py".to_string(), // Relative
+        line: None,
+        find_variable: Some("user".to_string()),
+        connection_id: Some(conn_id.to_string()),
+    };
+
+    let result = fixture.server.inspect_file(Parameters(params)).await;
+    assert!(
+        result.is_ok(),
+        "inspect_file find_variable with relative path should succeed: {:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+async fn test_enable_from_diff_relative_path() {
+    let fixture = TestFixture::new().await;
+    let workspace = fixtures_dir().to_string_lossy().to_string();
+    let conn_id = fixture
+        .with_mock_connection_with_workspace(&workspace)
+        .await;
+
+    // Diff uses relative path "auth.py" — should resolve against workspace_root
+    let diff = r#"
+diff --git a/auth.py b/auth.py
+@@ -125,6 +125,7 @@
+ user = get_user()
++    print(f"user_id={user.id}")
+ return user
+"#;
+
+    let params = EnableFromDiffParams {
+        diff: diff.to_string(),
+        connection_id: Some(conn_id.to_string()),
+        group: Some("diff_rel_test".to_string()),
+        ttl_seconds: None,
+    };
+
+    let result = fixture.server.enable_from_diff(Parameters(params)).await;
+    assert!(
+        result.is_ok(),
+        "enable_from_diff with relative path should succeed: {:?}",
+        result.err()
+    );
+
+    // Verify the stored metric has the resolved absolute path
+    let metrics = fixture
+        .state
+        .context
+        .metric_service
+        .list_metrics()
+        .await
+        .unwrap();
+    assert_eq!(metrics.len(), 1);
+    assert!(
+        std::path::Path::new(&metrics[0].location.file).is_absolute(),
+        "Diff-created metric should have absolute file path: {}",
+        metrics[0].location.file
+    );
+}
+
+#[tokio::test]
+async fn test_absolute_path_still_works_with_workspace() {
+    // Ensure absolute paths pass through unchanged even when workspace_root is set
+    let fixture = TestFixture::new().await;
+    let workspace = fixtures_dir().to_string_lossy().to_string();
+    let conn_id = fixture
+        .with_mock_connection_with_workspace(&workspace)
+        .await;
+
+    let absolute_path = auth_py_path();
+    let params = ObserveParams {
+        file: absolute_path.clone(), // Absolute path
+        expressions: vec!["user.id".to_string()],
+        line: Some(127),
+        connection_id: Some(conn_id.to_string()),
+        name: Some("abs_path_test".to_string()),
+        find_variable: None,
+        group: None,
+        capture_stack_trace: None,
+        capture_memory_snapshot: None,
+        ttl_seconds: None,
+    };
+
+    let result = fixture.server.observe(Parameters(params)).await;
+    assert!(
+        result.is_ok(),
+        "observe with absolute path should still succeed: {:?}",
+        result.err()
+    );
+
+    let metrics = fixture
+        .state
+        .context
+        .metric_service
+        .list_metrics()
+        .await
+        .unwrap();
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(
+        metrics[0].location.file, absolute_path,
+        "Absolute path should be preserved unchanged"
     );
 }

@@ -54,27 +54,35 @@ pub async fn handle_validate_expression(
 
 /// Handle inspect_file request
 pub async fn handle_inspect_file(
-    _state: &Arc<ApiState>,
+    state: &Arc<ApiState>,
     request: Request<InspectFileRequest>,
 ) -> Result<Response<InspectFileResponse>, Status> {
-    use detrix_application::{FileInspectionRequest, FileInspectionService};
+    use detrix_application::{resolve_file_path, FileInspectionRequest, FileInspectionService};
 
     let req = request.into_inner();
 
-    // Validate file exists
-    let path = std::path::Path::new(&req.file_path);
+    // Resolve workspace_root from connection (or auto-select single connection)
+    let workspace_root =
+        crate::common::resolve_workspace_root(state, req.connection_id.as_deref()).await;
+
+    // Resolve relative file path against workspace_root
+    let resolved_file = resolve_file_path(&req.file_path, workspace_root.as_deref());
+
+    // Validate resolved file exists
+    let path = std::path::Path::new(&resolved_file);
     if !path.exists() {
         return Err(Status::not_found(format!(
             "File not found: {}",
-            req.file_path
+            resolved_file
         )));
     }
 
     // Create inspection request
     let inspection_request = FileInspectionRequest {
-        file_path: req.file_path.clone(),
+        file_path: resolved_file,
         line: req.line,
         find_variable: req.find_variable,
+        workspace_root,
     };
 
     // Use FileInspectionService from application layer

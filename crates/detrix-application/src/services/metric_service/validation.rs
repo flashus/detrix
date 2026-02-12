@@ -225,6 +225,7 @@ impl MetricService {
             file_path: metric.location.file.clone(),
             line: Some(metric.location.line),
             find_variable: None,
+            workspace_root: None,
         };
 
         // ALWAYS check file existence - this is a fundamental safety check

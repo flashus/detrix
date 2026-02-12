@@ -264,7 +264,7 @@ pub async fn get_metric(
 /// - 409 Conflict: Metric already exists at location (when `replace=false`)
 pub async fn add_metric(
     State(state): State<Arc<ApiState>>,
-    Json(payload): Json<CreateMetricRequest>,
+    Json(mut payload): Json<CreateMetricRequest>,
 ) -> Result<(StatusCode, Json<CreateMetricResponse>), HttpError> {
     use crate::grpc::conversions::add_request_to_metric;
     use crate::http::proto_adapters::rest_request_to_add_metric_request;
@@ -283,6 +283,12 @@ pub async fn add_metric(
         .await
         .http_context("Failed to get connection")?
         .http_not_found("Connection")?;
+
+    // Resolve relative file path against connection's workspace_root
+    payload.location.file = detrix_application::resolve_file_path(
+        &payload.location.file,
+        connection.valid_workspace_root(),
+    );
 
     // Resolve safety level: use provided value or default from config
     let safety_level = match &payload.safety_level {

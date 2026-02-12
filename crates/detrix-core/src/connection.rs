@@ -181,6 +181,15 @@ fn default_auto_reconnect() -> bool {
 }
 
 impl Connection {
+    /// Returns the workspace root if it's a valid, usable path.
+    ///
+    /// Filters out placeholder values ("/unknown") and empty strings.
+    /// Use this instead of accessing `workspace_root` directly when
+    /// resolving relative file paths.
+    pub fn valid_workspace_root(&self) -> Option<&str> {
+        Some(self.workspace_root.as_str()).filter(|r| *r != "/unknown" && !r.is_empty())
+    }
+
     /// Get current timestamp in microseconds
     fn now_micros() -> i64 {
         Utc::now().timestamp_micros()

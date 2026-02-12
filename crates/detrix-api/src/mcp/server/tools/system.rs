@@ -12,7 +12,8 @@ use crate::mcp::params::{
 };
 use crate::state::ApiState;
 use detrix_application::{
-    FileInspectionRequest, FileInspectionService, UsageSnapshot, ValidationResult,
+    resolve_file_path, FileInspectionRequest, FileInspectionService, UsageSnapshot,
+    ValidationResult,
 };
 use detrix_core::{ConnectionId, SafetyLevel};
 use rmcp::model::Content;
@@ -336,11 +337,22 @@ pub struct InspectFileResult {
 }
 
 /// Core inspect_file implementation
-pub fn inspect_file_impl(params: InspectFileParams) -> Result<InspectFileResult, McpError> {
+pub async fn inspect_file_impl(
+    state: &Arc<ApiState>,
+    params: InspectFileParams,
+) -> Result<InspectFileResult, McpError> {
+    // Resolve workspace_root from connection (or auto-select single connection)
+    let workspace_root =
+        crate::common::resolve_workspace_root(state, params.connection_id.as_deref()).await;
+
+    // Resolve file path against workspace root
+    let resolved_file = resolve_file_path(&params.file_path, workspace_root.as_deref());
+
     let request = FileInspectionRequest {
-        file_path: params.file_path.clone(),
+        file_path: resolved_file.clone(),
         line: params.line,
         find_variable: params.find_variable,
+        workspace_root,
     };
 
     let service = FileInspectionService::new();
@@ -348,7 +360,7 @@ pub fn inspect_file_impl(params: InspectFileParams) -> Result<InspectFileResult,
         .inspect(request)
         .mcp_context("File inspection failed")?;
 
-    let messages = format_inspection_result(language, result, &params.file_path);
+    let messages = format_inspection_result(language, result, &resolved_file);
     let mut all_messages = vec![Content::text(format!("Detected language: {}", language))];
     all_messages.extend(messages);
     Ok(InspectFileResult {

@@ -22,6 +22,40 @@ use detrix_config::constants::{
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
+/// Resolve a file path against an optional workspace root.
+///
+/// Resolution logic:
+/// 1. If the path is absolute → use as-is
+/// 2. If relative and `workspace_root` is provided → join with workspace_root, check existence
+/// 3. Fallback: return the raw path (covers daemon-CWD-relative paths)
+///
+/// Returns the resolved path as a string for subsequent validation.
+pub fn resolve_file_path(file_path: &str, workspace_root: Option<&str>) -> String {
+    let path = Path::new(file_path);
+
+    // Absolute paths need no resolution
+    if path.is_absolute() {
+        return file_path.to_string();
+    }
+
+    // Try resolving against workspace_root
+    if let Some(root) = workspace_root {
+        let resolved = Path::new(root).join(path);
+        if resolved.exists() {
+            debug!(
+                original = file_path,
+                workspace_root = root,
+                resolved = %resolved.display(),
+                "Resolved relative path against workspace root"
+            );
+            return resolved.to_string_lossy().into_owned();
+        }
+    }
+
+    // Fallback: return as-is (validate_file_path will produce the appropriate error)
+    file_path.to_string()
+}
+
 /// Validate and canonicalize a file path for inspection
 ///
 /// Security checks performed:
@@ -91,6 +125,121 @@ fn validate_file_path(file_path: &str) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+/// Check if a line is an assignment line for the given variable.
+///
+/// Detects patterns like:
+/// - Python: `var = ...`, `var: Type = ...`
+/// - Go: `var := ...`, `var = ...`, `var raw = ...`
+/// - Rust: `let var = ...`, `let mut var = ...`
+///
+/// Returns false for comparison operators (`==`, `!=`, `<=`, `>=`)
+/// and compound assignments (`+=`, `-=`, `*=`, `/=`).
+fn is_assignment_line(line: &str, variable: &str) -> bool {
+    let trimmed = line.trim();
+
+    // Find variable in the line
+    let Some(var_pos) = trimmed.find(variable) else {
+        return false;
+    };
+
+    // Check character boundaries - variable must not be part of a larger identifier
+    let before_ok = var_pos == 0
+        || !trimmed.as_bytes()[var_pos - 1].is_ascii_alphanumeric()
+            && trimmed.as_bytes()[var_pos - 1] != b'_';
+    let after_pos = var_pos + variable.len();
+    let after_ok = after_pos >= trimmed.len()
+        || !trimmed.as_bytes()[after_pos].is_ascii_alphanumeric()
+            && trimmed.as_bytes()[after_pos] != b'_';
+
+    if !before_ok || !after_ok {
+        return false;
+    }
+
+    // Look for `=` after the variable (with possible type annotation between)
+    let rest = &trimmed[after_pos..];
+
+    // Find first `=` in rest
+    let Some(eq_pos) = rest.find('=') else {
+        return false;
+    };
+
+    // Check it's not `==`, `!=`, `<=`, `>=`
+    let eq_abs = after_pos + eq_pos;
+    if eq_abs > 0 {
+        let before_eq = trimmed.as_bytes()[eq_abs - 1];
+        if before_eq == b'!' || before_eq == b'<' || before_eq == b'>' || before_eq == b'=' {
+            return false;
+        }
+    }
+    // Check the character after `=` is not `=` (rules out `==`)
+    let after_eq = eq_abs + 1;
+    if after_eq < trimmed.len() && trimmed.as_bytes()[after_eq] == b'=' {
+        return false;
+    }
+
+    // Check it's not a compound assignment (`+=`, `-=`, `*=`, `/=`)
+    if eq_abs > 0 {
+        let before_eq = trimmed.as_bytes()[eq_abs - 1];
+        if before_eq == b'+' || before_eq == b'-' || before_eq == b'*' || before_eq == b'/' {
+            return false;
+        }
+    }
+
+    // Go `:=` is also assignment
+    // At this point we know there's a `=` after the variable, which means assignment
+    true
+}
+
+/// Check if a line can host a logpoint (is "stoppable").
+///
+/// A line is NOT stoppable if it's:
+/// - Empty or whitespace only
+/// - Comment only (`#`, `//`, `///`, `/* ... */`)
+/// - Closing delimiter only (`}`, `)`, `]` with optional whitespace/semicolons)
+fn is_stoppable_line(line: &str) -> bool {
+    let trimmed = line.trim();
+
+    // Empty or whitespace only
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Comment only
+    if trimmed.starts_with('#')
+        || trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+    {
+        return false;
+    }
+
+    // Closing delimiter only (with optional trailing semicolons/commas)
+    let stripped = trimmed.trim_end_matches([';', ',', ' ']);
+    if stripped == "}" || stripped == ")" || stripped == "]" || stripped == "})" {
+        return false;
+    }
+
+    true
+}
+
+/// Find the next stoppable line after `from_line` (1-indexed).
+///
+/// Scans up to 5 lines forward. Returns the original line if no stoppable line is found.
+fn next_stoppable_line(lines: &[&str], from_line: u32) -> u32 {
+    let from_idx = from_line as usize; // from_line is 1-indexed, so from_idx points to NEXT line (0-indexed)
+    let max_scan = 5;
+    let end = (from_idx + max_scan).min(lines.len());
+
+    for (idx, line) in lines.iter().enumerate().take(end).skip(from_idx) {
+        if is_stoppable_line(line) {
+            return (idx + 1) as u32; // Convert back to 1-indexed
+        }
+    }
+
+    // No stoppable line found, return original
+    from_line
+}
+
 /// Service for inspecting source files
 ///
 /// Provides text-based analysis capabilities for finding correct metric placement.
@@ -149,8 +298,12 @@ impl FileInspectionService {
         &self,
         request: FileInspectionRequest,
     ) -> Result<(SourceLanguage, FileInspectionResult)> {
+        // Resolve relative paths against workspace_root before validation
+        let resolved_path =
+            resolve_file_path(&request.file_path, request.workspace_root.as_deref());
+
         // Validate and canonicalize path before any file access
-        let canonical_path = validate_file_path(&request.file_path)?;
+        let canonical_path = validate_file_path(&resolved_path)?;
 
         let extension = canonical_path
             .extension()
@@ -165,6 +318,7 @@ impl FileInspectionService {
             file_path: canonical_path.to_string_lossy().into_owned(),
             line: request.line,
             find_variable: request.find_variable,
+            workspace_root: None,
         };
 
         // All languages use generic text-based inspection
@@ -260,6 +414,10 @@ impl FileInspectionService {
     }
 
     /// Search for a variable in a generic file (text-based)
+    ///
+    /// Prefers usage lines over assignment lines for logpoint placement,
+    /// since logpoints fire BEFORE the line executes (so a variable isn't
+    /// defined yet on its assignment line).
     fn inspect_generic_variable(
         &self,
         lines: &[&str],
@@ -276,22 +434,49 @@ impl FileInspectionService {
             })
             .collect();
 
-        // Convert text matches to variable definitions (approximate)
-        let definitions: Vec<VariableDefinition> = matches
-            .iter()
-            .take(10) // Limit to first 10
-            .map(|m| VariableDefinition {
-                line: m.line_number,
-                scope: "unknown".to_string(), // No scope info without AST
-                code: m.code.clone(),
-            })
-            .collect();
+        // Partition matches into usage and assignment lines
+        let mut usage_defs = Vec::new();
+        let mut assignment_defs = Vec::new();
+
+        for m in matches.iter().take(10) {
+            if is_assignment_line(&m.code, variable) {
+                // For assignment lines, bump to the next stoppable line
+                let bumped_line = next_stoppable_line(lines, m.line_number);
+                let bumped_code = if bumped_line != m.line_number {
+                    lines
+                        .get((bumped_line - 1) as usize)
+                        .unwrap_or(&"")
+                        .to_string()
+                } else {
+                    m.code.clone()
+                };
+                assignment_defs.push(VariableDefinition {
+                    line: bumped_line,
+                    scope: "assignment".to_string(),
+                    code: bumped_code,
+                });
+            } else {
+                usage_defs.push(VariableDefinition {
+                    line: m.line_number,
+                    scope: "usage".to_string(),
+                    code: m.code.clone(),
+                });
+            }
+        }
+
+        // Usage lines first, then bumped assignment lines
+        let mut definitions = usage_defs;
+        definitions.extend(assignment_defs);
+
+        // Deduplicate by line number (keep first occurrence)
+        let mut seen_lines = std::collections::HashSet::new();
+        definitions.retain(|d| seen_lines.insert(d.line));
 
         let suggested_lines: Vec<u32> = definitions.iter().map(|d| d.line).collect();
 
-        // Build context around first match if any
-        let context = if let Some(first) = matches.first() {
-            let target_idx = (first.line_number - 1) as usize;
+        // Build context around first definition if any
+        let context = if let Some(first) = definitions.first() {
+            let target_idx = (first.line - 1) as usize;
             let start = target_idx.saturating_sub(2);
             let end = (target_idx + 5).min(lines.len());
 
@@ -389,6 +574,7 @@ mod tests {
             file_path: file.path().to_string_lossy().to_string(),
             line: Some(2),
             find_variable: None,
+            workspace_root: None,
         };
 
         let (lang, result) = service.inspect(request).unwrap();
@@ -419,6 +605,7 @@ mod tests {
             file_path: file.path().to_string_lossy().to_string(),
             line: None,
             find_variable: Some("userID".to_string()),
+            workspace_root: None,
         };
 
         let (lang, result) = service.inspect(request).unwrap();
@@ -445,6 +632,7 @@ mod tests {
             file_path: file.path().to_string_lossy().to_string(),
             line: None,
             find_variable: None,
+            workspace_root: None,
         };
 
         let (lang, result) = service.inspect(request).unwrap();
@@ -469,6 +657,7 @@ mod tests {
             file_path: file.path().to_string_lossy().to_string(),
             line: Some(100),
             find_variable: None,
+            workspace_root: None,
         };
 
         let result = service.inspect(request);
@@ -559,5 +748,303 @@ mod tests {
         // Should resolve to the same canonical path
         let expected = std::path::Path::new(&file_path).canonicalize().unwrap();
         assert_eq!(canonical, expected);
+    }
+
+    // ========================================================================
+    // Assignment Detection Tests
+    // ========================================================================
+
+    #[test]
+    fn test_assignment_detection_python() {
+        assert!(is_assignment_line("    raw = json.loads(resp)", "raw"));
+        assert!(is_assignment_line(
+            "    raw: dict = json.loads(resp)",
+            "raw"
+        ));
+        assert!(is_assignment_line("x = 42", "x"));
+        // Not assignments
+        assert!(!is_assignment_line("    print(raw)", "raw"));
+        assert!(!is_assignment_line("    if raw == expected:", "raw"));
+        assert!(!is_assignment_line("    if raw != None:", "raw"));
+    }
+
+    #[test]
+    fn test_assignment_detection_go() {
+        assert!(is_assignment_line("    raw := json.Unmarshal(data)", "raw"));
+        assert!(is_assignment_line("    raw = getData()", "raw"));
+        assert!(is_assignment_line("    var raw = getData()", "raw"));
+        // Not assignments
+        assert!(!is_assignment_line("    fmt.Println(raw)", "raw"));
+        assert!(!is_assignment_line("    if raw == nil {", "raw"));
+    }
+
+    #[test]
+    fn test_assignment_detection_rust() {
+        assert!(is_assignment_line(
+            "    let raw = serde_json::from_str(&s);",
+            "raw"
+        ));
+        assert!(is_assignment_line("    let mut raw = Vec::new();", "raw"));
+        // Not assignments
+        assert!(!is_assignment_line("    process(raw);", "raw"));
+        assert!(!is_assignment_line("    if raw == expected {", "raw"));
+    }
+
+    #[test]
+    fn test_assignment_detection_compound_operators() {
+        assert!(!is_assignment_line("    count += 1", "count"));
+        assert!(!is_assignment_line("    total -= amount", "total"));
+        assert!(!is_assignment_line("    result *= factor", "result"));
+        assert!(!is_assignment_line("    value /= divisor", "value"));
+    }
+
+    #[test]
+    fn test_assignment_detection_comparison() {
+        assert!(!is_assignment_line("    if x == 5:", "x"));
+        assert!(!is_assignment_line("    if x != 5:", "x"));
+        assert!(!is_assignment_line("    if x <= 5:", "x"));
+        assert!(!is_assignment_line("    if x >= 5:", "x"));
+    }
+
+    #[test]
+    fn test_assignment_no_partial_match() {
+        // "raw" should not match "raw_data"
+        assert!(!is_assignment_line("    raw_data = 42", "raw"));
+        // "x" should not match "extra"
+        assert!(!is_assignment_line("    extra = 42", "x"));
+    }
+
+    // ========================================================================
+    // Stoppable Line Detection Tests
+    // ========================================================================
+
+    #[test]
+    fn test_stoppable_line_detection() {
+        // Stoppable lines
+        assert!(is_stoppable_line("    x = 42"));
+        assert!(is_stoppable_line("    return normalize(raw)"));
+        assert!(is_stoppable_line("    print(result)"));
+        assert!(is_stoppable_line("    if x > 0:"));
+
+        // NOT stoppable
+        assert!(!is_stoppable_line(""));
+        assert!(!is_stoppable_line("   "));
+        assert!(!is_stoppable_line("# comment"));
+        assert!(!is_stoppable_line("// comment"));
+        assert!(!is_stoppable_line("/// doc comment"));
+        assert!(!is_stoppable_line("/* block comment */"));
+        assert!(!is_stoppable_line("}"));
+        assert!(!is_stoppable_line("    }"));
+        assert!(!is_stoppable_line("    )"));
+        assert!(!is_stoppable_line("    ]"));
+        assert!(!is_stoppable_line("    };"));
+        assert!(!is_stoppable_line("    })"));
+    }
+
+    // ========================================================================
+    // Variable Search Smart Line Suggestion Tests
+    // ========================================================================
+
+    #[test]
+    fn test_variable_search_prefers_usage() {
+        // File where variable appears in both assignment and usage
+        let mut file = NamedTempFile::with_suffix(".py").unwrap();
+        writeln!(file, "def process():").unwrap();
+        writeln!(file, "    raw = json.loads(resp)").unwrap();
+        writeln!(file, "    return normalize(raw)").unwrap();
+
+        let service = FileInspectionService::new();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("raw".to_string()),
+            workspace_root: None,
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(!search.definitions.is_empty());
+            // First definition should be usage line (line 3), not assignment line (line 2)
+            assert_eq!(search.definitions[0].line, 3);
+            assert_eq!(search.definitions[0].scope, "usage");
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_variable_search_bumps_assignment() {
+        // File where variable only appears in assignment
+        let mut file = NamedTempFile::with_suffix(".py").unwrap();
+        writeln!(file, "def process():").unwrap();
+        writeln!(file, "    raw = json.loads(resp)").unwrap();
+        writeln!(file, "    return normalize(data)").unwrap();
+
+        let service = FileInspectionService::new();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("raw".to_string()),
+            workspace_root: None,
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(!search.definitions.is_empty());
+            // Assignment at line 2 should be bumped to line 3 (next stoppable line)
+            assert_eq!(search.definitions[0].line, 3);
+            assert_eq!(search.definitions[0].scope, "assignment");
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_variable_search_skips_blanks_and_braces() {
+        // Assignment followed by blank line, then closing brace, then real code
+        let mut file = NamedTempFile::with_suffix(".py").unwrap();
+        writeln!(file, "def process():").unwrap();
+        writeln!(file, "    raw = json.loads(resp)").unwrap();
+        writeln!(file, "").unwrap();
+        writeln!(file, "    # comment line").unwrap();
+        writeln!(file, "    return normalize(data)").unwrap();
+
+        let service = FileInspectionService::new();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("raw".to_string()),
+            workspace_root: None,
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(!search.definitions.is_empty());
+            // Assignment at line 2, blank at 3, comment at 4, stoppable at 5
+            assert_eq!(search.definitions[0].line, 5);
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    // ========================================================================
+    // Path Resolution Tests
+    // ========================================================================
+
+    #[test]
+    fn test_resolve_file_path_absolute() {
+        let result = resolve_file_path("/absolute/path/file.py", Some("/workspace"));
+        assert_eq!(result, "/absolute/path/file.py");
+    }
+
+    #[test]
+    fn test_resolve_file_path_relative_with_workspace() {
+        // Create a temp file to resolve against
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.py");
+        std::fs::write(&file_path, "x = 1").unwrap();
+
+        let result = resolve_file_path("test.py", Some(&dir.path().to_string_lossy()));
+        assert_eq!(result, file_path.to_string_lossy());
+    }
+
+    #[test]
+    fn test_resolve_file_path_relative_no_workspace() {
+        let result = resolve_file_path("test.py", None);
+        assert_eq!(result, "test.py");
+    }
+
+    #[test]
+    fn test_resolve_file_path_relative_not_found_in_workspace() {
+        let result = resolve_file_path("nonexistent.py", Some("/tmp"));
+        // Falls back to raw path when not found
+        assert_eq!(result, "nonexistent.py");
+    }
+
+    #[test]
+    fn test_resolve_file_path_subdirectory() {
+        // Create nested directory structure
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file_path = sub.join("app.py");
+        std::fs::write(&file_path, "x = 1").unwrap();
+
+        let result = resolve_file_path("sub/app.py", Some(&dir.path().to_string_lossy()));
+        assert_eq!(result, file_path.to_string_lossy());
+    }
+
+    // ========================================================================
+    // Full inspect() integration with workspace_root
+    // ========================================================================
+
+    #[test]
+    fn test_inspect_with_workspace_root_relative_path() {
+        // Create a temp file in a temp directory
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.py");
+        std::fs::write(&file_path, "x = 42\nprint(x)\n").unwrap();
+
+        let service = FileInspectionService::new();
+        // Use relative filename with workspace_root
+        let request = FileInspectionRequest {
+            file_path: "test.py".to_string(),
+            line: Some(1),
+            find_variable: None,
+            workspace_root: Some(dir.path().to_string_lossy().to_string()),
+        };
+
+        let (lang, result) = service.inspect(request).unwrap();
+        assert_eq!(lang, SourceLanguage::Python);
+        if let FileInspectionResult::LineInspection(inspection) = result {
+            assert_eq!(inspection.target_line, 1);
+            assert!(inspection.code_at_line.contains("x = 42"));
+        } else {
+            panic!("Expected LineInspection result");
+        }
+    }
+
+    #[test]
+    fn test_inspect_with_workspace_root_variable_search() {
+        // Create a file with a variable
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("weather.py");
+        std::fs::write(
+            &file_path,
+            "raw = json.loads(resp)\nreturn normalize(raw)\n",
+        )
+        .unwrap();
+
+        let service = FileInspectionService::new();
+        let request = FileInspectionRequest {
+            file_path: "weather.py".to_string(),
+            line: None,
+            find_variable: Some("raw".to_string()),
+            workspace_root: Some(dir.path().to_string_lossy().to_string()),
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert_eq!(search.variable_name, "raw");
+            assert!(!search.definitions.is_empty());
+            // Usage line should be preferred
+            assert_eq!(search.definitions[0].line, 2);
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_inspect_relative_path_without_workspace_fails() {
+        let service = FileInspectionService::new();
+        let request = FileInspectionRequest {
+            file_path: "nonexistent_relative.py".to_string(),
+            line: Some(1),
+            find_variable: None,
+            workspace_root: None,
+        };
+
+        let result = service.inspect(request);
+        assert!(result.is_err());
     }
 }
