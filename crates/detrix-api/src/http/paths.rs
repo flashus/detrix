@@ -41,3 +41,8 @@ pub const API_V1_VALIDATE_EXPRESSION: &str = "/api/v1/validate_expression";
 pub const API_V1_INSPECT_FILE: &str = "/api/v1/inspect_file";
 
 pub const API_V1_MCP_USAGE: &str = "/api/v1/mcp/usage";
+
+// VFS endpoints
+pub const API_V1_FILES: &str = "/api/v1/files";
+pub const API_V1_CACHE_VALIDATE: &str = "/api/v1/cache/validate";
+pub const API_V1_CACHE_HASHES: &str = "/api/v1/cache/{connection_id}";

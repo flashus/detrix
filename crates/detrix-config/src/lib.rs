@@ -57,6 +57,7 @@ mod output;
 mod safety;
 mod storage;
 mod tui;
+mod vfs;
 
 // Core types module that re-exports from submodules
 mod types;

@@ -60,6 +60,12 @@ regex.workspace = true
 # HTTP client (for MCP bridge and CodeLLDB download)
 reqwest = { workspace = true, features = ["json", "blocking"] }
 
+# HTTP server (for bridge file server)
+axum.workspace = true
+
+# Hashing (for drift detection in git-pinned file serving)
+sha2.workspace = true
+
 # ZIP archive extraction (for CodeLLDB VSIX files)
 zip = "2.2"
 

@@ -128,6 +128,7 @@ impl MetricsClient {
             capture_memory_snapshot: None,
             snapshot_scope: None,
             snapshot_ttl: None,
+            file_content: None,
             metadata: Some(RequestMetadata::default()),
         };
 
@@ -546,6 +547,7 @@ impl MetricsClient {
             find_variable: find_variable.map(|v| v.to_string()),
             metadata: Some(RequestMetadata::default()),
             connection_id: None,
+            file_content: None,
         };
 
         let response = self

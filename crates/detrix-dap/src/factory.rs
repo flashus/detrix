@@ -37,9 +37,10 @@ impl DapAdapterFactoryImpl {
 
 #[async_trait]
 impl DapAdapterFactory for DapAdapterFactoryImpl {
-    async fn create_python_adapter(&self, _host: &str, port: u16) -> Result<DapAdapterRef> {
-        // Create default debugpy configuration for the given port
-        let config = PythonAdapter::default_config(port);
+    async fn create_python_adapter(&self, host: &str, port: u16) -> Result<DapAdapterRef> {
+        // Create default debugpy configuration for the given port, then override host
+        // (default_config uses 127.0.0.1, but Docker/remote connections need the actual host)
+        let config = PythonAdapter::default_config(port).with_host(host);
 
         // Create PythonAdapter instance
         let adapter = PythonAdapter::new(config, self.base_path.clone());
@@ -48,9 +49,9 @@ impl DapAdapterFactory for DapAdapterFactoryImpl {
         Ok(Arc::new(adapter))
     }
 
-    async fn create_go_adapter(&self, _host: &str, port: u16) -> Result<DapAdapterRef> {
-        // Create default Delve configuration for the given port
-        let config = GoAdapter::default_config(port);
+    async fn create_go_adapter(&self, host: &str, port: u16) -> Result<DapAdapterRef> {
+        // Create default Delve configuration for the given port, then override host
+        let config = GoAdapter::default_config(port).with_host(host);
 
         // Create GoAdapter instance
         let adapter = GoAdapter::new(config, self.base_path.clone());
@@ -61,7 +62,7 @@ impl DapAdapterFactory for DapAdapterFactoryImpl {
 
     async fn create_rust_adapter(
         &self,
-        _host: &str,
+        host: &str,
         port: u16,
         program: Option<&str>,
         pid: Option<u32>,
@@ -70,6 +71,7 @@ impl DapAdapterFactory for DapAdapterFactoryImpl {
         // 1. Launch mode: program path provided, launch it through lldb-dap
         // 2. AttachPid mode: PID provided, attach to running process (Rust client library)
         // 3. Attach mode: connect to existing lldb-dap (e.g., via lldb-serve wrapper)
+        // All modes override host (default_config uses 127.0.0.1, but Docker/remote needs actual host)
         let config = match (program, pid) {
             // Direct TCP connection to lldb-dap: send program path in launch request
             // This is the preferred mode for direct lldb-dap connection
@@ -79,7 +81,8 @@ impl DapAdapterFactory for DapAdapterFactoryImpl {
             (None, Some(target_pid)) => RustAdapter::config_with_pid(target_pid, port),
             // Attach mode: connect to existing lldb-dap (e.g., via lldb-serve wrapper)
             (None, None) => RustAdapter::default_config(port),
-        };
+        }
+        .with_host(host);
 
         // Create RustAdapter instance
         let adapter = RustAdapter::new(config, self.base_path.clone());

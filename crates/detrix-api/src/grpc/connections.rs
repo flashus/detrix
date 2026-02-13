@@ -61,13 +61,16 @@ impl ConnectionService for ConnectionServiceImpl {
         // Call service (ALL business logic happens here)
         // ConnectionService.create_connection now handles adapter lifecycle internally
         let connection_id = connection_service
-            .create_connection(
+            .create_connection_with_metadata(
                 req.host,
                 port,
                 identity,
                 req.program,   // Optional program path for Rust direct lldb-dap
                 req.pid,       // Optional PID for Rust client AttachPid mode
                 req.safe_mode, // SafeMode: only allow logpoints
+                req.control_plane_url,
+                req.build_commit,
+                req.build_tag,
             )
             .await
             .to_status()?;

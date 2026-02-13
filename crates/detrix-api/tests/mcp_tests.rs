@@ -46,6 +46,12 @@ impl McpTestFixture {
         // Use MockDapAdapterFactory instead of PythonAdapter
         let mock_factory = Arc::new(MockDapAdapterFactory::new());
 
+        let vfs = Arc::new(detrix_storage::DiskVfs::new()) as detrix_application::VfsRef;
+        let file_source_chain = Arc::new(detrix_application::FileSourceChain::new(
+            Arc::clone(&vfs),
+            vec![],
+            &[],
+        ));
         let context = AppContext::new(
             Arc::clone(&storage) as MetricRepositoryRef,
             Arc::clone(&storage) as EventRepositoryRef,
@@ -62,6 +68,8 @@ impl McpTestFixture {
             None, // No separate DLQ storage in tests
             None,
             None, // No auth token in tests
+            vfs,
+            file_source_chain,
         );
 
         let state = Arc::new(

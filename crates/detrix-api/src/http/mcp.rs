@@ -201,6 +201,16 @@ pub async fn mcp_handler(
         }
     }
 
+    // Extract bridge file server URL if present and update bridge source
+    if let Some(file_server_header) = headers.get("X-Detrix-File-Server-Url") {
+        if let Ok(url) = file_server_header.to_str() {
+            if let Some(ref bridge_source) = state.bridge_file_source {
+                bridge_source.set_bridge_url(Some(url.to_string()));
+                debug!("MCP HTTP: Bridge file server URL set: {}", url);
+            }
+        }
+    }
+
     // Validate JSON-RPC 2.0 format
     let jsonrpc_version = payload.get("jsonrpc").and_then(|v| v.as_str());
     if jsonrpc_version != Some("2.0") {

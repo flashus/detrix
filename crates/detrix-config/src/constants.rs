@@ -411,6 +411,16 @@ pub const DEFAULT_MAX_EVAL_TIME_MS: u32 = 1_000;
 pub const DEFAULT_AST_CACHE_MAX_ENTRIES: usize = 10_000;
 
 // ============================================================================
+// VFS (Virtual File System)
+// ============================================================================
+
+/// Default HTTP fetch timeout for remote file sources (seconds)
+pub const DEFAULT_VFS_FETCH_TIMEOUT_SECONDS: u64 = 10;
+
+/// Default maximum file size for VFS caching (10 MB)
+pub const DEFAULT_VFS_MAX_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
+
+// ============================================================================
 // FILE INSPECTION
 // ============================================================================
 

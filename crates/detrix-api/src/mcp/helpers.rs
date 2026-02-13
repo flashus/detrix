@@ -133,6 +133,7 @@ pub mod metrics {
         expression: &str,
         find_variable: Option<&str>,
         workspace_root: Option<&str>,
+        file_inspection: &FileInspectionService,
     ) -> Result<(u32, String, Vec<(u32, String)>), McpError> {
         // Determine what to search for
         let search_var = find_variable
@@ -154,7 +155,6 @@ pub mod metrics {
         };
 
         // Use file inspection service to find the variable
-        let service = FileInspectionService::new();
         let request = FileInspectionRequest {
             file_path: file.to_string(),
             line: None,
@@ -162,7 +162,7 @@ pub mod metrics {
             workspace_root: workspace_root.map(|s| s.to_string()),
         };
 
-        let (_lang, result) = service.inspect(request).map_err(|e| {
+        let (_lang, result) = file_inspection.inspect(request).map_err(|e| {
             McpError::internal_error(format!("Failed to inspect file: {}", e), None)
         })?;
 

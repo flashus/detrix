@@ -65,6 +65,9 @@ impl ConnectionsClient {
             program: program.map(|s| s.to_string()),
             safe_mode,
             pid: None, // CLI doesn't use AttachPid mode
+            control_plane_url: None,
+            build_commit: None,
+            build_tag: None,
         };
 
         let response = self

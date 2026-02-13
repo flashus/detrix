@@ -45,6 +45,11 @@ message CreateConnectionRequest {
   string name = 8;                   // User-friendly name (e.g., "trade-bot")
   string workspace_root = 9;         // Workspace directory for isolation
   string hostname = 10;              // Machine hostname for multi-host support
+
+  // Cloud metadata for transparent file fetching
+  optional string control_plane_url = 11;  // App control plane URL (e.g., "http://app:8091")
+  optional string build_commit = 12;       // Git commit SHA at build time
+  optional string build_tag = 13;          // Build version tag (e.g., "v1.2.3")
 }
 
 message CreateConnectionResponse {

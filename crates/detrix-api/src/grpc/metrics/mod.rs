@@ -9,6 +9,7 @@ mod crud;
 mod list_filter;
 mod system;
 mod tools;
+mod vfs;
 
 use crate::generated::detrix::v1::{metrics_service_server::MetricsService, *};
 use crate::state::ApiState;
@@ -163,5 +164,26 @@ impl MetricsService for MetricsServiceImpl {
         request: Request<GetMcpUsageRequest>,
     ) -> Result<Response<GetMcpUsageResponse>, Status> {
         tools::handle_get_mcp_usage(&self.state, request).await
+    }
+
+    async fn provide_file(
+        &self,
+        request: Request<ProvideFileRequest>,
+    ) -> Result<Response<ProvideFileResponse>, Status> {
+        vfs::handle_provide_file(&self.state, request).await
+    }
+
+    async fn validate_cache(
+        &self,
+        request: Request<ValidateCacheRequest>,
+    ) -> Result<Response<ValidateCacheResponse>, Status> {
+        vfs::handle_validate_cache(&self.state, request).await
+    }
+
+    async fn get_cached_hashes(
+        &self,
+        request: Request<GetCachedHashesRequest>,
+    ) -> Result<Response<GetCachedHashesResponse>, Status> {
+        vfs::handle_get_cached_hashes(&self.state, request).await
     }
 }

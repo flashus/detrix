@@ -43,6 +43,51 @@ pub fn resolve_hostname() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Pre-fetch a file into the VFS cache using the file source chain.
+///
+/// Resolves the connection from `connection_id` (or auto-selects single connection)
+/// and calls `ensure_available()` to transparently fetch the file if not cached.
+///
+/// Failures are silently ignored — if the file can't be fetched, downstream code
+/// will handle the "file not found" error naturally.
+pub async fn ensure_file_cached(
+    state: &crate::state::ApiState,
+    connection_id: Option<&str>,
+    file_path: &str,
+) {
+    let connection = if let Some(conn_id_str) = connection_id {
+        let conn_id = detrix_core::ConnectionId::new(conn_id_str);
+        state
+            .context
+            .connection_service
+            .get_connection(&conn_id)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        // Auto-select if only one connection exists
+        let connections = state
+            .context
+            .connection_service
+            .list_connections()
+            .await
+            .unwrap_or_default();
+        if connections.len() == 1 {
+            Some(connections.into_iter().next().unwrap())
+        } else {
+            None
+        }
+    };
+
+    if let Some(conn) = connection {
+        let _ = state
+            .context
+            .file_source_chain
+            .ensure_available(&conn, file_path)
+            .await;
+    }
+}
+
 /// Resolve workspace_root from an optional connection_id, with auto-select fallback.
 ///
 /// If `connection_id` is provided, looks up that connection's workspace_root.

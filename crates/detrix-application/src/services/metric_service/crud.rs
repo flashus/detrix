@@ -115,7 +115,18 @@ impl MetricService {
         &self,
         metric: Metric,
         replace: bool,
+        file_content: Option<String>,
     ) -> Result<OperationOutcome<MetricId>> {
+        // If file content is provided, store it in VFS so downstream
+        // validation (scope check, anchor capture) can read the file.
+        if let Some(content) = file_content {
+            self.file_inspection.vfs().store(
+                &metric.connection_id.0,
+                &metric.location.file,
+                content,
+            );
+        }
+
         // Validate SafeMode constraints (stack trace/memory snapshot in SafeMode)
         self.validate_safe_mode(&metric)?;
 

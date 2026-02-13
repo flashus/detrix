@@ -32,6 +32,7 @@ pub struct ApiStateBuilder {
     mcp_spawned: bool,
     system_event_repository: Option<SystemEventRepositoryRef>,
     mcp_usage_repository: Option<McpUsageRepositoryRef>,
+    bridge_file_source: Option<Arc<crate::file_sources::BridgeSource>>,
 }
 
 impl ApiStateBuilder {
@@ -45,6 +46,7 @@ impl ApiStateBuilder {
             mcp_spawned: false,
             system_event_repository: None,
             mcp_usage_repository: None,
+            bridge_file_source: None,
         }
     }
 
@@ -88,6 +90,12 @@ impl ApiStateBuilder {
         self
     }
 
+    /// Set the bridge file source for runtime URL updates from MCP HTTP headers.
+    pub fn bridge_file_source(mut self, source: Arc<crate::file_sources::BridgeSource>) -> Self {
+        self.bridge_file_source = Some(source);
+        self
+    }
+
     /// Build the ApiState
     pub fn build(self) -> ApiState {
         let config = self.config.unwrap_or_default();
@@ -118,6 +126,7 @@ impl ApiStateBuilder {
             mcp_client_tracker,
             config_service,
             mcp_usage_repository: self.mcp_usage_repository,
+            bridge_file_source: self.bridge_file_source,
         }
     }
 }
@@ -173,6 +182,10 @@ pub struct ApiState {
     /// Set via `with_mcp_usage_repository()` builder method.
     /// When None, usage analytics are not persisted.
     pub mcp_usage_repository: Option<McpUsageRepositoryRef>,
+
+    /// Bridge file source for setting bridge URL from MCP HTTP headers.
+    /// Set when bridge source is included in the file source chain.
+    pub bridge_file_source: Option<Arc<crate::file_sources::BridgeSource>>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -330,6 +343,12 @@ mod tests {
         let storage = Arc::new(SqliteStorage::new(&sqlite_config).await.unwrap());
         let mock_factory = Arc::new(MockDapAdapterFactory::new());
 
+        let vfs = Arc::new(detrix_storage::DiskVfs::new()) as detrix_application::VfsRef;
+        let file_source_chain = Arc::new(detrix_application::FileSourceChain::new(
+            Arc::clone(&vfs),
+            vec![],
+            &[],
+        ));
         let context = AppContext::new(
             Arc::clone(&storage) as MetricRepositoryRef,
             Arc::clone(&storage) as EventRepositoryRef,
@@ -346,6 +365,8 @@ mod tests {
             None, // No separate DLQ storage in tests
             None,
             None, // No auth token in tests
+            vfs,
+            file_source_chain,
         );
 
         (context, storage as EventRepositoryRef, temp_dir)

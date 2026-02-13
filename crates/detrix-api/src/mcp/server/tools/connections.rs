@@ -72,13 +72,16 @@ pub async fn create_connection_impl(
     let port = crate::common::validate_port(params.port).mcp_invalid_params("Invalid port")?;
 
     match connection_service
-        .create_connection(
+        .create_connection_with_metadata(
             params.host.clone(),
             port,
             identity,
             params.program,   // Optional program path for Rust direct lldb-dap
             None,             // MCP doesn't use PID-based attach (client library feature)
             params.safe_mode, // SafeMode: only allow logpoints
+            params.control_plane_url,
+            params.build_commit,
+            params.build_tag,
         )
         .await
     {

@@ -214,10 +214,12 @@ pub async fn run(
         &config.adapter,
         &config.anchor,
         &config.limits,
+        &config.vfs,
         gelf_output.clone(),
     );
     let app_context = ctx.app_context;
     let storage = ctx.storage;
+    let bridge_file_source = ctx.bridge_file_source;
 
     // Load metrics from config into database if needed (via MetricService)
     let metrics = app_context
@@ -311,6 +313,7 @@ pub async fn run(
         .mcp_spawned(mcp_spawned)
         .system_event_repository(Arc::clone(&storage) as SystemEventRepositoryRef)
         .mcp_usage_repository(Arc::clone(&storage) as McpUsageRepositoryRef)
+        .bridge_file_source(bridge_file_source)
         .build(),
     );
 

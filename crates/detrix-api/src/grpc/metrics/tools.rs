@@ -57,7 +57,7 @@ pub async fn handle_inspect_file(
     state: &Arc<ApiState>,
     request: Request<InspectFileRequest>,
 ) -> Result<Response<InspectFileResponse>, Status> {
-    use detrix_application::{resolve_file_path, FileInspectionRequest, FileInspectionService};
+    use detrix_application::{resolve_file_path, FileInspectionRequest};
 
     let req = request.into_inner();
 
@@ -68,9 +68,13 @@ pub async fn handle_inspect_file(
     // Resolve relative file path against workspace_root
     let resolved_file = resolve_file_path(&req.file_path, workspace_root.as_deref());
 
-    // Validate resolved file exists
+    // Pre-fetch file into VFS cache (transparent remote file fetching)
+    crate::common::ensure_file_cached(state, req.connection_id.as_deref(), &resolved_file).await;
+
+    // Validate resolved file exists (check VFS cache first, then disk)
+    let exists_in_vfs = state.context.vfs.exists(&resolved_file).unwrap_or(false);
     let path = std::path::Path::new(&resolved_file);
-    if !path.exists() {
+    if !exists_in_vfs && !path.exists() {
         return Err(Status::not_found(format!(
             "File not found: {}",
             resolved_file
@@ -85,9 +89,10 @@ pub async fn handle_inspect_file(
         workspace_root,
     };
 
-    // Use FileInspectionService from application layer
-    let file_inspection = FileInspectionService::new();
-    let (_detected_language, result) = file_inspection
+    // Use FileInspectionService from application layer (shared VFS)
+    let (_detected_language, result) = state
+        .context
+        .file_inspection
         .inspect(inspection_request)
         .map_err(|e| Status::internal(format!("File inspection failed: {}", e)))?;
 

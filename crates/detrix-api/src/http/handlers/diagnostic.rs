@@ -177,7 +177,7 @@ pub async fn inspect_file(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<ProtoInspectFileRequest>,
 ) -> Result<Json<InspectFileResponse>, HttpError> {
-    use detrix_application::{resolve_file_path, FileInspectionRequest, FileInspectionService};
+    use detrix_application::{resolve_file_path, FileInspectionRequest};
 
     info!(
         "REST: inspect_file (file='{}', line={:?}, find_variable={:?})",
@@ -191,6 +191,9 @@ pub async fn inspect_file(
     // Resolve relative file path against workspace_root
     let resolved_file = resolve_file_path(&req.file_path, workspace_root.as_deref());
 
+    // Pre-fetch file into VFS cache (transparent remote file fetching)
+    crate::common::ensure_file_cached(&state, req.connection_id.as_deref(), &resolved_file).await;
+
     // Create inspection request - path validation is done in the service layer
     let inspection_request = FileInspectionRequest {
         file_path: resolved_file.clone(),
@@ -199,9 +202,8 @@ pub async fn inspect_file(
         workspace_root,
     };
 
-    // Use FileInspectionService from application layer
-    // Service validates path (length, null bytes, existence, traversal)
-    let file_inspection = FileInspectionService::new();
+    // Use FileInspectionService from application layer (shared VFS)
+    let file_inspection = &state.context.file_inspection;
     let (language, result) = file_inspection
         .inspect(inspection_request)
         .http_context("File inspection failed")?;

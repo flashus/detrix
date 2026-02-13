@@ -226,6 +226,7 @@ class HttpDaemonClient:
         connection_id: str,
         token: str | None = None,
         timeout: float = 5.0,
+        control_plane_url: str | None = None,
     ) -> str:
         """Register a DAP connection with the daemon.
 
@@ -235,6 +236,7 @@ class HttpDaemonClient:
             connection_id: Unique connection identifier (user-facing name)
             token: Optional authentication token
             timeout: Request timeout in seconds
+            control_plane_url: URL of this client's control plane for file fetching
 
         Raises:
             DaemonError: If daemon is not reachable or registration fails
@@ -256,7 +258,7 @@ class HttpDaemonClient:
         except OSError:
             hostname = "unknown"
 
-        payload = {
+        payload: dict[str, object] = {
             "host": host,
             "port": port,
             "language": "python",
@@ -264,6 +266,27 @@ class HttpDaemonClient:
             "workspaceRoot": workspace_root,
             "hostname": hostname,
         }
+
+        # Include control plane URL so the daemon can fetch files from us
+        if control_plane_url:
+            payload["controlPlaneUrl"] = control_plane_url
+
+        # Auto-detect build commit from CI environment variables
+        build_commit = (
+            os.environ.get("GIT_COMMIT")
+            or os.environ.get("CI_COMMIT_SHA")
+            or os.environ.get("GITHUB_SHA")
+        )
+        if build_commit:
+            payload["buildCommit"] = build_commit
+
+        build_tag = (
+            os.environ.get("GIT_TAG")
+            or os.environ.get("CI_COMMIT_TAG")
+            or os.environ.get("GITHUB_REF_NAME")
+        )
+        if build_tag:
+            payload["buildTag"] = build_tag
 
         headers = {}
         if token:
@@ -357,6 +380,7 @@ def register_connection(
     timeout: float = 5.0,
     verify_ssl: bool = True,
     ca_bundle: str | None = None,
+    control_plane_url: str | None = None,
 ) -> str:
     """Register a DAP connection with the daemon.
 
@@ -371,6 +395,7 @@ def register_connection(
         timeout: Request timeout in seconds
         verify_ssl: Whether to verify SSL certificates (default: True)
         ca_bundle: Path to CA bundle file for SSL verification
+        control_plane_url: URL of this client's control plane for file fetching
 
     Raises:
         DaemonError: If daemon is not reachable or registration fails
@@ -379,7 +404,7 @@ def register_connection(
         Connection ID from daemon response
     """
     with HttpDaemonClient(daemon_url, verify_ssl=verify_ssl, ca_bundle=ca_bundle) as client:
-        return client.register(host, port, connection_id, token, timeout)
+        return client.register(host, port, connection_id, token, timeout, control_plane_url)
 
 
 def unregister_connection(

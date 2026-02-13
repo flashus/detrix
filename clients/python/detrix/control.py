@@ -29,6 +29,9 @@ _logger = logging.getLogger("detrix.control")
 # Maximum request body size (1MB) to prevent DoS via large payloads
 MAX_BODY_SIZE = 1_048_576
 
+# Maximum file size for /detrix/files/read (10MB)
+MAX_FILE_SIZE = 10 * 1024 * 1024
+
 
 class ControlHandler(BaseHTTPRequestHandler):
     """HTTP request handler for client control plane."""
@@ -155,6 +158,8 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._handle_wake()
         elif path == "/detrix/sleep":
             self._handle_sleep()
+        elif path == "/detrix/files/read":
+            self._handle_files_read()
         else:
             self._send_error_response("Not found", 404)
 
@@ -221,6 +226,69 @@ class ControlHandler(BaseHTTPRequestHandler):
         """
         response = do_sleep()
         self._send_json_response(response.model_dump())
+
+    def _handle_files_read(self) -> None:
+        """Handle /detrix/files/read endpoint.
+
+        Reads a file from the local filesystem and returns its content as plain text.
+        Used by the Detrix daemon to transparently fetch source files from the
+        application's control plane in cloud/Docker deployments.
+
+        Request body: {"path": "relative/or/absolute/path"}
+        Response: plain text file content (200), or 404 if not found.
+        """
+        body = self._read_json_body()
+        if not body or "path" not in body:
+            self._send_error_response("Missing 'path' in request body", 400)
+            return
+
+        file_path = body["path"]
+        if not isinstance(file_path, str) or not file_path.strip():
+            self._send_error_response("Invalid 'path' value", 400)
+            return
+
+        # Resolve relative paths against the working directory
+        resolved = Path(file_path)
+        if not resolved.is_absolute():
+            resolved = Path(os.getcwd()) / resolved
+        resolved = resolved.resolve()
+
+        # Security: prevent directory traversal outside workspace
+        workspace = Path(os.getcwd()).resolve()
+        try:
+            resolved.relative_to(workspace)
+        except ValueError:
+            _logger.warning("File read blocked (path escapes workspace): %s", resolved)
+            self._send_error_response("Path not within workspace", 403)
+            return
+
+        if not resolved.is_file():
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        try:
+            size = resolved.stat().st_size
+            if size > MAX_FILE_SIZE:
+                _logger.warning("File too large: %s (%d bytes)", resolved, size)
+                self._send_error_response("File exceeds maximum size", 413)
+                return
+
+            content = resolved.read_text(encoding="utf-8")
+            encoded = content.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+        except PermissionError:
+            self._send_error_response("Permission denied", 403)
+        except UnicodeDecodeError:
+            self._send_error_response("File is not valid UTF-8 text", 400)
+        except Exception as e:
+            _logger.exception("File read failed: %s", resolved)
+            self._send_error_response(f"File read error: {e}", 500)
 
 
 class ControlServer:

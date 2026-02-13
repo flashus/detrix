@@ -59,7 +59,7 @@ pub async fn handle_add_metric(
     let outcome = state
         .context
         .metric_service
-        .add_metric(metric.clone(), replace)
+        .add_metric(metric.clone(), replace, None)
         .await
         .to_status()?;
 

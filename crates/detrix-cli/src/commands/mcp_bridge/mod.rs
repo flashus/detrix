@@ -26,6 +26,7 @@
 mod auth;
 mod bridge;
 mod config;
+mod file_server;
 mod parent_detect;
 
 // Re-exports

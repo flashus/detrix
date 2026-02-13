@@ -28,6 +28,8 @@ pub struct ObserveResult {
     pub line_source: &'static str,
     pub alternatives: Vec<(u32, String)>,
     pub warnings: Vec<String>,
+    /// Source info when file was served from git-pinned commit
+    pub source_info: Option<String>,
 }
 
 impl ObserveResult {
@@ -39,6 +41,10 @@ impl ObserveResult {
              Metric: {} (ID: {})",
             expr_display, self.file, self.line, self.metric_name, self.metric_id.0
         );
+
+        if let Some(ref info) = self.source_info {
+            message.push_str(&format!("\n{}", info));
+        }
 
         if !self.line_content.is_empty() {
             message.push_str(&format!("\nLine: {}", self.line_content.trim()));
@@ -129,6 +135,13 @@ pub async fn observe_impl(
     let workspace_root = connection.valid_workspace_root();
     let file = resolve_file_path(&file, workspace_root);
 
+    // Pre-fetch file into VFS cache (transparent remote file fetching)
+    let _ = state
+        .context
+        .file_source_chain
+        .ensure_available(&connection, &file)
+        .await;
+
     // Use first expression for line-finding and name generation
     let first_expr = expressions[0].clone();
 
@@ -143,6 +156,7 @@ pub async fn observe_impl(
             &first_expr,
             find_variable.as_deref(),
             workspace_root,
+            &state.context.file_inspection,
         )?;
         (l, content, alts, "auto_found")
     };
@@ -171,11 +185,31 @@ pub async fn observe_impl(
     let outcome = state
         .context
         .metric_service
-        .add_metric(metric, false) // Don't replace by default
+        .add_metric(metric, false, None) // Don't replace by default
         .await
         .mcp_context("Failed to add metric")?;
 
     let warnings: Vec<String> = outcome.warnings.iter().map(|w| w.to_string()).collect();
+
+    // Surface source metadata (pinned mode info) when available
+    let source_info = state.context.vfs.get_metadata(&file).and_then(|metadata| {
+        // Only surface when there's meaningful info (commit pinning or drift)
+        if metadata.commit.is_some() || metadata.differs_from_local == Some(true) {
+            let mut info = format!("Source: {}", metadata.source_kind);
+            if let Some(ref commit) = metadata.commit {
+                info.push_str(&format!(
+                    ", pinned to commit {}",
+                    &commit[..commit.len().min(12)]
+                ));
+            }
+            if let Some(true) = metadata.differs_from_local {
+                info.push_str(" (local drift: yes)");
+            }
+            Some(info)
+        } else {
+            None
+        }
+    });
 
     Ok(ObserveResult {
         metric_id: outcome.value,
@@ -188,6 +222,7 @@ pub async fn observe_impl(
         line_source,
         alternatives,
         warnings,
+        source_info,
     })
 }
 
@@ -330,7 +365,7 @@ pub async fn add_metric_impl(
     let outcome = state
         .context
         .metric_service
-        .add_metric(metric, replace_flag)
+        .add_metric(metric, replace_flag, None)
         .await
         .mcp_context("Failed to add metric")?;
 
@@ -530,6 +565,14 @@ pub async fn enable_from_diff_impl(
         }
 
         let resolved_file = resolve_file_path(&parsed.file, workspace_root);
+
+        // Pre-fetch file into VFS cache (transparent remote file fetching)
+        let _ = state
+            .context
+            .file_source_chain
+            .ensure_available(&connection, &resolved_file)
+            .await;
+
         let metric_name =
             helpers::metrics::generate_metric_name(&parsed.expression, &resolved_file, parsed.line);
 
@@ -548,7 +591,7 @@ pub async fn enable_from_diff_impl(
         match state
             .context
             .metric_service
-            .add_metric(metric, true) // Replace existing if any
+            .add_metric(metric, true, None) // Replace existing if any
             .await
         {
             Ok(outcome) => {

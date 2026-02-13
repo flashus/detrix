@@ -29,11 +29,11 @@ use super::paths;
 use super::websocket::websocket_handler;
 use crate::http::handlers::{
     add_metric, cleanup_connections, close_connection, create_connection, delete_metric,
-    disable_group, disable_metric, disconnect_all, enable_group, enable_metric, get_config,
-    get_connection, get_mcp_usage, get_metric, get_metric_history, get_metric_value, health_check,
-    inspect_file, list_connections, list_group_metrics, list_groups, list_metrics,
-    prometheus_metrics, query_events, reload_config, sleep, status, update_config, update_metric,
-    validate_config, validate_expression, wake,
+    disable_group, disable_metric, disconnect_all, enable_group, enable_metric, get_cached_hashes,
+    get_config, get_connection, get_mcp_usage, get_metric, get_metric_history, get_metric_value,
+    health_check, inspect_file, list_connections, list_group_metrics, list_groups, list_metrics,
+    prometheus_metrics, provide_file, query_events, reload_config, sleep, status, update_config,
+    update_metric, validate_cache, validate_config, validate_expression, wake,
 };
 use crate::state::ApiState;
 use axum::{
@@ -42,7 +42,7 @@ use axum::{
     http::Request,
     middleware,
     response::Response,
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 use detrix_application::JwksValidator;
@@ -325,6 +325,10 @@ pub fn create_router_with_jwt_validator(
         // Diagnostic endpoints
         .route(paths::API_V1_VALIDATE_EXPRESSION, post(validate_expression))
         .route(paths::API_V1_INSPECT_FILE, post(inspect_file))
+        // VFS endpoints
+        .route(paths::API_V1_FILES, put(provide_file))
+        .route(paths::API_V1_CACHE_VALIDATE, post(validate_cache))
+        .route(paths::API_V1_CACHE_HASHES, get(get_cached_hashes))
         // MCP usage statistics
         .route(paths::API_V1_MCP_USAGE, get(get_mcp_usage))
         // WebSocket endpoint for real-time events

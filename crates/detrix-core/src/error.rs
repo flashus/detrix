@@ -492,6 +492,10 @@ pub enum Error {
     #[error("Output error: {0}")]
     Output(String),
 
+    // File system errors
+    #[error("File not found: {0}")]
+    FileNotFound(String),
+
     // Remote app control errors (wake/sleep proxy)
     #[error("Remote app error: {0}")]
     RemoteApp(String),
@@ -522,8 +526,9 @@ impl Error {
             // Config errors (3xxx)
             Error::InvalidConfig(_) => ErrorCode::ConfigInvalid,
 
-            // Connection errors (4xxx)
+            // Connection/File errors (4xxx)
             Error::NotConnected(_) => ErrorCode::ConnectionNotConnected,
+            Error::FileNotFound(_) => ErrorCode::FileNotFound,
 
             // Infrastructure errors (5xxx)
             Error::Database(_) => ErrorCode::DatabaseError,

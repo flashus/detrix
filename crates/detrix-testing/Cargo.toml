@@ -38,6 +38,9 @@ tonic.workspace = true
 # Directory utilities (home dir expansion)
 dirs = "6"
 
+# Hashing (for MockVfs)
+sha2.workspace = true
+
 # Logging
 tracing.workspace = true
 

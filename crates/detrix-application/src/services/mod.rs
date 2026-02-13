@@ -13,6 +13,7 @@ pub mod environment_service;
 pub mod event_capture_service;
 pub mod file_inspection_service;
 pub mod file_inspection_types;
+pub mod file_source_chain;
 pub mod file_watcher_service;
 pub mod jwt_validator;
 pub mod mcp_usage_service;
@@ -39,6 +40,7 @@ pub use file_inspection_types::{
     LanguageCapabilities, LineInspectionResult, SourceLanguage, TextSearchMatch,
     VariableDefinition, VariableSearchResult,
 };
+pub use file_source_chain::FileSourceChain;
 pub use file_watcher_service::{FileWatcherOrchestrator, NotifyFileWatcher};
 pub use metric_service::{FileChangeResult, MetricService, MetricServiceBuilder};
 pub use streaming_service::{

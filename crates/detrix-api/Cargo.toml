@@ -18,6 +18,7 @@ detrix-application = { path = "../detrix-application" }
 tokio.workspace = true
 futures.workspace = true
 async-stream.workspace = true
+async-trait.workspace = true
 
 # gRPC
 tonic.workspace = true
@@ -60,6 +61,7 @@ sysinfo.workspace = true
 regex.workspace = true
 paste.workspace = true
 hostname = "0.4"  # Get machine hostname for connection identity
+sha2.workspace = true  # For VFS file content hashing
 
 # Unix-specific for process info
 [target.'cfg(unix)'.dependencies]
@@ -100,6 +102,10 @@ path = "tests/grpc_e2e.rs"
 [[test]]
 name = "mcp_e2e"
 path = "tests/mcp_e2e_tests.rs"
+
+[[test]]
+name = "vfs_e2e"
+path = "tests/vfs_e2e_tests.rs"
 
 # Note: Real E2E tests in detrix-testing crate
 # - mcp_real_dap_e2e.rs → detrix-testing/tests/mcp_e2e.rs

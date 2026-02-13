@@ -7,13 +7,13 @@
 //! - Is protocol-agnostic (no knowledge of gRPC, REST, MCP, etc.)
 
 use crate::services::AdapterLifecycleManager;
-use crate::{ConnectionRepositoryRef, MetricRepositoryRef};
+use crate::{ConnectionRepositoryRef, MetricRepositoryRef, VfsRef};
 use detrix_core::{
     Connection, ConnectionId, ConnectionIdentity, ConnectionStatus, Result, SystemEvent,
 };
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument};
 
 /// Service for managing debugger connections
 ///
@@ -36,6 +36,9 @@ pub struct ConnectionService {
 
     /// System event broadcast channel for connection events
     system_event_tx: broadcast::Sender<SystemEvent>,
+
+    /// Virtual file system for caching remote files
+    vfs: VfsRef,
 }
 
 impl ConnectionService {
@@ -46,17 +49,20 @@ impl ConnectionService {
     /// * `metric_repo` - Repository for metric persistence (for cascade delete)
     /// * `adapter_lifecycle_manager` - Manager for DAP adapter lifecycle
     /// * `system_event_tx` - Broadcast channel for system events
+    /// * `vfs` - Virtual file system for caching remote files
     pub fn new(
         connection_repo: ConnectionRepositoryRef,
         metric_repo: MetricRepositoryRef,
         adapter_lifecycle_manager: Arc<AdapterLifecycleManager>,
         system_event_tx: broadcast::Sender<SystemEvent>,
+        vfs: VfsRef,
     ) -> Self {
         Self {
             connection_repo,
             metric_repo,
             adapter_lifecycle_manager,
             system_event_tx,
+            vfs,
         }
     }
 
@@ -97,9 +103,38 @@ impl ConnectionService {
         pid: Option<u32>,
         safe_mode: bool,
     ) -> Result<ConnectionId> {
+        self.create_connection_with_metadata(
+            host, port, identity, program, pid, safe_mode, None, None, None,
+        )
+        .await
+    }
+
+    /// Create a new connection with optional cloud metadata
+    ///
+    /// Extended version of `create_connection` that also accepts:
+    /// * `control_plane_url` - App control plane URL for transparent file fetching
+    /// * `build_commit` - Git commit SHA at build time
+    /// * `build_tag` - Build version tag
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip(self), fields(host = %host, port = port, name = %identity.name, language = %identity.language, workspace_root = %identity.workspace_root, hostname = %identity.hostname, pid = ?pid, safe_mode = safe_mode))]
+    pub async fn create_connection_with_metadata(
+        &self,
+        host: String,
+        port: u16,
+        identity: ConnectionIdentity,
+        program: Option<String>,
+        pid: Option<u32>,
+        safe_mode: bool,
+        control_plane_url: Option<String>,
+        build_commit: Option<String>,
+        build_tag: Option<String>,
+    ) -> Result<ConnectionId> {
         // 1. Create Connection entity from identity (validates identity, host, port, language + generates UUID)
         let mut connection = Connection::new_with_identity(identity, host, port)?;
         connection.safe_mode = safe_mode;
+        connection.control_plane_url = control_plane_url;
+        connection.build_commit = build_commit;
+        connection.build_tag = build_tag;
         let connection_id = connection.id.clone();
 
         // 2. Check if connection with same UUID already exists and is connected
@@ -179,12 +214,16 @@ impl ConnectionService {
         // 1. Stop adapter via lifecycle manager
         self.adapter_lifecycle_manager.stop_adapter(id).await?;
 
-        // 2. Update status to Disconnected
+        // 2. Mark VFS entries as stale (don't clear - connection may reconnect)
+        self.vfs.mark_stale(&id.0);
+        debug!("VFS entries marked stale for connection {}", id.0);
+
+        // 3. Update status to Disconnected
         self.connection_repo
             .update_status(id, ConnectionStatus::Disconnected)
             .await?;
 
-        // 3. Emit connection closed event
+        // 4. Emit connection closed event
         let event = SystemEvent::connection_closed(id.clone());
         let _ = self.system_event_tx.send(event);
 
@@ -212,7 +251,11 @@ impl ConnectionService {
         // 1. Stop adapter via lifecycle manager (ignore error if not running)
         let _ = self.adapter_lifecycle_manager.stop_adapter(id).await;
 
-        // 2. Delete all associated metrics (cascade delete)
+        // 2. Clear VFS cache for this connection (permanent deletion)
+        self.vfs.clear_connection(&id.0);
+        debug!("VFS cache cleared for connection {}", id.0);
+
+        // 3. Delete all associated metrics (cascade delete)
         let deleted_metrics = self.metric_repo.delete_by_connection_id(id).await?;
         if deleted_metrics > 0 {
             info!(
@@ -221,10 +264,10 @@ impl ConnectionService {
             );
         }
 
-        // 3. Delete connection from repository
+        // 4. Delete connection from repository
         self.connection_repo.delete(id).await?;
 
-        // 4. Emit connection closed event
+        // 5. Emit connection closed event
         let event = SystemEvent::connection_closed(id.clone());
         let _ = self.system_event_tx.send(event);
 

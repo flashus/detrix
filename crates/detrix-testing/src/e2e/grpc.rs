@@ -354,6 +354,9 @@ impl ApiClient for GrpcClient {
                 program: program.map(|s| s.to_string()), // Optional program path for launch mode (Rust direct lldb-dap)
                 safe_mode: false,                        // Default to false for tests
                 pid: None,                               // Tests don't use AttachPid mode
+                control_plane_url: None,
+                build_commit: None,
+                build_tag: None,
             })
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?
@@ -479,6 +482,7 @@ impl ApiClient for GrpcClient {
                 capture_memory_snapshot: request.capture_memory_snapshot,
                 snapshot_scope: request.snapshot_scope.clone(),
                 snapshot_ttl: request.snapshot_ttl,
+                file_content: None,
             })
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?
@@ -794,6 +798,7 @@ impl ApiClient for GrpcClient {
                 find_variable: find_variable.map(|s| s.to_string()),
                 metadata: None,
                 connection_id: None,
+                file_content: None,
             })
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?

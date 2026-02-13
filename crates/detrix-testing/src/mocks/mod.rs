@@ -18,11 +18,13 @@
 //! - [`MockDlqRepository`] - In-memory dead-letter queue storage
 
 mod adapters;
+mod file_system;
 mod repositories;
 
 pub use adapters::{
     MockDapAdapter, MockDapAdapterFactory, MockRemoteAppControl, StatefulMockDapAdapter,
 };
+pub use file_system::MockVfs;
 pub use repositories::{
     MockConnectionRepository, MockDlqRepository, MockEventRepository, MockMetricRepository,
     MockSystemEventRepository,

@@ -15,8 +15,10 @@ mod tests {
         ConnectionId, Location, Metric, MetricEvent, MetricId, MetricMode, SafetyLevel,
         SourceLanguage, SystemEvent,
     };
-    use detrix_ports::ConnectionRepository;
-    use detrix_testing::{MockConnectionRepository, MockEventRepository, MockMetricRepository};
+    use detrix_ports::{ConnectionRepository, VfsRef};
+    use detrix_testing::{
+        MockConnectionRepository, MockEventRepository, MockMetricRepository, MockVfs,
+    };
     use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -300,6 +302,7 @@ mod tests {
         let factory = Arc::new(MockAdapterFactory) as DapAdapterFactoryRef;
         let metric_repo = Arc::new(MockMetricRepository::new()) as MetricRepositoryRef;
         let connection_repo = Arc::new(MockConnectionRepository::new()) as ConnectionRepositoryRef;
+        let vfs: VfsRef = Arc::new(MockVfs::new());
 
         Arc::new(AdapterLifecycleManager::new(
             event_capture,
@@ -308,6 +311,7 @@ mod tests {
             factory,
             metric_repo,
             connection_repo,
+            vfs,
         ))
     }
 
@@ -324,6 +328,7 @@ mod tests {
             Arc::new(FailingMockAdapterFactory::new(failing_adapter)) as DapAdapterFactoryRef;
         let metric_repo = Arc::new(MockMetricRepository::new()) as MetricRepositoryRef;
         let connection_repo = Arc::new(MockConnectionRepository::new()) as ConnectionRepositoryRef;
+        let vfs: VfsRef = Arc::new(MockVfs::new());
 
         Arc::new(AdapterLifecycleManager::new(
             event_capture,
@@ -332,6 +337,7 @@ mod tests {
             factory,
             metric_repo,
             connection_repo,
+            vfs,
         ))
     }
 
@@ -437,7 +443,7 @@ mod tests {
         let metric = create_test_metric("test_metric_1");
 
         let metric_id = service
-            .add_metric(metric.clone(), false)
+            .add_metric(metric.clone(), false, None)
             .await
             .unwrap()
             .value;
@@ -456,7 +462,7 @@ mod tests {
         let metric = create_test_metric("unique_metric");
 
         service
-            .add_metric(metric.clone(), false)
+            .add_metric(metric.clone(), false, None)
             .await
             .unwrap()
             .value;
@@ -472,15 +478,15 @@ mod tests {
 
         // Add multiple metrics at different lines (DAP only supports one logpoint per line)
         service
-            .add_metric(create_test_metric_at_line("metric1", 10), false)
+            .add_metric(create_test_metric_at_line("metric1", 10), false, None)
             .await
             .unwrap();
         service
-            .add_metric(create_test_metric_at_line("metric2", 20), false)
+            .add_metric(create_test_metric_at_line("metric2", 20), false, None)
             .await
             .unwrap();
         service
-            .add_metric(create_test_metric_at_line("metric3", 30), false)
+            .add_metric(create_test_metric_at_line("metric3", 30), false, None)
             .await
             .unwrap();
 
@@ -514,9 +520,21 @@ mod tests {
         let mut metric3 = create_test_metric_at_line("metric3", 30);
         metric3.group = Some("group_a".to_string());
 
-        service.add_metric(metric1, false).await.unwrap().value;
-        service.add_metric(metric2, false).await.unwrap().value;
-        service.add_metric(metric3, false).await.unwrap().value;
+        service
+            .add_metric(metric1, false, None)
+            .await
+            .unwrap()
+            .value;
+        service
+            .add_metric(metric2, false, None)
+            .await
+            .unwrap()
+            .value;
+        service
+            .add_metric(metric3, false, None)
+            .await
+            .unwrap()
+            .value;
 
         let group_a_metrics = service.list_metrics_by_group("group_a").await.unwrap();
         assert_eq!(group_a_metrics.len(), 2);
@@ -531,7 +549,7 @@ mod tests {
         let mut metric = create_test_metric("test_update");
 
         let metric_id = service
-            .add_metric(metric.clone(), false)
+            .add_metric(metric.clone(), false, None)
             .await
             .unwrap()
             .value;
@@ -554,7 +572,7 @@ mod tests {
         let service = create_test_service().await;
         let metric = create_test_metric("test_remove");
 
-        let metric_id = service.add_metric(metric, false).await.unwrap().value;
+        let metric_id = service.add_metric(metric, false, None).await.unwrap().value;
 
         // Verify it exists
         assert!(service.get_metric(metric_id).await.unwrap().is_some());
@@ -571,7 +589,7 @@ mod tests {
         let service = create_test_service().await;
         let metric = create_test_metric("test_toggle");
 
-        let metric_id = service.add_metric(metric, false).await.unwrap().value;
+        let metric_id = service.add_metric(metric, false, None).await.unwrap().value;
 
         // Initially enabled
         let retrieved = service.get_metric(metric_id).await.unwrap().unwrap();
@@ -601,8 +619,16 @@ mod tests {
         metric2.group = Some("test_group".to_string());
         metric2.enabled = false;
 
-        service.add_metric(metric1, false).await.unwrap().value;
-        service.add_metric(metric2, false).await.unwrap().value;
+        service
+            .add_metric(metric1, false, None)
+            .await
+            .unwrap()
+            .value;
+        service
+            .add_metric(metric2, false, None)
+            .await
+            .unwrap()
+            .value;
 
         let result = service.enable_group("test_group").await.unwrap();
         assert_eq!(result.succeeded, 2);
@@ -626,8 +652,16 @@ mod tests {
         metric2.group = Some("test_group".to_string());
         metric2.enabled = true;
 
-        service.add_metric(metric1, false).await.unwrap().value;
-        service.add_metric(metric2, false).await.unwrap().value;
+        service
+            .add_metric(metric1, false, None)
+            .await
+            .unwrap()
+            .value;
+        service
+            .add_metric(metric2, false, None)
+            .await
+            .unwrap()
+            .value;
 
         let result = service.disable_group("test_group").await.unwrap();
         assert_eq!(result.succeeded, 2);
@@ -666,9 +700,21 @@ mod tests {
         metric3.enabled = false;
 
         // Add metrics (disabled, so adapter won't be called yet)
-        service.add_metric(metric1, false).await.unwrap().value;
-        service.add_metric(metric2, false).await.unwrap().value;
-        service.add_metric(metric3, false).await.unwrap().value;
+        service
+            .add_metric(metric1, false, None)
+            .await
+            .unwrap()
+            .value;
+        service
+            .add_metric(metric2, false, None)
+            .await
+            .unwrap()
+            .value;
+        service
+            .add_metric(metric3, false, None)
+            .await
+            .unwrap()
+            .value;
 
         // Configure adapter to fail on "metric_fail"
         adapter.fail_on_set_metric("metric_fail").await;
@@ -725,9 +771,21 @@ mod tests {
         metric3.enabled = true;
 
         // Add metrics (enabled, adapter will be called)
-        service.add_metric(metric1, false).await.unwrap().value;
-        service.add_metric(metric2, false).await.unwrap().value;
-        service.add_metric(metric3, false).await.unwrap().value;
+        service
+            .add_metric(metric1, false, None)
+            .await
+            .unwrap()
+            .value;
+        service
+            .add_metric(metric2, false, None)
+            .await
+            .unwrap()
+            .value;
+        service
+            .add_metric(metric3, false, None)
+            .await
+            .unwrap()
+            .value;
 
         // Configure adapter to fail on remove for "metric_fail"
         adapter.fail_on_remove_metric("metric_fail").await;
@@ -772,8 +830,16 @@ mod tests {
         metric2.group = Some("test".to_string());
         metric2.enabled = false;
 
-        service.add_metric(metric1, false).await.unwrap().value;
-        service.add_metric(metric2, false).await.unwrap().value;
+        service
+            .add_metric(metric1, false, None)
+            .await
+            .unwrap()
+            .value;
+        service
+            .add_metric(metric2, false, None)
+            .await
+            .unwrap()
+            .value;
 
         adapter.fail_on_set_metric("fail_metric").await;
 
@@ -811,7 +877,7 @@ mod tests {
 
         // Try to add an enabled metric - should fail
         let metric = create_test_metric("test_metric");
-        let result = service.add_metric(metric, false).await;
+        let result = service.add_metric(metric, false, None).await;
 
         assert!(result.is_err(), "Should fail when adapter is disconnected");
 
@@ -831,7 +897,7 @@ mod tests {
         let mut metric = create_test_metric("disabled_metric");
         metric.enabled = false;
 
-        let result = service.add_metric(metric, false).await;
+        let result = service.add_metric(metric, false, None).await;
         assert!(
             result.is_ok(),
             "Disabled metric should be added even with disconnected adapter"
@@ -849,7 +915,7 @@ mod tests {
         // Add a disabled metric first (adapter not called)
         let mut metric = create_test_metric("test_metric");
         metric.enabled = false;
-        let metric_id = service.add_metric(metric, false).await.unwrap().value;
+        let metric_id = service.add_metric(metric, false, None).await.unwrap().value;
 
         // Disconnect adapter
         adapter.set_disconnected(true).await;
@@ -876,8 +942,16 @@ mod tests {
         metric2.group = Some("test".to_string());
         metric2.enabled = false;
 
-        service.add_metric(metric1, false).await.unwrap().value;
-        service.add_metric(metric2, false).await.unwrap().value;
+        service
+            .add_metric(metric1, false, None)
+            .await
+            .unwrap()
+            .value;
+        service
+            .add_metric(metric2, false, None)
+            .await
+            .unwrap()
+            .value;
 
         // Disconnect adapter
         adapter.set_disconnected(true).await;
@@ -903,7 +977,7 @@ mod tests {
 
         // Add an enabled metric
         let metric = create_test_metric("test_metric");
-        let metric_id = service.add_metric(metric, false).await.unwrap().value;
+        let metric_id = service.add_metric(metric, false, None).await.unwrap().value;
 
         // Disconnect adapter
         adapter.set_disconnected(true).await;
@@ -996,7 +1070,7 @@ mod tests {
         let mut metric = create_safe_mode_test_metric("stack_trace_metric");
         metric.capture_stack_trace = true;
 
-        let result = service.add_metric(metric, false).await;
+        let result = service.add_metric(metric, false, None).await;
 
         assert!(
             result.is_err(),
@@ -1023,7 +1097,7 @@ mod tests {
         metric.location.line = 31; // Different line to avoid conflict
         metric.capture_memory_snapshot = true;
 
-        let result = service.add_metric(metric, false).await;
+        let result = service.add_metric(metric, false, None).await;
 
         assert!(
             result.is_err(),
@@ -1051,7 +1125,7 @@ mod tests {
         metric.capture_stack_trace = true;
         metric.capture_memory_snapshot = true;
 
-        let result = service.add_metric(metric, false).await;
+        let result = service.add_metric(metric, false, None).await;
 
         assert!(
             result.is_err(),
@@ -1078,7 +1152,7 @@ mod tests {
         // Basic metric without introspection features
         let metric = create_safe_mode_test_metric("basic_logpoint");
 
-        let result = service.add_metric(metric, false).await;
+        let result = service.add_metric(metric, false, None).await;
 
         assert!(
             result.is_ok(),
@@ -1093,7 +1167,10 @@ mod tests {
 
         // First add a basic metric (should succeed)
         let metric = create_safe_mode_test_metric("update_test_metric");
-        let outcome = service.add_metric(metric.clone(), false).await.unwrap();
+        let outcome = service
+            .add_metric(metric.clone(), false, None)
+            .await
+            .unwrap();
         let metric_id = outcome.value;
 
         // Now try to update it to enable capture_stack_trace
@@ -1124,7 +1201,7 @@ mod tests {
         metric.capture_stack_trace = true;
         metric.capture_memory_snapshot = true;
 
-        let result = service.add_metric(metric, false).await;
+        let result = service.add_metric(metric, false, None).await;
 
         assert!(
             result.is_ok(),

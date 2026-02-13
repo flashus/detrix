@@ -157,6 +157,12 @@ impl E2ETestServer {
         let adapter_factory = Arc::new(DapAdapterFactoryImpl::new(temp_dir.path()));
 
         // Create application context with connection-based architecture
+        let vfs = Arc::new(detrix_storage::DiskVfs::new()) as detrix_application::VfsRef;
+        let file_source_chain = Arc::new(detrix_application::FileSourceChain::new(
+            Arc::clone(&vfs),
+            vec![],
+            &[],
+        ));
         let context = AppContext::new(
             Arc::clone(&storage) as MetricRepositoryRef,
             Arc::clone(&storage) as EventRepositoryRef,
@@ -173,6 +179,8 @@ impl E2ETestServer {
             None, // No separate DLQ storage in tests
             None,
             None, // No auth token in tests
+            vfs,
+            file_source_chain,
         );
 
         // Connect to debugpy using ConnectionService

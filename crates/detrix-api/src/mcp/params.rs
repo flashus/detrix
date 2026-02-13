@@ -317,6 +317,15 @@ pub struct CreateConnectionParams {
         description = "SafeMode: Only allow logpoints (non-blocking), disable breakpoint-based operations like function calls, stack traces, memory snapshots. Recommended for production environments."
     )]
     pub safe_mode: bool,
+
+    #[schemars(
+        description = "Control plane URL for the application (e.g., 'http://my-app:8091'). Used for transparent file fetching in cloud/Docker deployments."
+    )]
+    pub control_plane_url: Option<String>,
+    #[schemars(description = "Git commit SHA at build time. Used for file content verification.")]
+    pub build_commit: Option<String>,
+    #[schemars(description = "Build version tag (e.g., 'v1.2.3'). Informational metadata.")]
+    pub build_tag: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -472,3 +481,51 @@ pub struct AcknowledgeEventsParams {
     description = "Disconnect all local debugger adapters. Stops all active debug sessions. Metrics remain configured and will be re-enabled when connections are re-established."
 )]
 pub struct DisconnectAllParams {}
+
+// ============================================================================
+// VFS (Virtual File System) Parameter Types
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "Parameters for providing file content to cache in the Virtual File System. Use in cloud/Docker deployments where the server has no direct access to source files."
+)]
+pub struct ProvideFileParams {
+    #[schemars(description = "Connection ID (UUID) for scoping the cached file")]
+    pub connection_id: String,
+
+    #[schemars(description = "File path (absolute or relative to workspace root)")]
+    pub path: String,
+
+    #[schemars(description = "File content to cache (plain text)")]
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "File hash entry for cache validation")]
+pub struct FileHash {
+    #[schemars(description = "File path")]
+    pub path: String,
+
+    #[schemars(description = "SHA-256 hash of file content")]
+    pub hash: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "Parameters for validating cache hashes. Server compares client hashes with cached content and evicts mismatched files."
+)]
+pub struct ValidateCacheParams {
+    #[schemars(description = "Connection ID to validate cache for")]
+    pub connection_id: String,
+
+    #[schemars(description = "List of file hashes from the client")]
+    pub files: Vec<FileHash>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "Parameters for getting all cached file hashes for a connection")]
+pub struct GetCachedFilesParams {
+    #[schemars(description = "Connection ID to get cached files for")]
+    pub connection_id: String,
+}

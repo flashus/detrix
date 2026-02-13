@@ -56,6 +56,9 @@ pub mod supervisor;
 // MCP client tracking for daemon lifecycle
 pub mod mcp_client_tracker;
 
+// Pluggable file source implementations (control_plane, bridge, disk, git)
+pub mod file_sources;
+
 // Remote app control (HTTP implementation of RemoteAppControl port)
 pub mod remote_app_control;
 

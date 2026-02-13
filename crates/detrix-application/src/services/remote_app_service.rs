@@ -107,11 +107,11 @@ mod tests {
     use detrix_core::{MetricEvent, SystemEvent};
     use detrix_ports::{
         DapAdapterFactoryRef, MetricRepositoryRef, RemoteAppControl, RemoteSleepResponse,
-        RemoteWakeResponse,
+        RemoteWakeResponse, VfsRef,
     };
     use detrix_testing::{
         MockConnectionRepository, MockDapAdapterFactory, MockEventRepository, MockMetricRepository,
-        MockRemoteAppControl,
+        MockRemoteAppControl, MockVfs,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::broadcast;
@@ -130,6 +130,7 @@ mod tests {
         ));
         let (event_tx, _) = broadcast::channel::<MetricEvent>(16);
         let (system_event_tx, _) = broadcast::channel::<SystemEvent>(16);
+        let vfs: VfsRef = Arc::new(MockVfs::new());
 
         let adapter_lifecycle = Arc::new(AdapterLifecycleManager::with_config(
             event_capture,
@@ -142,6 +143,7 @@ mod tests {
             Default::default(),
             DaemonConfig::default().drain_timeout_ms,
             None,
+            vfs.clone(),
         ));
 
         let connection_service = Arc::new(ConnectionService::new(
@@ -149,6 +151,7 @@ mod tests {
             metric_repo as MetricRepositoryRef,
             adapter_lifecycle,
             system_event_tx,
+            vfs,
         ));
 
         RemoteAppService::new(

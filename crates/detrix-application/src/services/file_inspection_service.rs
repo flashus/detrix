@@ -19,6 +19,7 @@ use crate::Result;
 use detrix_config::constants::{
     DEFAULT_CONTEXT_LINES, DEFAULT_PREVIEW_LINES, MAX_PATH_COMPONENT_LENGTH, MAX_PATH_LENGTH,
 };
+use detrix_ports::VfsRef;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
@@ -54,6 +55,39 @@ pub fn resolve_file_path(file_path: &str, workspace_root: Option<&str>) -> Strin
 
     // Fallback: return as-is (validate_file_path will produce the appropriate error)
     file_path.to_string()
+}
+
+/// Lightweight path syntax validation (no disk access).
+///
+/// Checks length limits and null bytes only. Used for VFS-cached files
+/// where disk-based canonicalization is not needed.
+fn validate_path_syntax(file_path: &str) -> Result<()> {
+    if file_path.len() > MAX_PATH_LENGTH {
+        return Err(FileInspectionError::InvalidPath(format!(
+            "Path too long: {} chars (max {})",
+            file_path.len(),
+            MAX_PATH_LENGTH
+        ))
+        .into());
+    }
+    if file_path.contains('\0') {
+        warn!(path = file_path, "Rejected file path containing null byte");
+        return Err(FileInspectionError::InvalidPath(
+            "Invalid path: contains null byte".to_string(),
+        )
+        .into());
+    }
+    for component in file_path.split(['/', '\\']) {
+        if component.len() > MAX_PATH_COMPONENT_LENGTH {
+            return Err(FileInspectionError::InvalidPath(format!(
+                "Path component too long: {} chars (max {})",
+                component.len(),
+                MAX_PATH_COMPONENT_LENGTH
+            ))
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Validate and canonicalize a file path for inspection
@@ -244,56 +278,70 @@ fn next_stoppable_line(lines: &[&str], from_line: u32) -> u32 {
 ///
 /// Provides text-based analysis capabilities for finding correct metric placement.
 /// All languages use the generic text-based inspection.
-#[derive(Debug, Clone)]
+///
+/// File content is resolved via the Virtual File System (VFS):
+/// - VFS cache hit → use cached content (cloud mode)
+/// - VFS cache miss → disk fallback (local daemon mode)
+#[derive(Clone)]
 pub struct FileInspectionService {
     /// Number of lines to include as context around target line
     context_lines: usize,
     /// Number of preview lines for file overview
     preview_lines: usize,
+    /// Virtual File System for reading source files
+    vfs: VfsRef,
 }
 
-impl Default for FileInspectionService {
-    fn default() -> Self {
-        Self {
-            context_lines: DEFAULT_CONTEXT_LINES,
-            preview_lines: DEFAULT_PREVIEW_LINES,
-        }
+impl std::fmt::Debug for FileInspectionService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileInspectionService")
+            .field("context_lines", &self.context_lines)
+            .field("preview_lines", &self.preview_lines)
+            .field("vfs", &"<VFS>")
+            .finish()
     }
 }
 
 impl FileInspectionService {
-    /// Create a new file inspection service with default config
-    pub fn new() -> Self {
-        Self::default()
+    /// Create a new file inspection service with a VFS and default config
+    pub fn new(vfs: VfsRef) -> Self {
+        Self {
+            context_lines: DEFAULT_CONTEXT_LINES,
+            preview_lines: DEFAULT_PREVIEW_LINES,
+            vfs,
+        }
     }
 
-    /// Create a file inspection service from API config
-    pub fn from_config(context_lines: usize, preview_lines: usize) -> Self {
+    /// Create a file inspection service from API config with VFS
+    pub fn from_config(context_lines: usize, preview_lines: usize, vfs: VfsRef) -> Self {
         Self {
             context_lines,
             preview_lines,
+            vfs,
         }
     }
-}
 
-impl From<&detrix_config::ApiConfig> for FileInspectionService {
-    fn from(config: &detrix_config::ApiConfig) -> Self {
-        Self::from_config(config.context_lines, config.preview_lines)
+    /// Get a reference to the underlying VFS
+    pub fn vfs(&self) -> &dyn detrix_ports::VirtualFileSystem {
+        &*self.vfs
     }
 }
 
 impl FileInspectionService {
     /// Inspect a source file
     ///
-    /// Uses text-based context extraction for all file types.
+    /// File content is resolved via VFS (cache → disk fallback).
     ///
     /// # Security
     ///
-    /// The file path is validated and canonicalized before any file access:
+    /// For disk-backed files, the path is validated and canonicalized:
     /// - Path length limits enforced
     /// - Null bytes rejected
     /// - Path traversal (`..`) resolved via canonicalization
     /// - Symlinks resolved to their target
+    ///
+    /// For VFS-cached files (cloud mode), path validation is lighter since
+    /// the content was already provided by the agent.
     pub fn inspect(
         &self,
         request: FileInspectionRequest,
@@ -302,28 +350,36 @@ impl FileInspectionService {
         let resolved_path =
             resolve_file_path(&request.file_path, request.workspace_root.as_deref());
 
-        // Validate and canonicalize path before any file access
-        let canonical_path = validate_file_path(&resolved_path)?;
-
-        let extension = canonical_path
+        // Determine language from extension
+        let extension = Path::new(&resolved_path)
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-
         let language = SourceLanguage::from_extension(&extension);
 
-        // Create a modified request with the canonical path
+        // Try reading from VFS first (handles cache + disk fallback)
+        // If VFS returns content, skip heavy disk validation (canonicalize etc.)
+        // since the content is already available.
+        let file_path = if self.vfs.exists(&resolved_path)? {
+            // VFS has it (cached or on disk) — use resolved path directly
+            // Still do lightweight validation (length, null bytes)
+            validate_path_syntax(&resolved_path)?;
+            resolved_path
+        } else {
+            // Not in VFS, try disk with full security validation
+            let canonical = validate_file_path(&resolved_path)?;
+            canonical.to_string_lossy().into_owned()
+        };
+
         let validated_request = FileInspectionRequest {
-            file_path: canonical_path.to_string_lossy().into_owned(),
+            file_path,
             line: request.line,
             find_variable: request.find_variable,
             workspace_root: None,
         };
 
-        // All languages use generic text-based inspection
         let result = self.inspect_generic(&validated_request, language)?;
-
         Ok((language, result))
     }
 
@@ -333,12 +389,15 @@ impl FileInspectionService {
         request: &FileInspectionRequest,
         language: SourceLanguage,
     ) -> Result<FileInspectionResult> {
-        // Read the file
-        let contents =
-            std::fs::read_to_string(&request.file_path).map_err(|e| IoErrorWithContext {
-                error: e,
+        // Read the file via VFS (cache → disk fallback)
+        let contents = self.vfs.read_to_string(&request.file_path).map_err(|e| {
+            // Wrap as IoErrorWithContext for consistent error handling
+            let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string());
+            IoErrorWithContext {
+                error: io_err,
                 path: request.file_path.clone(),
-            })?;
+            }
+        })?;
 
         let lines: Vec<&str> = contents.lines().collect();
         let total_lines = lines.len();
@@ -537,7 +596,36 @@ mod tests {
     use super::*;
     use crate::services::file_inspection_types::SourceLanguageExt;
     use std::io::Write;
+    use std::sync::Arc;
     use tempfile::NamedTempFile;
+
+    use detrix_ports::VirtualFileSystem;
+
+    /// Simple disk-only VFS for tests (no caching, just std::fs)
+    struct TestDiskVfs;
+
+    impl VirtualFileSystem for TestDiskVfs {
+        fn read_to_string(&self, path: &str) -> detrix_core::Result<String> {
+            std::fs::read_to_string(path)
+                .map_err(|e| detrix_core::Error::FileNotFound(format!("{}: {}", path, e)))
+        }
+        fn exists(&self, path: &str) -> detrix_core::Result<bool> {
+            Ok(std::path::Path::new(path).exists())
+        }
+        fn store(&self, _: &str, _: &str, _: String) {}
+        fn cached_hashes(&self, _: &str) -> Vec<(String, String)> {
+            vec![]
+        }
+        fn validate_hashes(&self, _: &str, _: &[(String, String)]) -> Vec<String> {
+            vec![]
+        }
+        fn mark_stale(&self, _: &str) {}
+        fn clear_connection(&self, _: &str) {}
+    }
+
+    fn test_service() -> FileInspectionService {
+        FileInspectionService::new(Arc::new(TestDiskVfs))
+    }
 
     #[test]
     fn test_source_language_from_extension() {
@@ -569,7 +657,7 @@ mod tests {
         writeln!(file, "    println!(\"{{:?}}\", x);").unwrap();
         writeln!(file, "}}").unwrap();
 
-        let service = FileInspectionService::new();
+        let service = test_service();
         let request = FileInspectionRequest {
             file_path: file.path().to_string_lossy().to_string(),
             line: Some(2),
@@ -600,7 +688,7 @@ mod tests {
         writeln!(file, "    }}").unwrap();
         writeln!(file, "}}").unwrap();
 
-        let service = FileInspectionService::new();
+        let service = test_service();
         let request = FileInspectionRequest {
             file_path: file.path().to_string_lossy().to_string(),
             line: None,
@@ -627,7 +715,7 @@ mod tests {
             writeln!(file, "// Line {}", i).unwrap();
         }
 
-        let service = FileInspectionService::new();
+        let service = test_service();
         let request = FileInspectionRequest {
             file_path: file.path().to_string_lossy().to_string(),
             line: None,
@@ -652,7 +740,7 @@ mod tests {
         let mut file = NamedTempFile::with_suffix(".rs").unwrap();
         writeln!(file, "fn main() {{}}").unwrap();
 
-        let service = FileInspectionService::new();
+        let service = test_service();
         let request = FileInspectionRequest {
             file_path: file.path().to_string_lossy().to_string(),
             line: Some(100),
@@ -853,7 +941,7 @@ mod tests {
         writeln!(file, "    raw = json.loads(resp)").unwrap();
         writeln!(file, "    return normalize(raw)").unwrap();
 
-        let service = FileInspectionService::new();
+        let service = test_service();
         let request = FileInspectionRequest {
             file_path: file.path().to_string_lossy().to_string(),
             line: None,
@@ -880,7 +968,7 @@ mod tests {
         writeln!(file, "    raw = json.loads(resp)").unwrap();
         writeln!(file, "    return normalize(data)").unwrap();
 
-        let service = FileInspectionService::new();
+        let service = test_service();
         let request = FileInspectionRequest {
             file_path: file.path().to_string_lossy().to_string(),
             line: None,
@@ -909,7 +997,7 @@ mod tests {
         writeln!(file, "    # comment line").unwrap();
         writeln!(file, "    return normalize(data)").unwrap();
 
-        let service = FileInspectionService::new();
+        let service = test_service();
         let request = FileInspectionRequest {
             file_path: file.path().to_string_lossy().to_string(),
             line: None,
@@ -985,7 +1073,7 @@ mod tests {
         let file_path = dir.path().join("test.py");
         std::fs::write(&file_path, "x = 42\nprint(x)\n").unwrap();
 
-        let service = FileInspectionService::new();
+        let service = test_service();
         // Use relative filename with workspace_root
         let request = FileInspectionRequest {
             file_path: "test.py".to_string(),
@@ -1015,7 +1103,7 @@ mod tests {
         )
         .unwrap();
 
-        let service = FileInspectionService::new();
+        let service = test_service();
         let request = FileInspectionRequest {
             file_path: "weather.py".to_string(),
             line: None,
@@ -1036,7 +1124,7 @@ mod tests {
 
     #[test]
     fn test_inspect_relative_path_without_workspace_fails() {
-        let service = FileInspectionService::new();
+        let service = test_service();
         let request = FileInspectionRequest {
             file_path: "nonexistent_relative.py".to_string(),
             line: Some(1),

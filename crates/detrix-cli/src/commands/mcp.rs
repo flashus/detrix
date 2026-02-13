@@ -222,6 +222,7 @@ async fn run_direct(config_path: &str, config: &Config) -> Result<()> {
         &config.adapter,
         &config.anchor,
         &config.limits,
+        &config.vfs,
         gelf_output.clone(),
     );
 
@@ -234,6 +235,7 @@ async fn run_direct(config_path: &str, config: &Config) -> Result<()> {
         .full_config(config.clone())
         .system_event_repository(Arc::clone(&ctx.storage) as SystemEventRepositoryRef)
         .mcp_usage_repository(ctx.storage as McpUsageRepositoryRef)
+        .bridge_file_source(ctx.bridge_file_source)
         .build(),
     );
 

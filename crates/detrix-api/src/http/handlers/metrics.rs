@@ -311,7 +311,7 @@ pub async fn add_metric(
     let outcome = state
         .context
         .metric_service
-        .add_metric(metric.clone(), payload.replace)
+        .add_metric(metric.clone(), payload.replace, None)
         .await
         .http_context("Failed to add metric")?;
 

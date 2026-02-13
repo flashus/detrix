@@ -133,13 +133,16 @@ pub async fn create_connection(
     );
 
     let connection_id = connection_service
-        .create_connection(
+        .create_connection_with_metadata(
             payload.host,
             port,
             identity,
             payload.program,   // Optional program path for Rust direct lldb-dap
             payload.pid,       // Optional PID for Rust client AttachPid mode
             payload.safe_mode, // SafeMode: only allow logpoints
+            payload.control_plane_url,
+            payload.build_commit,
+            payload.build_tag,
         )
         .await
         .http_context("Failed to create connection")?;

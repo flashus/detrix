@@ -38,6 +38,11 @@ service MetricsService {
   rpc ValidateExpression(ValidateExpressionRequest) returns (ValidateExpressionResponse);
   rpc InspectFile(InspectFileRequest) returns (InspectFileResponse);
 
+  // Cloud VFS operations
+  rpc ProvideFile(ProvideFileRequest) returns (ProvideFileResponse);
+  rpc ValidateCache(ValidateCacheRequest) returns (ValidateCacheResponse);
+  rpc GetCachedHashes(GetCachedHashesRequest) returns (GetCachedHashesResponse);
+
   // MCP usage statistics
   rpc GetMcpUsage(GetMcpUsageRequest) returns (GetMcpUsageResponse);
 }
@@ -151,6 +156,9 @@ message AddMetricRequest {
   optional bool capture_memory_snapshot = 16;
   optional string snapshot_scope = 17;  // "local", "global", "both"
   optional uint64 snapshot_ttl = 18;    // TTL in seconds, null for continuous
+
+  // Cloud VFS: Optional file content for remote execution
+  optional string file_content = 19;    // Full file content to cache in VFS
 }
 
 // Stack trace capture configuration
@@ -359,6 +367,7 @@ message InspectFileRequest {
   optional string find_variable = 3;  // If provided, search for variable occurrences
   RequestMetadata metadata = 4;
   optional string connection_id = 5;  // If provided, resolve relative paths against connection's workspace_root
+  optional string file_content = 6;    // Cloud VFS: Optional file content to cache in VFS
 }
 
 message InspectFileResponse {
@@ -366,6 +375,56 @@ message InspectFileResponse {
   string content = 2;          // JSON-encoded inspection result
   optional string error = 3;
   ResponseMetadata metadata = 4;
+}
+
+// ============================================================
+// CLOUD VFS MESSAGES
+// ============================================================
+
+// Provide file content to cache in VFS
+message ProvideFileRequest {
+  string connection_id = 1;
+  string path = 2;              // Relative or absolute file path
+  string content = 3;           // Full file content
+  RequestMetadata metadata = 4;
+}
+
+message ProvideFileResponse {
+  bool success = 1;
+  string path = 2;              // Cached file path
+  string hash = 3;              // SHA256 hash of the content
+  optional string error = 4;
+  ResponseMetadata metadata = 5;
+}
+
+// Validate cached files against client hashes
+message ValidateCacheRequest {
+  string connection_id = 1;
+  repeated FileHash files = 2;  // Client's file hashes
+  RequestMetadata metadata = 3;
+}
+
+message ValidateCacheResponse {
+  repeated string evicted_paths = 1;  // Paths client should re-provide (stale or missing)
+  repeated FileHash cached = 2;        // Server's current cache state
+  ResponseMetadata metadata = 3;
+}
+
+// Get all cached file hashes for a connection
+message GetCachedHashesRequest {
+  string connection_id = 1;
+  RequestMetadata metadata = 2;
+}
+
+message GetCachedHashesResponse {
+  repeated FileHash cached = 1;  // All cached files with hashes
+  ResponseMetadata metadata = 2;
+}
+
+// File hash entry (used in validation)
+message FileHash {
+  string path = 1;
+  string hash = 2;  // SHA256 hash
 }
 
 // ============================================================

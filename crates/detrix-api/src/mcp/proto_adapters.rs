@@ -87,6 +87,8 @@ pub fn mcp_params_to_add_metric_request(
         capture_memory_snapshot: params.capture_memory_snapshot,
         snapshot_scope,
         snapshot_ttl: params.snapshot_ttl,
+        // Cloud VFS
+        file_content: None, // TODO: Support file_content in MCP add_metric
     }
 }
 

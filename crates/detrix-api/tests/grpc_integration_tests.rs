@@ -77,6 +77,12 @@ impl TestServer {
         let mock_factory = Arc::new(MockDapAdapterFactory::new());
 
         // Create AppContext with mock factory
+        let vfs = Arc::new(detrix_storage::DiskVfs::new()) as detrix_application::VfsRef;
+        let file_source_chain = Arc::new(detrix_application::FileSourceChain::new(
+            Arc::clone(&vfs),
+            vec![],
+            &[],
+        ));
         let context = AppContext::new(
             Arc::clone(&storage) as MetricRepositoryRef,
             Arc::clone(&storage) as EventRepositoryRef,
@@ -93,6 +99,8 @@ impl TestServer {
             None, // No separate DLQ storage in tests
             None,
             None, // No auth token in tests
+            vfs,
+            file_source_chain,
         );
 
         // Create a mock connection so metrics can be added
@@ -169,6 +177,12 @@ impl TestServer {
         let storage = Arc::new(SqliteStorage::new(&sqlite_config).await?);
         let mock_factory = Arc::new(MockDapAdapterFactory::new());
 
+        let vfs = Arc::new(detrix_storage::DiskVfs::new()) as detrix_application::VfsRef;
+        let file_source_chain = Arc::new(detrix_application::FileSourceChain::new(
+            Arc::clone(&vfs),
+            vec![],
+            &[],
+        ));
         let context = AppContext::new(
             Arc::clone(&storage) as MetricRepositoryRef,
             Arc::clone(&storage) as EventRepositoryRef,
@@ -185,6 +199,8 @@ impl TestServer {
             None,
             None,
             None,
+            vfs,
+            file_source_chain,
         );
 
         let identity = detrix_core::ConnectionIdentity::new(
@@ -292,6 +308,7 @@ fn create_add_metric_request(
         capture_memory_snapshot: None,
         snapshot_scope: None,
         snapshot_ttl: None,
+        file_content: None,
     }
 }
 
@@ -1654,6 +1671,7 @@ async fn test_add_metric_relative_path() {
         capture_memory_snapshot: None,
         snapshot_scope: None,
         snapshot_ttl: None,
+        file_content: None,
     };
 
     let response = client
@@ -1695,6 +1713,7 @@ async fn test_inspect_file_relative_path() {
         find_variable: None,
         metadata: None,
         connection_id: Some(server.connection_id.clone()),
+        file_content: None,
     };
 
     let response = client
@@ -1727,6 +1746,7 @@ async fn test_inspect_file_relative_path_auto_select() {
         find_variable: Some("user".to_string()),
         metadata: None,
         connection_id: None, // Auto-select
+        file_content: None,
     };
 
     let response = client
@@ -1774,6 +1794,7 @@ async fn test_add_metric_absolute_path_still_works() {
         capture_memory_snapshot: None,
         snapshot_scope: None,
         snapshot_ttl: None,
+        file_content: None,
     };
 
     let response = client

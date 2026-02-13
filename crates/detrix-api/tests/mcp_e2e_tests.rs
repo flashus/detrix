@@ -53,6 +53,12 @@ impl McpE2eFixture {
         let storage = Arc::new(SqliteStorage::new(&sqlite_config).await.unwrap());
         let mock_factory = Arc::new(MockDapAdapterFactory::new());
 
+        let vfs = Arc::new(detrix_storage::DiskVfs::new()) as detrix_application::VfsRef;
+        let file_source_chain = Arc::new(detrix_application::FileSourceChain::new(
+            Arc::clone(&vfs),
+            vec![],
+            &[],
+        ));
         let context = AppContext::new(
             Arc::clone(&storage) as MetricRepositoryRef,
             Arc::clone(&storage) as EventRepositoryRef,
@@ -69,6 +75,8 @@ impl McpE2eFixture {
             None, // No separate DLQ storage in tests
             None,
             None, // No auth token in tests
+            vfs,
+            file_source_chain,
         );
 
         let state = Arc::new(ApiState::builder(context, storage).build());
@@ -185,7 +193,7 @@ async fn test_e2e_add_and_list_metric() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .expect("Should add metric")
         .value;
@@ -215,7 +223,7 @@ async fn test_e2e_toggle_metric() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .unwrap()
         .value;
@@ -270,7 +278,7 @@ async fn test_e2e_query_events() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .unwrap()
         .value;
@@ -347,7 +355,7 @@ async fn test_e2e_full_metric_lifecycle() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .unwrap()
         .value;
@@ -441,7 +449,7 @@ async fn test_e2e_multi_expression_metric() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .expect("Should add multi-expression metric")
         .value;
@@ -491,7 +499,7 @@ async fn test_e2e_multiple_metrics_in_group() {
             .state
             .context
             .metric_service
-            .add_metric(metric, false)
+            .add_metric(metric, false, None)
             .await
             .unwrap();
     }
@@ -554,7 +562,11 @@ async fn test_concurrent_tool_calls_no_deadlock() {
                 anchor: None,
                 anchor_status: AnchorStatus::Unanchored,
             };
-            state.context.metric_service.add_metric(metric, false).await
+            state
+                .context
+                .metric_service
+                .add_metric(metric, false, None)
+                .await
         });
         add_handles.push(handle);
     }
@@ -624,7 +636,7 @@ async fn test_graceful_degradation_list_metrics_when_disconnected() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .unwrap();
 
@@ -656,7 +668,7 @@ async fn test_graceful_degradation_query_events_when_disconnected() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .unwrap()
         .value;
@@ -744,7 +756,7 @@ async fn test_e2e_observe_workflow_with_introspection() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await;
 
     assert!(
@@ -806,7 +818,7 @@ async fn test_e2e_observe_workflow_connection_binding() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .unwrap();
 
@@ -865,7 +877,7 @@ async fn test_e2e_observe_workflow_with_group() {
             .state
             .context
             .metric_service
-            .add_metric(metric, false)
+            .add_metric(metric, false, None)
             .await
             .unwrap();
     }

@@ -27,13 +27,15 @@ use crate::ports::{
 use crate::safety::ValidatorRegistry;
 use crate::services::{
     AdapterLifecycleManager, AnchorServiceConfig, ConnectionService, DefaultAnchorService,
-    EventCaptureService, McpUsageService, MetricService, RemoteAppService, StreamingService,
+    EventCaptureService, FileInspectionService, FileSourceChain, McpUsageService, MetricService,
+    RemoteAppService, StreamingService,
 };
 use detrix_config::{
     AdapterConnectionConfig, AnchorConfig, ApiConfig, DaemonConfig, LimitsConfig, SafetyConfig,
     StorageConfig,
 };
 use detrix_core::{MetricEvent, SystemEvent};
+use detrix_ports::VfsRef;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -65,6 +67,15 @@ pub struct AppContext {
 
     /// Remote app control service (optional — only when HTTP client is available)
     pub remote_app_service: Option<Arc<RemoteAppService>>,
+
+    /// File inspection service for code analysis (shared VFS)
+    pub file_inspection: FileInspectionService,
+
+    /// Virtual File System reference (shared across services)
+    pub vfs: VfsRef,
+
+    /// File source chain for transparent file fetching (VFS cache → control_plane → bridge → disk)
+    pub file_source_chain: Arc<FileSourceChain>,
 }
 
 impl AppContext {
@@ -86,6 +97,8 @@ impl AppContext {
     /// * `dlq_repo` - Optional dead-letter queue repository (separate from main storage)
     /// * `remote_control` - Optional remote app control implementation (HTTP client)
     /// * `auth_token` - Optional authentication token for remote app control (e.g. from DETRIX_TOKEN env var, read in CLI layer)
+    /// * `vfs` - Virtual File System for source file access (cache + disk fallback)
+    /// * `file_source_chain` - Pluggable file source chain for transparent remote file fetching
     ///
     /// Note: In practice, `metric_storage` and `event_storage` often point to the
     /// same underlying storage (e.g., SqliteStorage), but they're separate parameters
@@ -107,6 +120,8 @@ impl AppContext {
         dlq_repo: Option<DlqRepositoryRef>,
         remote_control: Option<RemoteAppControlRef>,
         auth_token: Option<String>,
+        vfs: VfsRef,
+        file_source_chain: Arc<FileSourceChain>,
     ) -> Self {
         // Create broadcast channels for real-time events
         let (event_tx, _) = broadcast::channel::<MetricEvent>(api_config.event_buffer_capacity);
@@ -135,6 +150,7 @@ impl AppContext {
             adapter_config.clone(),
             daemon_config.drain_timeout_ms,
             output.clone(), // Pass GELF output to lifecycle manager
+            Arc::clone(&vfs),
         ));
 
         // Create the ConnectionService with the lifecycle manager
@@ -143,6 +159,7 @@ impl AppContext {
             metric_storage.clone(),
             Arc::clone(&adapter_lifecycle_manager),
             system_event_tx.clone(),
+            Arc::clone(&vfs),
         ));
 
         // Create the MCP usage service for tool analytics
@@ -168,10 +185,14 @@ impl AppContext {
             streaming_builder = streaming_builder.output(out);
         }
 
-        // Create anchor service with config
-        let anchor_service = Arc::new(DefaultAnchorService::with_config(
+        // Create anchor service with config and VFS (for cloud mode file access)
+        let anchor_service = Arc::new(DefaultAnchorService::with_vfs(
             AnchorServiceConfig::from(anchor_config),
+            Arc::clone(&vfs),
         ));
+
+        // Create file inspection service with VFS
+        let file_inspection = FileInspectionService::new(Arc::clone(&vfs));
 
         Self {
             metric_service: Arc::new(
@@ -184,6 +205,7 @@ impl AppContext {
                 .adapter_config(adapter_config.clone())
                 .limits_config(limits_config.clone())
                 .anchor_service(anchor_service)
+                .vfs(Arc::clone(&vfs))
                 .build(),
             ),
             streaming_service: Arc::new(streaming_builder.build()),
@@ -192,6 +214,9 @@ impl AppContext {
             adapter_lifecycle_manager,
             mcp_usage,
             remote_app_service,
+            file_inspection,
+            vfs,
+            file_source_chain,
         }
     }
 
@@ -201,6 +226,8 @@ impl AppContext {
         event_storage: EventRepositoryRef,
         connection_repo: ConnectionRepositoryRef,
         adapter_factory: DapAdapterFactoryRef,
+        vfs: VfsRef,
+        file_source_chain: Arc<FileSourceChain>,
     ) -> Self {
         Self::new(
             metric_storage,
@@ -218,6 +245,8 @@ impl AppContext {
             None, // No separate DLQ storage
             None, // No remote app control
             None, // No auth token
+            vfs,
+            file_source_chain,
         )
     }
 
@@ -248,6 +277,7 @@ impl std::fmt::Debug for AppContext {
             .field("streaming_service", &self.streaming_service)
             .field("event_capture_service", &self.event_capture_service)
             .field("mcp_usage", &"<McpUsageService>")
+            .field("vfs", &"<VFS>")
             .finish()
     }
 }

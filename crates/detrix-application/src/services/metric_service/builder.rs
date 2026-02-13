@@ -7,10 +7,44 @@ use crate::services::{AdapterLifecycleManager, DefaultAnchorService, FileInspect
 use crate::AnchorServiceRef;
 use detrix_config::{AdapterConnectionConfig, AnchorConfig, LimitsConfig};
 use detrix_core::SystemEvent;
+use detrix_ports::VfsRef;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use super::MetricService;
+
+/// Create a default disk-only VFS (reads from std::fs, no caching).
+///
+/// Used when no VFS is explicitly configured (local daemon mode).
+fn default_vfs() -> VfsRef {
+    /// Minimal VFS that delegates to `std::fs`.
+    struct DiskVfs;
+
+    impl detrix_ports::VirtualFileSystem for DiskVfs {
+        fn read_to_string(&self, path: &str) -> detrix_core::Result<String> {
+            std::fs::read_to_string(path).map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => {
+                    detrix_core::Error::FileNotFound(format!("File not found: {}", path))
+                }
+                _ => detrix_core::Error::Io(format!("Failed to read '{}': {}", path, e)),
+            })
+        }
+        fn exists(&self, path: &str) -> detrix_core::Result<bool> {
+            Ok(std::path::Path::new(path).exists())
+        }
+        fn store(&self, _: &str, _: &str, _: String) {}
+        fn cached_hashes(&self, _: &str) -> Vec<(String, String)> {
+            vec![]
+        }
+        fn validate_hashes(&self, _: &str, _: &[(String, String)]) -> Vec<String> {
+            vec![]
+        }
+        fn mark_stale(&self, _: &str) {}
+        fn clear_connection(&self, _: &str) {}
+    }
+
+    Arc::new(DiskVfs)
+}
 
 /// Builder for MetricService
 ///
@@ -21,6 +55,7 @@ use super::MetricService;
 ///     .limits_config(limits)
 ///     .adapter_config(adapter_cfg)
 ///     .anchor_service(anchor_svc)
+///     .vfs(vfs)
 ///     .build();
 /// ```
 pub struct MetricServiceBuilder {
@@ -32,6 +67,7 @@ pub struct MetricServiceBuilder {
     pub(super) adapter_config: AdapterConnectionConfig,
     pub(super) anchor_service: Option<AnchorServiceRef>,
     pub(super) anchor_config: Option<AnchorServiceConfig>,
+    pub(super) vfs: Option<VfsRef>,
 }
 
 impl MetricServiceBuilder {
@@ -50,6 +86,7 @@ impl MetricServiceBuilder {
             adapter_config: AdapterConnectionConfig::default(),
             anchor_service: None,
             anchor_config: None,
+            vfs: None,
         }
     }
 
@@ -94,13 +131,27 @@ impl MetricServiceBuilder {
         self
     }
 
+    /// Set the Virtual File System implementation.
+    ///
+    /// If not set, a default disk-only VFS is used (suitable for local daemon mode).
+    pub fn vfs(mut self, vfs: VfsRef) -> Self {
+        self.vfs = Some(vfs);
+        self
+    }
+
     /// Build the MetricService
     pub fn build(self) -> MetricService {
         // Create anchor service: use provided service, or create from config, or default
         let anchor_service = self.anchor_service.unwrap_or_else(|| {
             let config = self.anchor_config.unwrap_or_default();
-            Arc::new(DefaultAnchorService::with_config(config))
+            match &self.vfs {
+                Some(vfs) => Arc::new(DefaultAnchorService::with_vfs(config, Arc::clone(vfs))),
+                None => Arc::new(DefaultAnchorService::with_config(config)),
+            }
         });
+
+        // Use provided VFS or create a default disk-only VFS
+        let vfs = self.vfs.unwrap_or_else(default_vfs);
 
         MetricService {
             storage: self.storage,
@@ -108,7 +159,7 @@ impl MetricServiceBuilder {
             validators: Arc::new(self.validators.unwrap_or_default()),
             limits_config: self.limits_config,
             adapter_config: self.adapter_config,
-            file_inspection: FileInspectionService::new(),
+            file_inspection: FileInspectionService::new(vfs),
             system_event_tx: self.system_event_tx,
             anchor_service,
         }

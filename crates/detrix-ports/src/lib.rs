@@ -21,6 +21,7 @@ mod adapter;
 mod anchor;
 mod cache;
 mod dlq;
+mod file_system;
 mod file_watcher;
 mod mcp_usage;
 mod output;
@@ -36,6 +37,9 @@ pub use anchor::{AnchorService, AnchorServiceRef, SourceContext, SymbolInfo};
 pub use cache::{PurityCache, PurityCacheEntry, PurityCacheKey, PurityCacheStats};
 pub use detrix_config::constants::{DEFAULT_BATCH_CONCURRENCY, DEFAULT_BATCH_THRESHOLD};
 pub use dlq::{DlqEntry, DlqEntryStatus, DlqRepository, ParseDlqEntryStatusError};
+pub use file_system::{
+    FetchResult, FileSource, FileSourceRef, SourceMetadata, VfsRef, VirtualFileSystem,
+};
 pub use file_watcher::{
     FileEvent, FileWatcher, FileWatcherConfig, FileWatcherRef, NullFileWatcher,
 };

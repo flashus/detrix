@@ -28,6 +28,8 @@ pub struct McpBridge {
     pub(crate) auth_token: RwLock<Option<String>>,
     /// Backoff state for daemon restart attempts
     restart_backoff: RwLock<RestartBackoff>,
+    /// URL of the local file server (set after start_file_server)
+    file_server_url: RwLock<Option<String>>,
 }
 
 impl McpBridge {
@@ -51,6 +53,7 @@ impl McpBridge {
             daemon_url,
             auth_token,
             restart_backoff,
+            file_server_url: RwLock::new(None),
         })
     }
 
@@ -154,10 +157,15 @@ impl McpBridge {
 
     /// Internal method to forward request without retry logic
     pub async fn try_forward_request(&self, request: &Value) -> Result<Value> {
-        let (url, token) = {
+        let (url, token, file_server) = {
             let daemon_url = self.daemon_url.read().await;
             let auth_token = self.auth_token.read().await;
-            (format!("{}/mcp", daemon_url), auth_token.clone())
+            let file_server_url = self.file_server_url.read().await;
+            (
+                format!("{}/mcp", daemon_url),
+                auth_token.clone(),
+                file_server_url.clone(),
+            )
         };
         debug!("Forwarding request to {}", url);
 
@@ -177,6 +185,11 @@ impl McpBridge {
                 .header("X-Detrix-Parent-Pid", parent.pid.to_string())
                 .header("X-Detrix-Parent-Name", &parent.name)
                 .header("X-Detrix-Bridge-Pid", parent.bridge_pid.to_string());
+        }
+
+        // Add file server URL so daemon can fetch source files from this machine
+        if let Some(ref url) = file_server {
+            req_builder = req_builder.header("X-Detrix-File-Server-Url", url);
         }
 
         let response = req_builder
@@ -294,6 +307,18 @@ impl McpBridge {
             "MCP bridge started (client_id: {}), forwarding to {}",
             self.client_id, self.config.daemon_url
         );
+
+        // Start local file server so daemon can fetch source files from this machine
+        match super::file_server::start_file_server().await {
+            Ok(port) => {
+                let url = format!("http://127.0.0.1:{}", port);
+                info!(url = %url, "Bridge file server ready");
+                *self.file_server_url.write().await = Some(url);
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to start bridge file server (file fetching disabled)");
+            }
+        }
 
         // Create a shutdown channel for the heartbeat task
         let (shutdown_tx, shutdown_rx) = watch::channel(false);

@@ -13,7 +13,7 @@
 
 use crate::ports::{
     ConnectionRepositoryRef, DapAdapterFactoryRef, DapAdapterRef, EventOutputRef,
-    MetricRepositoryRef,
+    MetricRepositoryRef, VfsRef,
 };
 use crate::services::EventCaptureService;
 use dashmap::DashMap;
@@ -176,6 +176,7 @@ impl AdapterLifecycleManager {
     /// * `adapter_factory` - Factory for creating language-specific adapters
     /// * `metric_repository` - Repository for loading metrics to sync on connect
     /// * `connection_repository` - Repository for updating connection status on crash
+    /// * `vfs` - Virtual file system for caching remote files
     pub fn new(
         event_capture_service: Arc<EventCaptureService>,
         event_broadcast_tx: broadcast::Sender<MetricEvent>,
@@ -183,6 +184,7 @@ impl AdapterLifecycleManager {
         adapter_factory: DapAdapterFactoryRef,
         metric_repository: MetricRepositoryRef,
         connection_repository: ConnectionRepositoryRef,
+        vfs: VfsRef,
     ) -> Self {
         let daemon_config = DaemonConfig::default();
         Self::with_config(
@@ -196,6 +198,7 @@ impl AdapterLifecycleManager {
             AdapterConnectionConfig::default(),
             daemon_config.drain_timeout_ms,
             None, // No GELF output by default
+            vfs,
         )
     }
 
@@ -212,6 +215,7 @@ impl AdapterLifecycleManager {
     /// * `adapter_config` - Adapter connection configuration (for batch thresholds)
     /// * `drain_timeout_ms` - Timeout for draining events during graceful shutdown
     /// * `event_output` - Optional event output for external destinations (Graylog/GELF)
+    /// * `vfs` - Virtual file system for caching remote files
     #[allow(clippy::too_many_arguments)]
     pub fn with_config(
         event_capture_service: Arc<EventCaptureService>,
@@ -224,6 +228,7 @@ impl AdapterLifecycleManager {
         adapter_config: AdapterConnectionConfig,
         drain_timeout_ms: u64,
         event_output: Option<EventOutputRef>,
+        vfs: VfsRef,
     ) -> Self {
         let (flush_tx, flush_rx) = mpsc::channel(1);
         let (cleanup_tx, cleanup_rx) = mpsc::channel(16); // Buffer for cleanup requests
@@ -286,6 +291,7 @@ impl AdapterLifecycleManager {
                 connection_repository,
                 cleanup_rx,
                 drain_timeout_ms,
+                vfs,
             );
             if let Ok(mut guard) = cleanup_task_handle.try_lock() {
                 *guard = Some(handle);
@@ -350,6 +356,7 @@ impl AdapterLifecycleManager {
         connection_repository: ConnectionRepositoryRef,
         mut cleanup_rx: mpsc::Receiver<ConnectionId>,
         drain_timeout_ms: u64,
+        vfs: VfsRef,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             info!("Adapter cleanup task started");
@@ -396,6 +403,13 @@ impl AdapterLifecycleManager {
                             connection_id.0, e
                         );
                     }
+
+                    // Mark VFS entries as stale (don't clear - connection may reconnect)
+                    vfs.mark_stale(&connection_id.0);
+                    debug!(
+                        "VFS entries marked stale for crashed connection {}",
+                        connection_id.0
+                    );
 
                     // Update connection status to Disconnected in database
                     // This ensures `detrix status` shows the correct state

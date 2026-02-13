@@ -191,7 +191,7 @@ impl DetrixServer {
     /// observe(file="auth.py", expression="user.session", ttl_seconds=300)
     /// ```
     #[tool(
-        description = "Observe a value in code. Simplest way to add metrics - auto-finds line if not specified."
+        description = "Observe a value in code. Simplest way to add metrics - auto-finds line if not specified.\n\nWhen the connection has a pinned build_commit, source is served from that git commit. Response includes source info (commit SHA, drift detection)."
     )]
     async fn observe(
         &self,
@@ -375,7 +375,7 @@ impl DetrixServer {
     /// For Python files: Full AST analysis (variable scope, definitions)
     /// For other languages: Code context extraction around specified line
     #[tool(
-        description = "Find correct line for metric. Returns variables at line. USE BEFORE add_metric."
+        description = "Find correct line for metric. Returns variables at line. USE BEFORE add_metric.\n\nFile Paths\nAll file paths (observe, add_metric, inspect_file) accept **absolute or relative** paths.\nRelative paths are resolved against the connection's workspace_root.\n\nWhen the connection has a pinned build_commit, source is served from that git commit with local drift detection."
     )]
     async fn inspect_file(
         &self,
@@ -394,6 +394,8 @@ impl DetrixServer {
         }
     }
 
+    // ========================================================================
+    // VFS (Virtual File System) Tools
     // ========================================================================
     // Connection Management Tools
     // ========================================================================

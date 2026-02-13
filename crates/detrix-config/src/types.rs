@@ -40,6 +40,9 @@ mod storage_mod {
 mod tui_mod {
     pub use crate::tui::*;
 }
+mod vfs_mod {
+    pub use crate::vfs::*;
+}
 
 // Re-export all types from submodules
 pub use adapter_mod::*;
@@ -50,6 +53,7 @@ pub use output_mod::*;
 pub use safety_mod::*;
 pub use storage_mod::*;
 pub use tui_mod::*;
+pub use vfs_mod::*;
 
 use crate::constants::{
     DEFAULT_AUDIT_RETENTION_DAYS, DEFAULT_AUTO_SLEEP_SECONDS, DEFAULT_MAX_EVAL_TIME_MS,
@@ -99,6 +103,8 @@ pub struct Config {
     pub anchor: AnchorConfig,
     #[serde(default)]
     pub audit: AuditConfig,
+    #[serde(default)]
+    pub vfs: VfsConfig,
     #[serde(default)]
     pub metric: Vec<MetricDefinition>,
 }

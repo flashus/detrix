@@ -24,6 +24,7 @@ mod lifecycle;
 mod metrics;
 mod operations;
 mod values;
+mod vfs;
 pub use config::{
     get_config, reload_config, update_config, validate_config, ConfigResponse, GetConfigQuery,
     UpdateConfigRequest, UpdateConfigResponse,
@@ -52,6 +53,10 @@ pub use operations::{disable_metric, enable_metric, update_metric, UpdateMetricR
 pub use values::{
     get_metric_history, get_metric_value, MetricHistoryParams, MetricHistoryResponse,
     MetricValueResponse,
+};
+pub use vfs::{
+    get_cached_hashes, provide_file, validate_cache, GetCachedHashesResponse, ProvideFileRequest,
+    ProvideFileResponse, ValidateCacheRequest, ValidateCacheResponse,
 };
 
 // ============================================================================

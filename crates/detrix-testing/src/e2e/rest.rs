@@ -348,6 +348,9 @@ impl ApiClient for RestClient {
             program: program.map(|s| s.to_string()), // Optional program path for launch mode (Rust direct lldb-dap)
             safe_mode: false,                        // Default to false for tests
             pid: None,                               // Tests don't use AttachPid mode
+            control_plane_url: None,
+            build_commit: None,
+            build_tag: None,
         };
 
         let response = self
@@ -891,6 +894,7 @@ impl ApiClient for RestClient {
             find_variable: find_variable.map(String::from),
             metadata: None,
             connection_id: None,
+            file_content: None,
         };
 
         let response = self

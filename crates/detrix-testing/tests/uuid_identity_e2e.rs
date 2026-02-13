@@ -43,6 +43,9 @@ async fn create_connection_with_identity(
         program: program.map(|s| s.to_string()),
         safe_mode: false,
         pid: None,
+        control_plane_url: None,
+        build_commit: None,
+        build_tag: None,
     };
 
     let response = reqwest::Client::new()

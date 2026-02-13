@@ -119,6 +119,13 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
             # Register connection with daemon
             # Use advertise_host if set (for Docker/cloud), otherwise use control_host
             registration_host = advertise_host or control_host
+
+            # Build control plane URL so daemon can fetch files from us
+            cp_host = advertise_host or control_host
+            with state.lock:
+                cp_port = state.actual_control_port
+            control_plane_url = f"http://{cp_host}:{cp_port}" if cp_port else None
+
             try:
                 connection_id = client.register(
                     host=registration_host,
@@ -126,6 +133,7 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
                     connection_id=connection_name,
                     token=token,
                     timeout=reg_timeout,
+                    control_plane_url=control_plane_url,
                 )
             except DaemonError:
                 # debugpy started but registration failed

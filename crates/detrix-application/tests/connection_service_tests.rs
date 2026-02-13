@@ -10,7 +10,9 @@ use detrix_core::{
     ConnectionId, ConnectionIdentity, ConnectionStatus, Error, MetricEvent, SourceLanguage,
     SystemEvent,
 };
+use detrix_ports::VfsRef;
 use detrix_testing::fixtures::sample_connection_identity;
+use detrix_testing::MockVfs;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -38,6 +40,7 @@ fn create_test_fixtures() -> (
     MetricRepositoryRef,
     Arc<AdapterLifecycleManager>,
     broadcast::Sender<SystemEvent>,
+    VfsRef,
 ) {
     let connection_repo = Arc::new(MockConnectionRepository::new());
     let event_repo = Arc::new(MockEventRepository::new());
@@ -45,6 +48,7 @@ fn create_test_fixtures() -> (
     let (broadcast_tx, _) = broadcast::channel::<MetricEvent>(100);
     let adapter_factory: DapAdapterFactoryRef = Arc::new(SimpleMockAdapterFactory);
     let metric_repo: MetricRepositoryRef = Arc::new(MockMetricRepository::new());
+    let vfs: VfsRef = Arc::new(MockVfs::new());
 
     let (system_event_tx, _) = broadcast::channel::<SystemEvent>(100);
     let adapter_lifecycle_manager = Arc::new(AdapterLifecycleManager::new(
@@ -54,6 +58,7 @@ fn create_test_fixtures() -> (
         adapter_factory,
         metric_repo.clone(),
         Arc::clone(&connection_repo) as ConnectionRepositoryRef,
+        vfs.clone(),
     ));
 
     (
@@ -61,6 +66,7 @@ fn create_test_fixtures() -> (
         metric_repo,
         adapter_lifecycle_manager,
         system_event_tx,
+        vfs,
     )
 }
 
@@ -71,12 +77,13 @@ fn create_test_fixtures() -> (
 #[tokio::test]
 async fn test_create_connection_with_auto_generated_id() {
     // Arrange
-    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let (repo, metric_repo, lifecycle_manager, system_event_tx, vfs) = create_test_fixtures();
     let service = ConnectionService::new(
         repo.clone(),
         metric_repo,
         lifecycle_manager,
         system_event_tx,
+        vfs,
     );
 
     // Create identity (UUID will be deterministic)
@@ -118,12 +125,13 @@ async fn test_create_connection_with_auto_generated_id() {
 #[tokio::test]
 async fn test_create_connection_with_identity() {
     // Arrange
-    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let (repo, metric_repo, lifecycle_manager, system_event_tx, vfs) = create_test_fixtures();
     let service = ConnectionService::new(
         repo.clone(),
         metric_repo,
         lifecycle_manager,
         system_event_tx,
+        vfs,
     );
 
     // Create identity with custom name
@@ -166,12 +174,13 @@ async fn test_create_connection_with_identity() {
 #[tokio::test]
 async fn test_create_connection_validates_port_range() {
     // Arrange
-    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let (repo, metric_repo, lifecycle_manager, system_event_tx, vfs) = create_test_fixtures();
     let service = ConnectionService::new(
         repo.clone(),
         metric_repo,
         lifecycle_manager,
         system_event_tx,
+        vfs,
     );
 
     let identity = sample_connection_identity();
@@ -202,12 +211,13 @@ async fn test_create_connection_validates_port_range() {
 #[tokio::test]
 async fn test_create_connection_validates_host() {
     // Arrange
-    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let (repo, metric_repo, lifecycle_manager, system_event_tx, vfs) = create_test_fixtures();
     let service = ConnectionService::new(
         repo.clone(),
         metric_repo,
         lifecycle_manager,
         system_event_tx,
+        vfs,
     );
 
     let identity = sample_connection_identity();
@@ -228,12 +238,13 @@ async fn test_create_connection_validates_host() {
 #[tokio::test]
 async fn test_create_connection_starts_adapter() {
     // Arrange
-    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let (repo, metric_repo, lifecycle_manager, system_event_tx, vfs) = create_test_fixtures();
     let service = ConnectionService::new(
         repo,
         metric_repo,
         lifecycle_manager.clone(),
         system_event_tx,
+        vfs,
     );
 
     let identity = sample_connection_identity();
@@ -265,12 +276,13 @@ async fn test_create_connection_starts_adapter() {
 #[tokio::test]
 async fn test_disconnect_stops_adapter_and_updates_status() {
     // Arrange
-    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let (repo, metric_repo, lifecycle_manager, system_event_tx, vfs) = create_test_fixtures();
     let service = ConnectionService::new(
         repo.clone(),
         metric_repo,
         lifecycle_manager,
         system_event_tx,
+        vfs,
     );
 
     let identity = sample_connection_identity();
@@ -309,8 +321,9 @@ async fn test_disconnect_stops_adapter_and_updates_status() {
 async fn test_disconnect_nonexistent_adapter_succeeds() {
     // AdapterLifecycleManager.stop_adapter succeeds even for nonexistent adapters
     // But updating connection status will fail if connection doesn't exist
-    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx, vfs) = create_test_fixtures();
+    let service =
+        ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx, vfs);
 
     // Act - Try to disconnect nonexistent connection
     let nonexistent_id = ConnectionId::new("does-not-exist");
@@ -323,12 +336,13 @@ async fn test_disconnect_nonexistent_adapter_succeeds() {
 #[tokio::test]
 async fn test_list_connections_returns_all() {
     // Arrange
-    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let (repo, metric_repo, lifecycle_manager, system_event_tx, vfs) = create_test_fixtures();
     let service = ConnectionService::new(
         repo.clone(),
         metric_repo,
         lifecycle_manager,
         system_event_tx,
+        vfs,
     );
 
     // Create multiple connections with different identities
@@ -388,8 +402,9 @@ async fn test_list_connections_returns_all() {
 #[tokio::test]
 async fn test_list_connections_empty_when_no_connections() {
     // Arrange
-    let (_repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(_repo, metric_repo, lifecycle_manager, system_event_tx);
+    let (_repo, metric_repo, lifecycle_manager, system_event_tx, vfs) = create_test_fixtures();
+    let service =
+        ConnectionService::new(_repo, metric_repo, lifecycle_manager, system_event_tx, vfs);
 
     // Act
     let result = service.list_connections().await;
@@ -403,8 +418,9 @@ async fn test_list_connections_empty_when_no_connections() {
 #[tokio::test]
 async fn test_get_connection_by_id() {
     // Arrange
-    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx, vfs) = create_test_fixtures();
+    let service =
+        ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx, vfs);
 
     let identity = ConnectionIdentity::new(
         "test-conn",
@@ -443,8 +459,9 @@ async fn test_get_connection_by_id() {
 #[tokio::test]
 async fn test_get_connection_returns_none_for_nonexistent() {
     // Arrange
-    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx, vfs) = create_test_fixtures();
+    let service =
+        ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx, vfs);
 
     // Act
     let nonexistent_id = ConnectionId::new("does-not-exist");
@@ -458,8 +475,9 @@ async fn test_get_connection_returns_none_for_nonexistent() {
 #[tokio::test]
 async fn test_get_adapter_returns_adapter_for_active_connection() {
     // Arrange
-    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx, vfs) = create_test_fixtures();
+    let service =
+        ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx, vfs);
 
     let identity = sample_connection_identity();
 
@@ -487,8 +505,9 @@ async fn test_get_adapter_returns_adapter_for_active_connection() {
 #[tokio::test]
 async fn test_get_adapter_returns_none_after_disconnect() {
     // Arrange
-    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
-    let service = ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx);
+    let (repo, metric_repo, lifecycle_manager, system_event_tx, vfs) = create_test_fixtures();
+    let service =
+        ConnectionService::new(repo, metric_repo, lifecycle_manager, system_event_tx, vfs);
 
     let identity = sample_connection_identity();
 
@@ -519,12 +538,13 @@ async fn test_get_adapter_returns_none_after_disconnect() {
 #[tokio::test]
 async fn test_create_connection_returns_existing_when_connected() {
     // Arrange
-    let (repo, metric_repo, lifecycle_manager, system_event_tx) = create_test_fixtures();
+    let (repo, metric_repo, lifecycle_manager, system_event_tx, vfs) = create_test_fixtures();
     let service = ConnectionService::new(
         repo.clone(),
         metric_repo,
         lifecycle_manager.clone(),
         system_event_tx,
+        vfs,
     );
 
     // Create identity (same identity for both calls)

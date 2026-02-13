@@ -165,6 +165,21 @@ pub struct Connection {
     #[serde(default)]
     pub safe_mode: bool,
 
+    /// Control plane URL for the application (e.g., "http://app:8091").
+    /// Used by the file source chain to fetch source files from the application.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_plane_url: Option<String>,
+
+    /// Git commit SHA at build time (e.g., "abc123def").
+    /// Used for file content verification and future git-based file sourcing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_commit: Option<String>,
+
+    /// Build tag / version (e.g., "v1.2.3").
+    /// Informational metadata for connection identification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_tag: Option<String>,
+
     /// When the connection was created (microseconds since epoch)
     pub created_at: i64,
 
@@ -236,6 +251,9 @@ impl Connection {
             status: ConnectionStatus::Disconnected,
             auto_reconnect: true,
             safe_mode: false,
+            control_plane_url: None,
+            build_commit: None,
+            build_tag: None,
             created_at: now,
             last_connected_at: None,
             last_active: now,
@@ -285,6 +303,9 @@ impl Connection {
             status: ConnectionStatus::Disconnected,
             auto_reconnect: true,
             safe_mode: false,
+            control_plane_url: None,
+            build_commit: None,
+            build_tag: None,
             created_at: now,
             last_connected_at: None,
             last_active: now,

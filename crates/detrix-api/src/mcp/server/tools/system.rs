@@ -12,8 +12,7 @@ use crate::mcp::params::{
 };
 use crate::state::ApiState;
 use detrix_application::{
-    resolve_file_path, FileInspectionRequest, FileInspectionService, UsageSnapshot,
-    ValidationResult,
+    resolve_file_path, FileInspectionRequest, UsageSnapshot, ValidationResult,
 };
 use detrix_core::{ConnectionId, SafetyLevel};
 use rmcp::model::Content;
@@ -348,6 +347,9 @@ pub async fn inspect_file_impl(
     // Resolve file path against workspace root
     let resolved_file = resolve_file_path(&params.file_path, workspace_root.as_deref());
 
+    // Pre-fetch file into VFS cache (transparent remote file fetching)
+    crate::common::ensure_file_cached(state, params.connection_id.as_deref(), &resolved_file).await;
+
     let request = FileInspectionRequest {
         file_path: resolved_file.clone(),
         line: params.line,
@@ -355,13 +357,31 @@ pub async fn inspect_file_impl(
         workspace_root,
     };
 
-    let service = FileInspectionService::new();
-    let (language, result) = service
+    let (language, result) = state
+        .context
+        .file_inspection
         .inspect(request)
         .mcp_context("File inspection failed")?;
 
     let messages = format_inspection_result(language, result, &resolved_file);
-    let mut all_messages = vec![Content::text(format!("Detected language: {}", language))];
+    let mut all_messages = Vec::new();
+
+    // Surface source metadata (pinned mode info) when available
+    if let Some(metadata) = state.context.vfs.get_metadata(&resolved_file) {
+        let mut source_info = format!("Source: {}", metadata.source_kind);
+        if let Some(ref commit) = metadata.commit {
+            source_info.push_str(&format!(
+                ", pinned to commit {}",
+                &commit[..commit.len().min(12)]
+            ));
+        }
+        if let Some(true) = metadata.differs_from_local {
+            source_info.push_str(" (local drift: yes)");
+        }
+        all_messages.push(Content::text(source_info));
+    }
+
+    all_messages.push(Content::text(format!("Detected language: {}", language)));
     all_messages.extend(messages);
     Ok(InspectFileResult {
         messages: all_messages,
