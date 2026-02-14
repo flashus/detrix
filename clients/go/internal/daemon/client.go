@@ -117,6 +117,9 @@ type RegisterRequest struct {
 	Hostname      string `json:"hostname"`
 	Token         string `json:"token,omitempty"`
 	SafeMode      bool   `json:"safeMode,omitempty"`
+	// Build metadata (optional)
+	BuildCommit string `json:"buildCommit,omitempty"`
+	BuildTag    string `json:"buildTag,omitempty"`
 }
 
 // RegisterResponse is the response from connection registration.

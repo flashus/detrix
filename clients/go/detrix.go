@@ -39,7 +39,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/flashus/detrix/clients/go/internal/auth"
@@ -95,6 +97,12 @@ type Config struct {
 	// Disables operations that require breakpoints: function calls, stack traces, memory snapshots.
 	// Recommended for production environments where execution pauses are unacceptable.
 	SafeMode bool
+
+	// BuildCommit allows explicit override of build commit detection (optional)
+	BuildCommit string
+
+	// BuildTag allows explicit override of build tag detection (optional)
+	BuildTag string
 }
 
 // StatusResponse contains the current client status.
@@ -192,6 +200,8 @@ func Init(cfg Config) error {
 	s.DelvePath = delvePath
 	s.DetrixHome = cfg.DetrixHome
 	s.SafeMode = cfg.SafeMode
+	s.BuildCommit = cfg.BuildCommit
+	s.BuildTag = cfg.BuildTag
 	s.HealthCheckTimeoutMs = int(cfg.HealthCheckTimeout.Milliseconds())
 	s.RegisterTimeoutMs = int(cfg.RegisterTimeout.Milliseconds())
 	s.UnregisterTimeoutMs = int(cfg.UnregisterTimeout.Milliseconds())
@@ -254,6 +264,82 @@ func Status() StatusResponse {
 	}
 }
 
+// detectBuildInfo detects build commit and tag from environment variables
+// with fallback to compile-time injection and runtime git detection (dev mode only).
+func detectBuildInfo(cfg *Config) (commit string, tag string) {
+	// Layer 1: Explicit parameter override
+	if cfg != nil {
+		if cfg.BuildCommit != "" {
+			commit = cfg.BuildCommit
+		}
+		if cfg.BuildTag != "" {
+			tag = cfg.BuildTag
+		}
+	}
+
+	// If both set via config, skip auto-detection
+	if commit != "" && tag != "" {
+		return commit, tag
+	}
+
+	// Layer 2: DETRIX_* environment variables (highest priority for auto-detection)
+	if commit == "" {
+		commit = os.Getenv("DETRIX_BUILD_COMMIT")
+	}
+	if tag == "" {
+		tag = os.Getenv("DETRIX_BUILD_TAG")
+	}
+
+	// Layer 3: CI-specific environment variables
+	if commit == "" {
+		if c := os.Getenv("GIT_COMMIT"); c != "" {
+			commit = c
+		} else if c := os.Getenv("CI_COMMIT_SHA"); c != "" {
+			commit = c
+		} else if c := os.Getenv("GITHUB_SHA"); c != "" {
+			commit = c
+		}
+	}
+
+	if tag == "" {
+		if t := os.Getenv("GIT_TAG"); t != "" {
+			tag = t
+		} else if t := os.Getenv("CI_COMMIT_TAG"); t != "" {
+			tag = t
+		} else if t := os.Getenv("GITHUB_REF_NAME"); t != "" {
+			tag = t
+		}
+	}
+
+	// Layer 4: Compile-time injection (from ldflags)
+	if commit == "" && BuildCommit != "" {
+		commit = BuildCommit
+	}
+	if tag == "" && Version != "" && Version != "dev" {
+		tag = Version
+	}
+
+	// Layer 5: Runtime git detection (dev mode fallback)
+	if commit == "" {
+		if c := tryGitRevParse(); c != "" {
+			commit = c
+		}
+	}
+
+	return commit, tag
+}
+
+// tryGitRevParse attempts to get the current commit via git command.
+// Returns empty string on any error (expected in containers).
+func tryGitRevParse() string {
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
 // Wake starts the debugger and registers with the daemon.
 //
 // This spawns a Delve process to attach to the current process,
@@ -305,6 +391,8 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 	name := s.Name
 	detrixHome := s.DetrixHome
 	safeMode := s.SafeMode
+	buildCommitOverride := s.BuildCommit
+	buildTagOverride := s.BuildTag
 	healthTimeout := time.Duration(s.HealthCheckTimeoutMs) * time.Millisecond
 	registerTimeout := time.Duration(s.RegisterTimeoutMs) * time.Millisecond
 	s.Unlock()
@@ -344,7 +432,13 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 		slog.Warn("failed to get hostname", "error", err)
 	}
 
-	// 2e. Register with daemon
+	// 2e. Detect build information
+	buildCommit, buildTag := detectBuildInfo(&Config{
+		BuildCommit: buildCommitOverride,
+		BuildTag:    buildTagOverride,
+	})
+
+	// 2f. Register with daemon
 	// Use advertise_host if set (for Docker/cloud), otherwise use control_host
 	registrationHost := debugHost
 	if advertiseHost != "" {
@@ -359,6 +453,8 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 		Hostname:      hostname,
 		Token:         token,
 		SafeMode:      safeMode,
+		BuildCommit:   buildCommit,
+		BuildTag:      buildTag,
 	}, registerTimeout)
 	if err != nil {
 		if killErr := delveManager.Kill(delveProc); killErr != nil {

@@ -40,6 +40,7 @@
 #![cfg_attr(not(test), deny(clippy::panic))]
 
 mod auth;
+mod build_info;
 mod config;
 mod control;
 mod daemon;
@@ -150,6 +151,8 @@ pub fn init(config: Config) -> Result<()> {
             .detrix_home_path()
             .map(|p| p.to_string_lossy().to_string());
         guard.safe_mode = config.safe_mode;
+        guard.build_commit = config.build_commit.clone();
+        guard.build_tag = config.build_tag.clone();
         guard.health_check_timeout_ms = config
             .health_check_timeout
             .as_millis()
@@ -395,6 +398,8 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
         name,
         detrix_home,
         safe_mode,
+        build_commit_override,
+        build_tag_override,
         health_timeout,
         register_timeout,
     ) = {
@@ -411,6 +416,8 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
             guard.name.clone(),
             guard.detrix_home.clone(),
             guard.safe_mode,
+            guard.build_commit.clone(),
+            guard.build_tag.clone(),
             Duration::from_millis(guard.health_check_timeout_ms),
             Duration::from_millis(guard.register_timeout_ms),
         )
@@ -501,6 +508,10 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
             "unknown".to_string()
         });
 
+    // Detect build information
+    let build_commit = build_info::detect_build_commit(build_commit_override);
+    let build_tag = build_info::detect_build_tag(build_tag_override);
+
     // Register with daemon
     // Use advertise_host if set (for Docker/cloud), otherwise use control_host
     // Pass our PID so the daemon can use AttachPid mode with lldb-dap
@@ -517,6 +528,8 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
             pid: Some(std::process::id()),
             token,
             safe_mode,
+            build_commit,
+            build_tag,
         },
         register_timeout,
     ) {

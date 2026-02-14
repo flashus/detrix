@@ -43,6 +43,16 @@ pub struct RegisterRequest {
     #[serde(rename = "safeMode")]
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub safe_mode: bool,
+
+    /// Build commit SHA (optional).
+    #[serde(rename = "buildCommit")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_commit: Option<String>,
+
+    /// Build tag/version (optional).
+    #[serde(rename = "buildTag")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_tag: Option<String>,
 }
 
 /// Response from connection registration.
@@ -208,6 +218,8 @@ mod tests {
             pid: Some(12345),
             token: Some("secret".to_string()),
             safe_mode: true,
+            build_commit: Some("abc123".to_string()),
+            build_tag: Some("v1.0.0".to_string()),
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -232,6 +244,8 @@ mod tests {
             pid: None,
             token: None,
             safe_mode: false,
+            build_commit: None,
+            build_tag: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();

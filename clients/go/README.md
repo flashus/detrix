@@ -136,6 +136,42 @@ detrix.Shutdown()
 | `DETRIX_REGISTER_TIMEOUT` | Registration timeout (seconds) | `5.0` |
 | `DETRIX_UNREGISTER_TIMEOUT` | Unregistration timeout (seconds) | `2.0` |
 
+## Build Information
+
+The client automatically detects build metadata (commit SHA, version tag) from:
+
+1. **Explicit parameters** (via `Config.BuildCommit`, `Config.BuildTag`)
+2. **Environment variables**:
+   - `DETRIX_BUILD_COMMIT` / `DETRIX_BUILD_TAG` (recommended for Docker)
+   - `GIT_COMMIT`, `CI_COMMIT_SHA`, `GITHUB_SHA` (CI auto-detection)
+   - `GIT_TAG`, `CI_COMMIT_TAG`, `GITHUB_REF_NAME` (tag detection)
+3. **Compile-time injection** (via ldflags):
+   ```bash
+   go build -ldflags="-X github.com/flashus/detrix/clients/go.Version=1.0.0 \
+     -X github.com/flashus/detrix/clients/go.BuildCommit=$(git rev-parse HEAD)"
+   ```
+4. **Runtime git detection** (local dev only, requires .git directory)
+
+### Docker Example
+
+```dockerfile
+FROM golang:1.21 AS builder
+ARG GIT_COMMIT=unknown
+ARG GIT_TAG=unknown
+
+ENV DETRIX_BUILD_COMMIT=${GIT_COMMIT}
+ENV DETRIX_BUILD_TAG=${GIT_TAG}
+
+# These will be captured at build time
+RUN go build -ldflags="-X main.BuildCommit=${GIT_COMMIT}" ./cmd/myapp
+```
+
+Build with:
+```bash
+docker build --build-arg GIT_COMMIT=$(git rev-parse HEAD) \
+             --build-arg GIT_TAG=$(git describe --tags) .
+```
+
 ## Control Plane API
 
 The client exposes an HTTP control plane (same as Python client):

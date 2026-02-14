@@ -17,6 +17,8 @@ func main() {
 	err := detrix.Init(detrix.Config{
 		Name:      "example-app",
 		DaemonURL: "http://127.0.0.1:8090",
+		// BuildCommit: "custom-commit",  // Optional: override auto-detection
+		// BuildTag:    "custom-tag",     // Optional: override auto-detection
 	})
 	if err != nil {
 		log.Fatalf("Failed to initialize Detrix: %v", err)

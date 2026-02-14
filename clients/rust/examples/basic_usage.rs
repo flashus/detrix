@@ -26,6 +26,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Initializing Detrix client...");
     detrix::init(Config {
         name: Some("basic-example".to_string()),
+        // build_commit: Some("custom-commit".to_string()),  // Optional: override auto-detection
+        // build_tag: Some("custom-tag".to_string()),        // Optional: override auto-detection
         ..Config::default()
     })?;
 

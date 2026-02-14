@@ -1,5 +1,13 @@
 package detrix
 
-// Version is the current version of the Detrix Go client.
-// This value is kept in sync with clients/VERSION by the publish script.
-const Version = "1.0.0"
+// Version information (can be set via ldflags at build time)
+var (
+	// Version is the client version (set via ldflags or defaults to "1.0.0")
+	Version = "1.0.0"
+
+	// BuildCommit is the git commit SHA (set via ldflags)
+	BuildCommit = ""
+
+	// BuildTime is when the binary was built (set via ldflags)
+	BuildTime = ""
+)

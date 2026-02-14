@@ -62,6 +62,12 @@ pub struct InternalState {
     /// Safe mode enabled.
     pub safe_mode: bool,
 
+    /// Build commit override (optional).
+    pub build_commit: Option<String>,
+
+    /// Build tag override (optional).
+    pub build_tag: Option<String>,
+
     /// Health check timeout in milliseconds.
     pub health_check_timeout_ms: u64,
 
@@ -92,6 +98,8 @@ impl Default for InternalState {
             lldb_dap_path: String::new(),
             detrix_home: None,
             safe_mode: false,
+            build_commit: None,
+            build_tag: None,
             health_check_timeout_ms: 2000,
             register_timeout_ms: 5000,
             unregister_timeout_ms: 2000,

@@ -49,6 +49,12 @@ pub struct Config {
     /// Recommended for production environments.
     pub safe_mode: bool,
 
+    /// Explicit build commit override (optional)
+    pub build_commit: Option<String>,
+
+    /// Explicit build tag override (optional)
+    pub build_tag: Option<String>,
+
     /// Timeout for daemon health checks
     pub health_check_timeout: Duration,
 
@@ -74,6 +80,8 @@ impl Default for Config {
             lldb_dap_path: None,
             detrix_home: None,
             safe_mode: false,
+            build_commit: None,
+            build_tag: None,
             health_check_timeout: DEFAULT_HEALTH_CHECK_TIMEOUT,
             // Aligned with Python/Go: 5s is sufficient for registration
             register_timeout: DEFAULT_REGISTER_TIMEOUT,
