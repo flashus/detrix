@@ -48,12 +48,14 @@ use std::sync::Arc;
 /// # Arguments
 /// * `daemon_host` - Host the daemon is running on (from api.host config)
 /// * `daemon_port` - Port the daemon is running on
+/// * `file_server_host` - Host to advertise for file server (defaults to daemon_host)
 /// * `config_path` - Config path for daemon restart capability
 /// * `pid_file` - PID file path for daemon restart capability
 /// * `mcp_config` - MCP bridge configuration from detrix.toml
 pub async fn run_bridge(
     daemon_host: &str,
     daemon_port: u16,
+    file_server_host: Option<String>,
     config_path: Option<PathBuf>,
     pid_file: Option<PathBuf>,
     mcp_config: &detrix_config::McpBridgeConfig,
@@ -79,6 +81,7 @@ pub async fn run_bridge(
         heartbeat_interval_secs: mcp_config.heartbeat_interval_secs,
         heartbeat_max_failures: mcp_config.heartbeat_max_failures,
         parent_process,
+        file_server_host: file_server_host.unwrap_or_else(|| daemon_host.to_string()),
     };
 
     let bridge = Arc::new(McpBridge::new(config)?);

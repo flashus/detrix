@@ -47,7 +47,8 @@ tasks:
           --field-constraints \
           --snake-case-field \
           --use-default-kwarg \
-          --target-python-version 3.11
+          --target-python-version 3.11 \
+          --formatters ruff-format ruff-check
       - echo "✅ Generated Python models in python/detrix/_generated/models.py"
 
   generate-python-scaffold:

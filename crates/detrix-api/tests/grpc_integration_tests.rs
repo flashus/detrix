@@ -29,8 +29,8 @@ use detrix_api::generated::detrix::v1::{
 use detrix_api::grpc::{MetricsServiceImpl, StreamingServiceImpl};
 use detrix_api::ApiState;
 use detrix_application::{
-    AppContext, ConnectionRepositoryRef, DapAdapterFactoryRef, EventRepositoryRef,
-    MetricRepositoryRef,
+    AppContext, ConnectionReferenceRepositoryRef, ConnectionRepositoryRef, DapAdapterFactoryRef,
+    EventRepositoryRef, MetricRepositoryRef,
 };
 use detrix_config::ApiConfig;
 use detrix_storage::{SqliteConfig, SqliteStorage};
@@ -101,6 +101,7 @@ impl TestServer {
             None, // No auth token in tests
             vfs,
             file_source_chain,
+            Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
         );
 
         // Create a mock connection so metrics can be added
@@ -201,6 +202,7 @@ impl TestServer {
             None,
             vfs,
             file_source_chain,
+            Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
         );
 
         let identity = detrix_core::ConnectionIdentity::new(

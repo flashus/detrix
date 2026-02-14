@@ -382,6 +382,11 @@ pub const DEFAULT_AUDIT_RETENTION_DAYS: u32 = 90;
 /// Log files older than this will be deleted at daemon startup
 pub const DEFAULT_LOG_RETENTION_DAYS: u32 = 7;
 
+/// Connection TTL in calendar days (7 days)
+/// Connections inactive for more than this many calendar days will be removed on daemon startup.
+/// Set to -1 for indefinite retention.
+pub const DEFAULT_CONNECTION_TTL_DAYS: i64 = 7;
+
 /// System event cleanup interval in seconds
 pub const DEFAULT_SYSTEM_EVENT_CLEANUP_INTERVAL_SECS: u64 = 3_600;
 

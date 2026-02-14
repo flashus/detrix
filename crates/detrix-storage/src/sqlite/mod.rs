@@ -9,6 +9,7 @@
 //! - `connection_repo.rs` - ConnectionRepository implementation
 //! - `system_event_repo.rs` - SystemEventRepository implementation
 
+mod connection_reference_repo;
 mod connection_repo;
 mod event_repo;
 mod mcp_usage_repo;

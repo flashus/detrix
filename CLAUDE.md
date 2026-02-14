@@ -371,6 +371,10 @@ Each language has:
 
 See [docs/ADD_LANGUAGE.md](docs/ADD_LANGUAGE.md) for adding new languages.
 
+### Go/Delve Testing Caveat
+
+Delve's `dlv attach --continue` cannot properly attach to a `go run` subprocess — it needs a directly-running compiled binary. The Go client test config (`crates/detrix-testing/src/e2e/client_tests/config.rs`) compiles the fixture to a binary with debug symbols (`-gcflags=all=-N -l`) and runs it directly instead of using `go run .`.
+
 ## Safety System
 
 Three-layer validation before expressions are evaluated:

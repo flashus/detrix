@@ -164,6 +164,11 @@ pub struct Metric {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>, // Microseconds since epoch
 
+    /// Client identity of the creator (from X-Detrix-Client-Id header).
+    /// Used for user-scoped disable_metrics on daemon switch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+
     // Stack trace capture options
     #[serde(default)]
     pub capture_stack_trace: bool,
@@ -285,6 +290,7 @@ impl Metric {
             condition: None,
             safety_level: SafetyLevel::default(),
             created_at: None,
+            created_by: None,
             // Stack trace defaults
             capture_stack_trace: false,
             stack_trace_ttl: None,

@@ -146,6 +146,10 @@ pub struct RestConfig {
     /// CORS configuration
     #[serde(default)]
     pub cors: CorsConfig,
+    /// Enable admin endpoints (e.g., force disconnect-all).
+    /// Default: false. Only enable for trusted environments.
+    #[serde(default)]
+    pub admin_endpoints_enabled: bool,
 }
 
 // ============================================================================
@@ -267,6 +271,7 @@ impl Default for RestConfig {
             port: DEFAULT_REST_PORT,
             rate_limit: RateLimitConfig::default(),
             cors: CorsConfig::default(),
+            admin_endpoints_enabled: false,
         }
     }
 }

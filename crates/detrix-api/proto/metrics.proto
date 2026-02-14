@@ -64,6 +64,7 @@ message WakeResponse {
   int32 debug_port = 4;         // optional: debug port
   string message = 5;
   ResponseMetadata metadata = 6;
+  optional string daemon_url = 7;  // Daemon URL for auto-discovery (e.g., "http://localhost:8090")
 }
 
 message SleepRequest {

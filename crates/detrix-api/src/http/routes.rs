@@ -27,13 +27,18 @@ pub enum RouterConfigError {
 use super::middleware::{auth_middleware, AuthState};
 use super::paths;
 use super::websocket::websocket_handler;
+use crate::http::handlers::references::{
+    admin_disconnect_all, attach_connection, list_references, release_connection,
+    release_connections,
+};
 use crate::http::handlers::{
     add_metric, cleanup_connections, close_connection, create_connection, delete_metric,
     disable_group, disable_metric, disconnect_all, enable_group, enable_metric, get_cached_hashes,
     get_config, get_connection, get_mcp_usage, get_metric, get_metric_history, get_metric_value,
     health_check, inspect_file, list_connections, list_group_metrics, list_groups, list_metrics,
-    prometheus_metrics, provide_file, query_events, reload_config, sleep, status, update_config,
-    update_metric, validate_cache, validate_config, validate_expression, wake,
+    prometheus_metrics, provide_file, query_events, reload_config, sleep, status,
+    touch_connections, update_config, update_metric, validate_cache, validate_config,
+    validate_expression, wake,
 };
 use crate::state::ApiState;
 use axum::{
@@ -318,6 +323,17 @@ pub fn create_router_with_jwt_validator(
             get(get_connection).delete(close_connection),
         )
         .route(paths::API_V1_CONNECTIONS_CLEANUP, post(cleanup_connections))
+        .route(paths::API_V1_CONNECTIONS_TOUCH, post(touch_connections))
+        // Connection reference management (multi-user safety)
+        .route(paths::API_V1_CONNECTIONS_RELEASE, post(release_connections))
+        .route(paths::API_V1_CONNECTION_ATTACH, post(attach_connection))
+        .route(paths::API_V1_CONNECTION_RELEASE, post(release_connection))
+        .route(paths::API_V1_CONNECTION_REFERENCES, get(list_references))
+        // Admin endpoints
+        .route(
+            paths::API_V1_ADMIN_DISCONNECT_ALL,
+            post(admin_disconnect_all),
+        )
         // Config management REST API
         .route(paths::API_V1_CONFIG, get(get_config).put(update_config))
         .route(paths::API_V1_CONFIG_RELOAD, post(reload_config))

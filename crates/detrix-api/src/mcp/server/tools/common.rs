@@ -106,6 +106,7 @@ impl MetricBuilder {
             condition: None,
             safety_level: self.safety_level,
             created_at: None,
+            created_by: None,
             capture_stack_trace: self.capture_stack_trace,
             stack_trace_ttl: ttl,
             stack_trace_slice: None,

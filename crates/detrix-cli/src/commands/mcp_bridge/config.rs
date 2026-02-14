@@ -32,6 +32,8 @@ pub struct BridgeConfig {
     pub pid_file: Option<PathBuf>,
     /// Parent process info (IDE/editor that spawned this bridge)
     pub parent_process: Option<ParentProcessInfo>,
+    /// File server host to advertise to daemon (for file fetching)
+    pub file_server_host: String,
 }
 
 impl Default for BridgeConfig {
@@ -47,6 +49,7 @@ impl Default for BridgeConfig {
             config_path: None,
             pid_file: None,
             parent_process: None,
+            file_server_host: DEFAULT_API_HOST.to_string(),
         }
     }
 }

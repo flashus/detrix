@@ -7,8 +7,11 @@
 //! - Is protocol-agnostic (no knowledge of gRPC, REST, MCP, etc.)
 
 use crate::services::AdapterLifecycleManager;
-use crate::{ConnectionRepositoryRef, MetricRepositoryRef, VfsRef};
+use crate::{
+    ConnectionReferenceRepositoryRef, ConnectionRepositoryRef, MetricRepositoryRef, VfsRef,
+};
 use detrix_core::{
+    connection_reference::{ClientIdentity, ConnectionReference, ReferenceKind},
     Connection, ConnectionId, ConnectionIdentity, ConnectionStatus, Result, SystemEvent,
 };
 use std::sync::Arc;
@@ -21,6 +24,7 @@ use tracing::{debug, info, instrument};
 /// - Creating new connections to debugger servers (debugpy, delve, lldb-dap)
 /// - Disconnecting from debugger servers
 /// - Listing and querying connections
+/// - Reference counting for multi-user safety
 ///
 /// Uses dependency injection via trait objects for testability.
 /// Delegates adapter lifecycle management to AdapterLifecycleManager.
@@ -30,6 +34,9 @@ pub struct ConnectionService {
 
     /// Repository for persisting metrics (needed for cascade delete)
     metric_repo: MetricRepositoryRef,
+
+    /// Repository for connection reference counting (multi-user safety)
+    reference_repo: ConnectionReferenceRepositoryRef,
 
     /// Lifecycle manager for DAP adapters
     adapter_lifecycle_manager: Arc<AdapterLifecycleManager>,
@@ -47,12 +54,14 @@ impl ConnectionService {
     /// # Arguments
     /// * `connection_repo` - Repository for connection persistence
     /// * `metric_repo` - Repository for metric persistence (for cascade delete)
+    /// * `reference_repo` - Repository for connection reference counting (multi-user safety)
     /// * `adapter_lifecycle_manager` - Manager for DAP adapter lifecycle
     /// * `system_event_tx` - Broadcast channel for system events
     /// * `vfs` - Virtual file system for caching remote files
     pub fn new(
         connection_repo: ConnectionRepositoryRef,
         metric_repo: MetricRepositoryRef,
+        reference_repo: ConnectionReferenceRepositoryRef,
         adapter_lifecycle_manager: Arc<AdapterLifecycleManager>,
         system_event_tx: broadcast::Sender<SystemEvent>,
         vfs: VfsRef,
@@ -60,6 +69,7 @@ impl ConnectionService {
         Self {
             connection_repo,
             metric_repo,
+            reference_repo,
             adapter_lifecycle_manager,
             system_event_tx,
             vfs,
@@ -104,7 +114,7 @@ impl ConnectionService {
         safe_mode: bool,
     ) -> Result<ConnectionId> {
         self.create_connection_with_metadata(
-            host, port, identity, program, pid, safe_mode, None, None, None,
+            host, port, identity, program, pid, safe_mode, None, None, None, None,
         )
         .await
     }
@@ -115,6 +125,7 @@ impl ConnectionService {
     /// * `control_plane_url` - App control plane URL for transparent file fetching
     /// * `build_commit` - Git commit SHA at build time
     /// * `build_tag` - Build version tag
+    /// * `created_by` - Client identity of the creator (from X-Detrix-Client-Id header)
     #[allow(clippy::too_many_arguments)]
     #[instrument(skip(self), fields(host = %host, port = port, name = %identity.name, language = %identity.language, workspace_root = %identity.workspace_root, hostname = %identity.hostname, pid = ?pid, safe_mode = safe_mode))]
     pub async fn create_connection_with_metadata(
@@ -128,6 +139,7 @@ impl ConnectionService {
         control_plane_url: Option<String>,
         build_commit: Option<String>,
         build_tag: Option<String>,
+        created_by: Option<String>,
     ) -> Result<ConnectionId> {
         // 1. Create Connection entity from identity (validates identity, host, port, language + generates UUID)
         let mut connection = Connection::new_with_identity(identity, host, port)?;
@@ -135,6 +147,7 @@ impl ConnectionService {
         connection.control_plane_url = control_plane_url;
         connection.build_commit = build_commit;
         connection.build_tag = build_tag;
+        connection.created_by = created_by.clone();
         let connection_id = connection.id.clone();
 
         // 2. Check if connection with same UUID already exists and is connected
@@ -147,6 +160,15 @@ impl ConnectionService {
                     .has_adapter(&existing.id)
                     .await
             {
+                // Even if already connected, ensure the caller holds a reference
+                if let Some(ref client_id) = created_by {
+                    let reference = ConnectionReference::new(
+                        existing.id.clone(),
+                        ClientIdentity::bridge(client_id),
+                        ReferenceKind::Client,
+                    );
+                    let _ = self.reference_repo.add_reference(&reference).await;
+                }
                 info!(
                     "Connection already exists and is connected (UUID={}), returning existing",
                     connection_id.0
@@ -183,7 +205,24 @@ impl ConnectionService {
             .update_status(&connection_id, ConnectionStatus::Connected)
             .await?;
 
-        // 6. Emit connection created event
+        // 6. Add client reference if created_by is provided
+        if let Some(ref client_id) = created_by {
+            let reference = ConnectionReference::new(
+                connection_id.clone(),
+                ClientIdentity::bridge(client_id),
+                ReferenceKind::Client,
+            );
+            if let Err(e) = self.reference_repo.add_reference(&reference).await {
+                tracing::warn!(
+                    connection_id = %connection_id.0,
+                    client_id = %client_id,
+                    error = %e,
+                    "Failed to add client reference (non-fatal)"
+                );
+            }
+        }
+
+        // 7. Emit connection created event
         let event = SystemEvent::connection_created(
             connection_id.clone(),
             &connection.host,
@@ -230,12 +269,13 @@ impl ConnectionService {
         Ok(())
     }
 
-    /// Delete a connection and all associated metrics.
+    /// Delete a connection and all associated metrics and references.
     ///
     /// This method:
     /// 1. Stops the adapter via AdapterLifecycleManager
-    /// 2. Deletes all metrics associated with the connection
-    /// 3. Deletes the connection from repository
+    /// 2. Removes all connection references (explicit, for mock compatibility alongside CASCADE)
+    /// 3. Deletes all metrics associated with the connection
+    /// 4. Deletes the connection from repository
     ///
     /// Use this for explicit user-requested deletion, not for disconnect/reconnection scenarios.
     ///
@@ -244,6 +284,7 @@ impl ConnectionService {
     ///
     /// # Business Rules
     /// - Stops the adapter and cleans up resources
+    /// - Removes all references (multi-user safety cleanup)
     /// - Cascade deletes all associated metrics
     /// - Removes the connection from storage
     #[instrument(skip(self), fields(connection_id = %id.0))]
@@ -255,7 +296,10 @@ impl ConnectionService {
         self.vfs.clear_connection(&id.0);
         debug!("VFS cache cleared for connection {}", id.0);
 
-        // 3. Delete all associated metrics (cascade delete)
+        // 3. Remove all connection references (explicit cleanup for mock compatibility)
+        let _ = self.reference_repo.remove_all_by_connection(id).await;
+
+        // 4. Delete all associated metrics (cascade delete)
         let deleted_metrics = self.metric_repo.delete_by_connection_id(id).await?;
         if deleted_metrics > 0 {
             info!(
@@ -264,10 +308,10 @@ impl ConnectionService {
             );
         }
 
-        // 4. Delete connection from repository
+        // 5. Delete connection from repository
         self.connection_repo.delete(id).await?;
 
-        // 5. Emit connection closed event
+        // 6. Emit connection closed event
         let event = SystemEvent::connection_closed(id.clone());
         let _ = self.system_event_tx.send(event);
 
@@ -337,18 +381,80 @@ impl ConnectionService {
         self.connection_repo.touch(id).await
     }
 
-    /// Remove all stale (disconnected/failed) connections from the database
+    /// Remove stale connections based on TTL, respecting reference counts.
     ///
-    /// This cleans up connections that are no longer active, which can accumulate
-    /// over time as debuggers are started and stopped.
+    /// This cleans up connections that have been inactive for more than `ttl_days` calendar days.
+    /// If ttl_days < 0, no cleanup is performed (indefinite TTL).
+    ///
+    /// First cleans up stale references, then only deletes connections with zero remaining refs.
+    ///
+    /// # Arguments
+    /// * `ttl_days` - Number of calendar days of inactivity before cleanup. Use -1 for indefinite.
     ///
     /// # Returns
     /// The number of connections that were deleted
     #[instrument(skip(self))]
-    pub async fn cleanup_stale_connections(&self) -> Result<u64> {
-        let deleted = self.connection_repo.delete_disconnected().await?;
-        tracing::info!("Cleaned up {} stale connection(s)", deleted);
-        Ok(deleted)
+    pub async fn cleanup_stale_connections(&self, ttl_days: i64) -> Result<u64> {
+        if ttl_days < 0 {
+            return Ok(0); // -1 = indefinite, skip cleanup
+        }
+
+        // First: cleanup stale references
+        let stale_refs = self
+            .reference_repo
+            .cleanup_stale_references(ttl_days)
+            .await?;
+        if stale_refs > 0 {
+            tracing::info!(
+                stale_refs,
+                ttl_days,
+                "Cleaned up stale connection references"
+            );
+        }
+
+        let now_micros = chrono::Utc::now().timestamp_micros();
+        let all_connections = self.connection_repo.list_all().await?;
+        let mut removed_count = 0;
+
+        for conn in all_connections {
+            if conn.inactive_for_days(ttl_days, now_micros) {
+                // Only delete if no live references remain
+                let ref_count = self
+                    .reference_repo
+                    .count_references(&conn.id)
+                    .await
+                    .unwrap_or(0);
+                if ref_count > 0 {
+                    tracing::debug!(
+                        connection_id = %conn.id,
+                        ref_count,
+                        "Skipping stale connection: still has live references"
+                    );
+                    continue;
+                }
+
+                tracing::debug!(
+                    connection_id = %conn.id,
+                    last_active_days_ago = (now_micros - conn.last_active) / (86_400 * 1_000_000),
+                    "Removing stale connection (zero references)"
+                );
+
+                // Disconnect (kills debuggers) then remove
+                let _ = self.disconnect(&conn.id).await;
+                self.connection_repo.delete(&conn.id).await?;
+                removed_count += 1;
+            }
+        }
+
+        if removed_count > 0 {
+            tracing::info!(
+                removed = removed_count,
+                ttl_days,
+                "Cleaned up stale connections"
+            );
+        }
+
+        Ok(removed_count)
     }
 
     /// Restore connections on daemon startup
@@ -476,6 +582,158 @@ impl ConnectionService {
         }
 
         (reconnected_count, deleted_count)
+    }
+
+    /// Disconnect connections owned by a specific client (user-scoped).
+    ///
+    /// Releases all of the caller's references, then disconnects any connections
+    /// that have zero remaining references.
+    ///
+    /// # Arguments
+    /// * `client_identity` - The client releasing their connections
+    ///
+    /// # Returns
+    /// `(references_released, connections_disconnected)`
+    #[instrument(skip(self))]
+    pub async fn disconnect_all_connections(
+        &self,
+        client_identity: &ClientIdentity,
+    ) -> Result<(u64, u64)> {
+        self.release_all_client_references(client_identity).await
+    }
+
+    /// Release a single connection reference for a client.
+    ///
+    /// If remaining references reach zero, the connection is disconnected.
+    ///
+    /// # Returns
+    /// `(was_released, was_disconnected)` — true if the reference existed and was removed,
+    /// and true if the connection was disconnected due to zero remaining references.
+    #[instrument(skip(self), fields(connection_id = %connection_id.0, client = %client_identity))]
+    pub async fn release_reference(
+        &self,
+        connection_id: &ConnectionId,
+        client_identity: &ClientIdentity,
+    ) -> Result<(bool, bool)> {
+        let (was_removed, remaining) = self
+            .reference_repo
+            .remove_reference_and_count(connection_id, client_identity)
+            .await?;
+
+        let was_disconnected = if was_removed && remaining == 0 {
+            info!(
+                connection_id = %connection_id.0,
+                "Last reference removed, disconnecting connection"
+            );
+            self.disconnect(connection_id).await.is_ok()
+        } else {
+            false
+        };
+
+        Ok((was_removed, was_disconnected))
+    }
+
+    /// Release ALL references held by a client, disconnecting unreferenced connections.
+    ///
+    /// # Returns
+    /// `(references_released, connections_disconnected)`
+    #[instrument(skip(self), fields(client = %client_identity))]
+    pub async fn release_all_client_references(
+        &self,
+        client_identity: &ClientIdentity,
+    ) -> Result<(u64, u64)> {
+        let results = self
+            .reference_repo
+            .remove_all_by_client_and_count(client_identity)
+            .await?;
+
+        let released = results.len() as u64;
+        let mut disconnected = 0u64;
+
+        for (conn_id, remaining) in &results {
+            if *remaining == 0 && self.disconnect(conn_id).await.is_ok() {
+                disconnected += 1;
+            }
+        }
+
+        info!(released, disconnected, "Released client references");
+
+        Ok((released, disconnected))
+    }
+
+    /// Explicitly attach a client to a connection (create a Client reference).
+    ///
+    /// Used when a client starts using a connection that was created by someone else.
+    #[instrument(skip(self), fields(connection_id = %connection_id.0, client = %client_identity))]
+    pub async fn attach_to_connection(
+        &self,
+        connection_id: &ConnectionId,
+        client_identity: &ClientIdentity,
+    ) -> Result<()> {
+        // Verify connection exists
+        self.connection_repo
+            .find_by_id(connection_id)
+            .await?
+            .ok_or_else(|| {
+                detrix_core::error::Error::NotConnected(format!(
+                    "Connection {} not found",
+                    connection_id.0
+                ))
+            })?;
+
+        let reference = ConnectionReference::new(
+            connection_id.clone(),
+            client_identity.clone(),
+            ReferenceKind::Client,
+        );
+        self.reference_repo.add_reference(&reference).await?;
+
+        debug!("Client attached to connection");
+        Ok(())
+    }
+
+    /// Add a daemon reference to a connection (for system/persistent references).
+    #[instrument(skip(self), fields(connection_id = %connection_id.0))]
+    pub async fn add_daemon_reference(&self, connection_id: &ConnectionId) -> Result<()> {
+        let reference = ConnectionReference::new(
+            connection_id.clone(),
+            ClientIdentity::daemon(),
+            ReferenceKind::Daemon,
+        );
+        self.reference_repo.add_reference(&reference).await
+    }
+
+    /// Get the number of active references for a connection.
+    pub async fn get_reference_count(&self, connection_id: &ConnectionId) -> Result<u64> {
+        self.reference_repo.count_references(connection_id).await
+    }
+
+    /// List all references for a connection.
+    pub async fn list_references(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Result<Vec<ConnectionReference>> {
+        self.reference_repo.find_by_connection(connection_id).await
+    }
+
+    /// Admin force-disconnect all connections, ignoring reference counts.
+    ///
+    /// This is the old behavior of `disconnect_all_connections` — disconnects everything
+    /// and clears all references. Only callable from admin endpoints.
+    #[instrument(skip(self))]
+    pub async fn admin_disconnect_all(&self) -> Result<usize> {
+        let all_connections = self.connection_repo.list_all().await?;
+        let mut disconnected_count = 0;
+
+        for conn in &all_connections {
+            // Remove all references for this connection
+            let _ = self.reference_repo.remove_all_by_connection(&conn.id).await;
+            if self.disconnect(&conn.id).await.is_ok() {
+                disconnected_count += 1;
+            }
+        }
+
+        Ok(disconnected_count)
     }
 }
 

@@ -180,6 +180,11 @@ pub struct Connection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_tag: Option<String>,
 
+    /// Client identity of the creator (from X-Detrix-Client-Id header).
+    /// Used for multi-user reference counting in cloud mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+
     /// When the connection was created (microseconds since epoch)
     pub created_at: i64,
 
@@ -254,6 +259,7 @@ impl Connection {
             control_plane_url: None,
             build_commit: None,
             build_tag: None,
+            created_by: None,
             created_at: now,
             last_connected_at: None,
             last_active: now,
@@ -306,6 +312,7 @@ impl Connection {
             control_plane_url: None,
             build_commit: None,
             build_tag: None,
+            created_by: None,
             created_at: now,
             last_connected_at: None,
             last_active: now,
@@ -355,6 +362,35 @@ impl Connection {
     /// Update last active timestamp
     pub fn touch(&mut self) {
         self.last_active = Self::now_micros();
+    }
+
+    /// Check if connection has been inactive for more than N calendar days
+    ///
+    /// Uses date-based comparison: if last_active was "2025-01-10" and today is "2025-01-12",
+    /// that's 2 calendar days, even if it's only 25 hours elapsed.
+    ///
+    /// # Arguments
+    /// * `days` - Number of calendar days to check against. If -1, returns false (indefinite TTL).
+    /// * `now_micros` - Current timestamp in microseconds since epoch
+    ///
+    /// # Returns
+    /// `true` if the connection has been inactive for more than `days` calendar days.
+    pub fn inactive_for_days(&self, days: i64, now_micros: i64) -> bool {
+        if days < 0 {
+            return false; // -1 = indefinite, never cleanup
+        }
+
+        use chrono::{DateTime, Utc};
+
+        let last_active_time =
+            DateTime::from_timestamp_micros(self.last_active).unwrap_or_else(Utc::now);
+        let now_time = DateTime::from_timestamp_micros(now_micros).unwrap_or_else(Utc::now);
+
+        let last_date = last_active_time.date_naive();
+        let now_date = now_time.date_naive();
+
+        let days_diff = (now_date - last_date).num_days();
+        days_diff > days
     }
 }
 
@@ -739,5 +775,99 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Connection name cannot be empty"));
+    }
+
+    #[test]
+    fn test_inactive_for_days_calendar_day_calculation() {
+        use chrono::DateTime;
+
+        let identity = ConnectionIdentity::new("app", SourceLanguage::Python, "/ws", "host");
+        let mut conn =
+            Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5678).unwrap();
+
+        // Set last_active to 2025-01-10 23:59:00 UTC
+        let last_active = DateTime::parse_from_rfc3339("2025-01-10T23:59:00Z")
+            .unwrap()
+            .timestamp_micros();
+        conn.last_active = last_active;
+
+        // Now is 2025-01-12 00:01:00 UTC (only 25 hours later, but 2 calendar days)
+        let now = DateTime::parse_from_rfc3339("2025-01-12T00:01:00Z")
+            .unwrap()
+            .timestamp_micros();
+
+        // Jan 10 to Jan 12 = 2 calendar days elapsed
+        // inactive_for_days returns true if days_diff > threshold
+        // So days_diff = 2, therefore:
+        assert!(conn.inactive_for_days(1, now)); // 2 > 1 = true
+        assert!(!conn.inactive_for_days(2, now)); // 2 > 2 = false (exactly 2 days)
+        assert!(!conn.inactive_for_days(3, now)); // 2 > 3 = false
+    }
+
+    #[test]
+    fn test_inactive_for_days_same_day() {
+        let identity = ConnectionIdentity::new("app", SourceLanguage::Python, "/ws", "host");
+        let mut conn =
+            Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5678).unwrap();
+
+        // Set last_active to today at 00:01
+        let today_morning = chrono::Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 1, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_micros();
+        conn.last_active = today_morning;
+
+        // Now is today at 23:59 (same calendar day)
+        let today_evening = chrono::Utc::now()
+            .date_naive()
+            .and_hms_opt(23, 59, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_micros();
+
+        // Should NOT be inactive for even 1 day (same calendar day)
+        assert!(!conn.inactive_for_days(0, today_evening));
+        assert!(!conn.inactive_for_days(1, today_evening));
+    }
+
+    #[test]
+    fn test_ttl_indefinite_never_expires() {
+        let identity = ConnectionIdentity::new("app", SourceLanguage::Python, "/ws", "host");
+        let mut conn =
+            Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5678).unwrap();
+
+        // Set last_active to 100 days ago
+        let long_ago = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::days(100))
+            .unwrap()
+            .timestamp_micros();
+        conn.last_active = long_ago;
+
+        let now = chrono::Utc::now().timestamp_micros();
+
+        // With ttl_days = -1 (indefinite), should never be considered inactive
+        assert!(!conn.inactive_for_days(-1, now));
+        assert!(!conn.inactive_for_days(-999, now));
+    }
+
+    #[test]
+    fn test_ttl_zero_days_removes_all() {
+        let identity = ConnectionIdentity::new("app", SourceLanguage::Python, "/ws", "host");
+        let mut conn =
+            Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5678).unwrap();
+
+        // Set last_active to yesterday
+        let yesterday = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::days(1))
+            .unwrap()
+            .timestamp_micros();
+        conn.last_active = yesterday;
+
+        let now = chrono::Utc::now().timestamp_micros();
+
+        // With ttl_days = 0, anything older than today should be inactive
+        assert!(conn.inactive_for_days(0, now));
     }
 }

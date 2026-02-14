@@ -46,6 +46,7 @@ async fn create_connection_with_identity(
         control_plane_url: None,
         build_commit: None,
         build_tag: None,
+        created_by: None, // Will be set by server from socket
     };
 
     let response = reqwest::Client::new()

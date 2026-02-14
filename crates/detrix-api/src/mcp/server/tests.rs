@@ -1,8 +1,8 @@
 use super::*;
 use crate::ApiState;
 use detrix_application::{
-    AppContext, ConnectionRepositoryRef, DapAdapterFactoryRef, EventRepositoryRef,
-    MetricRepositoryRef,
+    AppContext, ConnectionReferenceRepositoryRef, ConnectionRepositoryRef, DapAdapterFactoryRef,
+    EventRepositoryRef, MetricRepositoryRef,
 };
 use detrix_config::ApiConfig;
 use detrix_core::ConnectionId;
@@ -58,6 +58,7 @@ impl TestFixture {
             None, // No auth token in tests
             vfs,
             file_source_chain,
+            Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
         );
 
         let state = Arc::new(ApiState::builder(context, storage).build());

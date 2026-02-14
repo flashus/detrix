@@ -253,6 +253,70 @@ pub trait ConnectionLookup: Send + Sync {
     async fn get_connection(&self, id: &ConnectionId) -> Result<Option<Connection>>;
 }
 
+/// Repository for connection reference counting (multi-user safety)
+///
+/// Manages references that clients hold on connections. A connection should
+/// only be disconnected when its last reference is removed.
+///
+/// Key atomic methods:
+/// - `remove_reference_and_count`: atomically removes a reference and returns remaining count
+/// - `remove_all_by_client_and_count`: atomically removes all client refs and returns affected counts
+#[async_trait]
+pub trait ConnectionReferenceRepository: Send + Sync {
+    /// Upsert reference (if same client+connection exists, touch it)
+    async fn add_reference(&self, reference: &detrix_core::ConnectionReference) -> Result<()>;
+
+    /// Atomically remove reference and return remaining count.
+    /// Wraps DELETE + SELECT COUNT in a transaction.
+    /// Returns `(was_removed, remaining_count)`.
+    async fn remove_reference_and_count(
+        &self,
+        connection_id: &ConnectionId,
+        client_identity: &detrix_core::ClientIdentity,
+    ) -> Result<(bool, u64)>;
+
+    /// Atomically remove ALL references by client, return vec of (connection_id, remaining_count).
+    /// Connections not in the result have 0 remaining references.
+    async fn remove_all_by_client_and_count(
+        &self,
+        client_identity: &detrix_core::ClientIdentity,
+    ) -> Result<Vec<(ConnectionId, u64)>>;
+
+    /// Remove ALL references for a connection (for admin/cascade)
+    async fn remove_all_by_connection(&self, connection_id: &ConnectionId) -> Result<u64>;
+
+    /// Count references for a connection
+    async fn count_references(&self, connection_id: &ConnectionId) -> Result<u64>;
+
+    /// List references for a connection
+    async fn find_by_connection(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Result<Vec<detrix_core::ConnectionReference>>;
+
+    /// List references held by a client
+    async fn find_by_client(
+        &self,
+        client_identity: &detrix_core::ClientIdentity,
+    ) -> Result<Vec<detrix_core::ConnectionReference>>;
+
+    /// Check if client holds a reference
+    async fn has_reference(
+        &self,
+        connection_id: &ConnectionId,
+        client_identity: &detrix_core::ClientIdentity,
+    ) -> Result<bool>;
+
+    /// Remove references inactive > N calendar days
+    async fn cleanup_stale_references(&self, ttl_days: i64) -> Result<u64>;
+
+    /// Touch all references by client (update last_active)
+    async fn touch_all_by_client(
+        &self,
+        client_identity: &detrix_core::ClientIdentity,
+    ) -> Result<u64>;
+}
+
 /// Repository for system events (crashes, connections, metric CRUD)
 ///
 /// Used for:

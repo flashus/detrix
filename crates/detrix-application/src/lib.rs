@@ -88,7 +88,8 @@ pub use error::{
 
 // Re-export port types from detrix-ports for convenience
 pub use detrix_ports::{
-    AnchorService, AnchorServiceRef, ConnectionLookup, ConnectionLookupRef, ConnectionRepository,
+    AnchorService, AnchorServiceRef, ConnectionLookup, ConnectionLookupRef,
+    ConnectionReferenceRepository, ConnectionReferenceRepositoryRef, ConnectionRepository,
     ConnectionRepositoryRef, DapAdapter, DapAdapterFactory, DapAdapterFactoryRef, DapAdapterRef,
     DlqEntry, DlqEntryStatus, DlqRepository, DlqRepositoryRef, ErrorCountRow, EventOutput,
     EventOutputRef, EventRepository, EventRepositoryRef, FetchResult, FileEvent, FileSource,

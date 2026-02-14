@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use detrix_logging::{debug, error, info, warn};
 use reqwest::Client;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{watch, RwLock};
@@ -30,6 +31,10 @@ pub struct McpBridge {
     restart_backoff: RwLock<RestartBackoff>,
     /// URL of the local file server (set after start_file_server)
     file_server_url: RwLock<Option<String>>,
+    /// Host to advertise for file server (for daemon switching)
+    file_server_host: RwLock<String>,
+    /// Connections this bridge has auto-attached to (for cleanup on switch)
+    attached_connections: RwLock<HashSet<String>>,
 }
 
 impl McpBridge {
@@ -46,6 +51,8 @@ impl McpBridge {
         let auth_token = RwLock::new(config.auth_token.clone());
         let restart_backoff = RwLock::new(RestartBackoff::new());
 
+        let file_server_host_val = config.file_server_host.clone();
+
         Ok(Self {
             config,
             client,
@@ -54,6 +61,8 @@ impl McpBridge {
             auth_token,
             restart_backoff,
             file_server_url: RwLock::new(None),
+            file_server_host: RwLock::new(file_server_host_val),
+            attached_connections: RwLock::new(HashSet::new()),
         })
     }
 
@@ -493,20 +502,30 @@ impl McpBridge {
                 }
             };
 
-            // Forward to daemon
-            let response = match self.forward_request(request.clone()).await {
-                Ok(r) => r,
-                Err(e) => {
-                    error!("Failed to forward request: {}", e);
-                    let id = request.get("id").cloned().unwrap_or(Value::Null);
-                    serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "error": {
-                            "code": -32603,
-                            "message": format!("Internal error: {}", e)
-                        },
-                        "id": id
-                    })
+            // Check if this is a bridge-local tool call
+            let response = if let Some(local_response) = self.try_handle_local_tool(&request).await
+            {
+                local_response
+            } else {
+                // Not a local tool, forward to daemon
+                match self.forward_request(request.clone()).await {
+                    Ok(r) => {
+                        // Auto-attach to connections mentioned in successful responses
+                        self.auto_attach_from_response(&r).await;
+                        r
+                    }
+                    Err(e) => {
+                        error!("Failed to forward request: {}", e);
+                        let id = request.get("id").cloned().unwrap_or(Value::Null);
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "error": {
+                                "code": -32603,
+                                "message": format!("Internal error: {}", e)
+                            },
+                            "id": id
+                        })
+                    }
                 }
             };
 
@@ -520,4 +539,465 @@ impl McpBridge {
 
         Ok(())
     }
+
+    /// Try to handle bridge-local tool calls
+    ///
+    /// Returns Some(response) if the request is a local tool call (switch_daemon, list_known_daemons),
+    /// or None if the request should be forwarded to the daemon.
+    async fn try_handle_local_tool(&self, request: &Value) -> Option<Value> {
+        // Check if this is a tools/call request
+        if request.get("method")?.as_str()? != "tools/call" {
+            return None;
+        }
+
+        let params = request.get("params")?;
+        let tool_name = params.get("name")?.as_str()?;
+        let id = request.get("id").cloned().unwrap_or(Value::Null);
+
+        match tool_name {
+            "switch_daemon" => Some(self.handle_switch_daemon_tool(params, id).await),
+            "list_known_daemons" => Some(self.handle_list_known_daemons_tool(id).await),
+            _ => None, // Not a local tool, forward to daemon
+        }
+    }
+
+    /// Handle the switch_daemon tool call
+    async fn handle_switch_daemon_tool(&self, params: &Value, id: Value) -> Value {
+        let arguments = match params.get("arguments") {
+            Some(args) => args,
+            None => {
+                return jsonrpc_error(id, -32602, "Missing 'arguments' in switch_daemon request");
+            }
+        };
+
+        // Extract parameters
+        let url = arguments.get("url").and_then(|v| v.as_str());
+        let alias = arguments.get("alias").and_then(|v| v.as_str());
+        let close_connections = arguments
+            .get("close_connections")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let disable_metrics = arguments
+            .get("disable_metrics")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let file_server_host = arguments
+            .get("file_server_host")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let force = arguments
+            .get("force")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Validate parameters
+        if url.is_none() && alias.is_none() {
+            return jsonrpc_error(id, -32602, "Must specify either 'url' or 'alias'");
+        }
+        if url.is_some() && alias.is_some() {
+            return jsonrpc_error(id, -32602, "Cannot specify both 'url' and 'alias'");
+        }
+
+        // Resolve daemon config
+        let (target_url, is_production) = if let Some(alias_val) = alias {
+            match detrix_config::daemons::DaemonsConfig::load_from_home() {
+                Ok(config) => match config.find_by_alias(alias_val) {
+                    Some(daemon) => (daemon.url.clone(), daemon.is_production),
+                    None => {
+                        return jsonrpc_error(
+                            id,
+                            -32602,
+                            format!("Daemon alias '{}' not found", alias_val),
+                        );
+                    }
+                },
+                Err(e) => {
+                    return serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "error": {
+                            "code": -32603,
+                            "message": format!("Failed to load daemons config: {}", e)
+                        },
+                        "id": id
+                    });
+                }
+            }
+        } else {
+            (url.unwrap().to_string(), false) // Direct URL, assume non-production
+        };
+
+        // Production confirmation
+        if is_production && !force {
+            return serde_json::json!({
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32603,
+                    "message": "This is a PRODUCTION daemon. Add force=true to confirm switch."
+                },
+                "id": id
+            });
+        }
+
+        // Get current daemon URL for cleanup operations
+        let current_url = self.get_current_daemon_url().await;
+
+        // Disable metrics created by this bridge (before switching)
+        let mut disabled_count = 0;
+        if disable_metrics {
+            match self.disable_my_metrics_on_daemon(&current_url).await {
+                Ok(count) => {
+                    disabled_count = count;
+                    info!(
+                        disabled_count = count,
+                        current_url, "Disabled my metrics before daemon switch"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to disable my metrics");
+                }
+            }
+        }
+
+        // Release this bridge's connection references (before switching)
+        let mut released_refs = 0u64;
+        let mut disconnected_conns = 0u64;
+        if close_connections {
+            match self.release_my_references_on_daemon(&current_url).await {
+                Ok((released, disconnected)) => {
+                    released_refs = released;
+                    disconnected_conns = disconnected;
+                    info!(
+                        released,
+                        disconnected,
+                        current_url,
+                        "Released my connection references before daemon switch"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to release connection references");
+                }
+            }
+            // Clear tracked connections since we released them
+            self.attached_connections.write().await.clear();
+        }
+
+        // Switch daemon
+        match self
+            .switch_daemon(target_url.clone(), file_server_host)
+            .await
+        {
+            Ok(()) => {
+                let mut msg = format!("Switched to daemon: {}\n", target_url);
+                if close_connections {
+                    msg.push_str(&format!(
+                        "\nReleased {} references, disconnected {} connections on previous daemon\n",
+                        released_refs, disconnected_conns
+                    ));
+                } else {
+                    msg.push_str(&format!(
+                        "\nNote: Connections on previous daemon ({}) are still active.\n",
+                        current_url
+                    ));
+                }
+                if disable_metrics {
+                    msg.push_str(&format!(
+                        "Disabled {} of my metrics on previous daemon\n",
+                        disabled_count
+                    ));
+                } else {
+                    msg.push_str(&format!(
+                        "Note: Metrics on previous daemon ({}) are still running.\n",
+                        current_url
+                    ));
+                }
+
+                jsonrpc_success_text(id, msg)
+            }
+            Err(e) => jsonrpc_error(id, -32603, e),
+        }
+    }
+
+    /// Handle the list_known_daemons tool call
+    async fn handle_list_known_daemons_tool(&self, id: Value) -> Value {
+        match detrix_config::daemons::DaemonsConfig::load_from_home() {
+            Ok(config) => {
+                if config.daemon.is_empty() {
+                    return jsonrpc_success_text(
+                        id,
+                        "No saved daemons found in ~/.detrix/daemons.toml",
+                    );
+                }
+
+                let mut lines = vec!["Saved Daemons:\n".to_string()];
+                for daemon in &config.daemon {
+                    let prod_marker = if daemon.is_production {
+                        " [PRODUCTION]"
+                    } else {
+                        ""
+                    };
+                    lines.push(format!(
+                        "  • {} → {}{}",
+                        daemon.alias, daemon.url, prod_marker
+                    ));
+                }
+
+                jsonrpc_success_text(id, lines.join("\n"))
+            }
+            Err(e) => jsonrpc_error(id, -32603, format!("Failed to load daemons config: {}", e)),
+        }
+    }
+
+    /// Release all of this bridge's connection references on the specified daemon
+    ///
+    /// Calls the user-scoped `/api/v1/connections/release` endpoint with the bridge's client ID.
+    /// Returns (references_released, connections_disconnected).
+    async fn release_my_references_on_daemon(&self, daemon_url: &str) -> Result<(u64, u64)> {
+        let release_url = format!("{}/api/v1/connections/release", daemon_url);
+        let response = self
+            .client
+            .post(&release_url)
+            .header("X-Detrix-Client-Id", &self.client_id)
+            .send()
+            .await
+            .context("Failed to release connection references")?;
+
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "Failed to release connection references: {}",
+                response.status()
+            );
+        }
+
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse release response")?;
+
+        let released = result
+            .get("referencesReleased")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let disconnected = result
+            .get("connectionsDisconnected")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        Ok((released, disconnected))
+    }
+
+    /// Disable metrics created by this bridge on the specified daemon
+    ///
+    /// Lists all metrics and disables only those with `createdBy` matching this bridge's client ID.
+    /// Returns the number of metrics successfully disabled.
+    async fn disable_my_metrics_on_daemon(&self, daemon_url: &str) -> Result<usize> {
+        // List all metrics
+        let list_url = format!("{}/api/v1/metrics", daemon_url);
+        let response = self
+            .client
+            .get(&list_url)
+            .send()
+            .await
+            .context("Failed to list metrics")?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("Failed to list metrics: {}", response.status());
+        }
+
+        let metrics: Vec<serde_json::Value> = response
+            .json()
+            .await
+            .context("Failed to parse metrics response")?;
+
+        // Disable only metrics created by this bridge
+        let mut disabled_count = 0;
+        for metric in metrics {
+            let created_by = metric.get("createdBy").and_then(|v| v.as_str());
+            if created_by != Some(&self.client_id) {
+                continue;
+            }
+            if let Some(metric_id) = metric.get("metricId").and_then(|v| v.as_str()) {
+                let disable_url = format!("{}/api/v1/metrics/{}/disable", daemon_url, metric_id);
+                match self.client.post(&disable_url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        disabled_count += 1;
+                    }
+                    Ok(resp) => {
+                        warn!(metric_id, status = %resp.status(), "Failed to disable metric");
+                    }
+                    Err(e) => {
+                        warn!(metric_id, error = %e, "Failed to disable metric");
+                    }
+                }
+            }
+        }
+
+        Ok(disabled_count)
+    }
+
+    /// Force disconnect all connections on the specified daemon (admin)
+    ///
+    /// Calls the /api/v1/disconnect_all endpoint. This is the old non-scoped behavior.
+    /// Only used for admin/force operations.
+    #[allow(dead_code)]
+    async fn force_disconnect_all_on_daemon(&self, daemon_url: &str) -> Result<usize> {
+        let disconnect_url = format!("{}/api/v1/disconnect_all", daemon_url);
+        let response = self
+            .client
+            .post(&disconnect_url)
+            .send()
+            .await
+            .context("Failed to disconnect all")?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("Failed to disconnect all: {}", response.status());
+        }
+
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse disconnect response")?;
+
+        let count = result
+            .get("adaptersStopped")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+
+        Ok(count)
+    }
+
+    /// Auto-attach to a connection found in a forwarded response
+    ///
+    /// Inspects the response for `connectionId` and attaches if not already tracked.
+    async fn auto_attach_from_response(&self, response: &Value) {
+        if let Some(conn_id) = extract_connection_id_from_response(response) {
+            let already_attached = self.attached_connections.read().await.contains(&conn_id);
+            if !already_attached {
+                let daemon_url = self.daemon_url.read().await.clone();
+                let attach_url = format!("{}/api/v1/connections/{}/attach", daemon_url, conn_id);
+                match self
+                    .client
+                    .post(&attach_url)
+                    .header("X-Detrix-Client-Id", &self.client_id)
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        self.attached_connections
+                            .write()
+                            .await
+                            .insert(conn_id.clone());
+                        debug!("Auto-attached to connection {}", conn_id);
+                    }
+                    Ok(resp) => {
+                        debug!(
+                            "Failed to auto-attach to connection {}: {}",
+                            conn_id,
+                            resp.status()
+                        );
+                    }
+                    Err(e) => {
+                        debug!("Failed to auto-attach to connection {}: {}", conn_id, e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Switch to a different daemon URL at runtime
+    ///
+    /// File server behavior: The file server keeps running on the same port.
+    /// Only the advertised host changes (new_file_server_host). This allows
+    /// the new daemon to fetch files from the bridge's file server.
+    ///
+    /// # Arguments
+    /// * `new_url` - The new daemon URL to switch to
+    /// * `new_file_server_host` - Optional new host to advertise for file server
+    pub async fn switch_daemon(
+        &self,
+        new_url: String,
+        new_file_server_host: Option<String>,
+    ) -> Result<(), String> {
+        // Validate URL is reachable
+        let health_url = format!("{}/health", new_url.trim_end_matches('/'));
+        let resp = self
+            .client
+            .get(&health_url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|e| format!("Failed to reach daemon at {}: {}", new_url, e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("Daemon health check failed: {}", resp.status()));
+        }
+
+        // Update daemon URL
+        let mut url_guard = self.daemon_url.write().await;
+        *url_guard = new_url.clone();
+        drop(url_guard);
+
+        // Update file server host if provided
+        if let Some(host) = new_file_server_host {
+            let mut host_guard = self.file_server_host.write().await;
+            *host_guard = host;
+        }
+
+        info!("Switched to new daemon: {}", new_url);
+        Ok(())
+    }
+
+    /// Get the current daemon URL
+    pub async fn get_current_daemon_url(&self) -> String {
+        self.daemon_url.read().await.clone()
+    }
+}
+
+// ============================================================================
+// Response Inspection Helpers
+// ============================================================================
+
+/// Extract a connection ID from a daemon's JSON-RPC response
+///
+/// Looks for `connectionId` in the result content text (parsed as JSON).
+fn extract_connection_id_from_response(response: &Value) -> Option<String> {
+    let contents = response.pointer("/result/content")?.as_array()?;
+    contents.iter().find_map(|item| {
+        let text = item.get("text")?.as_str()?;
+        let parsed: Value = serde_json::from_str(text).ok()?;
+        parsed
+            .get("connectionId")
+            .or_else(|| parsed.get("connection_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    })
+}
+
+// ============================================================================
+// JSON-RPC Response Helpers
+// ============================================================================
+
+/// Create a JSON-RPC success response with text content
+fn jsonrpc_success_text(id: Value, text: impl Into<String>) -> Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "result": {
+            "content": [{
+                "type": "text",
+                "text": text.into()
+            }]
+        },
+        "id": id
+    })
+}
+
+/// Create a JSON-RPC error response
+fn jsonrpc_error(id: Value, code: i32, message: impl Into<String>) -> Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "error": {
+            "code": code,
+            "message": message.into()
+        },
+        "id": id
+    })
 }

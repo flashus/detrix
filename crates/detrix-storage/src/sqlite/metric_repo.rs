@@ -799,6 +799,7 @@ pub(crate) fn row_to_metric(row: &sqlx::sqlite::SqliteRow) -> Result<Metric> {
         condition: condition_expr,
         safety_level,
         created_at: Some(created_at),
+        created_by: row.try_get("created_by").unwrap_or(None),
         // Introspection fields
         capture_stack_trace,
         stack_trace_ttl: stack_trace_ttl.map(|t| t as u64),

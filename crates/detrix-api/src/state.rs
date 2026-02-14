@@ -367,6 +367,7 @@ mod tests {
             None, // No auth token in tests
             vfs,
             file_source_chain,
+            Arc::clone(&storage) as detrix_application::ConnectionReferenceRepositoryRef,
         );
 
         (context, storage as EventRepositoryRef, temp_dir)

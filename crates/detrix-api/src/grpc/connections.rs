@@ -44,6 +44,14 @@ impl ConnectionService for ConnectionServiceImpl {
         &self,
         request: Request<CreateConnectionRequest>,
     ) -> Result<Response<CreateConnectionResponse>, Status> {
+        // Extract client identity from gRPC metadata before consuming the request
+        let created_by = request
+            .metadata()
+            .get("x-detrix-client-id")
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| !s.is_empty() && *s != "__daemon__")
+            .map(|s| s.to_string());
+
         let req = request.into_inner();
         let connection_service = self.get_connection_service();
 
@@ -71,6 +79,7 @@ impl ConnectionService for ConnectionServiceImpl {
                 req.control_plane_url,
                 req.build_commit,
                 req.build_tag,
+                created_by, // Client identity from x-detrix-client-id metadata
             )
             .await
             .to_status()?;
@@ -175,13 +184,39 @@ impl ConnectionService for ConnectionServiceImpl {
     ) -> Result<Response<CleanupConnectionsResponse>, Status> {
         let connection_service = self.get_connection_service();
 
+        // API cleanup: remove all inactive connections (ttl_days=0)
         let deleted = connection_service
-            .cleanup_stale_connections()
+            .cleanup_stale_connections(0)
             .await
             .to_status()?;
 
         Ok(Response::new(CleanupConnectionsResponse {
             deleted,
+            metadata: None,
+        }))
+    }
+
+    async fn touch_connections(
+        &self,
+        request: Request<TouchConnectionsRequest>,
+    ) -> Result<Response<TouchConnectionsResponse>, Status> {
+        let req = request.into_inner();
+        let connection_service = self.get_connection_service();
+        let mut updated = 0;
+
+        for connection_id_str in &req.connection_ids {
+            let connection_id = ConnectionId::new(connection_id_str);
+            if connection_service
+                .touch_connection(&connection_id)
+                .await
+                .is_ok()
+            {
+                updated += 1;
+            }
+        }
+
+        Ok(Response::new(TouchConnectionsResponse {
+            updated,
             metadata: None,
         }))
     }

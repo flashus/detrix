@@ -82,6 +82,7 @@ pub async fn create_connection_impl(
             params.control_plane_url,
             params.build_commit,
             params.build_tag,
+            None, // MCP doesn't expose client IP easily, use None
         )
         .await
     {

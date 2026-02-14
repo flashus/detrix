@@ -11,8 +11,10 @@ use crate::constants::status;
 use crate::http::error::{HttpError, ToHttpResult};
 use crate::mcp_client_tracker::McpClientSummary;
 use crate::state::{ApiState, DaemonInfo};
-use axum::{extract::State, Json};
+use axum::{extract::State, http::HeaderMap, Json};
+use detrix_core::connection_reference::ClientIdentity;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{info, instrument};
 
@@ -33,6 +35,8 @@ pub struct WakeResponse {
     pub connection_id: Option<String>,
     pub debug_port: Option<i32>,
     pub message: String,
+    /// Daemon URL for auto-discovery (e.g., "http://localhost:8090")
+    pub daemon_url: Option<String>,
 }
 
 /// Sleep request DTO (REST)
@@ -111,12 +115,22 @@ pub async fn wake(
         .await
         .http_err()?;
 
+    // Determine daemon URL for auto-discovery
+    let daemon_url = {
+        let config = state.config_service.get_config().await;
+        Some(format!(
+            "http://{}:{}",
+            config.api.rest.host, config.api.rest.port
+        ))
+    };
+
     Ok(Json(WakeResponse {
         status: result.status,
         app_url: result.app_url,
         connection_id: result.connection_id,
         debug_port: result.debug_port,
         message: format!("Wake request sent to {}", req.app_url),
+        daemon_url,
     }))
 }
 
@@ -150,15 +164,63 @@ pub async fn sleep(
     }))
 }
 
-/// Stop all active DAP adapters.
+/// Stop active DAP adapters.
 ///
-/// Gracefully disconnects from all debug adapters. Metrics remain configured
-/// and will be re-enabled when connections are re-established.
-#[instrument(skip(state))]
+/// When `X-Detrix-Client-Id` header is present, operates in user-scoped mode:
+/// releases only the caller's connection references, and disconnects connections
+/// that have zero remaining references. This ensures multi-user safety in cloud mode.
+///
+/// Without the header, only localhost callers may perform a global disconnect
+/// (stops all adapters). Remote callers without the header get 400.
+#[instrument(skip_all)]
 pub async fn disconnect_all(
     State(state): State<Arc<ApiState>>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Result<Json<DisconnectAllResponse>, HttpError> {
-    info!("REST: disconnect_all");
+    // User-scoped mode: release only caller's references
+    if let Some(client_id_value) = headers.get("x-detrix-client-id") {
+        let client_id = client_id_value.to_str().map_err(|_| {
+            HttpError::bad_request("Invalid X-Detrix-Client-Id header encoding".to_string())
+        })?;
+
+        if client_id.is_empty() || client_id == "__daemon__" {
+            return Err(HttpError::bad_request(
+                "Invalid X-Detrix-Client-Id value".to_string(),
+            ));
+        }
+
+        let client_identity = ClientIdentity::bridge(client_id);
+        info!(
+            "REST: disconnect_all (user-scoped, client={})",
+            client_identity.as_str()
+        );
+
+        let (released, disconnected) = state
+            .context
+            .connection_service
+            .disconnect_all_connections(&client_identity)
+            .await
+            .http_err()?;
+
+        return Ok(Json(DisconnectAllResponse {
+            status: status::DISCONNECTED.to_string(),
+            adapters_stopped: disconnected as u32,
+            message: format!(
+                "{} reference(s) released, {} connection(s) disconnected",
+                released, disconnected
+            ),
+        }));
+    }
+
+    // Global mode requires localhost — remote callers must provide X-Detrix-Client-Id
+    if !addr.ip().is_loopback() {
+        return Err(HttpError::bad_request(
+            "X-Detrix-Client-Id header required for remote disconnect_all".to_string(),
+        ));
+    }
+
+    info!("REST: disconnect_all (global, localhost)");
 
     let result = state
         .context

@@ -325,4 +325,35 @@ impl MetricService {
         let summaries = self.storage.get_group_summaries().await?;
         Ok(summaries)
     }
+
+    /// Disable all metrics created by a specific client.
+    ///
+    /// Used by switch_daemon(disable_metrics=true) for user-scoped cleanup.
+    /// Only disables metrics where `created_by` matches the given client identity.
+    ///
+    /// # Returns
+    /// Number of metrics that were disabled.
+    pub async fn disable_metrics_by_owner(&self, client_identity: &str) -> Result<u64> {
+        let all_metrics = self.list_metrics().await?;
+        let mut disabled = 0u64;
+
+        for metric in all_metrics {
+            if metric.created_by.as_deref() == Some(client_identity) && metric.enabled {
+                if let Some(metric_id) = metric.id {
+                    let _ = self.toggle_metric(metric_id, false).await;
+                    disabled += 1;
+                }
+            }
+        }
+
+        if disabled > 0 {
+            tracing::info!(
+                disabled,
+                client_identity,
+                "Disabled metrics owned by client"
+            );
+        }
+
+        Ok(disabled)
+    }
 }

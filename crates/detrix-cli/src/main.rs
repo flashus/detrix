@@ -191,6 +191,16 @@ enum Commands {
         /// Daemon HTTP port for bridge mode
         #[arg(long, default_value_t = DEFAULT_REST_PORT)]
         daemon_port: u16,
+
+        /// Daemon URL to connect to (overrides config; e.g., http://192.168.1.10:8090)
+        /// If specified, ignores daemon_port and uses this URL directly
+        #[arg(long)]
+        daemon_url: Option<String>,
+
+        /// File server host to advertise (default: 127.0.0.1)
+        /// Used when switching daemons to tell the new daemon where to fetch files
+        #[arg(long)]
+        file_server_host: Option<String>,
     },
 
     /// Manage Detrix daemon lifecycle
@@ -381,7 +391,19 @@ async fn main() -> Result<()> {
             transport,
             no_daemon,
             daemon_port,
-        } => commands::mcp::run(&cli.config, &transport, no_daemon, daemon_port).await,
+            daemon_url,
+            file_server_host,
+        } => {
+            commands::mcp::run(
+                &cli.config,
+                &transport,
+                no_daemon,
+                daemon_port,
+                daemon_url,
+                file_server_host,
+            )
+            .await
+        }
         Commands::Daemon { action, pid_file } => {
             let pid_path = pid_file.map(std::path::PathBuf::from);
             commands::daemon::run(require_ctx()?, action, pid_path).await

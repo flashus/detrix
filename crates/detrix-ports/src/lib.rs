@@ -48,8 +48,8 @@ pub use output::{EventOutput, NullOutput, OutputStats};
 pub use purity::PurityAnalyzer;
 pub use remote_app::{RemoteAppControl, RemoteSleepResponse, RemoteWakeResponse};
 pub use repository::{
-    ConnectionLookup, ConnectionRepository, EventRepository, GroupSummary, MetricFilter,
-    MetricRepository, SystemEventRepository,
+    ConnectionLookup, ConnectionReferenceRepository, ConnectionRepository, EventRepository,
+    GroupSummary, MetricFilter, MetricRepository, SystemEventRepository,
 };
 
 // Type aliases for convenience
@@ -87,3 +87,6 @@ pub type RemoteAppControlRef = Arc<dyn RemoteAppControl + Send + Sync>;
 
 /// Thread-safe reference to a connection lookup
 pub type ConnectionLookupRef = Arc<dyn ConnectionLookup + Send + Sync>;
+
+/// Thread-safe reference to a connection reference repository
+pub type ConnectionReferenceRepositoryRef = Arc<dyn ConnectionReferenceRepository + Send + Sync>;

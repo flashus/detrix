@@ -32,6 +32,12 @@ pub const API_V1_GROUP_DISABLE: &str = "/api/v1/groups/{name}/disable";
 pub const API_V1_CONNECTIONS: &str = "/api/v1/connections";
 pub const API_V1_CONNECTION_BY_ID: &str = "/api/v1/connections/{id}";
 pub const API_V1_CONNECTIONS_CLEANUP: &str = "/api/v1/connections/cleanup";
+pub const API_V1_CONNECTIONS_TOUCH: &str = "/api/v1/connections/touch";
+pub const API_V1_CONNECTIONS_RELEASE: &str = "/api/v1/connections/release";
+pub const API_V1_CONNECTION_ATTACH: &str = "/api/v1/connections/{id}/attach";
+pub const API_V1_CONNECTION_RELEASE: &str = "/api/v1/connections/{id}/release";
+pub const API_V1_CONNECTION_REFERENCES: &str = "/api/v1/connections/{id}/references";
+pub const API_V1_ADMIN_DISCONNECT_ALL: &str = "/api/v1/admin/disconnect-all";
 
 pub const API_V1_CONFIG: &str = "/api/v1/config";
 pub const API_V1_CONFIG_RELOAD: &str = "/api/v1/config/reload";

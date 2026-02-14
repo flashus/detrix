@@ -357,6 +357,7 @@ impl ApiClient for GrpcClient {
                 control_plane_url: None,
                 build_commit: None,
                 build_tag: None,
+                created_by: None, // Will be set by server from socket (gRPC doesn't expose socket info directly)
             })
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?

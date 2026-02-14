@@ -328,12 +328,35 @@ pub async fn mcp_disconnect_handler(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
 ) -> StatusCode {
-    // Unregister MCP client
+    // Unregister MCP client and release all connection references
     if let Some(client_id_header) = headers.get("X-Detrix-Client-Id") {
         if let Ok(client_id_str) = client_id_header.to_str() {
             let client_id = McpClientId::from_string(client_id_str);
             state.mcp_client_tracker.unregister(&client_id).await;
-            info!("MCP disconnect: Client unregistered: {}", client_id_str);
+
+            // Release all connection references held by this client
+            let client_identity =
+                detrix_core::connection_reference::ClientIdentity::bridge(client_id_str);
+            match state
+                .context
+                .connection_service
+                .release_all_client_references(&client_identity)
+                .await
+            {
+                Ok((released, disconnected)) => {
+                    info!(
+                        "MCP disconnect: Client unregistered: {}, released {} refs, disconnected {} connections",
+                        client_id_str, released, disconnected
+                    );
+                }
+                Err(e) => {
+                    info!(
+                        "MCP disconnect: Client unregistered: {}, failed to release refs: {}",
+                        client_id_str, e
+                    );
+                }
+            }
+
             return StatusCode::OK;
         }
     }

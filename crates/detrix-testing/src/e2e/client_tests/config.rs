@@ -67,6 +67,11 @@ pub struct ClientTestConfig {
     pub env_vars: HashMap<String, String>,
     /// Test name prefix for logging
     pub test_name: String,
+    /// Optional compiled binary name. When set, prebuild produces a binary
+    /// with this name in working_dir, and spawn runs it directly instead of
+    /// using `spawn_command` (e.g., `go run`). Required for Go because
+    /// Delve `dlv attach --continue` cannot attach to a `go run` subprocess.
+    pub compiled_binary: Option<String>,
 }
 
 impl ClientTestConfig {
@@ -87,6 +92,7 @@ impl ClientTestConfig {
             spawn_args_after: vec![],
             env_vars,
             test_name: "Python Client".to_string(),
+            compiled_binary: None,
         }
     }
 
@@ -100,15 +106,18 @@ impl ClientTestConfig {
 
         Self {
             language: ClientLanguage::Go,
-            // Use the directory containing go.mod - go run will compile and run the package
+            // Directory containing go.mod (used for exists check and working dir)
             fixture_path: PathBuf::from("fixtures/go"),
             // Working dir is fixtures/go where go.mod is located
             working_dir: PathBuf::from("fixtures/go"),
-            // go run <dir> compiles and runs the package at <dir>
-            spawn_args_before: vec!["run".to_string()],
+            // spawn_args are not used when compiled_binary is set
+            spawn_args_before: vec![],
             spawn_args_after: vec![],
             env_vars,
             test_name: "Go Client".to_string(),
+            // Delve `dlv attach --continue` cannot attach to a `go run` subprocess.
+            // We compile to a binary with debug symbols and run it directly.
+            compiled_binary: Some("detrix_example_app".to_string()),
         }
     }
 
@@ -131,6 +140,7 @@ impl ClientTestConfig {
             spawn_args_after: vec!["--features".to_string(), "client".to_string()],
             env_vars,
             test_name: "Rust Client".to_string(),
+            compiled_binary: None,
         }
     }
 
@@ -162,9 +172,15 @@ impl ClientTestConfig {
                 Some((self.language.spawn_command().to_string(), args))
             }
             ClientLanguage::Go => {
-                // go build <fixture_path>
+                // go build with debug symbols for Delve attach
                 let mut args = vec!["build".to_string()];
-                args.push(fixture_full_path.to_string_lossy().to_string());
+                args.push("-gcflags=all=-N -l".to_string());
+                if let Some(ref binary_name) = self.compiled_binary {
+                    args.push("-o".to_string());
+                    args.push(binary_name.clone());
+                }
+                // Build current package (working_dir is fixtures/go)
+                args.push(".".to_string());
                 Some((self.language.spawn_command().to_string(), args))
             }
             ClientLanguage::Python => None,
@@ -178,6 +194,12 @@ impl ClientTestConfig {
     /// - fixture path
     /// - spawn_args_after
     pub fn build_spawn_args(&self, fixture_full_path: &std::path::Path) -> (String, Vec<String>) {
+        // When a compiled binary is set, run it directly from working_dir
+        if let Some(ref binary_name) = self.compiled_binary {
+            let binary = format!("./{}", binary_name);
+            return (binary, vec![]);
+        }
+
         let mut args = self.spawn_args_before.clone();
         args.push(fixture_full_path.to_string_lossy().to_string());
         args.extend(self.spawn_args_after.clone());

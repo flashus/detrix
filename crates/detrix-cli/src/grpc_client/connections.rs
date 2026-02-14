@@ -68,6 +68,7 @@ impl ConnectionsClient {
             control_plane_url: None,
             build_commit: None,
             build_tag: None,
+            created_by: None, // Server will override with actual IP
         };
 
         let response = self

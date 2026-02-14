@@ -23,6 +23,7 @@ mod health;
 mod lifecycle;
 mod metrics;
 mod operations;
+pub mod references;
 mod values;
 mod vfs;
 pub use config::{
@@ -31,7 +32,8 @@ pub use config::{
 };
 pub use connections::{
     cleanup_connections, close_connection, create_connection, get_connection, list_connections,
-    CleanupResponse, ListConnectionsQuery,
+    touch_connections, CleanupResponse, ListConnectionsQuery, TouchConnectionsRequest,
+    TouchConnectionsResponse,
 };
 pub use diagnostic::{
     get_mcp_usage, inspect_file, validate_expression, CodeLineDto, InspectFileResponse,

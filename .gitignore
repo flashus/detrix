@@ -9,3 +9,5 @@ clients/go/basic_usage
 clients/go/test_wake
 clients/go/trade_bot
 fixtures/go/go
+.mcp.json
+.serena/

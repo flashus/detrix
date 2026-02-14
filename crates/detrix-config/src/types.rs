@@ -107,6 +107,13 @@ pub struct Config {
     pub vfs: VfsConfig,
     #[serde(default)]
     pub metric: Vec<MetricDefinition>,
+    /// Connection TTL in calendar days. Default 7. Set to -1 for indefinite.
+    #[serde(default = "default_connection_ttl_days")]
+    pub connection_ttl_days: i64,
+}
+
+fn default_connection_ttl_days() -> i64 {
+    crate::constants::DEFAULT_CONNECTION_TTL_DAYS
 }
 
 impl Config {

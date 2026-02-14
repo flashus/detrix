@@ -26,6 +26,9 @@ service ConnectionService {
 
   // Cleanup stale (disconnected/failed) connections
   rpc CleanupConnections(CleanupConnectionsRequest) returns (CleanupConnectionsResponse);
+
+  // Touch connections to update last_active timestamp
+  rpc TouchConnections(TouchConnectionsRequest) returns (TouchConnectionsResponse);
 }
 
 // ============================================================
@@ -50,6 +53,9 @@ message CreateConnectionRequest {
   optional string control_plane_url = 11;  // App control plane URL (e.g., "http://app:8091")
   optional string build_commit = 12;       // Git commit SHA at build time
   optional string build_tag = 13;          // Build version tag (e.g., "v1.2.3")
+
+  // User identity tracking (for multi-user reference counting)
+  optional string created_by = 14;         // Client identity of the creator (from X-Detrix-Client-Id header)
 }
 
 message CreateConnectionResponse {
@@ -98,6 +104,16 @@ message CleanupConnectionsRequest {
 
 message CleanupConnectionsResponse {
   uint64 deleted = 1;                // Number of connections deleted
+  ResponseMetadata metadata = 2;
+}
+
+message TouchConnectionsRequest {
+  repeated string connection_ids = 1;
+  RequestMetadata metadata = 2;
+}
+
+message TouchConnectionsResponse {
+  uint32 updated = 1;                // Number of connections updated
   ResponseMetadata metadata = 2;
 }
 

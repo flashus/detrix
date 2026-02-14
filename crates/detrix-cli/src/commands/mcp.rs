@@ -53,6 +53,8 @@ pub async fn run(
     transport: &str,
     no_daemon: bool,
     daemon_port: u16,
+    daemon_url: Option<String>,
+    file_server_host: Option<String>,
 ) -> Result<()> {
     // Note: Logging is already initialized by main.rs with config from detrix.toml
     // (including use_utc timestamp setting and file logging to ~/detrix/log/mcp_{pid}.log)
@@ -93,87 +95,121 @@ pub async fn run(
         return run_direct(&config_path_str, &config).await;
     }
 
-    // Use centralized daemon discovery (PID file + port probe fallback)
-    let discovery = DaemonDiscovery::new()
-        .with_pid_file(&config.daemon.pid_file)
-        .with_probe_host(&config.api.rest.host)
-        .with_probe_ports(config.api.rest.port, config.api.grpc.port);
+    // If --daemon-url is provided, parse it and use it directly (skip discovery)
+    let (actual_host, actual_port) = if let Some(ref url) = daemon_url {
+        // Parse the daemon URL to extract host and port
+        // Expected format: http://host:port or https://host:port
+        let url_without_scheme = url
+            .strip_prefix("http://")
+            .or_else(|| url.strip_prefix("https://"))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid daemon URL: {}. Expected format: http://host:port",
+                    url
+                )
+            })?;
 
-    let (actual_host, actual_port) = match discovery.find_daemon() {
-        Ok(Some(daemon_info)) => {
-            let method = match daemon_info.discovery_method {
-                DiscoveryMethod::PidFile => "PID file",
-                DiscoveryMethod::PortProbe => "port probe",
-            };
-            info!(
-                "Found running daemon via {} (PID: {}, endpoint: {})",
-                method,
-                daemon_info
-                    .pid
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                daemon_info.http_endpoint()
+        let parts: Vec<&str> = url_without_scheme.split(':').collect();
+        if parts.len() != 2 {
+            anyhow::bail!(
+                "Invalid daemon URL: {}. Expected format: http://host:port",
+                url
             );
+        }
 
-            // Verify daemon is actually healthy before using it
-            if is_daemon_healthy(&daemon_info.host, daemon_info.http_port).await {
-                (daemon_info.host, daemon_info.http_port)
-            } else {
-                // Daemon found but not healthy yet - wait for it to become ready
-                // This handles the case where daemon is still starting up
+        let host = parts[0].to_string();
+        let port: u16 = parts[1].parse().with_context(|| {
+            format!(
+                "Invalid port in daemon URL: {}. Port must be a number.",
+                parts[1]
+            )
+        })?;
+
+        info!("Using daemon URL from --daemon-url flag: {}", url);
+        (host, port)
+    } else {
+        // Use centralized daemon discovery (PID file + port probe fallback)
+        let discovery = DaemonDiscovery::new()
+            .with_pid_file(&config.daemon.pid_file)
+            .with_probe_host(&config.api.rest.host)
+            .with_probe_ports(config.api.rest.port, config.api.grpc.port);
+
+        match discovery.find_daemon() {
+            Ok(Some(daemon_info)) => {
+                let method = match daemon_info.discovery_method {
+                    DiscoveryMethod::PidFile => "PID file",
+                    DiscoveryMethod::PortProbe => "port probe",
+                };
                 info!(
+                    "Found running daemon via {} (PID: {}, endpoint: {})",
+                    method,
+                    daemon_info
+                        .pid
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    daemon_info.http_endpoint()
+                );
+
+                // Verify daemon is actually healthy before using it
+                if is_daemon_healthy(&daemon_info.host, daemon_info.http_port).await {
+                    (daemon_info.host, daemon_info.http_port)
+                } else {
+                    // Daemon found but not healthy yet - wait for it to become ready
+                    // This handles the case where daemon is still starting up
+                    info!(
                     "Daemon found via {} but not responding yet, waiting for it to become healthy...",
                     method
                 );
-                match wait_for_daemon_healthy(
-                    &daemon_info.host,
-                    daemon_info.http_port,
-                    &config.daemon.pid_file,
-                )
-                .await
-                {
-                    Ok(port) => (daemon_info.host, port),
-                    Err(_) => {
-                        // Timeout waiting - daemon may have crashed, respawn
-                        warn!("Daemon didn't become healthy, respawning...");
-                        let port = spawn_daemon_for_mcp(
-                            &config.api.rest.host,
-                            &config_path_str,
-                            &config.daemon.pid_file,
-                            config.api.rest.port,
-                        )
-                        .await?;
-                        (config.api.rest.host.clone(), port)
+                    match wait_for_daemon_healthy(
+                        &daemon_info.host,
+                        daemon_info.http_port,
+                        &config.daemon.pid_file,
+                    )
+                    .await
+                    {
+                        Ok(port) => (daemon_info.host, port),
+                        Err(_) => {
+                            // Timeout waiting - daemon may have crashed, respawn
+                            warn!("Daemon didn't become healthy, respawning...");
+                            let port = spawn_daemon_for_mcp(
+                                &config.api.rest.host,
+                                &config_path_str,
+                                &config.daemon.pid_file,
+                                config.api.rest.port,
+                            )
+                            .await?;
+                            (config.api.rest.host.clone(), port)
+                        }
                     }
                 }
             }
-        }
-        Ok(None) => {
-            // Daemon not running - spawn it
-            info!(
-                "Daemon not running, auto-spawning (config: {})...",
-                config_path_str
-            );
-            let port = spawn_daemon_for_mcp(
-                &config.api.rest.host,
-                &config_path_str,
-                &config.daemon.pid_file,
-                config.api.rest.port,
-            )
-            .await?;
-            (config.api.rest.host.clone(), port)
-        }
-        Err(e) => {
-            // Error during discovery - try spawning anyway
-            warn!("Error discovering daemon: {}, trying to spawn...", e);
-            let port = spawn_daemon_for_mcp(
-                &config.api.rest.host,
-                &config_path_str,
-                &config.daemon.pid_file,
-                config.api.rest.port,
-            )
-            .await?;
-            (config.api.rest.host.clone(), port)
+            Ok(None) => {
+                // Daemon not running - spawn it
+                info!(
+                    "Daemon not running, auto-spawning (config: {})...",
+                    config_path_str
+                );
+                let port = spawn_daemon_for_mcp(
+                    &config.api.rest.host,
+                    &config_path_str,
+                    &config.daemon.pid_file,
+                    config.api.rest.port,
+                )
+                .await?;
+                (config.api.rest.host.clone(), port)
+            }
+            Err(e) => {
+                // Error during discovery - try spawning anyway
+                warn!("Error discovering daemon: {}, trying to spawn...", e);
+                let port = spawn_daemon_for_mcp(
+                    &config.api.rest.host,
+                    &config_path_str,
+                    &config.daemon.pid_file,
+                    config.api.rest.port,
+                )
+                .await?;
+                (config.api.rest.host.clone(), port)
+            }
         }
     };
 
@@ -184,7 +220,8 @@ pub async fn run(
     mcp_bridge::run_bridge(
         &actual_host,
         actual_port,
-        Some(config_path.clone()),
+        file_server_host,
+        Some(config_path),
         Some(config.daemon.pid_file.clone()),
         &config.mcp,
         config.api.rest.port,

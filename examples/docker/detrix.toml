@@ -1,0 +1,12 @@
+# Detrix server configuration for Docker deployment
+
+[api.rest]
+host = "0.0.0.0"
+port = 8090
+
+[api.grpc]
+host = "0.0.0.0"
+port = 50061
+
+[storage]
+path = "/data/detrix/data.db"

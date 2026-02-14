@@ -53,6 +53,7 @@ mod adapter;
 mod anchor;
 mod api;
 mod daemon;
+pub mod daemons;
 mod output;
 mod safety;
 mod storage;

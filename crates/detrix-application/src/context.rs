@@ -21,8 +21,8 @@
 //! - `adapter.*` - adapter connection timeouts
 
 use crate::ports::{
-    ConnectionRepositoryRef, DapAdapterFactoryRef, DlqRepositoryRef, EventOutputRef,
-    EventRepositoryRef, MetricRepositoryRef, RemoteAppControlRef,
+    ConnectionReferenceRepositoryRef, ConnectionRepositoryRef, DapAdapterFactoryRef,
+    DlqRepositoryRef, EventOutputRef, EventRepositoryRef, MetricRepositoryRef, RemoteAppControlRef,
 };
 use crate::safety::ValidatorRegistry;
 use crate::services::{
@@ -122,6 +122,7 @@ impl AppContext {
         auth_token: Option<String>,
         vfs: VfsRef,
         file_source_chain: Arc<FileSourceChain>,
+        reference_repo: ConnectionReferenceRepositoryRef,
     ) -> Self {
         // Create broadcast channels for real-time events
         let (event_tx, _) = broadcast::channel::<MetricEvent>(api_config.event_buffer_capacity);
@@ -157,6 +158,7 @@ impl AppContext {
         let connection_service = Arc::new(ConnectionService::new(
             Arc::clone(&connection_repo),
             metric_storage.clone(),
+            reference_repo,
             Arc::clone(&adapter_lifecycle_manager),
             system_event_tx.clone(),
             Arc::clone(&vfs),
@@ -228,6 +230,7 @@ impl AppContext {
         adapter_factory: DapAdapterFactoryRef,
         vfs: VfsRef,
         file_source_chain: Arc<FileSourceChain>,
+        reference_repo: ConnectionReferenceRepositoryRef,
     ) -> Self {
         Self::new(
             metric_storage,
@@ -247,6 +250,7 @@ impl AppContext {
             None, // No auth token
             vfs,
             file_source_chain,
+            reference_repo,
         )
     }
 

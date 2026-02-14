@@ -1,0 +1,69 @@
+services:
+  detrix:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    ports:
+      - "8095:8090"
+      - "50065:50061"
+    volumes:
+      - detrix-data:/data/detrix
+    environment:
+      DETRIX_TOKEN: docker-test-token
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  test-app-python:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.python
+    depends_on:
+      detrix:
+        condition: service_healthy
+    environment:
+      DETRIX_CLIENT_ENABLED: "1"
+      DETRIX_DAEMON_URL: http://detrix:8090
+      DETRIX_CONTROL_HOST: "0.0.0.0"
+      DETRIX_HOST: test-app-python
+      DETRIX_CONTROL_PORT: "8091"
+      DETRIX_TOKEN: docker-test-token
+
+  test-app-go:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.go
+    depends_on:
+      detrix:
+        condition: service_healthy
+    environment:
+      DETRIX_CLIENT_ENABLED: "1"
+      DETRIX_DAEMON_URL: http://detrix:8090
+      DETRIX_CONTROL_HOST: "0.0.0.0"
+      DETRIX_HOST: test-app-go
+      DETRIX_CONTROL_PORT: "8091"
+      DETRIX_TOKEN: docker-test-token
+
+  test-app-rust:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.rust
+    depends_on:
+      detrix:
+        condition: service_healthy
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      DETRIX_CLIENT_ENABLED: "1"
+      DETRIX_DAEMON_URL: http://detrix:8090
+      DETRIX_CONTROL_HOST: "0.0.0.0"
+      DETRIX_HOST: test-app-rust
+      DETRIX_CONTROL_PORT: "8091"
+      DETRIX_TOKEN: docker-test-token
+
+volumes:
+  detrix-data:

@@ -110,8 +110,8 @@ mod tests {
         RemoteWakeResponse, VfsRef,
     };
     use detrix_testing::{
-        MockConnectionRepository, MockDapAdapterFactory, MockEventRepository, MockMetricRepository,
-        MockRemoteAppControl, MockVfs,
+        MockConnectionReferenceRepository, MockConnectionRepository, MockDapAdapterFactory,
+        MockEventRepository, MockMetricRepository, MockRemoteAppControl, MockVfs,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::broadcast;
@@ -146,9 +146,12 @@ mod tests {
             vfs.clone(),
         ));
 
+        let reference_repo: crate::ConnectionReferenceRepositoryRef =
+            Arc::new(MockConnectionReferenceRepository::new());
         let connection_service = Arc::new(ConnectionService::new(
             connection_repo as detrix_ports::ConnectionRepositoryRef,
             metric_repo as MetricRepositoryRef,
+            reference_repo,
             adapter_lifecycle,
             system_event_tx,
             vfs,

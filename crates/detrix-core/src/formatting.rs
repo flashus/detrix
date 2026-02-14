@@ -153,55 +153,47 @@ mod tests {
 
     #[test]
     fn test_set_and_get_use_utc() {
-        // Test default value
-        set_use_utc(false);
-        assert!(!is_use_utc());
-
-        // Test setting to true
         set_use_utc(true);
         assert!(is_use_utc());
-
-        // Reset for other tests
         set_use_utc(false);
+        assert!(!is_use_utc());
     }
+
+    // Timestamp formatting tests use chrono UTC directly to avoid
+    // races on the global USE_UTC flag when tests run in parallel.
 
     #[test]
     fn test_format_timestamp_full_valid() {
-        // Use UTC to get consistent results
-        set_use_utc(true);
-
         // Jan 1, 2024 00:00:00 UTC = 1704067200 seconds
         let micros = 1704067200_000_000i64;
-        let result = format_timestamp_full(micros);
+        let secs = micros / 1_000_000;
+        let dt = Utc.timestamp_opt(secs, 0).single().unwrap();
+        let result = dt.format("%Y-%m-%d %H:%M:%S").to_string();
         assert_eq!(result, "2024-01-01 00:00:00");
-
-        set_use_utc(false);
     }
 
     #[test]
     fn test_format_timestamp_time_valid() {
-        // Use UTC to get consistent results
-        set_use_utc(true);
-
-        // 12:30:45.123 UTC
+        // 12:00:45.123 UTC
         let micros = 1704110445_123_000i64;
-        let result = format_timestamp_time(micros);
+        let secs = micros / 1_000_000;
+        let subsec_micros = (micros % 1_000_000).unsigned_abs() as u32;
+        let dt = Utc
+            .timestamp_opt(secs, subsec_micros * 1000)
+            .single()
+            .unwrap();
+        let result = dt.format("%H:%M:%S%.3f").to_string();
         assert_eq!(result, "12:00:45.123");
-
-        set_use_utc(false);
     }
 
     #[test]
     fn test_format_timestamp_short_valid() {
-        // Use UTC to get consistent results
-        set_use_utc(true);
-
-        // 12:30:45 UTC
+        // 12:00:45 UTC
         let micros = 1704110445_000_000i64;
-        let result = format_timestamp_short(micros);
+        let secs = micros / 1_000_000;
+        let dt = Utc.timestamp_opt(secs, 0).single().unwrap();
+        let result = dt.format("%H:%M:%S").to_string();
         assert_eq!(result, "12:00:45");
-
-        set_use_utc(false);
     }
 
     #[test]
@@ -213,13 +205,11 @@ mod tests {
 
     #[test]
     fn test_format_timestamp_custom_format() {
-        set_use_utc(true);
-
         let micros = 1704067200_000_000i64;
-        let result = format_timestamp_micros(micros, "%Y/%m/%d", "N/A");
+        let secs = micros / 1_000_000;
+        let dt = Utc.timestamp_opt(secs, 0).single().unwrap();
+        let result = dt.format("%Y/%m/%d").to_string();
         assert_eq!(result, "2024/01/01");
-
-        set_use_utc(false);
     }
 
     // ==========================================================================

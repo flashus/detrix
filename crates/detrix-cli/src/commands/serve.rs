@@ -221,6 +221,24 @@ pub async fn run(
     let storage = ctx.storage;
     let bridge_file_source = ctx.bridge_file_source;
 
+    // Cleanup stale connections based on TTL
+    let ttl_days = config.connection_ttl_days;
+    let cleanup_result = app_context
+        .connection_service
+        .cleanup_stale_connections(ttl_days)
+        .await;
+
+    match cleanup_result {
+        Ok(count) => {
+            if count > 0 {
+                info!(removed = count, ttl_days, "Cleaned up stale connections");
+            }
+        }
+        Err(e) => {
+            warn!(error = ?e, "Failed to cleanup stale connections");
+        }
+    }
+
     // Load metrics from config into database if needed (via MetricService)
     let metrics = app_context
         .metric_service
@@ -252,6 +270,7 @@ pub async fn run(
                 condition: metric_def.condition.clone(),
                 safety_level: metric_def.safety_level,
                 created_at: Some(chrono::Utc::now().timestamp_micros()),
+                created_by: None,
                 // Default values for introspection fields (loaded from config later if needed)
                 capture_stack_trace: false,
                 stack_trace_ttl: None,

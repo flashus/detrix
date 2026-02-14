@@ -181,6 +181,7 @@ pub trait DapTestFixture: Send + Sync + 'static {
             condition: None,
             safety_level: SafetyLevel::Strict,
             created_at: None,
+            created_by: None,
             capture_stack_trace: false,
             stack_trace_ttl: None,
             stack_trace_slice: None,

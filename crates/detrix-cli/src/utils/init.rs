@@ -130,6 +130,7 @@ impl InfrastructureComponents {
             std::env::var("DETRIX_TOKEN").ok(),
             vfs,
             file_source_chain,
+            Arc::clone(&self.storage) as detrix_application::ConnectionReferenceRepositoryRef,
         );
         AppContextWithStorage {
             app_context,

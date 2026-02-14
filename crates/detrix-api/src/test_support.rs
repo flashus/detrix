@@ -7,8 +7,8 @@
 
 use crate::ApiState;
 use detrix_application::{
-    AppContext, ConnectionRepositoryRef, DapAdapterFactoryRef, EventRepositoryRef, FileSourceChain,
-    MetricRepositoryRef,
+    AppContext, ConnectionReferenceRepositoryRef, ConnectionRepositoryRef, DapAdapterFactoryRef,
+    EventRepositoryRef, FileSourceChain, MetricRepositoryRef,
 };
 use detrix_config::ApiConfig;
 use detrix_storage::{SqliteConfig, SqliteStorage};
@@ -49,6 +49,7 @@ pub async fn create_test_state() -> (Arc<ApiState>, TempDir) {
         None, // No auth token in tests
         vfs,
         file_source_chain,
+        Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
     );
 
     let state = Arc::new(ApiState::builder(context, storage).build());

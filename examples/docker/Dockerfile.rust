@@ -1,0 +1,64 @@
+# Rust Test App Docker Image
+# Multi-stage: build fixture with debug symbols, runtime with lldb-dap
+
+# ---- Build Stage ----
+FROM rust:latest AS builder
+
+WORKDIR /src
+
+# Override target dir (the repo's .cargo/config.toml points elsewhere)
+ENV CARGO_TARGET_DIR=/build/target
+
+# Copy the Rust client
+COPY clients/rust /src/clients/rust
+
+# Copy the fixture
+COPY fixtures/rust /src/fixtures/rust
+
+WORKDIR /src/fixtures/rust
+
+# Build with debug symbols (NOT --release) and client feature enabled
+RUN cargo build --features client
+
+# ---- LLDB Extract Stage (LLVM apt repo has lldb-dap; this stage is discarded) ----
+FROM debian:bookworm-slim AS lldb
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates gnupg wget \
+    && wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
+    && echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-19 main" \
+       > /etc/apt/sources.list.d/llvm.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends lldb-19 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Package minimal lldb-dap: binary + non-base shared libs (CodeLLDB-style)
+RUN set -e && \
+    mkdir -p /opt/lldb/lib && \
+    dap=$(find /usr -name 'lldb-dap*' -type f | head -1) && \
+    test -n "$dap" || { echo "lldb-dap not found"; find /usr -name '*lldb*'; exit 1; } && \
+    cp "$dap" /opt/lldb/lldb-dap && \
+    ldd "$dap" | awk '/=>/{print $3}' | sort -u | while read lib; do \
+        [ -z "$lib" ] && continue; \
+        case "$(basename "$lib")" in \
+            libc.so*|libm.so*|libdl.so*|libpthread.so*|ld-linux*|libgcc_s*|librt.so*) ;; \
+            *) cp -L "$lib" /opt/lldb/lib/;; \
+        esac; \
+    done
+
+# ---- Runtime Stage ----
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Minimal lldb-dap distribution (binary + shared libs only)
+COPY --from=lldb /opt/lldb/lldb-dap /usr/local/bin/lldb-dap
+COPY --from=lldb /opt/lldb/lib/ /usr/local/lib/
+RUN ldconfig
+
+# Copy binary from build stage
+COPY --from=builder /build/target/debug/detrix_example_app /usr/local/bin/detrix_example_app
+
+CMD ["detrix_example_app"]
