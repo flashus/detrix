@@ -17,12 +17,14 @@ use serde::Serialize;
 use std::sync::Arc;
 use tracing::{info, instrument};
 
-/// Header name for client identity
-const CLIENT_ID_HEADER: &str = "x-detrix-client-id";
-
 /// Extract client identity from request headers.
 /// Returns 400 Bad Request if header is missing or contains reserved value.
+///
+/// Unlike `extract_client_id()` in mod.rs (optional), this ALWAYS requires the header.
+/// Used by reference counting endpoints where client identity is mandatory.
 fn extract_client_identity(headers: &HeaderMap) -> Result<ClientIdentity, HttpError> {
+    use crate::common::CLIENT_ID_HEADER;
+
     let client_id = headers
         .get(CLIENT_ID_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -30,21 +32,9 @@ fn extract_client_identity(headers: &HeaderMap) -> Result<ClientIdentity, HttpEr
             HttpError::bad_request(format!("Missing required header: {}", CLIENT_ID_HEADER))
         })?;
 
-    if client_id.is_empty() {
-        return Err(HttpError::bad_request(format!(
-            "{} header must not be empty",
-            CLIENT_ID_HEADER
-        )));
-    }
-
-    // Reject reserved "__daemon__" value from external callers
-    if client_id == "__daemon__" {
-        return Err(HttpError::bad_request(
-            "Reserved client identity '__daemon__' cannot be used via API".to_string(),
-        ));
-    }
-
-    Ok(ClientIdentity::bridge(client_id))
+    crate::common::validate_client_id(client_id)
+        .map(ClientIdentity::bridge)
+        .map_err(|e| HttpError::bad_request(e.to_string()))
 }
 
 /// Response for attach operation

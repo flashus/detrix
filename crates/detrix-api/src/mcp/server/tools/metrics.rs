@@ -94,6 +94,7 @@ pub async fn observe_impl(
     state: &Arc<ApiState>,
     params: ObserveParams,
     resolved_connection: Option<ConnectionId>,
+    created_by: Option<String>,
 ) -> Result<ObserveResult, McpError> {
     let ObserveParams {
         file,
@@ -180,6 +181,7 @@ pub async fn observe_impl(
     .with_stack_trace(capture_stack_trace.unwrap_or(false))
     .with_memory_snapshot(capture_memory_snapshot.unwrap_or(false))
     .with_ttl(ttl_seconds.map(|t| t as i64))
+    .with_created_by(created_by)
     .build();
 
     let outcome = state
@@ -281,6 +283,7 @@ impl AddMetricResult {
 pub async fn add_metric_impl(
     state: &Arc<ApiState>,
     params: AddMetricParams,
+    created_by: Option<String>,
 ) -> Result<AddMetricResult, McpError> {
     // Keep copies for response
     let metric_name = params.name.clone();
@@ -355,8 +358,9 @@ pub async fn add_metric_impl(
     );
     proto_request.language = Some(connection.language.to_string());
 
-    let metric =
+    let mut metric =
         add_request_to_metric(&proto_request).mcp_invalid_params("Invalid metric parameters")?;
+    metric.created_by = created_by;
 
     // Check workflow
     state.context.mcp_usage.check_workflow_for_add_metric();
@@ -518,6 +522,7 @@ pub struct NoDebugStatementsFound;
 pub async fn enable_from_diff_impl(
     state: &Arc<ApiState>,
     params: EnableFromDiffParams,
+    created_by: Option<String>,
 ) -> Result<Result<EnableFromDiffResult, NoDebugStatementsFound>, McpError> {
     let EnableFromDiffParams {
         diff,
@@ -586,6 +591,7 @@ pub async fn enable_from_diff_impl(
         )
         .with_group(group.clone())
         .with_ttl(ttl_seconds.map(|t| t as i64))
+        .with_created_by(created_by.clone())
         .build();
 
         match state

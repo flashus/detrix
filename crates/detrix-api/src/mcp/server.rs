@@ -46,12 +46,22 @@ pub struct DetrixServer {
     state: Arc<ApiState>,
     tool_router: ToolRouter<Self>,
     instrumentation: McpInstrumentation,
+    /// Client identity for traceability. Per-session UUID for MCP bridges,
+    /// ephemeral UUID for direct stdio mode.
+    client_id: Option<String>,
 }
 
 #[tool_router]
 impl DetrixServer {
-    /// Create a new MCP server with the given API state
+    /// Create a new MCP server with an ephemeral UUID (for stdio/test path).
     pub fn new(state: Arc<ApiState>) -> Self {
+        let client_id = uuid::Uuid::new_v4().to_string();
+        tracing::info!(client_id = %client_id, "MCP stdio: generated ephemeral client_id");
+        Self::with_client_id(state, Some(client_id))
+    }
+
+    /// Create a new MCP server with an explicit client identity (for HTTP bridge path).
+    pub fn with_client_id(state: Arc<ApiState>, client_id: Option<String>) -> Self {
         let instrumentation = McpInstrumentation::new(
             state.context.mcp_usage.clone(),
             state.mcp_usage_repository.clone(),
@@ -61,6 +71,7 @@ impl DetrixServer {
             state,
             tool_router: Self::tool_router(),
             instrumentation,
+            client_id,
         }
     }
 
@@ -153,7 +164,7 @@ impl DetrixServer {
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("add_metric");
 
-        match tools::add_metric_impl(&self.state, params).await {
+        match tools::add_metric_impl(&self.state, params, self.client_id.clone()).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 let message = result.build_message();
@@ -199,7 +210,7 @@ impl DetrixServer {
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("observe");
 
-        match tools::observe_impl(&self.state, params, None).await {
+        match tools::observe_impl(&self.state, params, None, self.client_id.clone()).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 let message = result.build_message();
@@ -230,7 +241,7 @@ impl DetrixServer {
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("enable_from_diff");
 
-        match tools::enable_from_diff_impl(&self.state, params).await {
+        match tools::enable_from_diff_impl(&self.state, params, self.client_id.clone()).await {
             Ok(Ok(result)) => {
                 self.finish_tool_success(timer);
                 let message = result.build_message();
@@ -417,7 +428,7 @@ Language-specific setup:
         Parameters(params): Parameters<CreateConnectionParams>,
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("create_connection");
-        match tools::create_connection_impl(&self.state, params).await {
+        match tools::create_connection_impl(&self.state, params, self.client_id.clone()).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 // Update MCP tracker with new connection count.
@@ -457,7 +468,7 @@ Language-specific setup:
         Parameters(params): Parameters<CloseConnectionParams>,
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("close_connection");
-        match tools::close_connection_impl(&self.state, params).await {
+        match tools::close_connection_impl(&self.state, params, self.client_id.as_deref()).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 // Update MCP tracker with new connection count

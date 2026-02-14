@@ -117,11 +117,7 @@ pub async fn create_connection(
 ) -> Result<(StatusCode, Json<CreateConnectionResponse>), HttpError> {
     // Use X-Detrix-Client-Id header for ownership tracking (client UUID).
     // Falls back to None if header not provided (backwards compat for local CLI callers).
-    let created_by = headers
-        .get("x-detrix-client-id")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty() && *s != "__daemon__")
-        .map(|s| s.to_string());
+    let created_by = super::extract_client_id(&headers)?;
     info!(
         "REST: create_connection (host={}, port={}, language={}, program={:?}, pid={:?})",
         payload.host, payload.port, payload.language, payload.program, payload.pid
@@ -192,9 +188,14 @@ pub async fn create_connection(
 #[instrument(skip(state), fields(connection_id = %id))]
 pub async fn close_connection(
     State(state): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, HttpError> {
-    info!("REST: close_connection (id={})", id);
+    let client_id = super::extract_client_id(&headers)?;
+    info!(
+        "REST: close_connection (id={}, client_id={:?})",
+        id, client_id
+    );
 
     let connection_service = &state.context.connection_service;
 
@@ -224,8 +225,10 @@ pub struct CleanupResponse {
 #[instrument(skip(state))]
 pub async fn cleanup_connections(
     State(state): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<CleanupResponse>, HttpError> {
-    info!("REST: cleanup_connections");
+    let client_id = super::extract_client_id(&headers)?;
+    info!("REST: cleanup_connections (client_id={:?})", client_id);
 
     let connection_service = &state.context.connection_service;
 

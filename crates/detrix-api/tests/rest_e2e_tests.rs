@@ -38,6 +38,7 @@ async fn create_connection_raw(
 
     let response = reqwest::Client::new()
         .post(format!("{}/api/v1/connections", base_url))
+        .header(detrix_api::common::CLIENT_ID_HEADER, "test-client")
         .json(&request)
         .send()
         .await

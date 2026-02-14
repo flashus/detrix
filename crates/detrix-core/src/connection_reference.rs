@@ -18,8 +18,10 @@ pub enum ClientIdentity {
     Daemon,
 }
 
-/// Sentinel value used for `Daemon` identity in storage
-const DAEMON_IDENTITY: &str = "__daemon__";
+/// Sentinel value used for `Daemon` identity in storage.
+///
+/// Reserved: external callers must never send this value via API.
+pub const DAEMON_IDENTITY: &str = "__daemon__";
 
 impl ClientIdentity {
     /// Create a bridge client identity

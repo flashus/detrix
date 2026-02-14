@@ -8,6 +8,7 @@ use detrix_api::generated::detrix::v1::{
     CloseConnectionRequest, CreateConnectionRequest, GetConnectionRequest,
     ListActiveConnectionsRequest, ListConnectionsRequest, RequestMetadata,
 };
+use detrix_api::grpc::request_with_machine_client_id;
 use detrix_api::grpc::AuthChannel;
 
 /// gRPC client for connection operations
@@ -73,7 +74,7 @@ impl ConnectionsClient {
 
         let response = self
             .client
-            .create_connection(request)
+            .create_connection(request_with_machine_client_id(request))
             .await
             .context("Failed to create connection via gRPC")?
             .into_inner();
@@ -143,7 +144,7 @@ impl ConnectionsClient {
         };
 
         self.client
-            .close_connection(request)
+            .close_connection(request_with_machine_client_id(request))
             .await
             .context("Failed to close connection via gRPC")?;
 
@@ -158,7 +159,7 @@ impl ConnectionsClient {
 
         let response = self
             .client
-            .cleanup_connections(request)
+            .cleanup_connections(request_with_machine_client_id(request))
             .await
             .context("Failed to cleanup connections via gRPC")?
             .into_inner();

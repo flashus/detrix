@@ -24,6 +24,16 @@ use super::client::{
 use detrix_api::grpc::{proto_to_core_memory_snapshot, proto_to_core_stack_trace};
 use detrix_config::constants::{DEFAULT_API_HOST, DEFAULT_REST_PORT};
 
+/// Wrap a gRPC request with test client_id metadata
+fn with_test_client_id<T>(inner: T) -> tonic::Request<T> {
+    let mut req = tonic::Request::new(inner);
+    req.metadata_mut().insert(
+        detrix_api::common::CLIENT_ID_HEADER,
+        "test-client".parse().unwrap(),
+    );
+    req
+}
+
 /// gRPC client for Detrix E2E tests
 pub struct GrpcClient {
     grpc_port: u16,
@@ -283,11 +293,11 @@ impl ApiClient for GrpcClient {
 
         let response = client
             .metrics_client()?
-            .wake(WakeRequest {
+            .wake(with_test_client_id(WakeRequest {
                 app_url: app_url.to_string(),
                 daemon_url: daemon_url.unwrap_or_default().to_string(),
                 metadata: None,
-            })
+            }))
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?
             .into_inner();
@@ -301,10 +311,10 @@ impl ApiClient for GrpcClient {
 
         let response = client
             .metrics_client()?
-            .sleep(detrix_api::SleepRequest {
+            .sleep(with_test_client_id(detrix_api::SleepRequest {
                 app_url: app_url.to_string(),
                 metadata: None,
-            })
+            }))
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?
             .into_inner();
@@ -318,7 +328,9 @@ impl ApiClient for GrpcClient {
 
         let response = client
             .metrics_client()?
-            .disconnect_all(detrix_api::DisconnectAllRequest { metadata: None })
+            .disconnect_all(with_test_client_id(detrix_api::DisconnectAllRequest {
+                metadata: None,
+            }))
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?
             .into_inner();
@@ -342,7 +354,7 @@ impl ApiClient for GrpcClient {
 
         let response = client
             .connection_client()?
-            .create_connection(CreateConnectionRequest {
+            .create_connection(with_test_client_id(CreateConnectionRequest {
                 host: host.to_string(),
                 port: port.into(), // Convert u16 to u32 for proto
                 language: language.to_string(),
@@ -357,8 +369,8 @@ impl ApiClient for GrpcClient {
                 control_plane_url: None,
                 build_commit: None,
                 build_tag: None,
-                created_by: None, // Will be set by server from socket (gRPC doesn't expose socket info directly)
-            })
+                created_by: None, // Will be set by server from metadata
+            }))
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?
             .into_inner();
@@ -380,10 +392,10 @@ impl ApiClient for GrpcClient {
 
         client
             .connection_client()?
-            .close_connection(detrix_api::CloseConnectionRequest {
+            .close_connection(with_test_client_id(detrix_api::CloseConnectionRequest {
                 connection_id: connection_id.to_string(),
                 metadata: None,
-            })
+            }))
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?;
 
@@ -461,7 +473,7 @@ impl ApiClient for GrpcClient {
 
         let response = client
             .metrics_client()?
-            .add_metric(ProtoAddMetricRequest {
+            .add_metric(with_test_client_id(ProtoAddMetricRequest {
                 name: request.name,
                 group: request.group,
                 location: Some(Location { file, line }),
@@ -484,7 +496,7 @@ impl ApiClient for GrpcClient {
                 snapshot_scope: request.snapshot_scope.clone(),
                 snapshot_ttl: request.snapshot_ttl,
                 file_content: None,
-            })
+            }))
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?
             .into_inner();
@@ -498,14 +510,14 @@ impl ApiClient for GrpcClient {
 
         client
             .metrics_client()?
-            .remove_metric(RemoveMetricRequest {
+            .remove_metric(with_test_client_id(RemoveMetricRequest {
                 identifier: Some(
                     detrix_api::generated::detrix::v1::remove_metric_request::Identifier::Name(
                         name.to_string(),
                     ),
                 ),
                 metadata: None,
-            })
+            }))
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?;
 
@@ -526,11 +538,11 @@ impl ApiClient for GrpcClient {
 
         client
             .metrics_client()?
-            .toggle_metric(ToggleMetricRequest {
+            .toggle_metric(with_test_client_id(ToggleMetricRequest {
                 metric_id: metric_id as u64,
                 enabled,
                 metadata: None,
-            })
+            }))
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?;
 
@@ -699,10 +711,10 @@ impl ApiClient for GrpcClient {
 
         let response = client
             .metrics_client()?
-            .enable_group(GroupRequest {
+            .enable_group(with_test_client_id(GroupRequest {
                 group_name: group.to_string(),
                 metadata: None,
-            })
+            }))
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?
             .into_inner();
@@ -716,10 +728,10 @@ impl ApiClient for GrpcClient {
 
         let response = client
             .metrics_client()?
-            .disable_group(GroupRequest {
+            .disable_group(with_test_client_id(GroupRequest {
                 group_name: group.to_string(),
                 metadata: None,
-            })
+            }))
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?
             .into_inner();
@@ -843,12 +855,12 @@ impl ApiClient for GrpcClient {
 
         client
             .metrics_client()?
-            .update_config(detrix_api::UpdateConfigRequest {
+            .update_config(with_test_client_id(detrix_api::UpdateConfigRequest {
                 config_toml: config_toml.to_string(),
                 merge: false,
                 persist,
                 metadata: None,
-            })
+            }))
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?;
 
@@ -878,10 +890,10 @@ impl ApiClient for GrpcClient {
 
         client
             .metrics_client()?
-            .reload_config(detrix_api::ReloadConfigRequest {
+            .reload_config(with_test_client_id(detrix_api::ReloadConfigRequest {
                 config_path: None,
                 metadata: None,
-            })
+            }))
             .await
             .map_err(|e| ApiError::new(format!("gRPC error: {}", e)))?;
 

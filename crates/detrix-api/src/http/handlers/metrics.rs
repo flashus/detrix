@@ -264,8 +264,10 @@ pub async fn get_metric(
 /// - 409 Conflict: Metric already exists at location (when `replace=false`)
 pub async fn add_metric(
     State(state): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
     Json(mut payload): Json<CreateMetricRequest>,
 ) -> Result<(StatusCode, Json<CreateMetricResponse>), HttpError> {
+    let client_id = super::extract_client_id(&headers)?;
     use crate::grpc::conversions::add_request_to_metric;
     use crate::http::proto_adapters::rest_request_to_add_metric_request;
 
@@ -305,7 +307,8 @@ pub async fn add_metric(
         rest_request_to_add_metric_request(&payload, &safety_level, connection.language);
 
     // 2. Convert Proto → Core Metric (shared conversion from grpc/conversions.rs)
-    let metric = add_request_to_metric(&proto_request).http_bad_request()?;
+    let mut metric = add_request_to_metric(&proto_request).http_bad_request()?;
+    metric.created_by = client_id;
 
     // Call service (ALL business logic happens here)
     let outcome = state
@@ -357,9 +360,11 @@ pub async fn add_metric(
 /// - 404 Not Found: Metric with given ID does not exist
 pub async fn delete_metric(
     State(state): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<u64>,
 ) -> Result<StatusCode, HttpError> {
-    info!("REST: delete_metric (id={})", id);
+    let client_id = super::extract_client_id(&headers)?;
+    info!("REST: delete_metric (id={}, client_id={:?})", id, client_id);
 
     state
         .context

@@ -67,10 +67,23 @@ pub use vfs::{
 
 use crate::grpc::conversions::{connection_to_info, metric_to_info};
 use crate::types::{ConnectionInfo, MetricInfo};
+use axum::http::HeaderMap;
 use detrix_core::{
     Connection, Metric, MetricMode, SafetyLevel, MODE_FIRST, MODE_SAMPLE, MODE_SAMPLE_INTERVAL,
     MODE_STREAM, MODE_THROTTLE, SAFETY_STRICT, SAFETY_TRUSTED,
 };
+
+/// Extract and validate client_id from `X-Detrix-Client-Id` header.
+///
+/// Returns `Ok(None)` if the header is absent (backwards compatible with SDK clients).
+/// Returns `Ok(Some(id))` if the header is present and valid.
+/// Returns `Err` if the header value is present but invalid.
+pub(crate) fn extract_client_id(
+    headers: &HeaderMap,
+) -> Result<Option<String>, crate::http::error::HttpError> {
+    crate::common::extract_client_id_from_headers(headers)
+        .map_err(crate::http::error::HttpError::bad_request)
+}
 
 /// Convert domain Metric to proto MetricInfo for REST responses
 ///

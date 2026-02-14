@@ -22,6 +22,9 @@ toml = { workspace = true }
 # Error handling
 thiserror = { workspace = true }
 
+# UUID generation (machine identity)
+uuid = { workspace = true }
+
 # Logging
 tracing = { workspace = true }
 

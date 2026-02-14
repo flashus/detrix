@@ -405,6 +405,20 @@ impl DaemonEndpoints {
     }
 }
 
+/// Wrap a request in a `tonic::Request` with machine-scoped `x-detrix-client-id` metadata.
+///
+/// Uses the persistent machine ID from `~/detrix/machine_id`.
+/// Intended for CLI/TUI clients (not MCP bridges, which use per-session UUIDs).
+pub fn request_with_machine_client_id<T>(inner: T) -> Request<T> {
+    let mut req = Request::new(inner);
+    let client_id = detrix_config::machine_id::ensure_machine_id();
+    if let Ok(val) = client_id.parse() {
+        req.metadata_mut()
+            .insert(crate::common::CLIENT_ID_HEADER, val);
+    }
+    req
+}
+
 /// Connect to daemon gRPC endpoint with authentication
 ///
 /// Creates an authenticated gRPC channel using discovered endpoints.

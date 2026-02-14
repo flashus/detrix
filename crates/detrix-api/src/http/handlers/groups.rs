@@ -10,6 +10,7 @@ use crate::state::ApiState;
 use crate::types::{GroupInfo, MetricInfo};
 use axum::{
     extract::{Path, State},
+    http::HeaderMap,
     Json,
 };
 use detrix_application::{GroupOperationResult, GroupSummary};
@@ -139,9 +140,14 @@ pub async fn list_group_metrics(
 /// Returns `GroupOperationResponse` with success/failure counts and any errors.
 pub async fn enable_group(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Path(group_name): Path<String>,
 ) -> Result<Json<GroupOperationResponse>, HttpError> {
-    info!("REST: enable_group (group={})", group_name);
+    let client_id = super::extract_client_id(&headers)?;
+    info!(
+        "REST: enable_group (group={}, client_id={:?})",
+        group_name, client_id
+    );
 
     let result = state
         .context
@@ -167,9 +173,14 @@ pub async fn enable_group(
 /// Returns `GroupOperationResponse` with success/failure counts and any errors.
 pub async fn disable_group(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Path(group_name): Path<String>,
 ) -> Result<Json<GroupOperationResponse>, HttpError> {
-    info!("REST: disable_group (group={})", group_name);
+    let client_id = super::extract_client_id(&headers)?;
+    info!(
+        "REST: disable_group (group={}, client_id={:?})",
+        group_name, client_id
+    );
 
     let result = state
         .context

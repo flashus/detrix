@@ -181,7 +181,7 @@ impl McpBridge {
         let mut req_builder = self
             .client
             .post(&url)
-            .header("X-Detrix-Client-Id", &self.client_id);
+            .header(detrix_api::common::CLIENT_ID_HEADER, &self.client_id);
 
         // Add auth token if available
         if let Some(ref token) = token {
@@ -236,7 +236,7 @@ impl McpBridge {
         let mut req_builder = self
             .client
             .post(&url)
-            .header("X-Detrix-Client-Id", &self.client_id);
+            .header(detrix_api::common::CLIENT_ID_HEADER, &self.client_id);
 
         // Add auth token if available
         if let Some(ref token) = token {
@@ -281,7 +281,7 @@ impl McpBridge {
         let mut req_builder = self
             .client
             .post(&url)
-            .header("X-Detrix-Client-Id", &self.client_id);
+            .header(detrix_api::common::CLIENT_ID_HEADER, &self.client_id);
 
         // Add auth token if available
         if let Some(ref token) = token {
@@ -756,7 +756,7 @@ impl McpBridge {
         let response = self
             .client
             .post(&release_url)
-            .header("X-Detrix-Client-Id", &self.client_id)
+            .header(detrix_api::common::CLIENT_ID_HEADER, &self.client_id)
             .send()
             .await
             .context("Failed to release connection references")?;
@@ -877,7 +877,7 @@ impl McpBridge {
                 match self
                     .client
                     .post(&attach_url)
-                    .header("X-Detrix-Client-Id", &self.client_id)
+                    .header(detrix_api::common::CLIENT_ID_HEADER, &self.client_id)
                     .send()
                     .await
                 {

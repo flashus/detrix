@@ -14,7 +14,9 @@ pub async fn handle_reload_config(
     state: &Arc<ApiState>,
     request: Request<ReloadConfigRequest>,
 ) -> Result<Response<ReloadConfigResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
     let req = request.into_inner();
+    tracing::info!(?client_id, "gRPC: reload_config");
 
     // Use request path or fall back to ConfigService's configured path
     let config_path = match req.config_path {
@@ -134,8 +136,11 @@ pub async fn handle_get_config(
 /// Handle update_config request
 pub async fn handle_update_config(
     _state: &Arc<ApiState>,
-    _request: Request<UpdateConfigRequest>,
+    request: Request<UpdateConfigRequest>,
 ) -> Result<Response<ConfigResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
+    let _req = request.into_inner();
+    tracing::info!(?client_id, "gRPC: update_config");
     // Runtime config updates require careful state management
     // For safety, we only support reload from file
     Err(Status::unimplemented(

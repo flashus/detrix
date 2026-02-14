@@ -9,8 +9,8 @@ pub mod metrics;
 pub mod streaming;
 
 pub use client::{
-    build_grpc_endpoint, connect_to_daemon_grpc, read_auth_token, AuthChannel, AuthInterceptor,
-    DaemonConnectionError, DaemonEndpoints, EndpointDiscoveryMethod,
+    build_grpc_endpoint, connect_to_daemon_grpc, read_auth_token, request_with_machine_client_id,
+    AuthChannel, AuthInterceptor, DaemonConnectionError, DaemonEndpoints, EndpointDiscoveryMethod,
 };
 pub use connections::ConnectionServiceImpl;
 pub use conversions::{
@@ -23,3 +23,25 @@ pub use metrics::MetricsServiceImpl;
 pub use streaming::StreamingServiceImpl;
 
 pub use auth::{AUTHORIZATION_METADATA_KEY, BEARER_PREFIX};
+
+/// Extract and validate client_id from `x-detrix-client-id` gRPC metadata.
+///
+/// Returns `Ok(None)` if the metadata key is absent (backwards compatible).
+/// Returns `Ok(Some(id))` if the key is present and valid.
+/// Returns `Err(Status)` if the key value is present but invalid.
+///
+/// **CRITICAL:** Must be called BEFORE `request.into_inner()` which consumes the Request.
+pub(crate) fn extract_client_id<T>(
+    request: &tonic::Request<T>,
+) -> Result<Option<String>, tonic::Status> {
+    match request
+        .metadata()
+        .get(crate::common::CLIENT_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(value) => crate::common::validate_client_id(value)
+            .map(Some)
+            .map_err(tonic::Status::invalid_argument),
+        None => Ok(None),
+    }
+}

@@ -48,6 +48,9 @@ pub mod ports;
 // PID file data structures (PidInfo)
 pub mod pid;
 
+// Persistent machine-scoped client identity
+pub mod machine_id;
+
 // Config modules - organized by domain
 mod adapter;
 mod anchor;

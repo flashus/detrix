@@ -16,6 +16,7 @@ pub async fn handle_add_metric(
     state: &Arc<ApiState>,
     request: Request<AddMetricRequest>,
 ) -> Result<Response<MetricResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
     let mut req = request.into_inner();
 
     // If safety_level is not provided, use the default from config
@@ -50,8 +51,9 @@ pub async fn handle_add_metric(
     }
 
     // Convert proto DTO to domain type
-    let metric =
+    let mut metric =
         add_request_to_metric(&req).map_err(|e| Status::invalid_argument(e.to_string()))?;
+    metric.created_by = client_id;
 
     // Call service (ALL business logic happens here)
     // Pass replace flag (default to false if not specified)
@@ -84,7 +86,9 @@ pub async fn handle_remove_metric(
     state: &Arc<ApiState>,
     request: Request<RemoveMetricRequest>,
 ) -> Result<Response<RemoveMetricResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
     let req = request.into_inner();
+    tracing::info!(?client_id, "gRPC: remove_metric");
 
     // Extract metric_id from oneof identifier
     let metric_id = match req.identifier {
@@ -125,7 +129,9 @@ pub async fn handle_update_metric(
     state: &Arc<ApiState>,
     request: Request<UpdateMetricRequest>,
 ) -> Result<Response<MetricResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
     let req = request.into_inner();
+    tracing::info!(metric_id = req.metric_id, ?client_id, "gRPC: update_metric");
     let metric_id = detrix_core::MetricId(req.metric_id);
 
     // Get existing metric

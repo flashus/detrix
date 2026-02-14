@@ -56,9 +56,11 @@ fn toggle_response_from_result(
 /// - 404 Not Found: Metric with given ID does not exist
 pub async fn enable_metric(
     State(state): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<u64>,
 ) -> Result<Json<ToggleMetricResponse>, HttpError> {
-    info!("REST: enable_metric (id={})", id);
+    let client_id = super::extract_client_id(&headers)?;
+    info!("REST: enable_metric (id={}, client_id={:?})", id, client_id);
 
     let result = state
         .context
@@ -99,9 +101,14 @@ pub async fn enable_metric(
 /// - 404 Not Found: Metric with given ID does not exist
 pub async fn disable_metric(
     State(state): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<u64>,
 ) -> Result<Json<ToggleMetricResponse>, HttpError> {
-    info!("REST: disable_metric (id={})", id);
+    let client_id = super::extract_client_id(&headers)?;
+    info!(
+        "REST: disable_metric (id={}, client_id={:?})",
+        id, client_id
+    );
 
     let result = state
         .context
@@ -164,10 +171,12 @@ pub struct UpdateMetricRequest {
 /// - 404 Not Found: Metric with given ID does not exist
 pub async fn update_metric(
     State(state): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<u64>,
     Json(payload): Json<UpdateMetricRequest>,
 ) -> Result<Json<MetricInfo>, HttpError> {
-    info!("REST: update_metric (id={})", id);
+    let client_id = super::extract_client_id(&headers)?;
+    info!("REST: update_metric (id={}, client_id={:?})", id, client_id);
 
     // Get existing metric
     let mut metric = state

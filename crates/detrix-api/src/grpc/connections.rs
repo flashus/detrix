@@ -45,12 +45,7 @@ impl ConnectionService for ConnectionServiceImpl {
         request: Request<CreateConnectionRequest>,
     ) -> Result<Response<CreateConnectionResponse>, Status> {
         // Extract client identity from gRPC metadata before consuming the request
-        let created_by = request
-            .metadata()
-            .get("x-detrix-client-id")
-            .and_then(|v| v.to_str().ok())
-            .filter(|s| !s.is_empty() && *s != "__daemon__")
-            .map(|s| s.to_string());
+        let created_by = crate::grpc::extract_client_id(&request)?;
 
         let req = request.into_inner();
         let connection_service = self.get_connection_service();
@@ -103,10 +98,13 @@ impl ConnectionService for ConnectionServiceImpl {
         &self,
         request: Request<CloseConnectionRequest>,
     ) -> Result<Response<CloseConnectionResponse>, Status> {
+        let client_id = crate::grpc::extract_client_id(&request)?;
         let req = request.into_inner();
         let connection_service = self.get_connection_service();
 
         let connection_id = ConnectionId::new(&req.connection_id);
+
+        tracing::info!(connection_id = %req.connection_id, ?client_id, "gRPC: close_connection");
 
         // Call service
         connection_service
@@ -180,8 +178,12 @@ impl ConnectionService for ConnectionServiceImpl {
 
     async fn cleanup_connections(
         &self,
-        _request: Request<CleanupConnectionsRequest>,
+        request: Request<CleanupConnectionsRequest>,
     ) -> Result<Response<CleanupConnectionsResponse>, Status> {
+        let client_id = crate::grpc::extract_client_id(&request)?;
+        let _req = request.into_inner();
+        tracing::info!(?client_id, "gRPC: cleanup_connections");
+
         let connection_service = self.get_connection_service();
 
         // API cleanup: remove all inactive connections (ttl_days=0)

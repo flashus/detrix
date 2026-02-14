@@ -15,7 +15,9 @@ pub async fn handle_wake(
     state: &Arc<ApiState>,
     request: Request<WakeRequest>,
 ) -> Result<Response<WakeResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
     let req = request.into_inner();
+    tracing::info!(app_url = %req.app_url, ?client_id, "gRPC: wake");
     let app_url = req.app_url;
     let daemon_url = if req.daemon_url.is_empty() {
         None
@@ -50,7 +52,9 @@ pub async fn handle_sleep(
     state: &Arc<ApiState>,
     request: Request<SleepRequest>,
 ) -> Result<Response<SleepResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
     let req = request.into_inner();
+    tracing::info!(app_url = %req.app_url, ?client_id, "gRPC: sleep");
     let app_url = req.app_url;
 
     let remote_app_service = state
@@ -72,8 +76,11 @@ pub async fn handle_sleep(
 /// Handle disconnect_all request — stop all local adapters
 pub async fn handle_disconnect_all(
     state: &Arc<ApiState>,
-    _request: Request<DisconnectAllRequest>,
+    request: Request<DisconnectAllRequest>,
 ) -> Result<Response<DisconnectAllResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
+    let _req = request.into_inner();
+    tracing::info!(?client_id, "gRPC: disconnect_all");
     let result = state
         .context
         .adapter_lifecycle_manager

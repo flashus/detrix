@@ -179,7 +179,7 @@ pub async fn mcp_handler(
     debug!("MCP HTTP: Request payload: {:?}", payload);
 
     // Track MCP client activity for daemon lifecycle management
-    if let Some(client_id_header) = headers.get("X-Detrix-Client-Id") {
+    if let Some(client_id_header) = headers.get(crate::common::CLIENT_ID_HEADER) {
         if let Ok(client_id_str) = client_id_header.to_str() {
             let client_id = McpClientId::from_string(client_id_str);
 
@@ -220,8 +220,10 @@ pub async fn mcp_handler(
         ));
     }
 
-    // Create MCP server instance
-    let mcp_server = DetrixServer::new(Arc::clone(&state));
+    // Create MCP server instance with client identity from header (if present)
+    // Uses shared validation (rejects empty, reserved "__daemon__")
+    let client_id = crate::common::extract_client_id_from_headers(&headers).unwrap_or(None);
+    let mcp_server = DetrixServer::with_client_id(Arc::clone(&state), client_id);
 
     // Parse the method from the request
     let method = payload.get("method").and_then(|v| v.as_str());
@@ -303,7 +305,7 @@ pub async fn mcp_heartbeat_handler(
     headers: HeaderMap,
 ) -> StatusCode {
     // Track MCP client activity
-    if let Some(client_id_header) = headers.get("X-Detrix-Client-Id") {
+    if let Some(client_id_header) = headers.get(crate::common::CLIENT_ID_HEADER) {
         if let Ok(client_id_str) = client_id_header.to_str() {
             let client_id = McpClientId::from_string(client_id_str);
             state.mcp_client_tracker.touch(&client_id).await;
@@ -313,7 +315,10 @@ pub async fn mcp_heartbeat_handler(
     }
 
     // No client ID provided
-    debug!("MCP heartbeat: Missing X-Detrix-Client-Id header");
+    debug!(
+        "MCP heartbeat: Missing {} header",
+        crate::common::CLIENT_ID_HEADER
+    );
     StatusCode::BAD_REQUEST
 }
 
@@ -329,7 +334,7 @@ pub async fn mcp_disconnect_handler(
     headers: HeaderMap,
 ) -> StatusCode {
     // Unregister MCP client and release all connection references
-    if let Some(client_id_header) = headers.get("X-Detrix-Client-Id") {
+    if let Some(client_id_header) = headers.get(crate::common::CLIENT_ID_HEADER) {
         if let Ok(client_id_str) = client_id_header.to_str() {
             let client_id = McpClientId::from_string(client_id_str);
             state.mcp_client_tracker.unregister(&client_id).await;
@@ -362,7 +367,10 @@ pub async fn mcp_disconnect_handler(
     }
 
     // No client ID provided
-    debug!("MCP disconnect: Missing X-Detrix-Client-Id header");
+    debug!(
+        "MCP disconnect: Missing {} header",
+        crate::common::CLIENT_ID_HEADER
+    );
     StatusCode::BAD_REQUEST
 }
 
@@ -666,7 +674,10 @@ mod tests {
 
         // Create headers with client ID
         let mut headers = HeaderMap::new();
-        headers.insert("X-Detrix-Client-Id", "test-client-123".parse().unwrap());
+        headers.insert(
+            crate::common::CLIENT_ID_HEADER,
+            "test-client-123".parse().unwrap(),
+        );
 
         let result = mcp_handler(State(Arc::clone(&state)), headers, Json(request)).await;
         assert!(result.is_ok());

@@ -12,6 +12,7 @@ use crate::state::ApiState;
 use detrix_core::ConnectionId;
 use rmcp::ErrorData as McpError;
 use std::sync::Arc;
+use tracing::info;
 
 // ============================================================================
 // create_connection Implementation
@@ -51,6 +52,7 @@ impl CreateConnectionResult {
 pub async fn create_connection_impl(
     state: &Arc<ApiState>,
     params: CreateConnectionParams,
+    created_by: Option<String>,
 ) -> Result<CreateConnectionResult, McpError> {
     let connection_service = &state.context.connection_service;
 
@@ -82,7 +84,7 @@ pub async fn create_connection_impl(
             params.control_plane_url,
             params.build_commit,
             params.build_tag,
-            None, // MCP doesn't expose client IP easily, use None
+            created_by, // Client identity from MCP session
         )
         .await
     {
@@ -137,9 +139,16 @@ impl CloseConnectionResult {
 pub async fn close_connection_impl(
     state: &Arc<ApiState>,
     params: CloseConnectionParams,
+    client_id: Option<&str>,
 ) -> Result<CloseConnectionResult, McpError> {
     let connection_service = &state.context.connection_service;
     let connection_id = ConnectionId::new(&params.connection_id);
+
+    info!(
+        connection_id = %params.connection_id,
+        client_id = ?client_id,
+        "MCP: close_connection"
+    );
 
     match connection_service.disconnect(&connection_id).await {
         Ok(_) => Ok(CloseConnectionResult {

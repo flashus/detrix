@@ -22,6 +22,7 @@ pub struct MetricBuilder {
     pub capture_stack_trace: bool,
     pub capture_memory_snapshot: bool,
     pub ttl_seconds: Option<i64>,
+    pub created_by: Option<String>,
     // Configurable via DefaultsConfig
     pub mode: MetricMode,
     pub enabled: bool,
@@ -48,6 +49,7 @@ impl MetricBuilder {
             capture_stack_trace: false,
             capture_memory_snapshot: false,
             ttl_seconds: None,
+            created_by: None,
             // Hardcoded defaults (overridden by with_defaults())
             mode: MetricMode::Stream,
             enabled: true,
@@ -86,6 +88,11 @@ impl MetricBuilder {
         self
     }
 
+    pub fn with_created_by(mut self, created_by: Option<String>) -> Self {
+        self.created_by = created_by;
+        self
+    }
+
     pub fn build(self) -> Metric {
         let ttl = self
             .ttl_seconds
@@ -106,7 +113,7 @@ impl MetricBuilder {
             condition: None,
             safety_level: self.safety_level,
             created_at: None,
-            created_by: None,
+            created_by: self.created_by,
             capture_stack_trace: self.capture_stack_trace,
             stack_trace_ttl: ttl,
             stack_trace_slice: None,

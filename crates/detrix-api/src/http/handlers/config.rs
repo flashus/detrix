@@ -11,6 +11,7 @@ use crate::http::error::{HttpError, ToHttpResult};
 use crate::state::ApiState;
 use axum::{
     extract::{Query, State},
+    http::HeaderMap,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -29,8 +30,11 @@ use tracing::{info, warn};
 /// Returns `ReloadConfigResponse` with success status and metrics count.
 pub async fn reload_config(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Json(req): Json<ReloadConfigRequest>,
 ) -> Result<Json<ReloadConfigResponse>, HttpError> {
+    let client_id = super::extract_client_id(&headers)?;
+
     // Use request path or fall back to ConfigService's path
     let config_path = match req.config_path {
         Some(path) => std::path::PathBuf::from(path),
@@ -41,7 +45,11 @@ pub async fn reload_config(
             .ok_or_else(|| HttpError::bad_request("No config path configured"))?,
     };
 
-    info!("REST: reload_config (path={})", config_path.display());
+    info!(
+        "REST: reload_config (path={}, client_id={:?})",
+        config_path.display(),
+        client_id
+    );
 
     match state.config_service.reload_from_file(&config_path).await {
         Ok(config) => {
@@ -213,9 +221,14 @@ pub struct UpdateConfigResponse {
 /// ```
 pub async fn update_config(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Json(req): Json<UpdateConfigRequest>,
 ) -> Result<Json<UpdateConfigResponse>, HttpError> {
-    info!("REST: update_config (persist={})", req.persist);
+    let client_id = super::extract_client_id(&headers)?;
+    info!(
+        "REST: update_config (persist={}, client_id={:?})",
+        req.persist, client_id
+    );
 
     // Delegate to ConfigService (Clean Architecture - handler does DTO mapping only)
     let result = state

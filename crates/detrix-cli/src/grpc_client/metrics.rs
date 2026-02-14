@@ -15,6 +15,7 @@ use detrix_api::generated::detrix::v1::{
     UpdateConfigRequest, UpdateMetricRequest, ValidateConfigRequest, ValidateExpressionRequest,
     WakeRequest,
 };
+use detrix_api::grpc::request_with_machine_client_id;
 use detrix_api::grpc::AuthChannel;
 use detrix_core::SAFETY_STRICT;
 
@@ -134,7 +135,7 @@ impl MetricsClient {
 
         let _response = self
             .client
-            .add_metric(request)
+            .add_metric(request_with_machine_client_id(request))
             .await
             .context("Failed to add metric via gRPC")?
             .into_inner();
@@ -154,7 +155,7 @@ impl MetricsClient {
         };
 
         self.client
-            .remove_metric(request)
+            .remove_metric(request_with_machine_client_id(request))
             .await
             .context("Failed to remove metric via gRPC")?;
 
@@ -175,7 +176,7 @@ impl MetricsClient {
         };
 
         self.client
-            .toggle_metric(request)
+            .toggle_metric(request_with_machine_client_id(request))
             .await
             .context("Failed to toggle metric via gRPC")?;
 
@@ -203,7 +204,7 @@ impl MetricsClient {
         };
 
         self.client
-            .update_metric(request)
+            .update_metric(request_with_machine_client_id(request))
             .await
             .context("Failed to update metric via gRPC")?;
 
@@ -248,7 +249,7 @@ impl MetricsClient {
 
         let response = self
             .client
-            .enable_group(request)
+            .enable_group(request_with_machine_client_id(request))
             .await
             .context("Failed to enable group via gRPC")?
             .into_inner();
@@ -265,7 +266,7 @@ impl MetricsClient {
 
         let response = self
             .client
-            .disable_group(request)
+            .disable_group(request_with_machine_client_id(request))
             .await
             .context("Failed to disable group via gRPC")?
             .into_inner();
@@ -338,7 +339,7 @@ impl MetricsClient {
 
         let response = self
             .client
-            .wake(request)
+            .wake(request_with_machine_client_id(request))
             .await
             .context("Failed to wake via gRPC")?
             .into_inner();
@@ -367,7 +368,7 @@ impl MetricsClient {
         };
 
         self.client
-            .sleep(request)
+            .sleep(request_with_machine_client_id(request))
             .await
             .context("Failed to sleep via gRPC")?;
 
@@ -382,7 +383,7 @@ impl MetricsClient {
 
         let response = self
             .client
-            .disconnect_all(request)
+            .disconnect_all(request_with_machine_client_id(request))
             .await
             .context("Failed to disconnect all via gRPC")?
             .into_inner();
@@ -445,7 +446,7 @@ impl MetricsClient {
         };
 
         self.client
-            .reload_config(request)
+            .reload_config(request_with_machine_client_id(request))
             .await
             .context("Failed to reload config via gRPC")?;
 
@@ -589,7 +590,7 @@ impl MetricsClient {
         };
 
         self.client
-            .update_config(request)
+            .update_config(request_with_machine_client_id(request))
             .await
             .context("Failed to update config via gRPC")?;
 

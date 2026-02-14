@@ -79,10 +79,16 @@ pub struct RestClient {
 impl RestClient {
     /// Create a new REST client
     pub fn new(http_port: u16) -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            detrix_api::common::CLIENT_ID_HEADER,
+            "test-client".parse().unwrap(),
+        );
         Self {
             base_url: format!("http://127.0.0.1:{}", http_port),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(120))
+                .default_headers(headers)
                 .build()
                 .expect("Failed to create HTTP client"),
         }
@@ -90,10 +96,16 @@ impl RestClient {
 
     /// Create a new REST client with custom base URL
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            detrix_api::common::CLIENT_ID_HEADER,
+            "test-client".parse().unwrap(),
+        );
         Self {
             base_url: base_url.into(),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(120))
+                .default_headers(headers)
                 .build()
                 .expect("Failed to create HTTP client"),
         }

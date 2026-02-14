@@ -98,9 +98,14 @@ pub struct StatusResponse {
 #[instrument(skip(state))]
 pub async fn wake(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Json(req): Json<WakeRequest>,
 ) -> Result<Json<WakeResponse>, HttpError> {
-    info!("REST: wake app_url={}", req.app_url);
+    let client_id = super::extract_client_id(&headers)?;
+    info!(
+        "REST: wake app_url={}, client_id={:?}",
+        req.app_url, client_id
+    );
 
     let remote_app_service = state.context.remote_app_service.as_ref().ok_or_else(|| {
         HttpError::with_code(
@@ -140,9 +145,14 @@ pub async fn wake(
 #[instrument(skip(state))]
 pub async fn sleep(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Json(req): Json<SleepRequest>,
 ) -> Result<Json<SleepResponse>, HttpError> {
-    info!("REST: sleep app_url={}", req.app_url);
+    let client_id = super::extract_client_id(&headers)?;
+    info!(
+        "REST: sleep app_url={}, client_id={:?}",
+        req.app_url, client_id
+    );
 
     let remote_app_service = state.context.remote_app_service.as_ref().ok_or_else(|| {
         HttpError::with_code(
@@ -179,17 +189,8 @@ pub async fn disconnect_all(
     headers: HeaderMap,
 ) -> Result<Json<DisconnectAllResponse>, HttpError> {
     // User-scoped mode: release only caller's references
-    if let Some(client_id_value) = headers.get("x-detrix-client-id") {
-        let client_id = client_id_value.to_str().map_err(|_| {
-            HttpError::bad_request("Invalid X-Detrix-Client-Id header encoding".to_string())
-        })?;
-
-        if client_id.is_empty() || client_id == "__daemon__" {
-            return Err(HttpError::bad_request(
-                "Invalid X-Detrix-Client-Id value".to_string(),
-            ));
-        }
-
+    let extracted_client_id = super::extract_client_id(&headers)?;
+    if let Some(client_id) = &extracted_client_id {
         let client_identity = ClientIdentity::bridge(client_id);
         info!(
             "REST: disconnect_all (user-scoped, client={})",
