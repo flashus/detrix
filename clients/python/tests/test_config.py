@@ -39,18 +39,18 @@ class TestGetDetrixHome:
 class TestGetTokenFilePath:
     """Test get_token_file_path function."""
 
-    def test_returns_mcp_token_in_home(self):
+    def test_returns_auth_token_in_home(self):
         """Test token file path is in detrix home."""
         home = Path("/custom/home")
         result = get_token_file_path(home)
-        assert result == Path("/custom/home/mcp-token")
+        assert result == Path("/custom/home/auth-token")
 
     def test_uses_default_home(self):
         """Test uses default detrix home."""
         with mock.patch.dict(os.environ, {}, clear=True):
             os.environ.pop("DETRIX_HOME", None)
             result = get_token_file_path()
-            assert result == Path.home() / "detrix" / "mcp-token"
+            assert result == Path.home() / "detrix" / "auth-token"
 
 
 class TestGetFreePort:

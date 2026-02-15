@@ -194,7 +194,7 @@ The control plane HTTP server has a security-first authentication model:
 
 To enable remote access:
 1. Set `DETRIX_TOKEN` environment variable, or
-2. Create `~/detrix/mcp-token` file with the token
+2. Create `~/detrix/auth-token` file with the token
 
 If no token is configured, remote requests are denied by default.
 
@@ -202,14 +202,14 @@ If no token is configured, remote requests are denied by default.
 
 The control plane is designed for **localhost access only** by default. If you need to expose it remotely:
 
-1. **Always configure authentication** - Set `DETRIX_TOKEN` or create `~/detrix/mcp-token`
+1. **Always configure authentication** - Set `DETRIX_TOKEN` or create `~/detrix/auth-token`
 2. **Use a reverse proxy** - Place nginx, HAProxy, or similar in front for:
    - TLS termination (HTTPS)
    - Rate limiting
    - Access logging
    - IP allowlisting
 3. **Restrict network access** - Use firewall rules to limit which hosts can connect
-4. **Protect the token file** - Ensure `~/detrix/mcp-token` has restrictive permissions (`chmod 600`)
+4. **Protect the token file** - Ensure `~/detrix/auth-token` has restrictive permissions (`chmod 600`)
 
 Example nginx configuration:
 ```nginx

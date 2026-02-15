@@ -61,7 +61,7 @@ class ControlHandler(BaseHTTPRequestHandler):
               without authentication. This is safe because only local processes
               can access these addresses.
             - Remote requests require a valid Bearer token that matches the
-              token configured in DETRIX_TOKEN or ~/detrix/mcp-token.
+              token configured in DETRIX_TOKEN or ~/detrix/auth-token.
             - If no token is configured AND the request is from a non-localhost
               address, access is DENIED. This is a change from the previous
               behavior which allowed all access when no token was set.

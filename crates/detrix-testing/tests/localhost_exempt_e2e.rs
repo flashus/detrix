@@ -86,6 +86,9 @@ per_second = {}
 burst_size = {}
 localhost_exempt = {}
 
+[api.auth]
+mode = "disabled"
+
 [api.grpc]
 enabled = false
 

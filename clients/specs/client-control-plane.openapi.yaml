@@ -13,7 +13,7 @@ info:
       This is safe because only local processes can access these addresses.
     - **Remote requests** require a valid Bearer token in the Authorization header.
       The token must match the token configured in DETRIX_TOKEN environment variable
-      or stored in ~/detrix/mcp-token file.
+      or stored in ~/detrix/auth-token file.
     - If no token is configured AND the request is from a non-localhost address, access is DENIED.
 
     ## State Machine
@@ -219,7 +219,7 @@ components:
       scheme: bearer
       description: |
         Bearer token authentication for remote requests.
-        Token must match DETRIX_TOKEN env var or ~/detrix/mcp-token file.
+        Token must match DETRIX_TOKEN env var or ~/detrix/auth-token file.
     localhostAuth:
       type: apiKey
       in: header

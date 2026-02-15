@@ -1636,6 +1636,9 @@ enabled = true
 host = "127.0.0.1"
 port = {}
 
+[api.auth]
+mode = "disabled"
+
 [api.grpc]
 enabled = true
 host = "127.0.0.1"

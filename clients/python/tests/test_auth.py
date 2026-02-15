@@ -1,9 +1,52 @@
 """Tests for authentication handling."""
 
 import os
+import sys
+import warnings
 from unittest import mock
 
-from detrix.auth import discover_auth_token, get_auth_headers, is_localhost
+import pytest
+
+from detrix.auth import (
+    _check_token_file_permissions,
+    discover_auth_token,
+    get_auth_headers,
+    is_localhost,
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix permissions not available on Windows")
+class TestCheckTokenFilePermissions:
+    """Test _check_token_file_permissions function."""
+
+    def test_warns_on_insecure_permissions(self, tmp_path):
+        """Test that a warning is issued when token file has group/other permissions."""
+        token_file = tmp_path / "auth-token"
+        token_file.write_text("secret-token")
+        token_file.chmod(0o644)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = _check_token_file_permissions(token_file)
+
+        assert result is True
+        assert len(caught) == 1
+        assert issubclass(caught[0].category, UserWarning)
+        assert "insecure permissions" in str(caught[0].message)
+        assert "0o644" in str(caught[0].message)
+
+    def test_no_warning_on_secure_permissions(self, tmp_path):
+        """Test that no warning is issued when token file has secure permissions."""
+        token_file = tmp_path / "auth-token"
+        token_file.write_text("secret-token")
+        token_file.chmod(0o600)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = _check_token_file_permissions(token_file)
+
+        assert result is True
+        assert len(caught) == 0
 
 
 class TestDiscoverAuthToken:
@@ -12,7 +55,7 @@ class TestDiscoverAuthToken:
     def test_env_var_takes_precedence(self, tmp_path):
         """Test that DETRIX_TOKEN env var takes precedence."""
         # Create a token file with different content
-        token_file = tmp_path / "mcp-token"
+        token_file = tmp_path / "auth-token"
         token_file.write_text("file-token")
 
         with mock.patch.dict(os.environ, {"DETRIX_TOKEN": "env-token"}):
@@ -21,7 +64,7 @@ class TestDiscoverAuthToken:
 
     def test_reads_from_file(self, tmp_path):
         """Test reads token from file when env not set."""
-        token_file = tmp_path / "mcp-token"
+        token_file = tmp_path / "auth-token"
         token_file.write_text("file-token\n")
         token_file.chmod(0o600)
 

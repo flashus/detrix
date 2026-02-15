@@ -158,6 +158,7 @@ pub async fn run_bridge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use detrix_config::constants::{AUTHORIZATION_HEADER, BEARER_PREFIX};
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -501,8 +502,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/mcp"))
             .and(wiremock::matchers::header(
-                "Authorization",
-                "Bearer new_token_xyz",
+                AUTHORIZATION_HEADER,
+                &format!("{}new_token_xyz", BEARER_PREFIX),
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "jsonrpc": "2.0",
@@ -547,8 +548,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/mcp/heartbeat"))
             .and(wiremock::matchers::header(
-                "Authorization",
-                "Bearer refreshed_token",
+                AUTHORIZATION_HEADER,
+                &format!("{}refreshed_token", BEARER_PREFIX),
             ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
@@ -584,8 +585,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/mcp/disconnect"))
             .and(wiremock::matchers::header(
-                "Authorization",
-                "Bearer updated_token",
+                AUTHORIZATION_HEADER,
+                &format!("{}updated_token", BEARER_PREFIX),
             ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
@@ -633,8 +634,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/mcp/heartbeat"))
             .and(wiremock::matchers::header(
-                "Authorization",
-                "Bearer new_daemon_token",
+                AUTHORIZATION_HEADER,
+                &format!("{}new_daemon_token", BEARER_PREFIX),
             ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
@@ -644,8 +645,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/mcp"))
             .and(wiremock::matchers::header(
-                "Authorization",
-                "Bearer new_daemon_token",
+                AUTHORIZATION_HEADER,
+                &format!("{}new_daemon_token", BEARER_PREFIX),
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "jsonrpc": "2.0",

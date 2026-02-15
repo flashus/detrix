@@ -183,7 +183,7 @@ compatibility.
 ### Authentication
 
 - Localhost requests (127.0.0.1, ::1, localhost, 0.0.0.0) are always allowed
-- Remote requests require Bearer token matching DETRIX_TOKEN or ~/detrix/mcp-token
+- Remote requests require Bearer token matching DETRIX_TOKEN or ~/detrix/auth-token
 - If no token is configured, remote requests are DENIED (security-first default)
 
 ## Known Limitations

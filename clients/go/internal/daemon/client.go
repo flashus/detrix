@@ -73,6 +73,15 @@ func NewClient(opts *ClientOptions) (*Client, error) {
 	}, nil
 }
 
+// UpdateToken updates the auth token (e.g., after daemon restart with a new token).
+//
+// Concurrency: This method is NOT thread-safe. It must be called under the wake lock
+// (state.AcquireWakeLock) to ensure no concurrent reads of c.token occur during the write.
+// Currently, all call sites (handleWake/WakeWithURL) hold the wake lock.
+func (c *Client) UpdateToken(token string) {
+	c.token = token
+}
+
 // setAuth sets the Authorization header if a token is configured.
 func (c *Client) setAuth(req *http.Request) {
 	if c.token != "" {
@@ -115,7 +124,6 @@ type RegisterRequest struct {
 	Name          string `json:"name"`
 	WorkspaceRoot string `json:"workspaceRoot"`
 	Hostname      string `json:"hostname"`
-	Token         string `json:"token,omitempty"`
 	SafeMode      bool   `json:"safeMode,omitempty"`
 	// Build metadata (optional)
 	BuildCommit string `json:"buildCommit,omitempty"`

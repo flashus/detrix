@@ -1,6 +1,6 @@
 //! HTTP request handlers for the control plane.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -8,6 +8,12 @@ use hyper::{Method, Request, Response, StatusCode};
 use tracing::{debug, error};
 
 use crate::auth::is_authorized;
+
+/// Shared, thread-safe auth token reference.
+///
+/// Used by both `HandlerContext` (for validating incoming requests) and
+/// `ControlServer` (for updating the token when the daemon restarts).
+pub type SharedAuthToken = Arc<RwLock<Option<String>>>;
 use crate::generated::{
     ErrorResponse, HealthResponse, HealthResponseService, HealthResponseStatus, InfoResponse,
     SleepResponse, StatusResponse, WakeRequest, WakeResponse,
@@ -46,7 +52,7 @@ pub type SleepCallback = Arc<dyn Fn() -> Result<SleepResponse, String> + Send + 
 
 /// Handler context with callbacks and auth token.
 pub struct HandlerContext {
-    pub auth_token: Option<String>,
+    pub auth_token: SharedAuthToken,
     pub status_callback: StatusCallback,
     pub wake_callback: WakeCallback,
     pub sleep_callback: SleepCallback,
@@ -72,14 +78,11 @@ pub async fn handle_request(
 
     // Check auth for protected endpoints
     let needs_auth = path != "/detrix/health";
-    if needs_auth
-        && !is_authorized(
-            &remote_addr,
-            auth_header.as_deref(),
-            ctx.auth_token.as_deref(),
-        )
-    {
-        return unauthorized();
+    if needs_auth {
+        let token_guard = ctx.auth_token.read().unwrap_or_else(|e| e.into_inner());
+        if !is_authorized(&remote_addr, auth_header.as_deref(), token_guard.as_deref()) {
+            return unauthorized();
+        }
     }
 
     // Route the request

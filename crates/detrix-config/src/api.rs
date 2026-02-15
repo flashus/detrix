@@ -375,11 +375,19 @@ pub enum AuthMode {
 /// Supports two modes:
 /// 1. **Simple mode**: Static bearer token from config (like Prometheus)
 /// 2. **External mode**: JWT validation via JWKS endpoint (for enterprise SSO)
+///
+/// When `mode` is `None` (no `[api.auth]` section in config), the daemon
+/// auto-generates a bearer token for secure-by-default operation.
+/// When `mode` is `Some(Disabled)`, auth is explicitly disabled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
-    /// Authentication mode (default: disabled)
+    /// Authentication mode.
+    /// - `None`: not configured (daemon auto-enables auth)
+    /// - `Some(Disabled)`: explicitly disabled
+    /// - `Some(Simple)`: static bearer token
+    /// - `Some(External)`: JWT via JWKS
     #[serde(default)]
-    pub mode: AuthMode,
+    pub mode: Option<AuthMode>,
     /// Bearer token for simple mode
     #[serde(default)]
     pub bearer_token: Option<String>,
@@ -444,11 +452,16 @@ fn default_grpc_public_methods() -> Vec<String> {
 }
 
 impl AuthConfig {
+    /// Returns the effective auth mode (`None` is treated as `Disabled`).
+    pub fn effective_mode(&self) -> AuthMode {
+        self.mode.clone().unwrap_or(AuthMode::Disabled)
+    }
+
     /// Validate authentication configuration
     ///
     /// Ensures that valid credentials are provided when authentication is enabled.
     pub fn validate(&self) -> Result<(), String> {
-        match &self.mode {
+        match self.effective_mode() {
             AuthMode::Disabled => Ok(()),
             AuthMode::Simple => match &self.bearer_token {
                 Some(token) if !token.is_empty() => Ok(()),
@@ -479,16 +492,16 @@ impl AuthConfig {
             .any(|m| method_path.contains(m))
     }
 
-    /// Check if authentication is enabled
+    /// Check if authentication is enabled (mode is Simple or External).
     pub fn is_enabled(&self) -> bool {
-        self.mode != AuthMode::Disabled
+        matches!(self.mode, Some(AuthMode::Simple) | Some(AuthMode::External))
     }
 }
 
 impl Default for AuthConfig {
     fn default() -> Self {
         AuthConfig {
-            mode: AuthMode::Disabled,
+            mode: None,
             bearer_token: None,
             jwt: JwtConfig::default(),
             public_endpoints: default_public_endpoints(),
@@ -731,7 +744,7 @@ mod tests {
     #[test]
     fn test_auth_config_simple_mode() {
         let config = AuthConfig {
-            mode: AuthMode::Simple,
+            mode: Some(AuthMode::Simple),
             bearer_token: Some("my-secret-token".to_string()),
             ..Default::default()
         };
@@ -742,7 +755,7 @@ mod tests {
     #[test]
     fn test_auth_config_simple_mode_missing_token() {
         let config = AuthConfig {
-            mode: AuthMode::Simple,
+            mode: Some(AuthMode::Simple),
             bearer_token: None,
             ..Default::default()
         };
@@ -752,7 +765,7 @@ mod tests {
     #[test]
     fn test_auth_config_simple_mode_empty_token() {
         let config = AuthConfig {
-            mode: AuthMode::Simple,
+            mode: Some(AuthMode::Simple),
             bearer_token: Some("".to_string()),
             ..Default::default()
         };
@@ -762,7 +775,7 @@ mod tests {
     #[test]
     fn test_auth_config_external_mode() {
         let config = AuthConfig {
-            mode: AuthMode::External,
+            mode: Some(AuthMode::External),
             jwt: JwtConfig {
                 jwks_url: Some("https://auth.example.com/.well-known/jwks.json".to_string()),
                 issuer: Some("https://auth.example.com".to_string()),
@@ -778,7 +791,7 @@ mod tests {
     #[test]
     fn test_auth_config_external_mode_missing_jwks() {
         let config = AuthConfig {
-            mode: AuthMode::External,
+            mode: Some(AuthMode::External),
             jwt: JwtConfig::default(),
             ..Default::default()
         };
@@ -786,10 +799,51 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_mode_disabled() {
+    fn test_auth_config_default_mode_is_none() {
         let config = AuthConfig::default();
+        // Default mode is None (not configured), NOT Some(Disabled)
+        assert_eq!(config.mode, None);
+        // effective_mode() normalizes None to Disabled
+        assert_eq!(config.effective_mode(), AuthMode::Disabled);
+        // Not enabled (None is not Simple or External)
         assert!(!config.is_enabled());
+        // Validates OK (None = auto-handled by daemon)
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_auth_config_explicit_disabled_vs_none() {
+        let none_config = AuthConfig::default();
+        let disabled_config = AuthConfig {
+            mode: Some(AuthMode::Disabled),
+            ..Default::default()
+        };
+
+        // Both behave the same for validation and middleware
+        assert_eq!(
+            none_config.effective_mode(),
+            disabled_config.effective_mode()
+        );
+        assert_eq!(none_config.is_enabled(), disabled_config.is_enabled());
+
+        // But they differ in mode — daemon uses this to decide auto-auth
+        assert_eq!(none_config.mode, None);
+        assert_eq!(disabled_config.mode, Some(AuthMode::Disabled));
+    }
+
+    #[test]
+    fn test_auth_config_toml_parsing_absent_mode() {
+        // When mode key is absent (even if other keys are present), mode should be None
+        let config_toml = r#"
+bearer_token = "ignored-since-no-mode"
+"#;
+        let config: AuthConfig = toml::from_str(config_toml).expect("Failed to parse TOML");
+        assert_eq!(config.mode, None);
+        assert!(!config.is_enabled());
+
+        // Empty TOML also yields None mode
+        let config: AuthConfig = toml::from_str("").expect("Failed to parse empty TOML");
+        assert_eq!(config.mode, None);
     }
 
     #[test]
@@ -814,7 +868,7 @@ bearer_token = "my-test-token"
 
         let config: AuthConfig = toml::from_str(config_toml).expect("Failed to parse TOML");
 
-        assert_eq!(config.mode, AuthMode::Simple);
+        assert_eq!(config.mode, Some(AuthMode::Simple));
         assert_eq!(config.bearer_token, Some("my-test-token".to_string()));
         assert!(config.is_enabled());
     }
@@ -827,7 +881,7 @@ mode = "disabled"
 
         let config: AuthConfig = toml::from_str(config_toml).expect("Failed to parse TOML");
 
-        assert_eq!(config.mode, AuthMode::Disabled);
+        assert_eq!(config.mode, Some(AuthMode::Disabled));
         assert!(!config.is_enabled());
     }
 
@@ -843,7 +897,7 @@ issuer = "https://auth.example.com"
 
         let config: AuthConfig = toml::from_str(config_toml).expect("Failed to parse TOML");
 
-        assert_eq!(config.mode, AuthMode::External);
+        assert_eq!(config.mode, Some(AuthMode::External));
         assert!(config.is_enabled());
         assert_eq!(
             config.jwt.jwks_url,

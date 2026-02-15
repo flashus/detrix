@@ -4,10 +4,12 @@
 //! - Simple mode: Static bearer token from config (like Prometheus)
 //! - External mode: JWT validation via JWKS endpoint (for enterprise SSO)
 //! - Disabled mode: No authentication required
+//! - Auto-auth: Secure-by-default when no [api.auth] section in config
 //!
 //! Run with: `cargo test --package detrix-testing --test auth_e2e -- --test-threads=1`
 
 use reqwest::{Client, StatusCode};
+use serial_test::serial;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -17,7 +19,7 @@ use tempfile::TempDir;
 use detrix_api::generated::detrix::v1::{
     metrics_service_client::MetricsServiceClient, ListMetricsRequest,
 };
-use detrix_api::grpc::{AUTHORIZATION_METADATA_KEY, BEARER_PREFIX};
+use detrix_config::constants::{AUTHORIZATION_HEADER, AUTHORIZATION_METADATA_KEY, BEARER_PREFIX};
 use detrix_testing::e2e::executor::find_detrix_binary;
 use detrix_testing::e2e::jwt::{JwtBuilder, JwtKeyPair, MockJwksServer, TestClaims};
 use tonic::transport::Channel;
@@ -200,7 +202,7 @@ enable_ast_analysis = false
         match self
             .client
             .get(format!("{}{}", self.base_url(), path))
-            .header("Authorization", format!("Bearer {}", token))
+            .header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, token))
             .send()
             .await
         {
@@ -737,7 +739,7 @@ enable_ast_analysis = false
         match self
             .client
             .get(format!("{}{}", self.base_url(), path))
-            .header("Authorization", format!("Bearer {}", token))
+            .header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, token))
             .send()
             .await
         {
@@ -1070,4 +1072,449 @@ async fn test_external_jwt_cross_protocol() {
     );
 
     println!("✓ Same JWT works across REST and gRPC!");
+}
+
+// ==================== AUTO-AUTH (SECURE-BY-DEFAULT) TESTS ====================
+
+/// Test executor for auto-auth mode (no [api.auth] section in config).
+///
+/// When no auth config is present, the daemon auto-generates a bearer token,
+/// writes it to ~/detrix/auth-token, and enables simple auth mode.
+///
+/// Supports two modes:
+/// - Default: daemon auto-generates token, writes to file
+/// - With env token: daemon uses DETRIX_TOKEN env var, no file written
+struct AutoAuthTestExecutor {
+    temp_dir: TempDir,
+    http_port: u16,
+    grpc_port: u16,
+    enable_grpc: bool,
+    env_token: Option<String>,
+    /// Cached auto-generated token, captured immediately after daemon starts.
+    /// This avoids reading the global token file later (which may be overwritten
+    /// by daemons from other test binaries running in parallel).
+    auto_token: Option<String>,
+    daemon_process: Option<Child>,
+    daemon_log_path: PathBuf,
+    workspace_root: PathBuf,
+    client: Client,
+}
+
+impl AutoAuthTestExecutor {
+    /// Create executor with auto-generated token (default auto-auth mode).
+    fn new() -> Self {
+        Self::with_options(true, None)
+    }
+
+    /// Create executor that sets DETRIX_TOKEN env var instead of auto-generating.
+    fn with_env_token(token: &str) -> Self {
+        Self::with_options(false, Some(token.to_string()))
+    }
+
+    fn with_options(enable_grpc: bool, env_token: Option<String>) -> Self {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| manifest_dir.clone());
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+
+        // Port range 18500-18799: non-overlapping with SimpleBearerTestExecutor (19000-19499)
+        // and ExternalJwtTestExecutor (19500-19999)
+        let counter = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base_port = 18500 + ((std::process::id() as u16 + counter) % 300);
+        let http_port = base_port;
+        let grpc_port = base_port + 1000;
+
+        let daemon_log_path = temp_dir.path().join("daemon.log");
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("Failed to create HTTP client");
+
+        Self {
+            temp_dir,
+            http_port,
+            grpc_port,
+            enable_grpc,
+            env_token,
+            auto_token: None,
+            daemon_process: None,
+            daemon_log_path,
+            workspace_root,
+            client,
+        }
+    }
+
+    /// Start daemon WITHOUT any [api.auth] section — triggers auto-auth.
+    async fn start_daemon(&mut self) -> Result<(), String> {
+        let db_path = self.temp_dir.path().join("detrix.db");
+        // NOTE: No [api.auth] section at all — this triggers auto-auth
+        let grpc_section = if self.enable_grpc {
+            format!(
+                "[api.grpc]\nenabled = true\nhost = \"127.0.0.1\"\nport = {}\n",
+                self.grpc_port
+            )
+        } else {
+            "[api.grpc]\nenabled = false\n".to_string()
+        };
+
+        let config_content = format!(
+            r#"
+[metadata]
+version = "1.0"
+
+[project]
+base_path = "{}"
+
+[storage]
+storage_type = "sqlite"
+path = "{}"
+
+[api]
+port_fallback = true
+
+[api.rest]
+enabled = true
+host = "127.0.0.1"
+port = {}
+
+{}
+
+[safety]
+enable_ast_analysis = false
+"#,
+            self.workspace_root.display(),
+            db_path.display(),
+            self.http_port,
+            grpc_section,
+        );
+
+        let config_path = self.temp_dir.path().join("detrix.toml");
+        std::fs::write(&config_path, config_content).map_err(|e| e.to_string())?;
+
+        let binary_path =
+            match find_detrix_binary(&self.workspace_root) {
+                Some(p) => p,
+                None => return Err(
+                    "detrix binary not found. Set DETRIX_BIN or run `cargo build -p detrix-cli`"
+                        .to_string(),
+                ),
+            };
+
+        let daemon_log_file =
+            std::fs::File::create(&self.daemon_log_path).map_err(|e| e.to_string())?;
+        let daemon_log_stderr = daemon_log_file.try_clone().map_err(|e| e.to_string())?;
+
+        let mut cmd = Command::new(&binary_path);
+        cmd.args(["serve", "--config", config_path.to_str().unwrap()])
+            .current_dir(&self.workspace_root)
+            .env("RUST_LOG", "debug")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(daemon_log_file))
+            .stderr(Stdio::from(daemon_log_stderr));
+
+        // Either set DETRIX_TOKEN env var or remove it for file-based auto-auth
+        if let Some(ref token) = self.env_token {
+            cmd.env("DETRIX_TOKEN", token);
+        } else {
+            cmd.env_remove("DETRIX_TOKEN");
+        }
+
+        let process = cmd.spawn();
+
+        match process {
+            Ok(p) => {
+                self.daemon_process = Some(p);
+                if !wait_for_port(self.http_port, 30).await {
+                    return Err(format!("Daemon not responding on port {}", self.http_port));
+                }
+                if self.enable_grpc && !wait_for_port(self.grpc_port, 10).await {
+                    return Err(format!("gRPC not responding on port {}", self.grpc_port));
+                }
+                // Capture the auto-generated token immediately after daemon starts.
+                // Reading later is unreliable because other test binaries (mcp_bridge_e2e)
+                // may overwrite ~/detrix/auth-token with their own daemon's token.
+                if self.env_token.is_none() {
+                    let token_path = detrix_config::paths::auth_token_path();
+                    if let Ok(token) = std::fs::read_to_string(&token_path) {
+                        let token = token.trim().to_string();
+                        if !token.is_empty() {
+                            self.auto_token = Some(token);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => Err(format!("Could not spawn daemon: {}", e)),
+        }
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.http_port)
+    }
+
+    fn stop(&mut self) {
+        if let Some(mut p) = self.daemon_process.take() {
+            let _ = p.kill();
+            let _ = p.wait();
+        }
+    }
+
+    fn print_daemon_logs(&self, last_n_lines: usize) {
+        println!("\n=== DAEMON LOG (last {} lines) ===", last_n_lines);
+        if let Ok(content) = std::fs::read_to_string(&self.daemon_log_path) {
+            let lines: Vec<&str> = content.lines().collect();
+            let start = lines.len().saturating_sub(last_n_lines);
+            for line in &lines[start..] {
+                println!("{}", line);
+            }
+        } else {
+            println!("   (could not read daemon log)");
+        }
+        println!("=================================\n");
+    }
+
+    async fn request_without_auth(&self, path: &str) -> reqwest::Result<StatusCode> {
+        self.client
+            .get(format!("{}{}", self.base_url(), path))
+            .send()
+            .await
+            .map(|resp| resp.status())
+    }
+
+    async fn request_with_token(&self, path: &str, token: &str) -> reqwest::Result<StatusCode> {
+        self.client
+            .get(format!("{}{}", self.base_url(), path))
+            .header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, token))
+            .send()
+            .await
+            .map(|resp| resp.status())
+    }
+}
+
+impl Drop for AutoAuthTestExecutor {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Test: Auto-auth creates token file and enforces auth on protected endpoints.
+///
+/// When no [api.auth] section is in the config, the daemon should:
+/// 1. Auto-generate a bearer token
+/// 2. Write it to ~/detrix/auth-token
+/// 3. Reject unauthenticated requests to protected endpoints
+/// 4. Accept requests with the auto-generated token
+/// 5. Keep health endpoint public
+#[tokio::test]
+#[serial(auto_auth_token_file)]
+async fn test_auto_auth_enforces_auth_on_protected_endpoints() {
+    let token_path = detrix_config::paths::auth_token_path();
+
+    // Clean up any existing token file
+    let _ = std::fs::remove_file(&token_path);
+
+    let mut executor = AutoAuthTestExecutor::new();
+
+    if let Err(e) = executor.start_daemon().await {
+        executor.print_daemon_logs(100);
+        panic!("Failed to start daemon: {}", e);
+    }
+
+    // Use the token captured immediately after daemon started (resilient to
+    // cross-binary interference — other test binaries may overwrite the global token file)
+    let token = executor
+        .auto_token
+        .as_ref()
+        .expect("Auto-generated token should have been captured by start_daemon");
+
+    // Verify token file permissions on Unix (file may be overwritten by another binary,
+    // but if it exists and was written by our daemon, it should have secure permissions)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(meta) = std::fs::metadata(&token_path) {
+            let mode = meta.mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "Token file should have 0600 permissions, got {:o}",
+                mode
+            );
+        }
+    }
+
+    // Protected endpoint should reject unauthenticated requests
+    let status = executor
+        .request_without_auth("/api/v1/metrics")
+        .await
+        .expect("Request failed");
+    if status != StatusCode::UNAUTHORIZED {
+        executor.print_daemon_logs(100);
+        panic!(
+            "Auto-auth should reject unauthenticated requests. Got: {}",
+            status
+        );
+    }
+
+    // Protected endpoint should accept requests with auto-generated token
+    let status = executor
+        .request_with_token("/api/v1/metrics", token)
+        .await
+        .expect("Request failed");
+    if status != StatusCode::OK {
+        executor.print_daemon_logs(100);
+        panic!(
+            "Auto-auth should accept the auto-generated token. Got: {}",
+            status
+        );
+    }
+
+    // Health endpoint should still be public
+    let status = executor
+        .request_without_auth("/health")
+        .await
+        .expect("Request failed");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Health endpoint should remain public with auto-auth"
+    );
+
+    // Wrong token should be rejected
+    let status = executor
+        .request_with_token("/api/v1/metrics", "wrong-token")
+        .await
+        .expect("Request failed");
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "Wrong token should be rejected even with auto-auth"
+    );
+
+    println!("✓ Auto-auth enforces authentication on protected endpoints!");
+}
+
+/// Test: Auto-auth with DETRIX_TOKEN env var uses the env token.
+///
+/// When DETRIX_TOKEN is set and no [api.auth] section exists, the daemon should:
+/// 1. Use the env var token (not generate a new one)
+/// 2. Enforce auth using the env var token
+///
+/// Note: We don't assert on token file absence because other test binaries
+/// (mcp_bridge_e2e) may write to ~/detrix/auth-token concurrently.
+#[tokio::test]
+#[serial(auto_auth_token_file)]
+async fn test_auto_auth_uses_detrix_token_env_var() {
+    let env_token = "my-env-token-for-auto-auth-test";
+
+    let mut executor = AutoAuthTestExecutor::with_env_token(env_token);
+
+    if let Err(e) = executor.start_daemon().await {
+        executor.print_daemon_logs(100);
+        panic!("Failed to start daemon: {}", e);
+    }
+
+    // Unauthenticated request should fail
+    let status = executor
+        .request_without_auth("/api/v1/metrics")
+        .await
+        .expect("Request failed");
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "Should reject unauthenticated request"
+    );
+
+    // Request with env token should succeed
+    let status = executor
+        .request_with_token("/api/v1/metrics", env_token)
+        .await
+        .expect("Request failed");
+    if status != StatusCode::OK {
+        executor.print_daemon_logs(100);
+        panic!("DETRIX_TOKEN env var should grant access. Got: {}", status);
+    }
+
+    // Wrong token should be rejected
+    let status = executor
+        .request_with_token("/api/v1/metrics", "wrong-token")
+        .await
+        .expect("Request failed");
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "Wrong token should be rejected"
+    );
+
+    println!("✓ Auto-auth with DETRIX_TOKEN env var works correctly!");
+}
+
+/// Test: Auto-auth also works on gRPC (not just REST).
+#[tokio::test]
+#[serial(auto_auth_token_file)]
+async fn test_auto_auth_grpc_enforcement() {
+    let token_path = detrix_config::paths::auth_token_path();
+    let _ = std::fs::remove_file(&token_path);
+
+    let mut executor = AutoAuthTestExecutor::new();
+
+    if let Err(e) = executor.start_daemon().await {
+        executor.print_daemon_logs(100);
+        panic!("Failed to start daemon: {}", e);
+    }
+
+    // Use the token captured immediately after daemon started (resilient to
+    // cross-binary interference — other test binaries may overwrite the global token file)
+    let token = executor
+        .auto_token
+        .as_ref()
+        .expect("Auto-generated token should have been captured by start_daemon");
+
+    let addr = format!("http://127.0.0.1:{}", executor.grpc_port);
+    let channel = Channel::from_shared(addr)
+        .unwrap()
+        .connect()
+        .await
+        .expect("Failed to connect to gRPC");
+
+    let mut client = MetricsServiceClient::new(channel);
+
+    // gRPC without auth should fail
+    let request = Request::new(ListMetricsRequest {
+        group: None,
+        enabled_only: None,
+        name_pattern: None,
+        metadata: None,
+    });
+    let result = client.list_metrics(request).await;
+    assert!(result.is_err(), "gRPC without auth should be rejected");
+    assert_eq!(
+        result.unwrap_err().code(),
+        tonic::Code::Unauthenticated,
+        "Should return Unauthenticated"
+    );
+
+    // gRPC with auto-generated token should succeed
+    let mut request = Request::new(ListMetricsRequest {
+        group: None,
+        enabled_only: None,
+        name_pattern: None,
+        metadata: None,
+    });
+    request.metadata_mut().insert(
+        AUTHORIZATION_METADATA_KEY,
+        format!("{}{}", BEARER_PREFIX, token).parse().unwrap(),
+    );
+    let result = client.list_metrics(request).await;
+    assert!(
+        result.is_ok(),
+        "gRPC with auto-generated token should succeed: {:?}",
+        result.err()
+    );
+
+    println!("✓ Auto-auth works on gRPC!");
 }

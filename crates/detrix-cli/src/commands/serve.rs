@@ -100,30 +100,41 @@ pub async fn run(
         );
     }
 
-    // Auto-generate auth token for MCP-spawned daemons (transparent local auth)
-    // This ensures local MCP clients can authenticate without manual config
-    if mcp_spawned && !config.api.auth.is_enabled() {
-        let auto_token = generate_secure_token();
-        let token_path = detrix_config::paths::mcp_token_path();
+    // Auto-generate auth token for all daemons when auth is not explicitly configured.
+    // This ensures daemons are secure by default — clients discover the token via
+    // DETRIX_TOKEN env var or ~/detrix/auth-token file.
+    let mut token_file_written = false;
+    if config.api.auth.mode.is_none() {
+        // Use DETRIX_TOKEN env var if set, otherwise generate a new one
+        let (auto_token, from_env) = match std::env::var("DETRIX_TOKEN")
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+        {
+            Some(t) => (t, true),
+            None => (generate_secure_token(), false),
+        };
 
-        // Ensure parent directory exists
-        if let Err(e) = detrix_config::paths::ensure_parent_dir(&token_path) {
-            warn!("Failed to create token directory: {}", e);
-        } else {
-            // Write token to file with restricted permissions (atomically where possible)
-            if let Err(e) = write_token_securely(&token_path, &auto_token) {
-                warn!("Failed to write MCP token file: {}", e);
+        // Only write token file if auto-generated (env var is already the source of truth)
+        // Note: Single token file means one daemon per machine for auto-auth.
+        // For concurrent daemons, use DETRIX_TOKEN env var or explicit [api.auth] config.
+        if !from_env {
+            let token_path = detrix_config::paths::auth_token_path();
+            if let Err(e) = detrix_config::paths::ensure_parent_dir(&token_path) {
+                warn!("Failed to create token directory: {}", e);
+            } else if let Err(e) = write_token_securely(&token_path, &auto_token) {
+                warn!("Failed to write auth token file: {}", e);
             } else {
-                // Enable auth with auto-generated token (simple mode)
-                config.api.auth.mode = detrix_config::AuthMode::Simple;
-                config.api.auth.bearer_token = Some(auto_token);
-
-                info!(
-                    "🔐 MCP auto-auth enabled, token saved to {}",
-                    token_path.display()
-                );
+                info!("🔐 Auth token saved to {}", token_path.display());
+                token_file_written = true;
             }
+        } else {
+            info!("🔐 Using DETRIX_TOKEN from environment");
         }
+
+        // Enable auth with the token
+        config.api.auth.mode = Some(detrix_config::AuthMode::Simple);
+        config.api.auth.bearer_token = Some(auto_token);
     }
 
     // Determine if gRPC should be enabled (CLI flag OR config setting)
@@ -340,7 +351,7 @@ pub async fn run(
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Create JWT validator for external auth mode (if configured)
-    let jwt_validator = if config.api.auth.mode == detrix_config::AuthMode::External {
+    let jwt_validator = if config.api.auth.mode == Some(detrix_config::AuthMode::External) {
         info!("🔑 Creating JWT validator for external auth mode...");
         match JwksValidator::new(&config.api.auth.jwt) {
             Ok(validator) => {
@@ -670,19 +681,18 @@ pub async fn run(
     }
     info!("✓ All adapters stopped");
 
-    // Clean up token file if daemon was MCP-spawned
-    // This prevents stale tokens from being used after restart
-    if mcp_spawned {
-        let token_path = detrix_config::paths::mcp_token_path();
+    // Clean up token file if we wrote one (prevents stale tokens after restart)
+    if token_file_written {
+        let token_path = detrix_config::paths::auth_token_path();
         match std::fs::remove_file(&token_path) {
             Ok(()) => {
-                debug!("✓ Removed MCP token file: {}", token_path.display());
+                debug!("✓ Removed auth token file: {}", token_path.display());
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Token file already gone, that's fine
             }
             Err(e) => {
-                warn!("Could not remove MCP token file: {}", e);
+                warn!("Could not remove auth token file: {}", e);
             }
         }
     }

@@ -1,6 +1,5 @@
 // gRPC service implementations
 
-pub mod auth;
 pub mod client;
 pub mod connections;
 pub mod conversions;
@@ -21,8 +20,6 @@ pub use conversions::{
 pub use interceptor::{create_auth_interceptor, AuthInterceptorState};
 pub use metrics::MetricsServiceImpl;
 pub use streaming::StreamingServiceImpl;
-
-pub use auth::{AUTHORIZATION_METADATA_KEY, BEARER_PREFIX};
 
 /// Extract and validate client_id from `x-detrix-client-id` gRPC metadata.
 ///

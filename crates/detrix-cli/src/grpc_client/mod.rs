@@ -66,7 +66,7 @@ pub fn get_grpc_port_from_pid_file(pid_file_path: &Path) -> u16 {
 /// This avoids redundant endpoint discovery.
 ///
 /// Authentication:
-/// - Automatically discovers auth token from DETRIX_TOKEN env var or mcp-token file
+/// - Automatically discovers auth token from DETRIX_TOKEN env var or auth-token file
 /// - If found, adds Bearer token to all gRPC requests
 pub async fn connect_with_endpoints(endpoints: &DaemonEndpoints) -> Result<AuthChannel> {
     connect_to_daemon_grpc(endpoints)

@@ -34,7 +34,8 @@ type Server struct {
 	wakeHandler    WakeHandler
 	sleepHandler   SleepHandler
 	authToken      string
-	mu             sync.Mutex
+	tokenMu        sync.RWMutex // protects authToken
+	mu             sync.Mutex   // protects running, listener, httpServer, actualPort
 	running        bool
 }
 
@@ -131,10 +132,30 @@ func (s *Server) ActualPort() int {
 	return s.actualPort
 }
 
+// UpdateToken updates the auth token used for validating incoming requests.
+//
+// This should be called when the daemon restarts with a new token, so the
+// control server accepts requests authenticated with the fresh token.
+//
+// Concurrency: This method is safe for concurrent use. It acquires tokenMu
+// for writing. The withAuth middleware acquires tokenMu for reading.
+func (s *Server) UpdateToken(token string) {
+	s.tokenMu.Lock()
+	defer s.tokenMu.Unlock()
+	s.authToken = token
+}
+
+// getToken returns the current auth token (thread-safe).
+func (s *Server) getToken() string {
+	s.tokenMu.RLock()
+	defer s.tokenMu.RUnlock()
+	return s.authToken
+}
+
 // withAuth wraps a handler with authentication.
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !auth.IsAuthorized(r, s.authToken) {
+		if !auth.IsAuthorized(r, s.getToken()) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			if err := json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"}); err != nil {

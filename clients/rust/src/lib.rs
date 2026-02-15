@@ -176,8 +176,11 @@ pub fn init(config: Config) -> Result<()> {
         guard.state = ClientState::Sleeping;
     }
 
+    // Discover auth token before creating daemon client
+    let auth_token = auth::discover_token(config.detrix_home_path().as_deref());
+
     // Initialize daemon client (resettable via Mutex<Option<T>>)
-    let daemon_client = DaemonClient::new(None)?;
+    let daemon_client = DaemonClient::new(None, auth_token.clone())?;
     let dc_holder = DAEMON_CLIENT.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(mut guard) = dc_holder.lock() {
         *guard = Some(daemon_client);
@@ -189,9 +192,6 @@ pub fn init(config: Config) -> Result<()> {
     if let Ok(mut guard) = lm_holder.lock() {
         *guard = Some(lldb_manager);
     }
-
-    // Discover auth token
-    let auth_token = auth::discover_token(config.detrix_home_path().as_deref());
 
     // Create callbacks for control server
     let status_callback = Arc::new(status_provider);
@@ -457,9 +457,24 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
     // Acquire daemon client and lldb manager locks for the operation.
     // Safe to hold for the duration because wake_lock already serializes access.
     let dc_holder = DAEMON_CLIENT.get().ok_or(Error::NotInitialized)?;
-    let dc_guard = dc_holder
+    let mut dc_guard = dc_holder
         .lock()
         .map_err(|_| Error::ControlPlaneError("daemon client lock poisoned".to_string()))?;
+
+    // Re-discover token (daemon may have restarted with a new one)
+    let fresh_token = auth::discover_token(detrix_home.as_ref().map(std::path::Path::new));
+    if let Some(ref mut dc) = *dc_guard {
+        dc.update_auth_token(fresh_token.clone());
+    }
+
+    // Update control server token too (so it accepts requests with the new token)
+    if let Some(cs_holder) = CONTROL_SERVER.get() {
+        if let Ok(cs_guard) = cs_holder.lock() {
+            if let Some(ref cs) = *cs_guard {
+                cs.update_token(fresh_token);
+            }
+        }
+    }
     let daemon_client = dc_guard.as_ref().ok_or(Error::NotInitialized)?;
 
     let lm_holder = LLDB_MANAGER.get().ok_or(Error::NotInitialized)?;
@@ -487,9 +502,6 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
 
     // Store lldb process
     state::set_lldb_process(lldb_process);
-
-    // Discover auth token
-    let token = auth::discover_token(detrix_home.as_ref().map(std::path::Path::new));
 
     // Get workspace root and hostname for identity
     let workspace_root = std::env::current_dir()
@@ -526,7 +538,6 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
             workspace_root,
             hostname,
             pid: Some(std::process::id()),
-            token,
             safe_mode,
             build_commit,
             build_tag,

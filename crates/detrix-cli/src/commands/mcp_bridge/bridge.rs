@@ -6,6 +6,7 @@
 use super::auth::{discover_auth_token, is_connection_error};
 use super::config::{BridgeConfig, RestartBackoff};
 use anyhow::{Context, Result};
+use detrix_config::constants::{AUTHORIZATION_HEADER, BEARER_PREFIX};
 use detrix_logging::{debug, error, info, warn};
 use reqwest::Client;
 use serde_json::Value;
@@ -185,7 +186,8 @@ impl McpBridge {
 
         // Add auth token if available
         if let Some(ref token) = token {
-            req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
+            req_builder =
+                req_builder.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, token));
         }
 
         // Add parent process info headers if available
@@ -240,7 +242,8 @@ impl McpBridge {
 
         // Add auth token if available
         if let Some(ref token) = token {
-            req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
+            req_builder =
+                req_builder.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, token));
         }
 
         // Add parent process info headers if available
@@ -285,7 +288,8 @@ impl McpBridge {
 
         // Add auth token if available
         if let Some(ref token) = token {
-            req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
+            req_builder =
+                req_builder.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, token));
         }
 
         let response = req_builder

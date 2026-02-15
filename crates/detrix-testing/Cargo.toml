@@ -67,6 +67,7 @@ nix.workspace = true
 [dev-dependencies]
 regex.workspace = true
 fs2.workspace = true
+serial_test = "3"
 
 [lints]
 workspace = true

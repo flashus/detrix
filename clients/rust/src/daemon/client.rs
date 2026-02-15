@@ -6,6 +6,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use crate::auth::{AUTHORIZATION_HEADER, BEARER_PREFIX};
 use crate::config::TlsConfig;
 use crate::error::{Error, ReqwestResultExt, Result, ResultExt};
 
@@ -34,10 +35,6 @@ pub struct RegisterRequest {
     /// Process ID to attach to (required for Rust/lldb-dap AttachPid mode).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
-
-    /// Authentication token (optional).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
 
     /// Safe mode flag.
     #[serde(rename = "safeMode")]
@@ -71,6 +68,8 @@ struct RegisterResponse {
 pub struct DaemonClient {
     /// HTTP client instance.
     client: Client,
+    /// Authentication token for daemon API requests.
+    auth_token: Option<String>,
 }
 
 impl DaemonClient {
@@ -86,7 +85,7 @@ impl DaemonClient {
     /// * The CA bundle path doesn't exist (fails fast)
     /// * The CA bundle file can't be read or parsed
     /// * Failed to create the HTTP client
-    pub fn new(tls_config: Option<&TlsConfig>) -> Result<Self> {
+    pub fn new(tls_config: Option<&TlsConfig>, auth_token: Option<String>) -> Result<Self> {
         let mut builder = Client::builder().timeout(Duration::from_secs(30));
 
         if let Some(tls) = tls_config {
@@ -106,7 +105,26 @@ impl DaemonClient {
 
         Ok(Self {
             client: builder.build().config("failed to create HTTP client")?,
+            auth_token,
         })
+    }
+
+    /// Update the auth token (e.g., after daemon restart with a new token).
+    pub fn update_auth_token(&mut self, token: Option<String>) {
+        self.auth_token = token;
+    }
+
+    /// Apply auth header to a request builder if token is available and non-empty.
+    fn set_auth(
+        &self,
+        builder: reqwest::blocking::RequestBuilder,
+    ) -> reqwest::blocking::RequestBuilder {
+        match self.auth_token {
+            Some(ref token) if !token.is_empty() => {
+                builder.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, token))
+            }
+            _ => builder,
+        }
     }
 
     /// Check if the daemon is reachable.
@@ -146,10 +164,7 @@ impl DaemonClient {
         );
 
         let response = self
-            .client
-            .post(&url)
-            .timeout(timeout)
-            .json(&request)
+            .set_auth(self.client.post(&url).timeout(timeout).json(&request))
             .send()
             .registration_context()?;
 
@@ -180,7 +195,9 @@ impl DaemonClient {
 
         debug!("Unregistering connection: {}", connection_id);
 
-        let result = self.client.delete(&url).timeout(timeout).send();
+        let result = self
+            .set_auth(self.client.delete(&url).timeout(timeout))
+            .send();
 
         match result {
             Ok(response) => {
@@ -216,7 +233,6 @@ mod tests {
             workspace_root: "/workspace".to_string(),
             hostname: "test-host".to_string(),
             pid: Some(12345),
-            token: Some("secret".to_string()),
             safe_mode: true,
             build_commit: Some("abc123".to_string()),
             build_tag: Some("v1.0.0".to_string()),
@@ -242,15 +258,12 @@ mod tests {
             workspace_root: "/workspace".to_string(),
             hostname: "test-host".to_string(),
             pid: None,
-            token: None,
             safe_mode: false,
             build_commit: None,
             build_tag: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
-        // Token should be omitted
-        assert!(!json.contains("token"));
         // pid should be omitted when None
         assert!(!json.contains("pid"));
         // safeMode should be omitted when false
@@ -258,5 +271,76 @@ mod tests {
         // Required fields should be present
         assert!(json.contains("\"workspaceRoot\":\"/workspace\""));
         assert!(json.contains("\"hostname\":\"test-host\""));
+    }
+
+    #[test]
+    fn test_daemon_client_new_with_token() {
+        let client = DaemonClient::new(None, Some("test-token".to_string()));
+        assert!(client.is_ok());
+        let client = client.unwrap();
+        assert_eq!(client.auth_token, Some("test-token".to_string()));
+    }
+
+    #[test]
+    fn test_daemon_client_new_without_token() {
+        let client = DaemonClient::new(None, None);
+        assert!(client.is_ok());
+        let client = client.unwrap();
+        assert_eq!(client.auth_token, None);
+    }
+
+    #[test]
+    fn test_update_auth_token() {
+        let mut client = DaemonClient::new(None, None).unwrap();
+        assert_eq!(client.auth_token, None);
+
+        client.update_auth_token(Some("new-token".to_string()));
+        assert_eq!(client.auth_token, Some("new-token".to_string()));
+
+        client.update_auth_token(None);
+        assert_eq!(client.auth_token, None);
+    }
+
+    #[test]
+    fn test_set_auth_adds_header_when_token_present() {
+        let client = DaemonClient::new(None, Some("my-token".to_string())).unwrap();
+        let request = client.client.get("http://localhost:8090/health");
+        let request = client.set_auth(request).build().unwrap();
+
+        let auth_header = request.headers().get(AUTHORIZATION_HEADER).unwrap();
+        assert_eq!(
+            auth_header.to_str().unwrap(),
+            format!("{}my-token", BEARER_PREFIX)
+        );
+    }
+
+    #[test]
+    fn test_set_auth_no_header_when_no_token() {
+        let client = DaemonClient::new(None, None).unwrap();
+        let request = client.client.get("http://localhost:8090/health");
+        let request = client.set_auth(request).build().unwrap();
+
+        assert!(request.headers().get(AUTHORIZATION_HEADER).is_none());
+    }
+
+    #[test]
+    fn test_set_auth_no_header_when_empty_token() {
+        let client = DaemonClient::new(None, Some("".to_string())).unwrap();
+        let request = client.client.get("http://localhost:8090/health");
+        let request = client.set_auth(request).build().unwrap();
+
+        // Empty token should be treated as no token
+        assert!(request.headers().get(AUTHORIZATION_HEADER).is_none());
+    }
+
+    #[test]
+    fn test_set_auth_no_header_when_whitespace_only_token() {
+        let client = DaemonClient::new(None, Some("   ".to_string())).unwrap();
+        let request = client.client.get("http://localhost:8090/health");
+        let request = client.set_auth(request).build().unwrap();
+
+        // Whitespace-only token should still set header (caller's responsibility to trim)
+        // But it IS non-empty, so the header is set
+        assert!(request.headers().get(AUTHORIZATION_HEADER).is_some());
     }
 }

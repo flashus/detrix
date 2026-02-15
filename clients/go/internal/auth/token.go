@@ -13,6 +13,9 @@ import (
 	"strings"
 )
 
+// authTokenFilename is the filename for the auto-generated auth token.
+const authTokenFilename = "auth-token"
+
 // checkTokenFilePermissions verifies token file has secure permissions (0600 or 0400).
 // On Unix systems, logs a warning if group or other has any permissions.
 // On Windows, the check is skipped (documented limitation).
@@ -38,17 +41,17 @@ func checkTokenFilePermissions(path string) {
 // DiscoverToken discovers the authentication token from environment or file.
 // Priority:
 // 1. DETRIX_TOKEN environment variable
-// 2. ~/detrix/mcp-token file
-// 3. {detrixHome}/mcp-token file (if detrixHome provided)
+// 2. ~/detrix/auth-token file
+// 3. {detrixHome}/auth-token file (if detrixHome provided)
 func DiscoverToken(detrixHome string) string {
 	// Check environment variable first
 	if token := os.Getenv("DETRIX_TOKEN"); token != "" {
 		return token
 	}
 
-	// Try ~/detrix/mcp-token
+	// Try ~/detrix/auth-token
 	if home, err := os.UserHomeDir(); err == nil {
-		tokenPath := filepath.Join(home, "detrix", "mcp-token")
+		tokenPath := filepath.Join(home, "detrix", authTokenFilename)
 		checkTokenFilePermissions(tokenPath)
 		if data, err := os.ReadFile(tokenPath); err == nil {
 			return strings.TrimSpace(string(data))
@@ -57,7 +60,7 @@ func DiscoverToken(detrixHome string) string {
 
 	// Try custom detrix home
 	if detrixHome != "" {
-		tokenPath := filepath.Join(detrixHome, "mcp-token")
+		tokenPath := filepath.Join(detrixHome, authTokenFilename)
 		checkTokenFilePermissions(tokenPath)
 		if data, err := os.ReadFile(tokenPath); err == nil {
 			return strings.TrimSpace(string(data))

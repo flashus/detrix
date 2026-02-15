@@ -416,8 +416,10 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 		return WakeResponse{}, fmt.Errorf("failed to start delve: %w", err)
 	}
 
-	// 2c. Discover auth token
-	token := auth.DiscoverToken(detrixHome)
+	// 2c. Re-discover auth token (daemon may have restarted with a new one)
+	freshToken := auth.DiscoverToken(detrixHome)
+	daemonClient.UpdateToken(freshToken)
+	controlServer.UpdateToken(freshToken)
 
 	// 2d. Get workspace root and hostname for identity
 	workspaceRoot, err := os.Getwd()
@@ -451,7 +453,6 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 		Name:          name,
 		WorkspaceRoot: workspaceRoot,
 		Hostname:      hostname,
-		Token:         token,
 		SafeMode:      safeMode,
 		BuildCommit:   buildCommit,
 		BuildTag:      buildTag,

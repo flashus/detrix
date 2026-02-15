@@ -5,6 +5,7 @@
 //! in `detrix-ports`.
 
 use detrix_application::ports::{RemoteAppControl, RemoteSleepResponse, RemoteWakeResponse};
+use detrix_config::constants::{AUTHORIZATION_HEADER, BEARER_PREFIX};
 use detrix_core::Error;
 use tracing::{debug, warn};
 
@@ -139,7 +140,7 @@ impl RemoteAppControl for HttpRemoteAppControl {
             .json(&serde_json::Value::Object(body));
 
         if let Some(token) = auth_token {
-            request = request.header("Authorization", format!("Bearer {}", token));
+            request = request.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, token));
         }
 
         let response = request.send().await.map_err(|e| {
@@ -211,7 +212,7 @@ impl RemoteAppControl for HttpRemoteAppControl {
         let mut request = self.client.post(&sleep_url);
 
         if let Some(token) = auth_token {
-            request = request.header("Authorization", format!("Bearer {}", token));
+            request = request.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, token));
         }
 
         let response = request.send().await.map_err(|e| {
@@ -312,7 +313,10 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/detrix/wake"))
-            .and(header("Authorization", "Bearer test-token-123"))
+            .and(header(
+                AUTHORIZATION_HEADER,
+                &format!("{}test-token-123", BEARER_PREFIX),
+            ))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "ok"})),
             )
@@ -415,7 +419,10 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/detrix/sleep"))
-            .and(header("Authorization", "Bearer my-secret"))
+            .and(header(
+                AUTHORIZATION_HEADER,
+                &format!("{}my-secret", BEARER_PREFIX),
+            ))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "sleeping"})),
             )

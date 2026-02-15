@@ -8,6 +8,7 @@
 //! 2. MCP bridge connects to existing daemon
 //! 3. MCP bridge handles daemon restart
 
+use detrix_config::constants::{AUTHORIZATION_HEADER, BEARER_PREFIX};
 use detrix_testing::e2e::{
     cleanup_orphaned_e2e_processes,
     executor::{
@@ -1426,11 +1427,8 @@ async fn test_mcp_token_cleanup_on_shutdown() {
     let log_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&log_dir).expect("Failed to create log dir");
 
-    // Token file location (uses default path from detrix_config::paths::mcp_token_path())
-    let home = std::env::var("HOME").expect("HOME not set");
-    let token_path = std::path::PathBuf::from(&home)
-        .join(".detrix")
-        .join("mcp-token");
+    // Token file location (uses default path from detrix_config::paths::auth_token_path())
+    let token_path = detrix_config::paths::auth_token_path();
 
     // Create config
     let config_content = format!(
@@ -1536,8 +1534,9 @@ port = 59999
         );
     } else {
         reporter.step_failed(step, "Token file was not created");
-        // This might happen if daemon didn't start with mcp_spawned flag
-        reporter.warn("Token file not created - daemon may not be MCP-spawned");
+        // This might happen if auth was explicitly configured or DETRIX_TOKEN env var was set
+        reporter
+            .warn("Token file not created - auth may be explicitly configured or using env var");
         // Continue test anyway to verify cleanup doesn't crash
     }
 
@@ -2241,10 +2240,7 @@ async fn test_mcp_bridge_auth_token_not_racy() {
     std::fs::create_dir_all(&log_dir).expect("Failed to create log dir");
 
     // Token file location
-    let home = std::env::var("HOME").expect("HOME not set");
-    let token_path = std::path::PathBuf::from(&home)
-        .join(".detrix")
-        .join("mcp-token");
+    let token_path = detrix_config::paths::auth_token_path();
 
     // Clean up any existing token
     let _ = std::fs::remove_file(&token_path);
@@ -2365,7 +2361,7 @@ port = 59999
                 "http://{}:{}/api/v1/metrics",
                 daemon_host, daemon_port
             ))
-            .header("Authorization", format!("Bearer {}", t))
+            .header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, t))
             .send()
             .await
         {
@@ -2448,10 +2444,7 @@ async fn test_mcp_bridge_stale_token_recovery_after_restart() {
     std::fs::create_dir_all(&log_dir).expect("Failed to create log dir");
 
     // Token file location
-    let home = std::env::var("HOME").expect("HOME not set");
-    let token_path = std::path::PathBuf::from(&home)
-        .join(".detrix")
-        .join("mcp-token");
+    let token_path = detrix_config::paths::auth_token_path();
     let _ = std::fs::remove_file(&token_path);
 
     // Create config with short heartbeat for faster testing
@@ -3006,10 +2999,7 @@ async fn test_mcp_bridge_stale_client_cleanup() {
     std::fs::create_dir_all(&log_dir).expect("Failed to create log dir");
 
     // Token file location
-    let home = std::env::var("HOME").expect("HOME not set");
-    let token_path = std::path::PathBuf::from(&home)
-        .join(".detrix")
-        .join("mcp-token");
+    let token_path = detrix_config::paths::auth_token_path();
 
     // Create config with short heartbeat timeout for faster testing
     let config_content = format!(
@@ -3118,7 +3108,7 @@ shutdown_grace_period_secs = 60
 
     let mut req = client.get(&format!("http://127.0.0.1:{}/mcp/clients", daemon_port));
     if let Some(ref t) = token {
-        req = req.header("Authorization", format!("Bearer {}", t));
+        req = req.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, t));
     }
 
     match req.send().await {
@@ -3157,7 +3147,7 @@ shutdown_grace_period_secs = 60
     let step = reporter.step_start("Check client removed", "Query MCP clients endpoint again");
     let mut req = client.get(&format!("http://127.0.0.1:{}/mcp/clients", daemon_port));
     if let Some(ref t) = token {
-        req = req.header("Authorization", format!("Bearer {}", t));
+        req = req.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, t));
     }
 
     match req.send().await {
@@ -3384,10 +3374,7 @@ cleanup_interval_secs = 2
         .build()
         .unwrap();
 
-    let home = std::env::var("HOME").expect("HOME not set");
-    let token_path = std::path::PathBuf::from(&home)
-        .join(".detrix")
-        .join("mcp-token");
+    let token_path = detrix_config::paths::auth_token_path();
     let token = std::fs::read_to_string(&token_path)
         .ok()
         .map(|t| t.trim().to_string());
@@ -3405,7 +3392,7 @@ cleanup_interval_secs = 2
         ))
         .json(&create_conn_body);
     if let Some(ref t) = token {
-        req = req.header("Authorization", format!("Bearer {}", t));
+        req = req.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, t));
     }
 
     let connection_id: Option<String> = match req.send().await {
@@ -3499,7 +3486,7 @@ cleanup_interval_secs = 2
         daemon_port
     ));
     if let Some(ref t) = token {
-        req = req.header("Authorization", format!("Bearer {}", t));
+        req = req.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, t));
     }
 
     match req.send().await {
@@ -3522,7 +3509,7 @@ cleanup_interval_secs = 2
             daemon_port, conn_id
         ));
         if let Some(ref t) = token {
-            req = req.header("Authorization", format!("Bearer {}", t));
+            req = req.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, t));
         }
         let _ = req.send().await;
     }

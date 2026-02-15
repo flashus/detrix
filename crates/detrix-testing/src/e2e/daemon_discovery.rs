@@ -107,6 +107,9 @@ enabled = true
 host = "{}"
 port = {}
 
+[api.auth]
+mode = "disabled"
+
 [api.grpc]
 enabled = true
 host = "{}"

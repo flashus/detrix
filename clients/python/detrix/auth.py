@@ -45,7 +45,7 @@ def discover_auth_token(detrix_home: Path | None = None) -> str | None:
 
     Priority:
     1. DETRIX_TOKEN environment variable
-    2. ~/detrix/mcp-token file
+    2. ~/detrix/auth-token file
 
     Args:
         detrix_home: Optional Detrix home directory override

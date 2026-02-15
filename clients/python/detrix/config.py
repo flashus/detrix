@@ -4,6 +4,8 @@ import os
 import socket
 from pathlib import Path
 
+AUTH_TOKEN_FILENAME = "auth-token"
+
 
 def get_detrix_home(override: str | None = None) -> Path:
     """Get the Detrix home directory.
@@ -25,16 +27,16 @@ def get_detrix_home(override: str | None = None) -> Path:
 
 
 def get_token_file_path(detrix_home: Path | None = None) -> Path:
-    """Get the path to the MCP token file.
+    """Get the path to the auth token file.
 
     Args:
         detrix_home: Optional Detrix home directory
 
     Returns:
-        Path to mcp-token file
+        Path to auth-token file
     """
     home = detrix_home or get_detrix_home()
-    return home / "mcp-token"
+    return home / AUTH_TOKEN_FILENAME
 
 
 def get_free_port() -> int:

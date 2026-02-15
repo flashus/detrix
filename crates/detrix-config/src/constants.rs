@@ -39,6 +39,19 @@ pub const LOCALHOST_IPV4: std::net::Ipv4Addr = std::net::Ipv4Addr::new(127, 0, 0
 /// Auth token for daemon communication
 pub const ENV_DETRIX_TOKEN: &str = "DETRIX_TOKEN";
 
+// ============================================================================
+// HTTP AUTH PROTOCOL CONSTANTS
+// ============================================================================
+
+/// HTTP Authorization header name.
+pub const AUTHORIZATION_HEADER: &str = "Authorization";
+
+/// gRPC metadata key for authorization (lowercase per gRPC convention).
+pub const AUTHORIZATION_METADATA_KEY: &str = "authorization";
+
+/// Bearer token prefix for Authorization headers.
+pub const BEARER_PREFIX: &str = "Bearer ";
+
 /// Override gRPC port (highest priority, typically for testing)
 pub const ENV_DETRIX_GRPC_PORT_OVERRIDE: &str = "DETRIX_GRPC_PORT_OVERRIDE";
 

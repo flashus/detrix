@@ -19,8 +19,8 @@ pub const DEFAULT_DB_FILENAME: &str = "data.db";
 /// Default PID filename
 pub const DEFAULT_PID_FILENAME: &str = "daemon.pid";
 
-/// Default MCP token filename
-pub const DEFAULT_MCP_TOKEN_FILENAME: &str = "mcp-token";
+/// Default auth token filename
+pub const AUTH_TOKEN_FILENAME: &str = "auth-token";
 
 /// Default daemon log filename (for tracing logs with daily rotation)
 pub const DEFAULT_DAEMON_LOG_FILENAME: &str = "detrix_daemon.log";
@@ -69,13 +69,13 @@ pub fn default_pid_path() -> PathBuf {
     detrix_home().join(DEFAULT_PID_FILENAME)
 }
 
-/// Get MCP auth token file path.
+/// Get auth token file path.
 ///
-/// Returns `~/detrix/mcp-token`.
-/// This file stores the auto-generated bearer token for local MCP usage.
+/// Returns `~/detrix/auth-token`.
+/// This file stores the auto-generated bearer token for daemon authentication.
 /// The token is ephemeral and regenerated on each daemon restart.
-pub fn mcp_token_path() -> PathBuf {
-    detrix_home().join(DEFAULT_MCP_TOKEN_FILENAME)
+pub fn auth_token_path() -> PathBuf {
+    detrix_home().join(AUTH_TOKEN_FILENAME)
 }
 
 /// Get default log directory.
@@ -292,9 +292,9 @@ mod tests {
     }
 
     #[test]
-    fn test_mcp_token_path() {
-        let token_path = mcp_token_path();
-        assert!(token_path.ends_with(DEFAULT_MCP_TOKEN_FILENAME));
+    fn test_auth_token_path() {
+        let token_path = auth_token_path();
+        assert!(token_path.ends_with(AUTH_TOKEN_FILENAME));
         assert!(token_path.to_string_lossy().contains(DETRIX_DIR_NAME));
     }
 
