@@ -360,7 +360,9 @@ impl ApiClient for GrpcClient {
                 language: language.to_string(),
                 // Identity fields for UUID-based connection tracking
                 name: format!("e2e-test-{}-{}", language, port),
-                workspace_root: "/e2e-test".to_string(),
+                workspace_root: crate::e2e::executor::get_workspace_root()
+                    .to_string_lossy()
+                    .into_owned(),
                 hostname: detrix_api::common::resolve_hostname(),
                 metadata: None,
                 program: program.map(|s| s.to_string()), // Optional program path for launch mode (Rust direct lldb-dap)

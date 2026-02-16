@@ -589,17 +589,20 @@ pub async fn scenario_query_events_nonexistent<C: ApiClient>(
 pub async fn scenario_inspect_file<C: ApiClient>(
     ctx: &UnifiedTestContext<C>,
 ) -> Result<(), ApiError> {
+    let file_path = ctx
+        .executor
+        .workspace_root
+        .join("fixtures/python/detrix_example_app.py");
+    let file_path_str = file_path.to_string_lossy();
     let step = ctx
         .reporter
         .step_start("Inspect File", "Inspect Python file");
-    ctx.reporter.step_request(
-        "inspect_file",
-        Some("file=fixtures/python/detrix_example_app.py"),
-    );
+    ctx.reporter
+        .step_request("inspect_file", Some(&format!("file={}", file_path_str)));
 
     let response = ctx
         .client
-        .inspect_file("fixtures/python/detrix_example_app.py", Some(10), None)
+        .inspect_file(&file_path_str, Some(10), None)
         .await?;
     ctx.reporter
         .step_response("OK", Some(&format!("{} chars", response.data.len())));
@@ -611,17 +614,22 @@ pub async fn scenario_inspect_file<C: ApiClient>(
 pub async fn scenario_inspect_file_with_variable<C: ApiClient>(
     ctx: &UnifiedTestContext<C>,
 ) -> Result<(), ApiError> {
+    let file_path = ctx
+        .executor
+        .workspace_root
+        .join("fixtures/python/detrix_example_app.py");
+    let file_path_str = file_path.to_string_lossy();
     let step = ctx
         .reporter
         .step_start("Inspect File (Variable)", "Find variable in Python file");
     ctx.reporter.step_request(
         "inspect_file",
-        Some("file=fixtures/python/detrix_example_app.py, find_variable=price"),
+        Some(&format!("file={}, find_variable=price", file_path_str)),
     );
 
     let response = ctx
         .client
-        .inspect_file("fixtures/python/detrix_example_app.py", None, Some("price"))
+        .inspect_file(&file_path_str, None, Some("price"))
         .await?;
     ctx.reporter
         .step_response("OK", Some(&format!("{} chars", response.data.len())));
@@ -1489,11 +1497,7 @@ pub async fn scenario_comprehensive_coverage<C: ApiClient>(
     }
 
     ctx.reporter.info("Testing inspect_file...");
-    if let Err(e) = ctx
-        .client
-        .inspect_file("fixtures/python/detrix_example_app.py", Some(10), None)
-        .await
-    {
+    if let Err(e) = ctx.client.inspect_file(script_path, Some(10), None).await {
         failures.push(format!("inspect_file: {}", e));
     }
 

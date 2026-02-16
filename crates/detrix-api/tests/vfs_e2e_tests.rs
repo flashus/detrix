@@ -65,6 +65,7 @@ async fn test_observe_fetches_file_from_control_plane() {
     let cp_source = Arc::new(ControlPlaneSource::new(
         Duration::from_secs(5),
         10 * 1024 * 1024,
+        None,
     )) as FileSourceRef;
 
     let chain = FileSourceChain::new(
@@ -116,6 +117,7 @@ async fn test_observe_uses_vfs_cache() {
     let cp_source = Arc::new(ControlPlaneSource::new(
         Duration::from_secs(5),
         10 * 1024 * 1024,
+        None,
     )) as FileSourceRef;
 
     let chain = FileSourceChain::new(
@@ -161,6 +163,7 @@ async fn test_inspect_file_fetches_transparently() {
     let cp_source = Arc::new(ControlPlaneSource::new(
         Duration::from_secs(5),
         10 * 1024 * 1024,
+        None,
     )) as FileSourceRef;
 
     let chain = FileSourceChain::new(
@@ -212,6 +215,7 @@ async fn test_fallthrough_to_disk() {
     let cp_source = Arc::new(ControlPlaneSource::new(
         Duration::from_secs(5),
         10 * 1024 * 1024,
+        None,
     )) as FileSourceRef;
     let disk_source = Arc::new(DiskSource) as FileSourceRef;
 
@@ -292,6 +296,7 @@ async fn test_priority_ordering_e2e() {
     let cp_source = Arc::new(ControlPlaneSource::new(
         Duration::from_secs(5),
         10 * 1024 * 1024,
+        None,
     )) as FileSourceRef;
 
     // Priority: disk first, then control_plane

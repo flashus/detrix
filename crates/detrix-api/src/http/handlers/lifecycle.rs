@@ -120,6 +120,18 @@ pub async fn wake(
         .await
         .http_err()?;
 
+    // Set control_plane_url on the connection so VFS can fetch files from the app
+    if let Some(ref conn_id) = result.connection_id {
+        let _ = state
+            .context
+            .connection_service
+            .set_control_plane_url(
+                &detrix_core::ConnectionId::new(conn_id),
+                req.app_url.trim_end_matches('/').to_string(),
+            )
+            .await;
+    }
+
     // Determine daemon URL for auto-discovery
     let daemon_url = {
         let config = state.config_service.get_config().await;

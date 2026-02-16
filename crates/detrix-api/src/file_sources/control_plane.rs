@@ -4,6 +4,7 @@
 //! `POST {url}/detrix/files/read` with `{"path": "..."}` body.
 
 use async_trait::async_trait;
+use detrix_application::services::file_serving::ReadFileRequest;
 use detrix_application::{FetchResult, FileSource};
 use detrix_core::{Connection, Result};
 use std::time::Duration;
@@ -13,10 +14,11 @@ pub struct ControlPlaneSource {
     client: reqwest::Client,
     timeout: Duration,
     max_size: usize,
+    auth_token: Option<String>,
 }
 
 impl ControlPlaneSource {
-    pub fn new(timeout: Duration, max_size: usize) -> Self {
+    pub fn new(timeout: Duration, max_size: usize, auth_token: Option<String>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
@@ -25,6 +27,7 @@ impl ControlPlaneSource {
             client,
             timeout,
             max_size,
+            auth_token,
         }
     }
 }
@@ -49,9 +52,21 @@ impl FileSource for ControlPlaneSource {
             "Fetching file from control plane"
         );
 
-        let body = super::build_file_request_body(connection, file_path);
+        let body = ReadFileRequest {
+            path: file_path.to_string(),
+            commit: connection.build_commit.clone(),
+            workspace_root: if connection.workspace_root.is_empty() {
+                None
+            } else {
+                Some(connection.workspace_root.clone())
+            },
+        };
 
-        let resp = match self.client.post(&endpoint).json(&body).send().await {
+        let mut req = self.client.post(&endpoint).json(&body);
+        if let Some(ref token) = self.auth_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
                 debug!(error = %e, "Control plane request failed");
@@ -84,7 +99,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_url_returns_none() {
-        let source = ControlPlaneSource::new(Duration::from_secs(5), 10 * 1024 * 1024);
+        let source = ControlPlaneSource::new(Duration::from_secs(5), 10 * 1024 * 1024, None);
         let conn = test_connection_with_cp(None);
         let result = source.fetch(&conn, "/app/main.py").await.unwrap();
         assert!(result.is_none());
@@ -100,7 +115,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let source = ControlPlaneSource::new(Duration::from_secs(5), 10 * 1024 * 1024);
+        let source = ControlPlaneSource::new(Duration::from_secs(5), 10 * 1024 * 1024, None);
         let conn = test_connection_with_cp(Some(&mock_server.uri()));
         let result = source.fetch(&conn, "/app/main.py").await.unwrap().unwrap();
         assert_eq!(result.content, "file content here");
@@ -116,7 +131,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let source = ControlPlaneSource::new(Duration::from_secs(5), 10 * 1024 * 1024);
+        let source = ControlPlaneSource::new(Duration::from_secs(5), 10 * 1024 * 1024, None);
         let conn = test_connection_with_cp(Some(&mock_server.uri()));
         let result = source.fetch(&conn, "/no/such/file.py").await.unwrap();
         assert!(result.is_none());
@@ -131,7 +146,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let source = ControlPlaneSource::new(Duration::from_secs(5), 10 * 1024 * 1024);
+        let source = ControlPlaneSource::new(Duration::from_secs(5), 10 * 1024 * 1024, None);
         let conn = test_connection_with_cp(Some(&mock_server.uri()));
         let result = source.fetch(&conn, "/app/main.py").await.unwrap();
         assert!(
@@ -154,7 +169,7 @@ mod tests {
             .await;
 
         // Very short timeout to trigger timeout error
-        let source = ControlPlaneSource::new(Duration::from_millis(50), 10 * 1024 * 1024);
+        let source = ControlPlaneSource::new(Duration::from_millis(50), 10 * 1024 * 1024, None);
         let conn = test_connection_with_cp(Some(&mock_server.uri()));
         let result = source.fetch(&conn, "/app/main.py").await.unwrap();
         assert!(
@@ -173,7 +188,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let source = ControlPlaneSource::new(Duration::from_secs(5), 10 * 1024 * 1024);
+        let source = ControlPlaneSource::new(Duration::from_secs(5), 10 * 1024 * 1024, None);
         let mut conn = test_connection_with_cp(Some(&mock_server.uri()));
         conn.build_commit = Some("abc123".to_string());
         source.fetch(&conn, "/app/main.py").await.unwrap();
@@ -183,7 +198,7 @@ mod tests {
 
     #[test]
     fn test_name() {
-        let source = ControlPlaneSource::new(Duration::from_secs(5), 10 * 1024 * 1024);
+        let source = ControlPlaneSource::new(Duration::from_secs(5), 10 * 1024 * 1024, None);
         assert_eq!(source.name(), "control_plane");
     }
 }

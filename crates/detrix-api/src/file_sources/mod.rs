@@ -13,22 +13,6 @@ pub use control_plane::ControlPlaneSource;
 pub use disk::DiskSource;
 
 use detrix_application::{FetchResult, SourceMetadata};
-use detrix_core::Connection;
-
-/// Build the JSON request body for remote file sources (bridge / control plane).
-///
-/// Always includes `path`. Adds `commit` and `workspace_root` when the
-/// connection carries that information.
-fn build_file_request_body(connection: &Connection, file_path: &str) -> serde_json::Value {
-    let mut body = serde_json::json!({ "path": file_path });
-    if let Some(ref commit) = connection.build_commit {
-        body["commit"] = serde_json::Value::String(commit.clone());
-    }
-    if !connection.workspace_root.is_empty() {
-        body["workspace_root"] = serde_json::Value::String(connection.workspace_root.clone());
-    }
-    body
-}
 
 /// Parse an HTTP response body into a `FetchResult`.
 ///

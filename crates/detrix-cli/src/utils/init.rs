@@ -101,7 +101,9 @@ impl InfrastructureComponents {
         ));
         let available_sources: Vec<FileSourceRef> = vec![
             Arc::new(detrix_api::file_sources::ControlPlaneSource::new(
-                timeout, max_size,
+                timeout,
+                max_size,
+                std::env::var("DETRIX_TOKEN").ok(),
             )),
             Arc::clone(&bridge_source) as FileSourceRef,
             Arc::new(detrix_api::file_sources::DiskSource),

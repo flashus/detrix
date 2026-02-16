@@ -11,6 +11,7 @@
 
 use crate::ports::{FileEvent, FileWatcher, FileWatcherConfig};
 use async_trait::async_trait;
+use detrix_logging::{debug, error, trace, warn};
 use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind, Debouncer};
 use std::collections::HashSet;
@@ -18,7 +19,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, trace, warn};
 
 /// File watcher implementation using the notify crate
 pub struct NotifyFileWatcher {
@@ -271,9 +271,9 @@ impl FileWatcher for NotifyFileWatcher {
 
 use crate::services::MetricService;
 use detrix_config::AnchorConfig;
+use detrix_logging::info;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::info;
 
 /// Orchestrates file watching and metric relocation
 ///

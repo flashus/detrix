@@ -344,6 +344,13 @@ pub async fn add_metric_impl(
     let workspace_root = connection.valid_workspace_root();
     let parsed_file = resolve_file_path(&parsed_file, workspace_root);
 
+    // Pre-fetch file into VFS cache (transparent remote file fetching for cloud mode)
+    let _ = state
+        .context
+        .file_source_chain
+        .ensure_available(&connection, &parsed_file)
+        .await;
+
     // Get default safety level from config
     let config = state.config_service.get_config().await;
     let safety_level = config.safety.default_safety_level().as_str();

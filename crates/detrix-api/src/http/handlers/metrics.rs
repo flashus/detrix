@@ -292,6 +292,13 @@ pub async fn add_metric(
         connection.valid_workspace_root(),
     );
 
+    // Pre-fetch file into VFS cache (transparent remote file fetching for cloud mode)
+    let _ = state
+        .context
+        .file_source_chain
+        .ensure_available(&connection, &payload.location.file)
+        .await;
+
     // Resolve safety level: use provided value or default from config
     let safety_level = match &payload.safety_level {
         Some(level) => level.clone(),

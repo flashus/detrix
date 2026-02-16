@@ -89,6 +89,7 @@ pub mod cli;
 pub mod grpc;
 pub mod mcp;
 pub mod rest;
+pub mod test_file_server;
 pub mod websocket;
 
 pub use cli::CliClient;

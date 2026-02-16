@@ -26,11 +26,11 @@ use crate::{DapAdapter, DapAdapterRef, RemoveMetricResult, SetMetricResult};
 use async_trait::async_trait;
 use detrix_config::ReconnectConfig;
 use detrix_core::{Metric, MetricEvent, Result};
+use detrix_logging::{debug, error, info, warn};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Notify, RwLock};
-use tracing::{debug, error, info, warn};
 
 /// RAII guard that ensures the reconnecting flag is reset even on panic
 struct ReconnectGuard {

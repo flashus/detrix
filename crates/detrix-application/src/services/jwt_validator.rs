@@ -10,6 +10,7 @@
 //! - Thread-safe for concurrent validation
 
 use detrix_config::JwtConfig;
+use detrix_logging::{debug, info, warn};
 use jsonwebtoken::{
     decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, TokenData, Validation,
 };
@@ -19,7 +20,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
 
 /// Errors that can occur during JWT validation
 #[derive(Debug, Error)]

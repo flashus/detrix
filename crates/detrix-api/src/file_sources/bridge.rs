@@ -5,6 +5,7 @@
 //! shared URL that can be updated at runtime.
 
 use async_trait::async_trait;
+use detrix_application::services::file_serving::ReadFileRequest;
 use detrix_application::{FetchResult, FileSource};
 use detrix_core::{Connection, Result};
 use std::sync::RwLock;
@@ -64,7 +65,15 @@ impl FileSource for BridgeSource {
             "Fetching file from bridge"
         );
 
-        let body = super::build_file_request_body(connection, file_path);
+        let body = ReadFileRequest {
+            path: file_path.to_string(),
+            commit: connection.build_commit.clone(),
+            workspace_root: if connection.workspace_root.is_empty() {
+                None
+            } else {
+                Some(connection.workspace_root.clone())
+            },
+        };
 
         let resp = match self.client.post(&endpoint).json(&body).send().await {
             Ok(r) => r,

@@ -32,6 +32,7 @@ use detrix_testing::e2e::{
     executor::{find_detrix_binary, get_workspace_root},
     require_tool, RestClient, TestExecutor, TestReporter,
 };
+use serial_test::serial;
 use std::sync::Arc;
 
 /// Macro to generate client tests for a specific language
@@ -44,6 +45,7 @@ use std::sync::Arc;
 macro_rules! generate_client_test {
     ($test_name:ident, $config_fn:ident, $display_name:expr) => {
         #[tokio::test]
+        #[serial]
         async fn $test_name() {
             let config = ClientTestConfig::$config_fn();
 
@@ -138,6 +140,7 @@ generate_client_test!(test_rust_client, rust, "Rust Client");
 /// This is a Python-specific test that demonstrates language-specific
 /// scenarios can still be added alongside the unified tests.
 #[tokio::test]
+#[serial]
 async fn test_python_client_daemon_restart() {
     let config = ClientTestConfig::python();
 
@@ -277,9 +280,9 @@ async fn test_python_client_daemon_restart() {
 /// This test verifies that when observing a variable, events are received
 /// exactly once per occurrence, not duplicated (e.g., 3 times per hit).
 ///
-/// Regression test for: https://github.com/flashus/detrix/issues/XXX
 /// Root cause: Broker subscribers not properly cleaned up during reconnection
 #[tokio::test]
+#[serial]
 async fn test_rust_client_no_duplicate_events() {
     use detrix_testing::e2e::client::{AddMetricRequest, ApiClient};
     use std::collections::HashMap;

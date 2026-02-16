@@ -8,10 +8,10 @@ use crate::{
     Error,
 };
 use detrix_config::Config;
+use detrix_logging::info;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::info;
 
 /// Fields that require a server restart to take effect (dotted path format)
 pub const RESTART_REQUIRED_FIELDS: &[&str] = &[

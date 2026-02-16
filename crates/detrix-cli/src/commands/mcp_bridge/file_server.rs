@@ -3,39 +3,19 @@
 //! Serves local files to the Detrix daemon so it can transparently fetch
 //! source files from the developer's machine when running in bridge mode.
 //!
-//! When a `commit` field is present in the request, the server serves the file
-//! from that git commit via `git show`, with drift detection against the
-//! working tree.
+//! The actual file-serving logic lives in `FileServingService` (detrix-application).
+//! This module provides the thin HTTP layer: binding, routing, and status code mapping.
 //!
 //! The server binds to `127.0.0.1:0` (random port, localhost only) and
 //! exposes a single endpoint: `POST /detrix/files/read`.
 
 use axum::{extract::Json, http::StatusCode, response::IntoResponse, routing::post, Router};
-use detrix_logging::{debug, info, warn};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::path::Path;
+use detrix_application::services::file_serving::{
+    FileServingError, FileServingService, ReadFileRequest,
+};
+use detrix_logging::{info, warn};
+use std::sync::Arc;
 use tokio::net::TcpListener;
-
-/// Maximum file size to serve (10 MB).
-const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
-
-#[derive(Deserialize)]
-struct ReadFileRequest {
-    path: String,
-    commit: Option<String>,
-    workspace_root: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ReadFileResponse {
-    content: String,
-    source: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    commit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    differs_from_local: Option<bool>,
-}
 
 /// Start the bridge file server on a random localhost port.
 ///
@@ -45,7 +25,17 @@ pub async fn start_file_server() -> anyhow::Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
 
-    let app = Router::new().route("/detrix/files/read", post(handle_read_file));
+    let service = Arc::new(FileServingService::new());
+    let app = Router::new().route(
+        "/detrix/files/read",
+        post({
+            let svc = Arc::clone(&service);
+            move |Json(req): Json<ReadFileRequest>| {
+                let svc = Arc::clone(&svc);
+                async move { handle_read_file(&svc, req).await }
+            }
+        }),
+    );
 
     info!(port, "Bridge file server started");
 
@@ -58,160 +48,27 @@ pub async fn start_file_server() -> anyhow::Result<u16> {
     Ok(port)
 }
 
-async fn handle_read_file(Json(req): Json<ReadFileRequest>) -> impl IntoResponse {
-    let file_path = req.path.trim();
-    if file_path.is_empty() {
-        return (
+async fn handle_read_file(service: &FileServingService, req: ReadFileRequest) -> impl IntoResponse {
+    match service.read_file(&req).await {
+        Ok(resp) => (StatusCode::OK, serde_json::to_string(&resp).unwrap()),
+        Err(FileServingError::EmptyPath) => (
             StatusCode::BAD_REQUEST,
             serde_json::json!({"error": "Missing 'path'"}).to_string(),
-        );
-    }
-
-    let path = Path::new(file_path);
-
-    // Only serve absolute paths (daemon resolves relative paths against workspace_root
-    // before asking the bridge)
-    if !path.is_absolute() {
-        debug!(path = file_path, "Rejected non-absolute path");
-        return (
+        ),
+        Err(FileServingError::RelativePath) => (
             StatusCode::BAD_REQUEST,
             serde_json::json!({"error": "Path must be absolute"}).to_string(),
-        );
-    }
-
-    // Try git-pinned serving if commit and workspace_root are provided
-    if let (Some(commit), Some(workspace_root)) = (&req.commit, &req.workspace_root) {
-        return handle_git_pinned(file_path, commit, workspace_root).await;
-    }
-
-    // Standard disk serving
-    handle_disk_read(file_path).await
-}
-
-/// Serve file from `git show commit:relative_path` with drift detection.
-async fn handle_git_pinned(
-    file_path: &str,
-    commit: &str,
-    workspace_root: &str,
-) -> (StatusCode, String) {
-    // Compute relative path by stripping workspace_root prefix
-    let relative_path = match Path::new(file_path).strip_prefix(workspace_root) {
-        Ok(rel) => rel.to_string_lossy().to_string(),
-        Err(_) => {
-            debug!(
-                file = file_path,
-                workspace_root, "File path not under workspace root, falling back to disk"
-            );
-            return handle_disk_read(file_path).await;
-        }
-    };
-
-    // Try git show
-    match git_show(workspace_root, commit, &relative_path).await {
-        Ok(git_content) => {
-            // Drift detection: compare git content with disk
-            let differs_from_local = match std::fs::read_to_string(file_path) {
-                Ok(disk_content) => Some(sha256_hex(&git_content) != sha256_hex(&disk_content)),
-                Err(_) => None, // No local file to compare
-            };
-
-            if differs_from_local == Some(true) {
-                debug!(
-                    file = file_path,
-                    commit, "Git content differs from local working tree"
-                );
-            }
-
-            let response = ReadFileResponse {
-                content: git_content,
-                source: "git".to_string(),
-                commit: Some(commit.to_string()),
-                differs_from_local,
-            };
-            (StatusCode::OK, serde_json::to_string(&response).unwrap())
-        }
-        Err(err) => {
-            debug!(
-                file = file_path,
-                commit,
-                error = %err,
-                "git show failed, falling back to disk"
-            );
-            handle_disk_read(file_path).await
-        }
-    }
-}
-
-/// Standard disk file reading.
-async fn handle_disk_read(file_path: &str) -> (StatusCode, String) {
-    let path = Path::new(file_path);
-
-    // Check file exists
-    let metadata = match std::fs::metadata(path) {
-        Ok(m) => m,
-        Err(_) => return (StatusCode::NOT_FOUND, String::new()),
-    };
-
-    // Check file size
-    if metadata.len() > MAX_FILE_SIZE {
-        warn!(
-            path = file_path,
-            size = metadata.len(),
-            "File exceeds maximum size"
-        );
-        return (
+        ),
+        Err(FileServingError::NotFound) => (StatusCode::NOT_FOUND, String::new()),
+        Err(FileServingError::TooLarge { .. }) => (
             StatusCode::PAYLOAD_TOO_LARGE,
             serde_json::json!({"error": "File exceeds maximum size"}).to_string(),
-        );
+        ),
+        Err(FileServingError::ReadError(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": format!("Read error: {e}")}).to_string(),
+        ),
     }
-
-    // Read file content
-    match std::fs::read_to_string(path) {
-        Ok(content) => {
-            let response = ReadFileResponse {
-                content,
-                source: "disk".to_string(),
-                commit: None,
-                differs_from_local: None,
-            };
-            (StatusCode::OK, serde_json::to_string(&response).unwrap())
-        }
-        Err(e) => {
-            debug!(path = file_path, error = %e, "Failed to read file");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"error": format!("Read error: {e}")}).to_string(),
-            )
-        }
-    }
-}
-
-/// Run `git show commit:relative_path` and return the file content.
-async fn git_show(
-    workspace_root: &str,
-    commit: &str,
-    relative_path: &str,
-) -> Result<String, String> {
-    let git_ref = format!("{}:{}", commit, relative_path);
-    let output = tokio::process::Command::new("git")
-        .args(["-C", workspace_root, "show", &git_ref])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-
-    if output.status.success() {
-        String::from_utf8(output.stdout)
-            .map_err(|e| format!("Git output is not valid UTF-8: {}", e))
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("git show failed: {}", stderr.trim()))
-    }
-}
-
-fn sha256_hex(data: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data.as_bytes());
-    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]

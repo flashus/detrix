@@ -43,6 +43,13 @@ pub async fn handle_add_metric(
             &location.file,
             connection.valid_workspace_root(),
         );
+
+        // Pre-fetch file into VFS cache (transparent remote file fetching for cloud mode)
+        let _ = state
+            .context
+            .file_source_chain
+            .ensure_available(&connection, &location.file)
+            .await;
     }
 
     // If language is not provided, derive it from the connection (same pattern as MCP/REST)

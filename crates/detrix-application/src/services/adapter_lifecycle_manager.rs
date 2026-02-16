@@ -21,12 +21,12 @@ use detrix_config::{AdapterConnectionConfig, DaemonConfig, EventBatchingConfig};
 use detrix_core::{
     ConnectionId, ConnectionStatus, Metric, MetricEvent, Result, SourceLanguage, SystemEvent,
 };
+use detrix_logging::{debug, error, info, instrument, trace, warn};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, instrument, trace, warn};
 
 /// Result of a disconnect_all operation (protocol-agnostic).
 ///

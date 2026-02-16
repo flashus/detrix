@@ -14,9 +14,9 @@ use detrix_core::{
     connection_reference::{ClientIdentity, ConnectionReference, ReferenceKind},
     Connection, ConnectionId, ConnectionIdentity, ConnectionStatus, Result, SystemEvent,
 };
+use detrix_logging::{debug, info, instrument};
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::{debug, info, instrument};
 
 /// Service for managing debugger connections
 ///
@@ -381,6 +381,20 @@ impl ConnectionService {
         self.connection_repo.touch(id).await
     }
 
+    /// Set the control plane URL on a connection (if not already set).
+    ///
+    /// Used by `wake` to propagate the app URL for VFS file fetching.
+    /// No-op if the connection already has a control_plane_url or doesn't exist.
+    pub async fn set_control_plane_url(&self, id: &ConnectionId, url: String) -> Result<()> {
+        if let Some(mut conn) = self.connection_repo.find_by_id(id).await? {
+            if conn.control_plane_url.is_none() {
+                conn.control_plane_url = Some(url);
+                self.connection_repo.update(&conn).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Remove stale connections based on TTL, respecting reference counts.
     ///
     /// This cleans up connections that have been inactive for more than `ttl_days` calendar days.
@@ -472,7 +486,7 @@ impl ConnectionService {
     /// A tuple of (reconnected_count, deleted_count)
     #[instrument(skip(self))]
     pub async fn restore_connections_on_startup(&self) -> (usize, usize) {
-        use tracing::{debug, info, warn};
+        use detrix_logging::{debug, info, warn};
 
         // Get ALL connections from database
         let connections = match self.connection_repo.list_all().await {

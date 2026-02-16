@@ -7,10 +7,10 @@ use detrix_config::constants::{
     DEFAULT_REMOTE_APP_POLL_INTERVAL_MS, DEFAULT_REMOTE_APP_POLL_MAX_RETRIES,
 };
 use detrix_core::{ConnectionId, Result};
+use detrix_logging::{info, warn};
 use detrix_ports::{
     ConnectionLookupRef, RemoteAppControlRef, RemoteSleepResponse, RemoteWakeResponse,
 };
-use tracing::{info, warn};
 
 /// Maximum number of polling attempts when verifying a connection appeared.
 const CONNECTION_POLL_MAX_RETRIES: u32 = DEFAULT_REMOTE_APP_POLL_MAX_RETRIES;

@@ -7,10 +7,10 @@ use crate::ports::{DlqEntryStatus, DlqRepositoryRef, EventRepositoryRef};
 use detrix_config::DlqConfig;
 use detrix_core::error::Result;
 use detrix_core::MetricEvent;
+use detrix_logging::{debug, error, info, trace, warn};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, trace, warn};
 
 /// Dead-letter queue recovery service
 ///

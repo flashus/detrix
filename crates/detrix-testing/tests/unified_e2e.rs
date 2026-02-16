@@ -1404,8 +1404,9 @@ mod dap_workflow_tests {
         let client = McpClient::new(executor.http_port);
         let config = DapWorkflowConfig::rust();
 
-        // For Rust workflow, we need the source file path for the config
-        let source_file = std::path::PathBuf::from(&config.source_file);
+        // Use absolute path (relative paths resolve against connection workspace_root
+        // which defaults to /unknown when not provided by MCP client)
+        let source_file = executor.workspace_root.join(&config.source_file);
 
         // When using lldb-serve, don't pass program_path (lldb-serve handles launch)
         match DapWorkflowScenarios::run_workflow(
@@ -1494,8 +1495,9 @@ mod dap_workflow_tests {
         let client = McpClient::new(executor.http_port);
         let config = DapWorkflowConfig::rust();
 
-        // For Rust workflow, we need the source file path for the config
-        let source_file = std::path::PathBuf::from(&config.source_file);
+        // Use absolute path (relative paths resolve against connection workspace_root
+        // which defaults to /unknown when not provided by MCP client)
+        let source_file = executor.workspace_root.join(&config.source_file);
 
         // When using lldb-serve (proxy mode), don't pass program_path
         // lldb-serve already handles launching the program

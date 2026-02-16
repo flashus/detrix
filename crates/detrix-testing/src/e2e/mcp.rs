@@ -30,6 +30,48 @@ impl McpClient {
         }
     }
 
+    /// Create a new MCP client with Bearer token authentication
+    pub fn with_auth(http_port: u16, token: &str) -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", token)
+                .parse()
+                .expect("Invalid auth header"),
+        );
+        Self {
+            base_url: format!("http://127.0.0.1:{}", http_port),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(120))
+                .default_headers(headers)
+                .build()
+                .expect("Failed to create HTTP client"),
+        }
+    }
+
+    /// Create a new MCP client with Bearer token and extra headers (e.g. bridge URL)
+    pub fn with_auth_and_headers(
+        http_port: u16,
+        token: &str,
+        extra_headers: reqwest::header::HeaderMap,
+    ) -> Self {
+        let mut headers = extra_headers;
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", token)
+                .parse()
+                .expect("Invalid auth header"),
+        );
+        Self {
+            base_url: format!("http://127.0.0.1:{}", http_port),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(120))
+                .default_headers(headers)
+                .build()
+                .expect("Failed to create HTTP client"),
+        }
+    }
+
     /// Call an MCP tool (JSON-RPC over HTTP)
     async fn call(&self, tool_name: &str, arguments: Value) -> Result<Value, ApiError> {
         let body = json!({
@@ -117,7 +159,7 @@ impl McpClient {
                 // Simple CSV-like parsing for TOON data lines
                 let parts: Vec<&str> = line.trim().split(',').collect();
                 if parts.len() >= 5 {
-                    let port_str = parts[2].trim();
+                    let port_str = parts[2].trim().trim_matches('"');
                     let port = port_str.parse().unwrap_or_else(|_| {
                         eprintln!(
                             "[WARN] Failed to parse port '{}' in connection response, defaulting to 0",
@@ -125,13 +167,27 @@ impl McpClient {
                         );
                         0
                     });
+                    // TOON status field is proto enum integer:
+                    // 0=unspecified, 1=disconnected, 2=connecting, 3=connected, 4=failed
+                    let status = match parts[4].trim().trim_matches('"') {
+                        "0" => "unspecified",
+                        "1" => "disconnected",
+                        "2" => "connecting",
+                        "3" => "connected",
+                        "4" => "failed",
+                        other => other, // pass through if already a string
+                    }
+                    .to_string();
+                    let safe_mode = parts
+                        .get(11)
+                        .is_some_and(|s| s.trim().trim_matches('"') == "true");
                     connections.push(ConnectionInfo {
-                        connection_id: parts[0].trim().to_string(),
+                        connection_id: parts[0].trim().trim_matches('"').to_string(),
                         host: parts[1].trim().trim_matches('"').to_string(),
                         port,
-                        language: parts[3].trim().to_string(),
-                        status: parts[4].trim().to_string(),
-                        safe_mode: false, // MCP text output doesn't include safe_mode
+                        language: parts[3].trim().trim_matches('"').to_string(),
+                        status,
+                        safe_mode,
                     });
                 }
             }

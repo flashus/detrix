@@ -14,8 +14,8 @@
 //!   "file not found" error from `FileInspectionService.inspect()`.
 
 use detrix_core::Connection;
+use detrix_logging::{debug, warn};
 use detrix_ports::{FileSourceRef, VfsRef};
-use tracing::{debug, warn};
 
 /// Orchestrator for pluggable file source chain.
 ///

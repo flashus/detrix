@@ -12,7 +12,7 @@
 use crate::ports::{DlqRepositoryRef, EventRepositoryRef};
 use crate::Result;
 use detrix_core::MetricEvent;
-use tracing::error;
+use detrix_logging::error;
 
 /// Event capture service (protocol-agnostic)
 ///

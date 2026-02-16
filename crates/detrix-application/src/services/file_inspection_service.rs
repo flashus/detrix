@@ -19,16 +19,19 @@ use crate::Result;
 use detrix_config::constants::{
     DEFAULT_CONTEXT_LINES, DEFAULT_PREVIEW_LINES, MAX_PATH_COMPONENT_LENGTH, MAX_PATH_LENGTH,
 };
+use detrix_logging::{debug, warn};
 use detrix_ports::VfsRef;
 use std::path::{Path, PathBuf};
-use tracing::{debug, warn};
 
 /// Resolve a file path against an optional workspace root.
 ///
 /// Resolution logic:
 /// 1. If the path is absolute → use as-is
-/// 2. If relative and `workspace_root` is provided → join with workspace_root, check existence
+/// 2. If relative and `workspace_root` is provided → join with workspace_root
 /// 3. Fallback: return the raw path (covers daemon-CWD-relative paths)
+///
+/// Note: Does NOT check file existence on disk. In cloud mode, the file lives
+/// inside a remote container and won't exist on the daemon's filesystem.
 ///
 /// Returns the resolved path as a string for subsequent validation.
 pub fn resolve_file_path(file_path: &str, workspace_root: Option<&str>) -> String {
@@ -39,18 +42,16 @@ pub fn resolve_file_path(file_path: &str, workspace_root: Option<&str>) -> Strin
         return file_path.to_string();
     }
 
-    // Try resolving against workspace_root
+    // Resolve against workspace_root (always join when workspace_root is set)
     if let Some(root) = workspace_root {
         let resolved = Path::new(root).join(path);
-        if resolved.exists() {
-            debug!(
-                original = file_path,
-                workspace_root = root,
-                resolved = %resolved.display(),
-                "Resolved relative path against workspace root"
-            );
-            return resolved.to_string_lossy().into_owned();
-        }
+        debug!(
+            original = file_path,
+            workspace_root = root,
+            resolved = %resolved.display(),
+            "Resolved relative path against workspace root"
+        );
+        return resolved.to_string_lossy().into_owned();
     }
 
     // Fallback: return as-is (validate_file_path will produce the appropriate error)
@@ -1045,8 +1046,8 @@ mod tests {
     #[test]
     fn test_resolve_file_path_relative_not_found_in_workspace() {
         let result = resolve_file_path("nonexistent.py", Some("/tmp"));
-        // Falls back to raw path when not found
-        assert_eq!(result, "nonexistent.py");
+        // Always resolves against workspace_root (file may be in remote container)
+        assert_eq!(result, "/tmp/nonexistent.py");
     }
 
     #[test]

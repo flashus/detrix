@@ -1,0 +1,49 @@
+# Detrix Server Docker Image
+# Multi-stage build: static musl binary + scratch runtime (~50MB total)
+
+# ---- Build Stage ----
+FROM rust:latest AS builder
+
+WORKDIR /src
+
+# Install protoc (proto compilation) + musl toolchain (static linking)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler musl-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add musl target for fully static binary
+RUN ARCH=$(uname -m) && rustup target add ${ARCH}-unknown-linux-musl
+
+# Override the repo's .cargo/config.toml which points to a local path
+ENV CARGO_TARGET_DIR=/build/target
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo .cargo
+COPY crates crates
+COPY clients/rust clients/rust
+COPY detrix.toml detrix.minimal.toml ./
+
+# Build static binary with musl
+RUN ARCH=$(uname -m) && \
+    cargo build --release --target ${ARCH}-unknown-linux-musl --bin detrix -p detrix-cli && \
+    cp /build/target/${ARCH}-unknown-linux-musl/release/detrix /build/detrix
+
+# ---- Runtime Stage (scratch — just the binary + config) ----
+FROM scratch
+
+# TLS certificates for HTTPS connections
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+# Create data directory structure (copy config creates parent dirs)
+COPY fixtures/docker/detrix.toml /data/detrix/detrix.toml
+
+# Copy static binary
+COPY --from=builder /build/detrix /usr/local/bin/detrix
+
+EXPOSE 8090 50061
+
+HEALTHCHECK --interval=5s --timeout=3s --retries=10 \
+    CMD ["/usr/local/bin/detrix", "status", "--config", "/data/detrix/detrix.toml", "-q"]
+
+CMD ["/usr/local/bin/detrix", "serve", "--config", "/data/detrix/detrix.toml"]

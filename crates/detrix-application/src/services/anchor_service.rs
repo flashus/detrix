@@ -20,10 +20,10 @@ use detrix_config::{AnchorConfig, NormalizationConfig};
 use detrix_core::entities::{Location, MetricAnchor, RelocationResult};
 use detrix_core::error::{Error, Result};
 use detrix_core::SourceLanguage;
+use detrix_logging::{debug, trace, warn};
 use detrix_ports::VfsRef;
 use sha2::{Digest, Sha256};
 use tokio::fs;
-use tracing::{debug, trace, warn};
 
 /// Parse line number from location string format "@file.py#123"
 ///

@@ -62,6 +62,15 @@ pub async fn wake_impl(state: &Arc<ApiState>, params: WakeParams) -> Result<Wake
         .await
         .mcp_context("Remote app operation failed")?;
 
+    // Set control_plane_url on the connection so VFS can fetch files from the app
+    if let Some(ref conn_id) = result.connection_id {
+        let _ = state
+            .context
+            .connection_service
+            .set_control_plane_url(&detrix_core::ConnectionId::new(conn_id), app_url.clone())
+            .await;
+    }
+
     Ok(WakeResult {
         app_url: result.app_url,
         status: result.status,
