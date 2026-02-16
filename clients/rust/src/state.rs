@@ -59,6 +59,9 @@ pub struct InternalState {
     /// Detrix home directory.
     pub detrix_home: Option<String>,
 
+    /// Workspace root override.
+    pub workspace_root: Option<String>,
+
     /// Safe mode enabled.
     pub safe_mode: bool,
 
@@ -79,6 +82,9 @@ pub struct InternalState {
 
     /// lldb-dap start timeout in milliseconds.
     pub lldb_start_timeout_ms: u64,
+
+    /// Daemon's advertise URL from registration response.
+    pub daemon_advertise_url: Option<String>,
 }
 
 impl Default for InternalState {
@@ -97,6 +103,7 @@ impl Default for InternalState {
             connection_id: None,
             lldb_dap_path: String::new(),
             detrix_home: None,
+            workspace_root: None,
             safe_mode: false,
             build_commit: None,
             build_tag: None,
@@ -104,6 +111,7 @@ impl Default for InternalState {
             register_timeout_ms: 5000,
             unregister_timeout_ms: 2000,
             lldb_start_timeout_ms: 10000,
+            daemon_advertise_url: None,
         }
     }
 }

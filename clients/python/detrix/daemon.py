@@ -84,7 +84,7 @@ class DaemonClient(Protocol):
         connection_id: str,
         token: str | None = None,
         timeout: float = 5.0,
-    ) -> str:
+    ) -> tuple[str, str | None]:
         """Register a DAP connection with the daemon.
 
         Args:
@@ -98,7 +98,7 @@ class DaemonClient(Protocol):
             DaemonError: If daemon is not reachable or registration fails
 
         Returns:
-            Connection ID from daemon response
+            Tuple of (connection_id, advertise_url) from daemon response
         """
         ...
 
@@ -227,7 +227,8 @@ class HttpDaemonClient:
         token: str | None = None,
         timeout: float = 5.0,
         control_plane_url: str | None = None,
-    ) -> str:
+        workspace_root: str | None = None,
+    ) -> tuple[str, str | None]:
         """Register a DAP connection with the daemon.
 
         Args:
@@ -237,21 +238,25 @@ class HttpDaemonClient:
             token: Optional authentication token
             timeout: Request timeout in seconds
             control_plane_url: URL of this client's control plane for file fetching
+            workspace_root: Override workspace root (default: cwd or DETRIX_WORKSPACE_ROOT)
 
         Raises:
             DaemonError: If daemon is not reachable or registration fails
 
         Returns:
-            Connection ID (UUID) from daemon response
+            Tuple of (connection_id, advertise_url) from daemon response
         """
         import os
         import socket
 
         # Build identity fields for UUID-based connection tracking
-        try:
-            workspace_root = os.getcwd()
-        except OSError:
-            workspace_root = ""
+        if not workspace_root:
+            workspace_root = os.environ.get("DETRIX_WORKSPACE_ROOT", "")
+        if not workspace_root:
+            try:
+                workspace_root = os.getcwd()
+            except OSError:
+                workspace_root = ""
 
         try:
             hostname = socket.gethostname()
@@ -301,8 +306,9 @@ class HttpDaemonClient:
             )
             response.raise_for_status()
             data = response.json()
-            result: str = data.get("connectionId", connection_id)
-            return result
+            result_id: str = data.get("connectionId", connection_id)
+            advertise_url: str | None = data.get("advertiseUrl")
+            return result_id, advertise_url
         except httpx.HTTPStatusError as e:
             raise DaemonError(
                 f"Failed to register connection: HTTP {e.response.status_code} - "
@@ -381,7 +387,7 @@ def register_connection(
     verify_ssl: bool = True,
     ca_bundle: str | None = None,
     control_plane_url: str | None = None,
-) -> str:
+) -> tuple[str, str | None]:
     """Register a DAP connection with the daemon.
 
     This is a convenience wrapper around HttpDaemonClient.register().
@@ -401,7 +407,7 @@ def register_connection(
         DaemonError: If daemon is not reachable or registration fails
 
     Returns:
-        Connection ID from daemon response
+        Tuple of (connection_id, advertise_url) from daemon response
     """
     with HttpDaemonClient(daemon_url, verify_ssl=verify_ssl, ca_bundle=ca_bundle) as client:
         return client.register(host, port, connection_id, token, timeout, control_plane_url)

@@ -17,12 +17,15 @@ pub struct WakeResult {
     pub status: String,
     pub connection_id: Option<String>,
     pub debug_port: Option<i32>,
+    /// Daemon URL advertised by the app (from daemon's advertise_url).
+    /// The MCP bridge uses this to auto-switch to the correct daemon.
+    pub daemon_url: Option<String>,
 }
 
 impl WakeResult {
     /// Build human-readable message for MCP response
     pub fn build_message(&self) -> String {
-        match &self.connection_id {
+        let mut msg = match &self.connection_id {
             Some(conn_id) => format!(
                 "App at {} woke successfully (connection_id: {}, debug_port: {})",
                 self.app_url,
@@ -33,7 +36,11 @@ impl WakeResult {
                 "Wake request sent to {} (status: {})",
                 self.app_url, self.status
             ),
+        };
+        if let Some(ref daemon_url) = self.daemon_url {
+            msg.push_str(&format!(", daemon_url: {}", daemon_url));
         }
+        msg
     }
 
     /// Build JSON response for MCP
@@ -43,6 +50,7 @@ impl WakeResult {
             "status": self.status,
             "connection_id": self.connection_id,
             "debug_port": self.debug_port,
+            "daemon_url": self.daemon_url,
         })
     }
 }
@@ -76,6 +84,7 @@ pub async fn wake_impl(state: &Arc<ApiState>, params: WakeParams) -> Result<Wake
         status: result.status,
         connection_id: result.connection_id,
         debug_port: result.debug_port,
+        daemon_url: result.daemon_url,
     })
 }
 

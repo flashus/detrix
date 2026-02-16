@@ -33,6 +33,7 @@ pub struct ApiStateBuilder {
     system_event_repository: Option<SystemEventRepositoryRef>,
     mcp_usage_repository: Option<McpUsageRepositoryRef>,
     bridge_file_source: Option<Arc<crate::file_sources::BridgeSource>>,
+    advertise_url: Option<String>,
 }
 
 impl ApiStateBuilder {
@@ -47,6 +48,7 @@ impl ApiStateBuilder {
             system_event_repository: None,
             mcp_usage_repository: None,
             bridge_file_source: None,
+            advertise_url: None,
         }
     }
 
@@ -96,6 +98,15 @@ impl ApiStateBuilder {
         self
     }
 
+    /// Set the daemon's external advertise URL.
+    ///
+    /// This URL is returned to clients during connection registration so they
+    /// can discover how to reach this daemon externally (e.g., through Docker port mapping).
+    pub fn advertise_url(mut self, url: Option<String>) -> Self {
+        self.advertise_url = url;
+        self
+    }
+
     /// Build the ApiState
     pub fn build(self) -> ApiState {
         let config = self.config.unwrap_or_default();
@@ -127,6 +138,7 @@ impl ApiStateBuilder {
             config_service,
             mcp_usage_repository: self.mcp_usage_repository,
             bridge_file_source: self.bridge_file_source,
+            advertise_url: self.advertise_url,
         }
     }
 }
@@ -186,6 +198,10 @@ pub struct ApiState {
     /// Bridge file source for setting bridge URL from MCP HTTP headers.
     /// Set when bridge source is included in the file source chain.
     pub bridge_file_source: Option<Arc<crate::file_sources::BridgeSource>>,
+
+    /// Daemon's external advertise URL, returned to clients during registration.
+    /// Like Kafka's advertised.listeners. Enables auto-discovery in Docker/cloud.
+    pub advertise_url: Option<String>,
 }
 
 impl std::fmt::Debug for ApiState {

@@ -101,7 +101,7 @@ class TestRegisterConnection:
 
     def test_successful_registration(self, mock_daemon):
         """Test successful connection registration."""
-        conn_id = register_connection(
+        conn_id, advertise_url = register_connection(
             daemon_url=mock_daemon,
             host="127.0.0.1",
             port=5678,
@@ -109,10 +109,11 @@ class TestRegisterConnection:
             token=None,
         )
         assert conn_id == "my-service-123"
+        assert advertise_url is None
 
     def test_registration_with_token(self, mock_daemon):
         """Test registration with auth token."""
-        conn_id = register_connection(
+        conn_id, advertise_url = register_connection(
             daemon_url=mock_daemon,
             host="127.0.0.1",
             port=5678,
@@ -120,6 +121,7 @@ class TestRegisterConnection:
             token="secret-token",
         )
         assert conn_id == "my-service-123"
+        assert advertise_url is None
 
     def test_registration_daemon_unreachable(self):
         """Test raises error when daemon unreachable."""

@@ -134,28 +134,30 @@ type RegisterRequest struct {
 type RegisterResponse struct {
 	ConnectionID string `json:"connectionId"`
 	Status       string `json:"status"`
+	AdvertiseURL string `json:"advertiseUrl,omitempty"`
 }
 
 // Register registers a connection with the daemon.
-func (c *Client) Register(daemonURL string, req RegisterRequest, timeout time.Duration) (string, error) {
+// Returns (connectionID, advertiseURL, error).
+func (c *Client) Register(daemonURL string, req RegisterRequest, timeout time.Duration) (string, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
+		return "", "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", daemonURL+"/api/v1/connections", bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+		return "", "", fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	c.setAuth(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("failed to register with daemon: %w", err)
+		return "", "", fmt.Errorf("failed to register with daemon: %w", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
@@ -165,19 +167,19 @@ func (c *Client) Register(daemonURL string, req RegisterRequest, timeout time.Du
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
-		return "", fmt.Errorf("failed to read response body: %w", err)
+		return "", "", fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("registration failed: status %d, body: %s", resp.StatusCode, string(respBody))
+		return "", "", fmt.Errorf("registration failed: status %d, body: %s", resp.StatusCode, string(respBody))
 	}
 
 	var regResp RegisterResponse
 	if err := json.Unmarshal(respBody, &regResp); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
+		return "", "", fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	return regResp.ConnectionID, nil
+	return regResp.ConnectionID, regResp.AdvertiseURL, nil
 }
 
 // Unregister unregisters a connection from the daemon.

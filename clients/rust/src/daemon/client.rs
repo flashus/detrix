@@ -62,6 +62,9 @@ struct RegisterResponse {
     /// Status message.
     #[allow(dead_code)]
     status: Option<String>,
+
+    /// Daemon's external advertise URL (for auto-discovery in Docker/cloud).
+    advertise_url: Option<String>,
 }
 
 /// HTTP client for the Detrix daemon.
@@ -150,12 +153,14 @@ impl DaemonClient {
     }
 
     /// Register a connection with the daemon.
+    ///
+    /// Returns `(connection_id, advertise_url)`.
     pub fn register(
         &self,
         daemon_url: &str,
         request: RegisterRequest,
         timeout: Duration,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<String>)> {
         let url = format!("{}/api/v1/connections", daemon_url);
 
         debug!(
@@ -181,10 +186,10 @@ impl DaemonClient {
             response.json().registration("failed to parse response")?;
 
         debug!(
-            "Registered with connection ID: {}",
-            reg_response.connection_id
+            "Registered with connection ID: {}, advertise_url: {:?}",
+            reg_response.connection_id, reg_response.advertise_url
         );
-        Ok(reg_response.connection_id)
+        Ok((reg_response.connection_id, reg_response.advertise_url))
     }
 
     /// Unregister a connection from the daemon.

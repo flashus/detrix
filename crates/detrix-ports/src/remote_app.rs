@@ -16,6 +16,9 @@ pub struct RemoteWakeResponse {
     pub connection_id: Option<String>,
     /// Debug port the app's debugger is listening on
     pub debug_port: Option<i32>,
+    /// Daemon URL advertised by the app (from daemon's advertise_url config).
+    /// The MCP bridge uses this to auto-switch to the correct daemon.
+    pub daemon_url: Option<String>,
 }
 
 /// Response from sleeping a remote app

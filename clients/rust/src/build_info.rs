@@ -82,7 +82,7 @@ pub fn detect_build_tag(override_value: Option<String>) -> Option<String> {
 /// Returns None if git is not available or not a git repo
 fn try_git_rev_parse() -> Option<String> {
     let output = Command::new("git")
-        .args(&["rev-parse", "HEAD"])
+        .args(["rev-parse", "HEAD"])
         .output()
         .ok()?;
 

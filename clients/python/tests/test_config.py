@@ -190,6 +190,7 @@ class TestInitStoresSslFromEnv:
     def setup_method(self):
         """Reset state before each test."""
         import contextlib
+
         import detrix
         from detrix._state import reset_state
 
@@ -200,6 +201,7 @@ class TestInitStoresSslFromEnv:
     def teardown_method(self):
         """Reset state after each test."""
         import contextlib
+
         import detrix
         from detrix._state import reset_state
 

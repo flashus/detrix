@@ -82,6 +82,7 @@ def get_env_config() -> dict[str, str | bool | None]:
         DETRIX_HEALTH_CHECK_TIMEOUT: Timeout for daemon health checks (seconds)
         DETRIX_REGISTER_TIMEOUT: Timeout for connection registration (seconds)
         DETRIX_UNREGISTER_TIMEOUT: Timeout for connection unregistration (seconds)
+        DETRIX_WORKSPACE_ROOT: Override workspace root (default: cwd)
         DETRIX_VERIFY_SSL: Whether to verify SSL certificates (default: true)
         DETRIX_CA_BUNDLE: Path to CA bundle file for SSL verification
 
@@ -102,6 +103,7 @@ def get_env_config() -> dict[str, str | bool | None]:
         "control_port": os.environ.get("DETRIX_CONTROL_PORT"),
         "debug_port": os.environ.get("DETRIX_DEBUG_PORT"),
         "daemon_url": os.environ.get("DETRIX_DAEMON_URL"),
+        "workspace_root": os.environ.get("DETRIX_WORKSPACE_ROOT"),
         "token": os.environ.get("DETRIX_TOKEN"),
         "health_check_timeout": os.environ.get("DETRIX_HEALTH_CHECK_TIMEOUT"),
         "register_timeout": os.environ.get("DETRIX_REGISTER_TIMEOUT"),

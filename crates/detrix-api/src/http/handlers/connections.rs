@@ -168,6 +168,7 @@ pub async fn create_connection(
             status: status::CREATED.to_string(),
             connection: Some(connection_to_rest_response(&connection)),
             metadata: None,
+            advertise_url: state.advertise_url.clone(),
         }),
     ))
 }

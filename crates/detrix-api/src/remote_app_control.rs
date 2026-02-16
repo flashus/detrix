@@ -190,12 +190,17 @@ impl RemoteAppControl for HttpRemoteAppControl {
             .and_then(|v| v.as_str())
             .unwrap_or("ok")
             .to_string();
+        let daemon_url = wake_response
+            .get("daemon_url")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         Ok(RemoteWakeResponse {
             app_url: app_url.to_string(),
             status,
             connection_id,
             debug_port,
+            daemon_url,
         })
     }
 
@@ -374,6 +379,28 @@ mod tests {
         assert_eq!(result.status, "started");
         assert_eq!(result.connection_id.as_deref(), Some("abc123"));
         assert_eq!(result.debug_port, Some(5678));
+        assert!(result.daemon_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_wake_parses_daemon_url() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/detrix/wake"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "awake",
+                "connection_id": "abc123",
+                "debug_port": 5678,
+                "daemon_url": "http://localhost:8095"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let ctrl = HttpRemoteAppControl::default();
+        let result = ctrl.wake_app(&mock_server.uri(), None, None).await.unwrap();
+
+        assert_eq!(result.daemon_url.as_deref(), Some("http://localhost:8095"));
     }
 
     #[tokio::test]

@@ -143,6 +143,11 @@ type WakeResponse struct {
 	// ConnectionId Connection ID assigned by the daemon
 	ConnectionId string `json:"connection_id"`
 
+	// DaemonUrl External URL of the daemon this client registered with.
+	// Set from daemon's advertise_url returned during registration.
+	// Used by MCP bridge for auto-discovery of remote daemons.
+	DaemonUrl *string `json:"daemon_url,omitempty"`
+
 	// DebugPort Port the debug adapter is listening on
 	DebugPort int32 `json:"debug_port"`
 

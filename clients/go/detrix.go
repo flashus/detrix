@@ -98,6 +98,11 @@ type Config struct {
 	// Recommended for production environments where execution pauses are unacceptable.
 	SafeMode bool
 
+	// WorkspaceRoot overrides the workspace root sent to the daemon.
+	// Default: current working directory (os.Getwd).
+	// Set this in Docker/cloud where the CWD doesn't match the build source path.
+	WorkspaceRoot string
+
 	// BuildCommit allows explicit override of build commit detection (optional)
 	BuildCommit string
 
@@ -200,6 +205,7 @@ func Init(cfg Config) error {
 	s.DelvePath = delvePath
 	s.DetrixHome = cfg.DetrixHome
 	s.SafeMode = cfg.SafeMode
+	s.WorkspaceRoot = cfg.WorkspaceRoot
 	s.BuildCommit = cfg.BuildCommit
 	s.BuildTag = cfg.BuildTag
 	s.HealthCheckTimeoutMs = int(cfg.HealthCheckTimeout.Milliseconds())
@@ -367,6 +373,7 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 			Status:       WakeStatusAlreadyAwake,
 			DebugPort:    int32(s.ActualDebugPort),
 			ConnectionId: "",
+			DaemonUrl:    stringPtrOrNil(s.DaemonAdvertiseURL),
 		}
 		if s.ConnectionID != nil {
 			resp.ConnectionId = *s.ConnectionID
@@ -391,6 +398,7 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 	name := s.Name
 	detrixHome := s.DetrixHome
 	safeMode := s.SafeMode
+	workspaceRootOverride := s.WorkspaceRoot
 	buildCommitOverride := s.BuildCommit
 	buildTagOverride := s.BuildTag
 	healthTimeout := time.Duration(s.HealthCheckTimeoutMs) * time.Millisecond
@@ -422,10 +430,13 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 	controlServer.UpdateToken(freshToken)
 
 	// 2d. Get workspace root and hostname for identity
-	workspaceRoot, err := os.Getwd()
-	if err != nil {
-		workspaceRoot = "/unknown"
-		slog.Warn("failed to get working directory", "error", err)
+	workspaceRoot := workspaceRootOverride
+	if workspaceRoot == "" {
+		workspaceRoot, err = os.Getwd()
+		if err != nil {
+			workspaceRoot = "/unknown"
+			slog.Warn("failed to get working directory", "error", err)
+		}
 	}
 
 	hostname, err := os.Hostname()
@@ -446,7 +457,7 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 	if advertiseHost != "" {
 		registrationHost = advertiseHost
 	}
-	connID, err := daemonClient.Register(targetDaemonURL, daemon.RegisterRequest{
+	connID, advertiseURL, err := daemonClient.Register(targetDaemonURL, daemon.RegisterRequest{
 		Host:          registrationHost,
 		Port:          delveProc.Port,
 		Language:      "go",
@@ -473,6 +484,7 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 	s.ActualDebugPort = delveProc.Port
 	s.DebugPortActive = true
 	s.ConnectionID = &connID
+	s.DaemonAdvertiseURL = advertiseURL
 	s.DelveProcess = &state.DelveProcess{
 		Cmd:  delveProc.Cmd,
 		Host: delveProc.Host,
@@ -484,6 +496,7 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 		Status:       WakeStatusAwake,
 		DebugPort:    int32(delveProc.Port),
 		ConnectionId: connID,
+		DaemonUrl:    stringPtrOrNil(advertiseURL),
 	}, nil
 }
 
@@ -597,6 +610,9 @@ func resolveConfig(cfg Config) Config {
 	if cfg.DetrixHome == "" {
 		cfg.DetrixHome = os.Getenv("DETRIX_HOME")
 	}
+	if cfg.WorkspaceRoot == "" {
+		cfg.WorkspaceRoot = os.Getenv("DETRIX_WORKSPACE_ROOT")
+	}
 
 	// Port overrides (validate range 0-65535)
 	if cfg.ControlPort == 0 {
@@ -643,6 +659,14 @@ func resolveConfig(cfg Config) Config {
 	return cfg
 }
 
+// stringPtrOrNil returns a pointer to s if non-empty, or nil.
+func stringPtrOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 func getEnvOrDefault(key, defaultValue string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -685,11 +709,15 @@ func wakeHandler(daemonURL string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
+	result := map[string]any{
 		"status":        resp.Status,
 		"debug_port":    resp.DebugPort,
 		"connection_id": resp.ConnectionId,
-	}, nil
+	}
+	if resp.DaemonUrl != nil && *resp.DaemonUrl != "" {
+		result["daemon_url"] = *resp.DaemonUrl
+	}
+	return result, nil
 }
 
 func sleepHandler() (map[string]any, error) {

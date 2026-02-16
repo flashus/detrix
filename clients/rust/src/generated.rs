@@ -711,6 +711,12 @@ impl ::std::default::Default for WakeRequest {
 ///      "type": "string",
 ///      "example": "conn_abc123"
 ///    },
+///    "daemon_url": {
+///      "description": "External URL of the daemon this client registered with.\nSet from daemon's advertise_url returned during registration.\nUsed by MCP bridge for auto-discovery of remote daemons.\n",
+///      "type": "string",
+///      "format": "uri",
+///      "example": "http://localhost:8095"
+///    },
 ///    "debug_port": {
 ///      "description": "Port the debug adapter is listening on",
 ///      "type": "integer",
@@ -730,6 +736,7 @@ impl ::std::default::Default for WakeRequest {
 ///  },
 ///  "example": {
 ///    "connection_id": "conn_abc123",
+///    "daemon_url": "http://localhost:8095",
 ///    "debug_port": 5678,
 ///    "status": "awake"
 ///  }
@@ -740,6 +747,12 @@ impl ::std::default::Default for WakeRequest {
 pub struct WakeResponse {
     ///Connection ID assigned by the daemon
     pub connection_id: ::std::string::String,
+    /**External URL of the daemon this client registered with.
+    Set from daemon's advertise_url returned during registration.
+    Used by MCP bridge for auto-discovery of remote daemons.
+    */
+    #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+    pub daemon_url: ::std::option::Option<::std::string::String>,
     ///Port the debug adapter is listening on
     pub debug_port: i32,
     /**"awake" if the client transitioned from sleeping to awake.

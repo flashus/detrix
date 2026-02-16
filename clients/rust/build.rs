@@ -1,3 +1,7 @@
+//! Build script for detrix-rs client
+//! Generates build_info.rs with version and git metadata
+#![allow(clippy::panic, clippy::expect_used)]
+
 use std::env;
 use std::fs;
 use std::path::Path;

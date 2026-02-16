@@ -91,6 +91,7 @@ impl ConnectionService for ConnectionServiceImpl {
             status: status::CREATED.to_string(),
             connection: Some(connection_to_info(&connection)),
             metadata: None,
+            advertise_url: self.state.advertise_url.clone(),
         }))
     }
 

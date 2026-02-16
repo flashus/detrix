@@ -97,7 +97,7 @@ func TestRegister_Success(t *testing.T) {
 		t.Fatalf("NewClient failed: %v", err)
 	}
 
-	connID, err := client.Register(server.URL, RegisterRequest{
+	connID, _, err := client.Register(server.URL, RegisterRequest{
 		Host:     "127.0.0.1",
 		Port:     5678,
 		Language: "go",
@@ -123,7 +123,7 @@ func TestRegister_ServerError(t *testing.T) {
 		t.Fatalf("NewClient failed: %v", err)
 	}
 
-	_, err = client.Register(server.URL, RegisterRequest{
+	_, _, err = client.Register(server.URL, RegisterRequest{
 		Host:     "127.0.0.1",
 		Port:     5678,
 		Language: "go",

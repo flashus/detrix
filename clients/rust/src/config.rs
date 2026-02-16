@@ -45,6 +45,10 @@ pub struct Config {
     /// Detrix home directory (default: ~/detrix)
     pub detrix_home: Option<PathBuf>,
 
+    /// Override workspace root sent to daemon (default: current working directory).
+    /// Set this in Docker/cloud where the CWD doesn't match the build source path.
+    pub workspace_root: Option<String>,
+
     /// Safe mode: only logpoints allowed, no breakpoint operations.
     /// Recommended for production environments.
     pub safe_mode: bool,
@@ -79,6 +83,7 @@ impl Default for Config {
             daemon_url: "http://127.0.0.1:8090".to_string(),
             lldb_dap_path: None,
             detrix_home: None,
+            workspace_root: None,
             safe_mode: false,
             build_commit: None,
             build_tag: None,
@@ -170,6 +175,15 @@ impl Config {
             if let Ok(home) = env::var("DETRIX_HOME") {
                 if !home.is_empty() {
                     self.detrix_home = Some(PathBuf::from(home));
+                }
+            }
+        }
+
+        // Workspace root
+        if self.workspace_root.is_none() {
+            if let Ok(root) = env::var("DETRIX_WORKSPACE_ROOT") {
+                if !root.is_empty() {
+                    self.workspace_root = Some(root);
                 }
             }
         }

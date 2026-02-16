@@ -122,9 +122,9 @@ func TestDetectBuildInfo(t *testing.T) {
 		// Restore original env
 		for key, val := range origEnv {
 			if val == "" {
-				os.Unsetenv(key)
+				_ = os.Unsetenv(key)
 			} else {
-				os.Setenv(key, val)
+				_ = os.Setenv(key, val)
 			}
 		}
 	}()
@@ -191,12 +191,12 @@ func TestDetectBuildInfo(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Clear all env vars
 			for _, key := range envVars {
-				os.Unsetenv(key)
+				_ = os.Unsetenv(key)
 			}
 
 			// Set test env vars
 			for k, v := range tt.envVars {
-				os.Setenv(k, v)
+				_ = os.Setenv(k, v)
 			}
 
 			commit, tag := detectBuildInfo(tt.config)

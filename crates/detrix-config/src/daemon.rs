@@ -137,6 +137,12 @@ pub struct DaemonConfig {
     /// Default: 30000ms (30 seconds)
     #[serde(default = "default_remote_app_timeout_ms")]
     pub remote_app_timeout_ms: u64,
+    /// External URL for this daemon, advertised to clients during registration.
+    /// Like Kafka's advertised.listeners or Consul's advertise_addr.
+    /// Env: DETRIX_ADVERTISE_URL (takes precedence over config file).
+    /// Example: "http://localhost:8095" when port-mapped in Docker.
+    #[serde(default)]
+    pub advertise_url: Option<String>,
     /// Logging configuration
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -175,6 +181,7 @@ impl Default for DaemonConfig {
             restart_delay_ms: DEFAULT_RESTART_DELAY_MS,
             poll_interval_ms: DEFAULT_DAEMON_POLL_INTERVAL_MS,
             remote_app_timeout_ms: DEFAULT_REMOTE_APP_TIMEOUT_MS,
+            advertise_url: None,
             logging: LoggingConfig::default(),
         }
     }

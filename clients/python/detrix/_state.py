@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-
 # Default timeout values (seconds) for client operations
 DEFAULT_HEALTH_CHECK_TIMEOUT = 2.0
 DEFAULT_REGISTER_TIMEOUT = 5.0
@@ -75,6 +74,8 @@ class ClientState:
     health_check_timeout: float = DEFAULT_HEALTH_CHECK_TIMEOUT
     register_timeout: float = DEFAULT_REGISTER_TIMEOUT
     unregister_timeout: float = DEFAULT_UNREGISTER_TIMEOUT
+    # Daemon's advertise URL from registration response
+    daemon_advertise_url: str | None = None
     # SSL configuration
     verify_ssl: bool = True
     ca_bundle: str | None = None

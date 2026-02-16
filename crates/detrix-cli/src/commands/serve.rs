@@ -330,6 +330,17 @@ pub async fn run(
     info!("   2. Use: detrix connect localhost:{}", port);
     info!("");
 
+    // Apply DETRIX_ADVERTISE_URL env var override (takes precedence over config file)
+    if let Ok(env_url) = std::env::var("DETRIX_ADVERTISE_URL") {
+        let env_url = env_url.trim().to_string();
+        if !env_url.is_empty() {
+            config.daemon.advertise_url = Some(env_url);
+        }
+    }
+    if let Some(ref url) = config.daemon.advertise_url {
+        info!("📢 Advertise URL: {}", url);
+    }
+
     // Create API state from the pre-configured AppContext
     // This ensures the connection_service is available in the API layer
     // Pass mcp_spawned flag to enable auto-shutdown when all MCP clients disconnect
@@ -344,6 +355,7 @@ pub async fn run(
         .system_event_repository(Arc::clone(&storage) as SystemEventRepositoryRef)
         .mcp_usage_repository(Arc::clone(&storage) as McpUsageRepositoryRef)
         .bridge_file_source(bridge_file_source)
+        .advertise_url(config.daemon.advertise_url.clone())
         .build(),
     );
 

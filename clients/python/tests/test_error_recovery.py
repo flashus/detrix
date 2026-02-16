@@ -365,6 +365,7 @@ class TestExceptionLogging:
     def test_daemon_health_check_logs_on_failure(self, caplog):
         """Health check logs debug message on failure."""
         import logging
+
         from detrix.daemon import check_daemon_health
 
         with caplog.at_level(logging.DEBUG, logger="detrix.daemon"):

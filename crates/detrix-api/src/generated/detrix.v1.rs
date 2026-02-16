@@ -3817,6 +3817,9 @@ pub struct CreateConnectionResponse {
     pub connection: ::core::option::Option<ConnectionInfo>,
     #[prost(message, optional, tag = "4")]
     pub metadata: ::core::option::Option<ResponseMetadata>,
+    /// Daemon's external URL (from advertise_url config)
+    #[prost(string, optional, tag = "5")]
+    pub advertise_url: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

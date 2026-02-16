@@ -210,7 +210,7 @@ class ControlHandler(BaseHTTPRequestHandler):
 
         try:
             response = do_wake(daemon_url)
-            self._send_json_response(response.model_dump())
+            self._send_json_response(response.model_dump(mode="json"))
         except DaemonError as e:
             self._send_error_response(str(e), 503)
         except DebuggerError as e:

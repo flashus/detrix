@@ -47,6 +47,7 @@ type ClientState struct {
 	DelvePath     string
 	DetrixHome    string
 	SafeMode      bool   // SafeMode: only logpoints allowed, no breakpoint operations
+	WorkspaceRoot string // Override workspace root (default: os.Getwd at wake time)
 	BuildCommit   string // Optional build commit SHA override
 	BuildTag      string // Optional build tag/version override
 
@@ -62,6 +63,9 @@ type ClientState struct {
 	ActualDebugPort   int
 	DebugPortActive   bool
 	ConnectionID      *string
+
+	// Daemon's advertise URL from registration response
+	DaemonAdvertiseURL string
 
 	// Process management
 	DelveProcess *DelveProcess

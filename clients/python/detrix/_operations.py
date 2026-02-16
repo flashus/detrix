@@ -60,6 +60,7 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
                     status=WakeStatus.already_awake,
                     debug_port=state.actual_debug_port,
                     connection_id=state.connection_id or "",
+                    daemon_url=state.daemon_advertise_url,
                 )
             if state.state == State.WAKING:
                 # Shouldn't happen since we hold wake_lock, but be safe
@@ -127,7 +128,7 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
             control_plane_url = f"http://{cp_host}:{cp_port}" if cp_port else None
 
             try:
-                connection_id = client.register(
+                connection_id, advertise_url = client.register(
                     host=registration_host,
                     port=actual_port,
                     connection_id=connection_name,
@@ -162,11 +163,13 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
             state.debug_port_active = True
             state.connection_id = connection_id
             state.daemon_url = effective_daemon_url
+            state.daemon_advertise_url = advertise_url
 
         return WakeResponse(
             status=WakeStatus.awake,
             debug_port=actual_port,
             connection_id=connection_id,
+            daemon_url=advertise_url,
         )
 
 

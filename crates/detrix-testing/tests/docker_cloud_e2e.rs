@@ -42,6 +42,9 @@ const PYTHON_APP_URL: &str = "http://test-app-python:8091";
 const GO_APP_URL: &str = "http://test-app-go:8091";
 const RUST_APP_URL: &str = "http://test-app-rust:8091";
 
+// Advertise URL for Phase 6/7 (matches host-mapped daemon port).
+const ADVERTISE_URL: &str = "http://localhost:8095";
+
 // File paths inside containers (from DWARF debug info / runtime WORKDIR).
 const PYTHON_FILE: &str = "/app/trade_bot_forever.py";
 const GO_FILE: &str = "/src/fixtures/go/detrix_example_app.go";
@@ -176,6 +179,94 @@ async fn restart_daemon() {
             panic!("Daemon failed to become healthy within 30s after restart");
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Restart the Detrix daemon container with extra environment variables.
+/// Combines stop + clear DB + force_recreate_with_env + health poll.
+async fn restart_daemon_with_env(envs: &[(&str, &str)]) {
+    let compose_file = compose_file_abs();
+    let make_args = |extra: &[&str]| -> Vec<String> {
+        let mut args = vec![
+            "compose".to_string(),
+            "-f".to_string(),
+            compose_file.clone(),
+            "-p".to_string(),
+            COMPOSE_PROJECT.to_string(),
+        ];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        args
+    };
+
+    // Stop the daemon
+    let _ = tokio::process::Command::new("docker")
+        .args(make_args(&["stop", "detrix"]))
+        .output()
+        .await;
+
+    // Clear the DB to prevent startup restore from reconnecting stale connections.
+    let volume_name = format!("{}_detrix-data", COMPOSE_PROJECT);
+    let _ = tokio::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &format!("{}:/data/detrix", volume_name),
+            "busybox",
+            "rm",
+            "-f",
+            "/data/detrix/data.db",
+            "/data/detrix/dlq.db",
+        ])
+        .output()
+        .await;
+
+    // Bring it back up with env vars and health check wait
+    force_recreate_with_env("detrix", envs).await;
+
+    // Poll health endpoint as extra safety
+    let http_client = reqwest::Client::new();
+    let start = Instant::now();
+    loop {
+        if let Ok(resp) = http_client
+            .get(format!("http://127.0.0.1:{}/health", DAEMON_HTTP_PORT))
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                break;
+            }
+        }
+        if start.elapsed() > Duration::from_secs(30) {
+            panic!("Daemon failed to become healthy within 30s after restart with env");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Assert that a wake response contains daemon_url in both text and raw JSON.
+fn assert_wake_has_daemon_url(
+    wake_result: &detrix_testing::e2e::client::ApiResponse<String>,
+    expected_url: &str,
+) {
+    // Check text content
+    assert!(
+        wake_result.data.contains("daemon_url")
+            || wake_result.data.contains("daemonUrl")
+            || wake_result.data.contains(expected_url),
+        "Wake text should contain daemon_url or the URL itself.\nText: {}",
+        wake_result.data
+    );
+
+    // Check raw JSON response
+    if let Some(ref raw) = wake_result.raw_response {
+        assert!(
+            raw.contains(expected_url),
+            "Wake raw JSON should contain advertise URL '{}'.\nRaw: {}",
+            expected_url,
+            raw
+        );
     }
 }
 
@@ -828,6 +919,409 @@ async fn test_cloud_e2e() {
     drop(stdin);
     let _ = child.kill().await;
     println!("  MCP binary process stopped");
+
+    println!("\n{}", "=".repeat(60));
+    println!("Phase 5 complete — MCP binary smoke test verified");
+    println!("{}", "=".repeat(60));
+
+    // ── Phase 6: Daemon Advertise URL + Observe (All Clients) ──
+    // Restart daemon with DETRIX_ADVERTISE_URL, verify daemon_url flows through
+    // wake responses, then observe with each client language.
+    println!("\n{}", "=".repeat(60));
+    println!("Phase 6: Daemon Advertise URL + Observe (All Clients)");
+    println!("{}", "=".repeat(60));
+
+    // Restart daemon with advertise_url
+    println!(
+        "\n--- Restarting daemon with DETRIX_ADVERTISE_URL={} ---",
+        ADVERTISE_URL
+    );
+    restart_daemon_with_env(&[("TEST_ADVERTISE_URL", ADVERTISE_URL)]).await;
+    println!("  Daemon restarted with advertise_url");
+
+    // ── Phase 6a: Python (control plane file serving) ──
+    println!("\n--- Phase 6a: Python (control plane file serving) ---");
+    let wake_resp = client
+        .wake(PYTHON_APP_URL, None)
+        .await
+        .expect("wake python failed");
+    assert_wake_has_daemon_url(&wake_resp, ADVERTISE_URL);
+    println!("  daemon_url verified: {}", ADVERTISE_URL);
+
+    let py_conn = poll_for_connection(&client, "python", Duration::from_secs(15))
+        .await
+        .expect("Python connection not found within 15s");
+    println!("  Python connection: {}", py_conn);
+
+    // observe with auto-find line (VFS fetches file from control plane)
+    let observe_req = ObserveRequest::new("trade_bot_forever.py", "order_id")
+        .with_name("cloud-py-adv")
+        .with_connection_id(&py_conn);
+    let observe_resp = client
+        .observe(observe_req)
+        .await
+        .expect("observe python via control plane failed");
+    assert!(
+        observe_resp.data.success,
+        "observe should succeed: {:?}",
+        observe_resp.data
+    );
+    println!(
+        "  observe ok: {} at {}#{}",
+        observe_resp.data.metric_name, observe_resp.data.file, observe_resp.data.line
+    );
+
+    let adv_py_events = poll_for_events(&client, "cloud-py-adv", Duration::from_secs(15)).await;
+    assert!(
+        !adv_py_events.is_empty(),
+        "Expected Python advertise-URL events but got none (waited 15s)"
+    );
+    println!("  Events captured: {}", adv_py_events.len());
+
+    sleep_app(&client, PYTHON_APP_URL).await;
+    println!("  Python sleeping");
+
+    // ── Phase 6b: Go (bridge file serving) ──
+    println!("\n--- Phase 6b: Go (bridge file serving) ---");
+
+    let workspace_root_6b = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let go_fixture_path_6b = workspace_root_6b.join("fixtures/go");
+
+    let mut mappings_6b = HashMap::new();
+    mappings_6b.insert("/src/fixtures/go".to_string(), go_fixture_path_6b.clone());
+    mappings_6b.insert("/app".to_string(), go_fixture_path_6b);
+
+    let (bridge_port_6b, bridge_handle_6b) = start_test_file_server(mappings_6b, None)
+        .await
+        .expect("start test file server for Phase 6b failed");
+    println!("  Test file server started on port {}", bridge_port_6b);
+
+    let mut bridge_headers_6b = reqwest::header::HeaderMap::new();
+    bridge_headers_6b.insert(
+        "X-Detrix-File-Server-Url",
+        format!("http://host.docker.internal:{}", bridge_port_6b)
+            .parse()
+            .unwrap(),
+    );
+    let bridge_client_6b =
+        McpClient::with_auth_and_headers(DAEMON_HTTP_PORT, DOCKER_AUTH_TOKEN, bridge_headers_6b);
+
+    let go_wake_resp = bridge_client_6b
+        .wake(GO_APP_URL, None)
+        .await
+        .expect("wake go failed");
+    assert_wake_has_daemon_url(&go_wake_resp, ADVERTISE_URL);
+    println!("  daemon_url verified: {}", ADVERTISE_URL);
+
+    let go_conn_6b = poll_for_connection(&bridge_client_6b, "go", Duration::from_secs(15))
+        .await
+        .expect("Go connection not found within 15s");
+    println!("  Go connection: {}", go_conn_6b);
+
+    let observe_req = ObserveRequest::new(GO_FILE, "symbol")
+        .with_name("cloud-go-adv")
+        .with_connection_id(&go_conn_6b);
+    let observe_resp = bridge_client_6b
+        .observe(observe_req)
+        .await
+        .expect("observe go via bridge failed");
+    assert!(
+        observe_resp.data.success,
+        "observe should succeed: {:?}",
+        observe_resp.data
+    );
+    println!(
+        "  observe ok: {} at {}#{}",
+        observe_resp.data.metric_name, observe_resp.data.file, observe_resp.data.line
+    );
+
+    let adv_go_events =
+        poll_for_events(&bridge_client_6b, "cloud-go-adv", Duration::from_secs(15)).await;
+    assert!(
+        !adv_go_events.is_empty(),
+        "Expected Go advertise-URL events but got none (waited 15s)"
+    );
+    println!("  Events captured: {}", adv_go_events.len());
+
+    sleep_app(&bridge_client_6b, GO_APP_URL).await;
+    bridge_handle_6b.abort();
+    println!("  Go sleeping, test file server stopped");
+
+    // ── Phase 6c: Rust (control plane file serving, skip if unavailable) ──
+    println!("\n--- Phase 6c: Rust (control plane file serving) ---");
+    let rust_adv_available = match client.wake(RUST_APP_URL, None).await {
+        Ok(rust_wake) => {
+            // Check daemon_url even if we might skip later
+            let has_daemon_url = rust_wake.data.contains(ADVERTISE_URL)
+                || rust_wake
+                    .raw_response
+                    .as_ref()
+                    .is_some_and(|r| r.contains(ADVERTISE_URL));
+            if has_daemon_url {
+                println!("  daemon_url verified: {}", ADVERTISE_URL);
+            }
+
+            if let Some(rust_conn) =
+                poll_for_connection(&client, "rust", Duration::from_secs(15)).await
+            {
+                println!("  Rust connection: {}", rust_conn);
+                let rust_metric = AddMetricRequest::new(
+                    "cloud-rust-adv",
+                    &format!("{}#108", RUST_FILE),
+                    "symbol",
+                    &rust_conn,
+                );
+                if let Err(e) = client.add_metric(rust_metric).await {
+                    println!("  Rust add_metric failed (skipping): {}", e);
+                    false
+                } else {
+                    let rust_events =
+                        poll_for_events(&client, "cloud-rust-adv", Duration::from_secs(15)).await;
+                    if rust_events.is_empty() {
+                        println!("  Rust events: 0 (skipping)");
+                        false
+                    } else {
+                        println!("  Events captured: {}", rust_events.len());
+                        true
+                    }
+                }
+            } else {
+                println!("  Rust connection not found (skipping)");
+                false
+            }
+        }
+        Err(e) => {
+            println!("  Rust wake failed (lldb-dap likely unavailable): {}", e);
+            false
+        }
+    };
+    if !rust_adv_available {
+        println!("  [SKIP] Rust advertise-URL tests skipped");
+    }
+    sleep_app(&client, RUST_APP_URL).await;
+
+    println!("\n{}", "=".repeat(60));
+    println!(
+        "Phase 6 complete — advertise_url verified: Python + Go{}",
+        if rust_adv_available {
+            " + Rust"
+        } else {
+            " (Rust skipped)"
+        }
+    );
+    println!("{}", "=".repeat(60));
+
+    // ── Phase 7: MCP Bridge Auto-Switch via Advertise URL ──
+    // Spawn detrix mcp with the daemon URL using IP (http://127.0.0.1:8095).
+    // The daemon's advertise_url is http://localhost:8095 (different string).
+    // On wake, the bridge detects daemon_url != current URL → auto-switches.
+    // Verifies: daemon_url extraction, auto-switch logic, subsequent requests work.
+    println!("\n{}", "=".repeat(60));
+    println!("Phase 7: MCP Bridge Auto-Switch via Advertise URL");
+    println!("{}", "=".repeat(60));
+
+    // Restart daemon with advertise_url (clean DB for fresh state)
+    println!(
+        "\n--- Restarting daemon with DETRIX_ADVERTISE_URL={} ---",
+        ADVERTISE_URL
+    );
+    restart_daemon_with_env(&[("TEST_ADVERTISE_URL", ADVERTISE_URL)]).await;
+    println!("  Daemon restarted");
+
+    // Spawn detrix mcp with IP-based daemon URL (differs from advertise_url string)
+    let ws_root_7 = get_workspace_root();
+    let detrix_bin_7 =
+        find_detrix_binary(&ws_root_7).expect("detrix binary not found — run `cargo build` first");
+
+    // Use 127.0.0.1 (IP) so it differs from advertise_url "localhost" (hostname)
+    let bridge_daemon_url = format!("http://127.0.0.1:{}", DAEMON_HTTP_PORT);
+    println!(
+        "  Spawning detrix mcp --daemon-url {} (IP-based, differs from advertise_url)",
+        bridge_daemon_url
+    );
+
+    let mut mcp_child = tokio::process::Command::new(&detrix_bin_7)
+        .args(["mcp", "--daemon-url", &bridge_daemon_url])
+        .env("DETRIX_TOKEN", DOCKER_AUTH_TOKEN)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn detrix mcp failed");
+
+    let mut mcp_stdin = mcp_child.stdin.take().expect("stdin");
+    let mcp_stdout = mcp_child.stdout.take().expect("stdout");
+    let mut mcp_reader = BufReader::new(mcp_stdout);
+
+    // Helper: read a JSON-RPC response (skip notifications)
+    async fn read_jsonrpc_response(
+        reader: &mut BufReader<tokio::process::ChildStdout>,
+        timeout_secs: u64,
+    ) -> serde_json::Value {
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            let mut line = String::new();
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                panic!("JSON-RPC response timeout ({}s)", timeout_secs);
+            }
+            let read_result = tokio::time::timeout(remaining, reader.read_line(&mut line))
+                .await
+                .unwrap_or_else(|_| panic!("JSON-RPC response timeout ({}s)", timeout_secs))
+                .expect("read JSON-RPC response");
+            assert!(read_result > 0, "Empty JSON-RPC response (EOF)");
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                // Skip notifications (no "id" or "id":null)
+                if parsed.get("id").is_some_and(|v| !v.is_null()) {
+                    return parsed;
+                }
+            }
+        }
+    }
+
+    // Send JSON-RPC initialize (forwarded to real daemon at 127.0.0.1:8095)
+    let init_msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "e2e-phase7", "version": "1.0" }
+        },
+        "id": 1
+    });
+    mcp_stdin
+        .write_all(format!("{}\n", init_msg).as_bytes())
+        .await
+        .expect("write initialize");
+    mcp_stdin.flush().await.expect("flush");
+
+    let init_resp = read_jsonrpc_response(&mut mcp_reader, 10).await;
+    assert!(
+        init_resp.get("result").is_some(),
+        "initialize should succeed: {}",
+        init_resp
+    );
+    println!("  initialize OK");
+
+    // Send notifications/initialized
+    let initialized_msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    });
+    mcp_stdin
+        .write_all(format!("{}\n", initialized_msg).as_bytes())
+        .await
+        .expect("write initialized");
+    mcp_stdin.flush().await.expect("flush");
+
+    // Brief pause to let the bridge process the notification
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Send wake tool call (Docker-internal URL, reachable by daemon)
+    // Bridge forwards to daemon → daemon wakes Python → response has daemon_url
+    // Bridge sees daemon_url (localhost:8095) != current (127.0.0.1:8095) → auto-switch
+    let wake_msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "wake",
+            "arguments": {
+                "app_url": PYTHON_APP_URL
+            }
+        },
+        "id": 2
+    });
+    mcp_stdin
+        .write_all(format!("{}\n", wake_msg).as_bytes())
+        .await
+        .expect("write wake");
+    mcp_stdin.flush().await.expect("flush");
+
+    // Read wake response (may take longer due to Python wake + registration)
+    let wake_resp_7 = read_jsonrpc_response(&mut mcp_reader, 60).await;
+    println!(
+        "  Wake response (truncated): {}",
+        &wake_resp_7.to_string()[..wake_resp_7.to_string().len().min(500)]
+    );
+
+    // Extract text content from wake response
+    let wake_text: String = wake_resp_7
+        .pointer("/result/content")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+
+    // Assert daemon_url is present in the response
+    assert!(
+        wake_text.contains("daemon_url") || wake_text.contains(ADVERTISE_URL),
+        "Wake response should contain daemon_url.\nText: {}",
+        wake_text
+    );
+    println!("  Wake response contains daemon_url");
+
+    // Assert auto-switch happened (advertise_url differs from bridge's IP-based URL)
+    assert!(
+        wake_text.contains("Auto-switched to daemon"),
+        "Wake response should contain auto-switch note.\nText: {}",
+        wake_text
+    );
+    println!(
+        "  Auto-switch confirmed: {} → {}",
+        bridge_daemon_url, ADVERTISE_URL
+    );
+
+    // Send get_status — should succeed after auto-switch
+    let status_msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "get_status",
+            "arguments": {}
+        },
+        "id": 3
+    });
+    mcp_stdin
+        .write_all(format!("{}\n", status_msg).as_bytes())
+        .await
+        .expect("write get_status");
+    mcp_stdin.flush().await.expect("flush");
+
+    let status_resp = read_jsonrpc_response(&mut mcp_reader, 10).await;
+    let has_result = status_resp.get("result").is_some();
+    let is_error = status_resp
+        .pointer("/result/isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(
+        has_result && !is_error,
+        "get_status should succeed after auto-switch.\nResponse: {}",
+        status_resp
+    );
+    println!("  get_status succeeded after auto-switch");
+
+    // Cleanup: kill MCP process, sleep Python
+    drop(mcp_stdin);
+    let _ = mcp_child.kill().await;
+    println!("  MCP bridge process stopped");
+
+    // Sleep Python (it was woken by the bridge's forwarded wake)
+    sleep_app(&client, PYTHON_APP_URL).await;
+    println!("  Python sleeping");
+
+    println!("\n{}", "=".repeat(60));
+    println!("Phase 7 complete — MCP bridge direct wake + auto-switch verified");
+    println!("{}", "=".repeat(60));
 
     println!("\n{}", "=".repeat(60));
     println!("ALL PHASES COMPLETE — Docker Cloud E2E passed!");

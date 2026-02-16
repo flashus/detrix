@@ -125,7 +125,7 @@ tasks:
     desc: Lint Python client code
     dir: python
     cmds:
-      - uv run ruff check detrix
+      - uv run ruff check detrix tests --fix
 
   python-format:
     desc: Format Python client code
@@ -262,6 +262,14 @@ tasks:
       - task: go-format-check
       - task: rust-fmt-check
       - echo "✅ All client formatting OK"
+
+  lint:
+    desc: Lint all client code (Python, Go, Rust)
+    cmds:
+      - task: python-lint
+      - task: go-lint
+      - task: rust-lint
+      - echo "✅ All client linting passed"
 
   test:
     desc: Run all client tests (Python, Go, and Rust)

@@ -392,10 +392,19 @@ components:
           type: string
           description: Connection ID assigned by the daemon
           example: "conn_abc123"
+        daemon_url:
+          type: string
+          format: uri
+          description: |
+            External URL of the daemon this client registered with.
+            Set from daemon's advertise_url returned during registration.
+            Used by MCP bridge for auto-discovery of remote daemons.
+          example: "http://localhost:8095"
       example:
         status: "awake"
         debug_port: 5678
         connection_id: "conn_abc123"
+        daemon_url: "http://localhost:8095"
 
     SleepResponse:
       type: object

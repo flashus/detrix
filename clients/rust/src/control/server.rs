@@ -234,6 +234,7 @@ mod tests {
             status: WakeResponseStatus::Awake,
             debug_port: 5678,
             connection_id: "conn-123".to_string(),
+            daemon_url: None,
         })
     }
 

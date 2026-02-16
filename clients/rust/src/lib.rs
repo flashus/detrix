@@ -150,6 +150,7 @@ pub fn init(config: Config) -> Result<()> {
         guard.detrix_home = config
             .detrix_home_path()
             .map(|p| p.to_string_lossy().to_string());
+        guard.workspace_root = config.workspace_root.clone();
         guard.safe_mode = config.safe_mode;
         guard.build_commit = config.build_commit.clone();
         guard.build_tag = config.build_tag.clone();
@@ -397,6 +398,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
         debug_port,
         name,
         detrix_home,
+        workspace_root_override,
         safe_mode,
         build_commit_override,
         build_tag_override,
@@ -415,6 +417,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
             guard.debug_port,
             guard.name.clone(),
             guard.detrix_home.clone(),
+            guard.workspace_root.clone(),
             guard.safe_mode,
             guard.build_commit.clone(),
             guard.build_tag.clone(),
@@ -431,6 +434,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
             status: WakeResponseStatus::AlreadyAwake,
             debug_port: i32::from(guard.actual_debug_port),
             connection_id: guard.connection_id.clone().unwrap_or_default(),
+            daemon_url: guard.daemon_advertise_url.clone(),
         });
     }
 
@@ -504,13 +508,15 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
     state::set_lldb_process(lldb_process);
 
     // Get workspace root and hostname for identity
-    let workspace_root = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.to_str().map(String::from))
-        .unwrap_or_else(|| {
-            warn!("Failed to get current directory, using /unknown");
-            "/unknown".to_string()
-        });
+    let workspace_root = workspace_root_override.unwrap_or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_else(|| {
+                warn!("Failed to get current directory, using /unknown");
+                "/unknown".to_string()
+            })
+    });
 
     let hostname = hostname::get()
         .ok()
@@ -528,7 +534,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
     // Use advertise_host if set (for Docker/cloud), otherwise use control_host
     // Pass our PID so the daemon can use AttachPid mode with lldb-dap
     let registration_host = advertise_host.unwrap_or(debug_host);
-    let connection_id = match daemon_client.register(
+    let (connection_id, advertise_url) = match daemon_client.register(
         &target_daemon_url,
         RegisterRequest {
             host: registration_host,
@@ -544,7 +550,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
         },
         register_timeout,
     ) {
-        Ok(id) => id,
+        Ok(result) => result,
         Err(e) => {
             // Kill lldb and revert state
             if let Some(mut process) = state::take_lldb_process() {
@@ -563,6 +569,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
         guard.actual_debug_port = actual_debug_port;
         guard.debug_port_active = true;
         guard.connection_id = Some(connection_id.clone());
+        guard.daemon_advertise_url = advertise_url.clone();
     }
 
     info!(
@@ -574,6 +581,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
         status: WakeResponseStatus::Awake,
         debug_port: i32::from(actual_debug_port),
         connection_id,
+        daemon_url: advertise_url,
     })
 }
 

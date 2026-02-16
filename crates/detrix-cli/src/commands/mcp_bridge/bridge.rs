@@ -506,32 +506,14 @@ impl McpBridge {
                 }
             };
 
-            // Check if this is a bridge-local tool call
-            let response = if let Some(local_response) = self.try_handle_local_tool(&request).await
-            {
-                local_response
-            } else {
-                // Not a local tool, forward to daemon
-                match self.forward_request(request.clone()).await {
-                    Ok(r) => {
-                        // Auto-attach to connections mentioned in successful responses
-                        self.auto_attach_from_response(&r).await;
-                        r
-                    }
-                    Err(e) => {
-                        error!("Failed to forward request: {}", e);
-                        let id = request.get("id").cloned().unwrap_or(Value::Null);
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "error": {
-                                "code": -32603,
-                                "message": format!("Internal error: {}", e)
-                            },
-                            "id": id
-                        })
-                    }
-                }
+            // Route request: local tool → daemon forward (with wake fallback)
+            let mut response = match self.try_handle_local_tool(&request).await {
+                Some(local_response) => local_response,
+                None => self.forward_or_fallback(&request).await,
             };
+
+            // Auto-switch daemon if wake response contains daemon_url
+            self.maybe_auto_switch_daemon(&mut response).await;
 
             // Write response to stdout
             let response_str = serde_json::to_string(&response)?;
@@ -921,8 +903,12 @@ impl McpBridge {
         new_url: String,
         new_file_server_host: Option<String>,
     ) -> Result<(), String> {
+        // Normalize URL: trim trailing slashes to prevent double-slash issues
+        // (e.g., Pydantic AnyUrl adds trailing slash: "http://host:8090/")
+        let new_url = new_url.trim_end_matches('/').to_string();
+
         // Validate URL is reachable
-        let health_url = format!("{}/health", new_url.trim_end_matches('/'));
+        let health_url = format!("{}/health", new_url);
         let resp = self
             .client
             .get(&health_url)
@@ -954,6 +940,169 @@ impl McpBridge {
     pub async fn get_current_daemon_url(&self) -> String {
         self.daemon_url.read().await.clone()
     }
+
+    /// Forward a request to the daemon, with wake fallback on failure.
+    ///
+    /// If the forwarded request fails and it was a `wake` tool call with an
+    /// `app_url`, tries waking the app directly as a fallback.
+    ///
+    /// Fallback triggers on both transport errors (daemon unreachable) AND
+    /// JSON-RPC errors from the daemon (e.g., daemon can't reach app due to
+    /// auth mismatch in Docker/cloud setups).
+    async fn forward_or_fallback(&self, request: &Value) -> Value {
+        let result = self.forward_request(request.clone()).await;
+
+        // Happy path: forward succeeded with a non-error response
+        if let Ok(r) = result {
+            if !is_jsonrpc_error(&r) {
+                self.auto_attach_from_response(&r).await;
+                return r;
+            }
+
+            // Daemon returned a JSON-RPC error — for wake calls, try direct fallback.
+            // This handles the case where the local daemon can't reach the app
+            // (e.g., auth mismatch when app is on a different daemon in Docker/cloud).
+            if let Some(app_url) = extract_wake_app_url(request) {
+                let error_msg = r
+                    .pointer("/error/message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
+                let id = request.get("id").cloned().unwrap_or(Value::Null);
+                info!(
+                    "Forwarded wake returned JSON-RPC error ({}), trying direct app wake at {}",
+                    error_msg, app_url
+                );
+                if let Some(r) = self.try_direct_app_wake(&app_url, id.clone()).await {
+                    self.auto_attach_from_response(&r).await;
+                    return r;
+                }
+                return jsonrpc_error(
+                    id,
+                    -32603,
+                    format!(
+                        "Wake failed via daemon ({}) and direct app wake",
+                        error_msg
+                    ),
+                );
+            }
+
+            // Non-wake JSON-RPC error — return as-is
+            return r;
+        }
+        let e = result.unwrap_err();
+
+        // Wake fallback: if this was a wake tool call, try direct app wake
+        if let Some(app_url) = extract_wake_app_url(request) {
+            let id = request.get("id").cloned().unwrap_or(Value::Null);
+            info!(
+                "Forwarded wake failed ({}), trying direct app wake at {}",
+                e, app_url
+            );
+            if let Some(r) = self.try_direct_app_wake(&app_url, id.clone()).await {
+                self.auto_attach_from_response(&r).await;
+                return r;
+            }
+            return jsonrpc_error(
+                id,
+                -32603,
+                format!("Wake failed via daemon ({}) and direct app wake", e),
+            );
+        }
+
+        error!("Failed to forward request: {}", e);
+        let id = request.get("id").cloned().unwrap_or(Value::Null);
+        jsonrpc_error(id, -32603, format!("Internal error: {}", e))
+    }
+
+    /// Check a wake response for `daemon_url` and auto-switch if present.
+    ///
+    /// This enables auto-discovery for Docker/cloud debugging:
+    /// the daemon returns its `advertise_url` in the wake response, and the
+    /// bridge auto-switches to it so the agent can observe without manual
+    /// `switch_daemon`.
+    async fn maybe_auto_switch_daemon(&self, response: &mut Value) {
+        let Some(daemon_url) = extract_daemon_url_from_response(response) else {
+            return;
+        };
+        let current_url = self.get_current_daemon_url().await;
+        // Normalize trailing slashes for comparison (Pydantic AnyUrl adds trailing slash)
+        if daemon_url.trim_end_matches('/') == current_url.trim_end_matches('/') {
+            return;
+        }
+
+        info!(
+            "Wake response contains daemon_url={}, auto-switching from {}",
+            daemon_url, current_url
+        );
+        if let Err(e) = self.switch_daemon(daemon_url.clone(), None).await {
+            warn!("Failed to auto-switch to daemon at {}: {}", daemon_url, e);
+            return;
+        }
+
+        info!("Auto-switched to daemon at {}", daemon_url);
+        append_to_response_text(
+            response,
+            format!("\n\nAuto-switched to daemon at {}", daemon_url),
+        );
+    }
+
+    /// Try to wake an app directly (fallback when forwarded wake through daemon fails).
+    ///
+    /// Sends POST to `{app_url}/detrix/wake` and builds an MCP JSON-RPC response.
+    async fn try_direct_app_wake(&self, app_url: &str, request_id: Value) -> Option<Value> {
+        let wake_url = format!("{}/detrix/wake", app_url.trim_end_matches('/'));
+        info!("Attempting direct app wake at {}", wake_url);
+
+        let resp = match self
+            .client
+            .post(&wake_url)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Direct app wake failed: {}", e);
+                return None;
+            }
+        };
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            warn!("Direct app wake failed: status {} - {}", status, body);
+            return None;
+        }
+
+        let wake_data: Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("Failed to parse direct wake response: {}", e);
+                return None;
+            }
+        };
+
+        info!("Direct app wake succeeded: {:?}", wake_data);
+
+        // Build MCP JSON-RPC response matching what the daemon's wake tool would return
+        let result_json = serde_json::json!({
+            "status": wake_data.get("status").and_then(|v| v.as_str()).unwrap_or("awake"),
+            "debug_port": wake_data.get("debug_port").and_then(|v| v.as_i64()).unwrap_or(0),
+            "connection_id": wake_data.get("connection_id").and_then(|v| v.as_str()).unwrap_or(""),
+            "daemon_url": wake_data.get("daemon_url").and_then(|v| v.as_str()),
+        });
+
+        Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string(&result_json).unwrap_or_default()
+                }]
+            },
+            "id": request_id
+        }))
+    }
 }
 
 // ============================================================================
@@ -974,6 +1123,58 @@ fn extract_connection_id_from_response(response: &Value) -> Option<String> {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     })
+}
+
+/// Extract `daemon_url` from a wake response's JSON-RPC result content.
+fn extract_daemon_url_from_response(response: &Value) -> Option<String> {
+    let contents = response.pointer("/result/content")?.as_array()?;
+    contents.iter().find_map(|item| {
+        let text = item.get("text")?.as_str()?;
+        let parsed: Value = serde_json::from_str(text).ok()?;
+        parsed
+            .get("daemon_url")
+            .or_else(|| parsed.get("daemonUrl"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    })
+}
+
+/// Append text to the first text content item in a JSON-RPC response.
+fn append_to_response_text(response: &mut Value, text: String) {
+    if let Some(contents) = response
+        .pointer_mut("/result/content")
+        .and_then(|v| v.as_array_mut())
+    {
+        if let Some(first) = contents.first_mut() {
+            if let Some(existing) = first.get("text").and_then(|v| v.as_str()) {
+                let new_text = format!("{}{}", existing, text);
+                first["text"] = Value::String(new_text);
+            }
+        }
+    }
+}
+
+/// Check if a JSON-RPC request is a `wake` tool call and extract the `app_url` argument.
+fn extract_wake_app_url(request: &Value) -> Option<String> {
+    if request.get("method")?.as_str()? != "tools/call" {
+        return None;
+    }
+    let params = request.get("params")?;
+    let tool_name = params.get("name")?.as_str()?;
+    if tool_name != "wake" {
+        return None;
+    }
+    let arguments = params.get("arguments")?;
+    arguments
+        .get("app_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Check if a JSON-RPC response is an error response.
+fn is_jsonrpc_error(response: &Value) -> bool {
+    response.get("error").is_some()
 }
 
 // ============================================================================

@@ -234,6 +234,7 @@ mod tests {
                 status: "ok".to_string(),
                 connection_id: Some("test-conn-123".to_string()),
                 debug_port: Some(5679),
+                daemon_url: None,
             },
             RemoteSleepResponse {
                 app_url: "http://app:8091".to_string(),
@@ -260,6 +261,7 @@ mod tests {
                 status: "ok".to_string(),
                 connection_id: Some("missing-conn".to_string()),
                 debug_port: None,
+                daemon_url: None,
             },
             RemoteSleepResponse {
                 app_url: "http://app:8091".to_string(),
@@ -286,6 +288,7 @@ mod tests {
                 status: "ok".to_string(),
                 connection_id: None,
                 debug_port: None,
+                daemon_url: None,
             },
             RemoteSleepResponse {
                 app_url: "http://app:8091".to_string(),
@@ -311,6 +314,7 @@ mod tests {
                 status: "ok".to_string(),
                 connection_id: None,
                 debug_port: None,
+                daemon_url: None,
             },
             RemoteSleepResponse {
                 app_url: "http://app:8091".to_string(),

@@ -76,7 +76,7 @@ func (s *Server) Start(host string, port int) (int, error) {
 	s.listener = listener
 	tcpAddr, ok := listener.Addr().(*net.TCPAddr)
 	if !ok {
-		listener.Close()
+		_ = listener.Close()
 		return 0, fmt.Errorf("listener address is not *net.TCPAddr: %T", listener.Addr())
 	}
 	s.actualPort = tcpAddr.Port

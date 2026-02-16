@@ -63,6 +63,7 @@ message CreateConnectionResponse {
   string status = 2;                // "created", "connected", etc.
   ConnectionInfo connection = 3;    // Full connection info
   ResponseMetadata metadata = 4;
+  optional string advertise_url = 5; // Daemon's external URL (from advertise_url config)
 }
 
 message CloseConnectionRequest {
