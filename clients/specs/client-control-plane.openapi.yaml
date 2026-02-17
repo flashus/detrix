@@ -71,6 +71,24 @@ paths:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
 
+  /detrix/discover:
+    get:
+      tags:
+        - Health
+      summary: Discover daemon information
+      description: |
+        Returns the external daemon URL for this client.
+        NO authentication required. Used by MCP bridge to discover
+        which daemon to connect to before authentication is established.
+      operationId: discover
+      responses:
+        "200":
+          description: Daemon discovery information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiscoverResponse"
+
   /detrix/status:
     get:
       tags:
@@ -429,6 +447,27 @@ components:
         - **sleeping**: Initial/inactive state. Control plane running, debugger not started.
         - **waking**: Transitional state during wake operation.
         - **awake**: Active state. Debugger listening, registered with daemon.
+
+    DiscoverResponse:
+      type: object
+      description: Daemon discovery response (no auth required)
+      required:
+        - daemon_url
+        - name
+      properties:
+        daemon_url:
+          type: string
+          description: |
+            External daemon URL (daemon_advertise_url if set, else daemon_url).
+            Used by MCP bridge to discover which daemon to connect to.
+          example: "http://localhost:8095"
+        name:
+          type: string
+          description: Connection name for this client
+          example: "order-service"
+      example:
+        daemon_url: "http://localhost:8095"
+        name: "order-service"
 
     ErrorResponse:
       type: object

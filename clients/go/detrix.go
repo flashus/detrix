@@ -238,6 +238,7 @@ func Init(cfg Config) error {
 		statusProvider,
 		wakeHandler,
 		sleepHandler,
+		discoverProvider,
 	)
 
 	actualPort, err := controlServer.Start(cfg.ControlHost, cfg.ControlPort)
@@ -701,6 +702,20 @@ func statusProvider() map[string]any {
 		"debug_port_active": status.DebugPortActive,
 		"daemon_url":        status.DaemonUrl,
 		"connection_id":     status.ConnectionId,
+	}
+}
+
+func discoverProvider() map[string]any {
+	s := state.Get()
+	s.RLock()
+	defer s.RUnlock()
+	daemonURL := s.DaemonAdvertiseURL
+	if daemonURL == "" {
+		daemonURL = s.DaemonURL
+	}
+	return map[string]any{
+		"daemon_url": daemonURL,
+		"name":       s.Name,
 	}
 }
 

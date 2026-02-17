@@ -143,6 +143,8 @@ class ControlHandler(BaseHTTPRequestHandler):
                 self._send_error_response("Unauthorized", 401)
                 return
             self._handle_info()
+        elif path == "/detrix/discover":
+            self._handle_discover()
         else:
             self._send_error_response("Not found", 404)
 
@@ -196,6 +198,17 @@ class ControlHandler(BaseHTTPRequestHandler):
                 python_executable=python_info["python_executable"],
             )
             self._send_json_response(response.model_dump())
+
+    def _handle_discover(self) -> None:
+        """Handle /detrix/discover endpoint (no auth required).
+
+        Returns daemon discovery information for MCP bridge auto-switching.
+        """
+        state = get_state()
+        with state.lock:
+            daemon_url = state.daemon_advertise_url or state.daemon_url
+            name = state.name
+        self._send_json_response({"daemon_url": daemon_url, "name": name})
 
     def _handle_wake(self) -> None:
         """Handle /detrix/wake endpoint.

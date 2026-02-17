@@ -3,7 +3,9 @@
 //! Contains the McpBridge struct and its methods for forwarding requests,
 //! managing heartbeats, and handling daemon communication.
 
-use super::auth::{discover_auth_token, is_connection_error};
+use super::auth::{
+    discover_auth_token, extract_host_port, is_connection_error, resolve_token_for_host,
+};
 use super::config::{BridgeConfig, RestartBackoff};
 use anyhow::{Context, Result};
 use detrix_config::constants::{AUTHORIZATION_HEADER, BEARER_PREFIX};
@@ -926,6 +928,13 @@ impl McpBridge {
         *url_guard = new_url.clone();
         drop(url_guard);
 
+        // Resolve and update auth token for the new daemon
+        if let Some(hp) = extract_host_port(&new_url) {
+            if let Some(token) = resolve_token_for_host(&hp, true) {
+                *self.auth_token.write().await = Some(token);
+            }
+        }
+
         // Update file server host if provided
         if let Some(host) = new_file_server_host {
             let mut host_guard = self.file_server_host.write().await;
@@ -941,77 +950,106 @@ impl McpBridge {
         self.daemon_url.read().await.clone()
     }
 
-    /// Forward a request to the daemon, with wake fallback on failure.
+    /// Forward a request to the daemon, with discovery-first flow for wake requests.
     ///
-    /// If the forwarded request fails and it was a `wake` tool call with an
-    /// `app_url`, tries waking the app directly as a fallback.
+    /// For wake requests with `app_url`: discovers the app's daemon via `/detrix/discover`,
+    /// looks up credentials, switches daemon if needed, then forwards through the daemon.
     ///
-    /// Fallback triggers on both transport errors (daemon unreachable) AND
-    /// JSON-RPC errors from the daemon (e.g., daemon can't reach app due to
-    /// auth mismatch in Docker/cloud setups).
+    /// For non-wake requests: forwards directly to the current daemon.
     async fn forward_or_fallback(&self, request: &Value) -> Value {
+        // For wake requests: use discovery-first flow
+        if let Some(app_url) = extract_wake_app_url(request) {
+            return self.handle_wake_with_discovery(request, &app_url).await;
+        }
+
+        // Non-wake: forward normally
         let result = self.forward_request(request.clone()).await;
 
-        // Happy path: forward succeeded with a non-error response
-        if let Ok(r) = result {
-            if !is_jsonrpc_error(&r) {
-                self.auto_attach_from_response(&r).await;
-                return r;
-            }
-
-            // Daemon returned a JSON-RPC error — for wake calls, try direct fallback.
-            // This handles the case where the local daemon can't reach the app
-            // (e.g., auth mismatch when app is on a different daemon in Docker/cloud).
-            if let Some(app_url) = extract_wake_app_url(request) {
-                let error_msg = r
-                    .pointer("/error/message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown error");
-                let id = request.get("id").cloned().unwrap_or(Value::Null);
-                info!(
-                    "Forwarded wake returned JSON-RPC error ({}), trying direct app wake at {}",
-                    error_msg, app_url
-                );
-                if let Some(r) = self.try_direct_app_wake(&app_url, id.clone()).await {
+        match result {
+            Ok(r) => {
+                if !is_jsonrpc_error(&r) {
                     self.auto_attach_from_response(&r).await;
-                    return r;
                 }
-                return jsonrpc_error(
-                    id,
-                    -32603,
-                    format!(
-                        "Wake failed via daemon ({}) and direct app wake",
-                        error_msg
-                    ),
-                );
+                r
             }
-
-            // Non-wake JSON-RPC error — return as-is
-            return r;
-        }
-        let e = result.unwrap_err();
-
-        // Wake fallback: if this was a wake tool call, try direct app wake
-        if let Some(app_url) = extract_wake_app_url(request) {
-            let id = request.get("id").cloned().unwrap_or(Value::Null);
-            info!(
-                "Forwarded wake failed ({}), trying direct app wake at {}",
-                e, app_url
-            );
-            if let Some(r) = self.try_direct_app_wake(&app_url, id.clone()).await {
-                self.auto_attach_from_response(&r).await;
-                return r;
+            Err(e) => {
+                error!("Failed to forward request: {}", e);
+                let id = request.get("id").cloned().unwrap_or(Value::Null);
+                jsonrpc_error(id, -32603, format!("Internal error: {}", e))
             }
-            return jsonrpc_error(
-                id,
-                -32603,
-                format!("Wake failed via daemon ({}) and direct app wake", e),
-            );
         }
+    }
 
-        error!("Failed to forward request: {}", e);
+    /// Discovery-first wake flow.
+    ///
+    /// 1. GET `{app_url}/detrix/discover` (no auth) to find the app's daemon URL
+    /// 2. Look up token for that daemon from credentials
+    /// 3. Switch daemon if it differs from current
+    /// 4. Forward wake request through the (now-correct) daemon
+    async fn handle_wake_with_discovery(&self, request: &Value, app_url: &str) -> Value {
         let id = request.get("id").cloned().unwrap_or(Value::Null);
-        jsonrpc_error(id, -32603, format!("Internal error: {}", e))
+
+        // 1. Discover app's daemon
+        if let Some((daemon_url, app_name)) = self.discover_app_daemon(app_url).await {
+            let current = self.get_current_daemon_url().await;
+            if daemon_url.trim_end_matches('/') != current.trim_end_matches('/') {
+                info!(
+                    "Discovery: {} uses daemon {}, switching from {}",
+                    app_name, daemon_url, current
+                );
+                // Look up token for target daemon
+                if let Some(hp) = extract_host_port(&daemon_url) {
+                    let token = resolve_token_for_host(&hp, true);
+                    // Switch daemon + update token
+                    if let Ok(()) = self.switch_daemon(daemon_url.clone(), None).await {
+                        if let Some(t) = token {
+                            *self.auth_token.write().await = Some(t);
+                        }
+                    }
+                }
+            }
+        } else {
+            debug!(
+                "Discovery failed for {}, forwarding to current daemon",
+                app_url
+            );
+        }
+
+        // 2. Forward wake to (now-correct) daemon
+        match self.forward_request(request.clone()).await {
+            Ok(r) if !is_jsonrpc_error(&r) => {
+                self.auto_attach_from_response(&r).await;
+                r
+            }
+            Ok(r) => r,
+            Err(e) => jsonrpc_error(id, -32603, format!("Wake failed: {}", e)),
+        }
+    }
+
+    /// Discover which daemon an app uses by calling its `/detrix/discover` endpoint.
+    ///
+    /// Returns `(daemon_url, app_name)` on success. This endpoint requires no authentication.
+    async fn discover_app_daemon(&self, app_url: &str) -> Option<(String, String)> {
+        let url = format!("{}/detrix/discover", app_url.trim_end_matches('/'));
+        debug!("Discovering app daemon at {}", url);
+
+        let resp = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .ok()?;
+
+        if !resp.status().is_success() {
+            debug!("Discovery endpoint returned {}", resp.status());
+            return None;
+        }
+
+        let data: Value = resp.json().await.ok()?;
+        let daemon_url = data["daemon_url"].as_str()?.to_string();
+        let name = data["name"].as_str().unwrap_or("unknown").to_string();
+        Some((daemon_url, name))
     }
 
     /// Check a wake response for `daemon_url` and auto-switch if present.
@@ -1044,64 +1082,6 @@ impl McpBridge {
             response,
             format!("\n\nAuto-switched to daemon at {}", daemon_url),
         );
-    }
-
-    /// Try to wake an app directly (fallback when forwarded wake through daemon fails).
-    ///
-    /// Sends POST to `{app_url}/detrix/wake` and builds an MCP JSON-RPC response.
-    async fn try_direct_app_wake(&self, app_url: &str, request_id: Value) -> Option<Value> {
-        let wake_url = format!("{}/detrix/wake", app_url.trim_end_matches('/'));
-        info!("Attempting direct app wake at {}", wake_url);
-
-        let resp = match self
-            .client
-            .post(&wake_url)
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("Direct app wake failed: {}", e);
-                return None;
-            }
-        };
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            warn!("Direct app wake failed: status {} - {}", status, body);
-            return None;
-        }
-
-        let wake_data: Value = match resp.json().await {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("Failed to parse direct wake response: {}", e);
-                return None;
-            }
-        };
-
-        info!("Direct app wake succeeded: {:?}", wake_data);
-
-        // Build MCP JSON-RPC response matching what the daemon's wake tool would return
-        let result_json = serde_json::json!({
-            "status": wake_data.get("status").and_then(|v| v.as_str()).unwrap_or("awake"),
-            "debug_port": wake_data.get("debug_port").and_then(|v| v.as_i64()).unwrap_or(0),
-            "connection_id": wake_data.get("connection_id").and_then(|v| v.as_str()).unwrap_or(""),
-            "daemon_url": wake_data.get("daemon_url").and_then(|v| v.as_str()),
-        });
-
-        Some(serde_json::json!({
-            "jsonrpc": "2.0",
-            "result": {
-                "content": [{
-                    "type": "text",
-                    "text": serde_json::to_string(&result_json).unwrap_or_default()
-                }]
-            },
-            "id": request_id
-        }))
     }
 }
 

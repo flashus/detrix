@@ -57,8 +57,8 @@ use tracing::{debug, info, warn};
 pub use config::{Config, TlsConfig};
 pub use error::{Error, Result};
 pub use generated::{
-    ClientState, SleepResponse, SleepResponseStatus, StatusResponse, WakeResponse,
-    WakeResponseStatus,
+    ClientState, DiscoverResponse, SleepResponse, SleepResponseStatus, StatusResponse,
+    WakeResponse, WakeResponseStatus,
 };
 
 use control::ControlServer;
@@ -199,6 +199,7 @@ pub fn init(config: Config) -> Result<()> {
     let wake_callback =
         Arc::new(|daemon_url: Option<String>| wake_handler(daemon_url).map_err(|e| e.to_string()));
     let sleep_callback = Arc::new(|| sleep_handler().map_err(|e| e.to_string()));
+    let discover_callback = Arc::new(discover_provider);
 
     // Start control server
     let server = ControlServer::start(
@@ -208,6 +209,7 @@ pub fn init(config: Config) -> Result<()> {
         status_callback,
         wake_callback,
         sleep_callback,
+        discover_callback,
     )?;
 
     let actual_port = server.port();
@@ -379,6 +381,19 @@ pub fn shutdown() -> Result<()> {
 
 fn status_provider() -> StatusResponse {
     status()
+}
+
+fn discover_provider() -> DiscoverResponse {
+    let state = get();
+    let guard = state.read().unwrap_or_else(|e| e.into_inner());
+    let daemon_url = guard
+        .daemon_advertise_url
+        .clone()
+        .unwrap_or_else(|| guard.daemon_url.clone());
+    DiscoverResponse {
+        daemon_url,
+        name: guard.name.clone(),
+    }
 }
 
 fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {

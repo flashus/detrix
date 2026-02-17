@@ -15,7 +15,8 @@ use tracing::{debug, error, info};
 use crate::error::{Result, ResultExt};
 
 use super::handlers::{
-    handle_request, HandlerContext, SharedAuthToken, SleepCallback, StatusCallback, WakeCallback,
+    handle_request, DiscoverCallback, HandlerContext, SharedAuthToken, SleepCallback,
+    StatusCallback, WakeCallback,
 };
 
 /// HTTP control plane server.
@@ -42,6 +43,7 @@ impl ControlServer {
         status_callback: StatusCallback,
         wake_callback: WakeCallback,
         sleep_callback: SleepCallback,
+        discover_callback: DiscoverCallback,
     ) -> Result<Self> {
         let addr: SocketAddr = format!("{}:{}", host, port)
             .parse()
@@ -55,6 +57,7 @@ impl ControlServer {
             status_callback,
             wake_callback,
             sleep_callback,
+            discover_callback,
         });
 
         // Bind on main thread to get the actual port before spawning
@@ -212,8 +215,8 @@ async fn serve_connection(
 mod tests {
     use super::*;
     use crate::generated::{
-        ClientState, SleepResponse, SleepResponseStatus, StatusResponse, WakeResponse,
-        WakeResponseStatus,
+        ClientState, DiscoverResponse, SleepResponse, SleepResponseStatus, StatusResponse,
+        WakeResponse, WakeResponseStatus,
     };
 
     fn mock_status() -> StatusResponse {
@@ -244,6 +247,13 @@ mod tests {
         })
     }
 
+    fn mock_discover() -> DiscoverResponse {
+        DiscoverResponse {
+            daemon_url: "http://127.0.0.1:8090".to_string(),
+            name: "test-client".to_string(),
+        }
+    }
+
     #[test]
     fn test_server_start_stop() {
         let server = ControlServer::start(
@@ -253,6 +263,7 @@ mod tests {
             Arc::new(mock_status),
             Arc::new(mock_wake),
             Arc::new(mock_sleep),
+            Arc::new(mock_discover),
         )
         .unwrap();
 
@@ -268,6 +279,7 @@ mod tests {
             Arc::new(mock_status),
             Arc::new(mock_wake),
             Arc::new(mock_sleep),
+            Arc::new(mock_discover),
         )
         .unwrap();
 
@@ -303,6 +315,7 @@ mod tests {
             Arc::new(mock_status),
             Arc::new(mock_wake),
             Arc::new(mock_sleep),
+            Arc::new(mock_discover),
         )
         .unwrap();
 

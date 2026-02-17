@@ -22,6 +22,9 @@ pub const DEFAULT_PID_FILENAME: &str = "daemon.pid";
 /// Default auth token filename
 pub const AUTH_TOKEN_FILENAME: &str = "auth-token";
 
+/// Default credentials filename
+pub const CREDENTIALS_FILENAME: &str = "credentials.toml";
+
 /// Default daemon log filename (for tracing logs with daily rotation)
 pub const DEFAULT_DAEMON_LOG_FILENAME: &str = "detrix_daemon.log";
 
@@ -76,6 +79,14 @@ pub fn default_pid_path() -> PathBuf {
 /// The token is ephemeral and regenerated on each daemon restart.
 pub fn auth_token_path() -> PathBuf {
     detrix_home().join(AUTH_TOKEN_FILENAME)
+}
+
+/// Get credentials file path.
+///
+/// Returns `~/detrix/credentials.toml`.
+/// This file stores per-host daemon authentication tokens.
+pub fn credentials_path() -> PathBuf {
+    detrix_home().join(CREDENTIALS_FILENAME)
 }
 
 /// Get default log directory.

@@ -61,8 +61,10 @@ pub async fn run_bridge(
     mcp_config: &detrix_config::McpBridgeConfig,
     config_port: u16,
 ) -> Result<()> {
-    // Discover auth token for daemon authentication
-    let auth_token = discover_auth_token();
+    // Resolve auth token for daemon authentication
+    // Priority: DETRIX_TOKEN env > credentials.toml per-host > auth-token file
+    let daemon_hp = format!("{}:{}", daemon_host, daemon_port);
+    let auth_token = auth::resolve_token_for_host(&daemon_hp, true).or_else(discover_auth_token);
     if auth_token.is_some() {
         info!("Auth token discovered for daemon communication");
     }

@@ -15,8 +15,8 @@ use crate::auth::is_authorized;
 /// `ControlServer` (for updating the token when the daemon restarts).
 pub type SharedAuthToken = Arc<RwLock<Option<String>>>;
 use crate::generated::{
-    ErrorResponse, HealthResponse, HealthResponseService, HealthResponseStatus, InfoResponse,
-    SleepResponse, StatusResponse, WakeRequest, WakeResponse,
+    DiscoverResponse, ErrorResponse, HealthResponse, HealthResponseService, HealthResponseStatus,
+    InfoResponse, SleepResponse, StatusResponse, WakeRequest, WakeResponse,
 };
 
 // ============================================================================
@@ -50,12 +50,16 @@ pub type WakeCallback = Arc<dyn Fn(Option<String>) -> Result<WakeResponse, Strin
 /// Callback type for sleep operation.
 pub type SleepCallback = Arc<dyn Fn() -> Result<SleepResponse, String> + Send + Sync>;
 
+/// Callback type for discover operation.
+pub type DiscoverCallback = Arc<dyn Fn() -> DiscoverResponse + Send + Sync>;
+
 /// Handler context with callbacks and auth token.
 pub struct HandlerContext {
     pub auth_token: SharedAuthToken,
     pub status_callback: StatusCallback,
     pub wake_callback: WakeCallback,
     pub sleep_callback: SleepCallback,
+    pub discover_callback: DiscoverCallback,
 }
 
 /// Handle an incoming HTTP request.
@@ -77,7 +81,7 @@ pub async fn handle_request(
         .map(|s| s.to_string());
 
     // Check auth for protected endpoints
-    let needs_auth = path != "/detrix/health";
+    let needs_auth = path != "/detrix/health" && path != "/detrix/discover";
     if needs_auth {
         let token_guard = ctx.auth_token.read().unwrap_or_else(|e| e.into_inner());
         if !is_authorized(&remote_addr, auth_header.as_deref(), token_guard.as_deref()) {
@@ -88,6 +92,7 @@ pub async fn handle_request(
     // Route the request
     match (method, path.as_str()) {
         (Method::GET, "/detrix/health") => handle_health(),
+        (Method::GET, "/detrix/discover") => handle_discover(&ctx),
         (Method::GET, "/detrix/status") => handle_status(&ctx),
         (Method::GET, "/detrix/info") => handle_info(&ctx),
         (Method::POST, "/detrix/wake") => handle_wake(req, &ctx).await,
@@ -99,6 +104,12 @@ pub async fn handle_request(
 /// Handle GET /detrix/health (no auth required).
 fn handle_health() -> Response<Full<Bytes>> {
     json_response(StatusCode::OK, &HealthResponse::default())
+}
+
+/// Handle GET /detrix/discover (no auth required).
+fn handle_discover(ctx: &HandlerContext) -> Response<Full<Bytes>> {
+    let response = (ctx.discover_callback)();
+    json_response(StatusCode::OK, &response)
 }
 
 /// Handle GET /detrix/status.

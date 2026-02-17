@@ -55,6 +55,7 @@ pub mod machine_id;
 mod adapter;
 mod anchor;
 mod api;
+pub mod credentials;
 mod daemon;
 pub mod daemons;
 mod output;

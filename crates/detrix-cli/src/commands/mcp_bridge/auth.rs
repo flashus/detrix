@@ -82,6 +82,28 @@ pub fn discover_auth_token() -> Option<String> {
     None
 }
 
+/// Extract host:port from a URL string.
+///
+/// Examples:
+/// - `"http://localhost:8095"` → `Some("localhost:8095")`
+/// - `"http://localhost:8095/path"` → `Some("localhost:8095")`
+/// - `"https://myapp.prod:8095"` → `Some("myapp.prod:8095")`
+/// - `"not-a-url"` → `None`
+pub fn extract_host_port(url: &str) -> Option<String> {
+    let url_parsed = reqwest::Url::parse(url).ok()?;
+    let host = url_parsed.host_str()?;
+    let port = url_parsed.port()?;
+    Some(format!("{}:{}", host, port))
+}
+
+/// Resolve an authentication token for a given daemon host:port.
+///
+/// Delegates to `detrix_config::credentials::resolve_token_for_target` which
+/// checks (in order): DETRIX_TOKEN env var, credentials.toml, auth-token file.
+pub fn resolve_token_for_host(host_port: &str, is_local_daemon: bool) -> Option<String> {
+    detrix_config::credentials::resolve_token_for_target(host_port, is_local_daemon)
+}
+
 /// Check if an error is a connection-related error
 ///
 /// Uses proper error type detection instead of fragile string matching.

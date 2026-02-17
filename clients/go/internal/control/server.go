@@ -25,18 +25,22 @@ type WakeHandler func(daemonURL string) (map[string]any, error)
 // SleepHandler is a function that handles sleep requests.
 type SleepHandler func() (map[string]any, error)
 
+// DiscoverProvider is a function that returns daemon discovery information.
+type DiscoverProvider func() map[string]any
+
 // Server is the HTTP control plane server.
 type Server struct {
-	httpServer     *http.Server
-	listener       net.Listener
-	actualPort     int
-	statusProvider StatusProvider
-	wakeHandler    WakeHandler
-	sleepHandler   SleepHandler
-	authToken      string
-	tokenMu        sync.RWMutex // protects authToken
-	mu             sync.Mutex   // protects running, listener, httpServer, actualPort
-	running        bool
+	httpServer       *http.Server
+	listener         net.Listener
+	actualPort       int
+	statusProvider   StatusProvider
+	wakeHandler      WakeHandler
+	sleepHandler     SleepHandler
+	discoverProvider DiscoverProvider
+	authToken        string
+	tokenMu          sync.RWMutex // protects authToken
+	mu               sync.Mutex   // protects running, listener, httpServer, actualPort
+	running          bool
 }
 
 // NewServer creates a new control plane server.
@@ -47,12 +51,14 @@ func NewServer(
 	statusProvider StatusProvider,
 	wakeHandler WakeHandler,
 	sleepHandler SleepHandler,
+	discoverProvider DiscoverProvider,
 ) *Server {
 	return &Server{
-		statusProvider: statusProvider,
-		wakeHandler:    wakeHandler,
-		sleepHandler:   sleepHandler,
-		authToken:      authToken,
+		statusProvider:   statusProvider,
+		wakeHandler:      wakeHandler,
+		sleepHandler:     sleepHandler,
+		discoverProvider: discoverProvider,
+		authToken:        authToken,
 	}
 }
 
@@ -86,6 +92,9 @@ func (s *Server) Start(host string, port int) (int, error) {
 
 	// Health endpoint (no auth required)
 	mux.HandleFunc("/detrix/health", s.handleHealth)
+
+	// Discover endpoint (no auth required)
+	mux.HandleFunc("/detrix/discover", s.handleDiscover)
 
 	// Authenticated endpoints
 	mux.HandleFunc("/detrix/status", s.withAuth(s.handleStatus))
@@ -178,6 +187,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"service": "detrix-client",
 	}); err != nil {
 		slog.Debug("failed to write health response", "error", err)
+	}
+}
+
+func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if s.discoverProvider == nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		if err := json.NewEncoder(w).Encode(map[string]string{"error": "discover provider not configured"}); err != nil {
+			slog.Debug("failed to write discover error response", "error", err)
+		}
+		return
+	}
+	if err := json.NewEncoder(w).Encode(s.discoverProvider()); err != nil {
+		slog.Debug("failed to write discover response", "error", err)
 	}
 }
 

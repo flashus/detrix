@@ -259,6 +259,12 @@ enum Commands {
     /// Show MCP tool usage statistics
     Usage,
 
+    /// Manage daemon authentication credentials
+    Auth {
+        #[command(subcommand)]
+        action: commands::auth::AuthAction,
+    },
+
     /// Initialize Detrix configuration
     ///
     /// Creates configuration file if it doesn't exist. By default, creates a
@@ -408,6 +414,9 @@ async fn main() -> Result<()> {
             let pid_path = pid_file.map(std::path::PathBuf::from);
             commands::daemon::run(require_ctx()?, action, pid_path).await
         }
+
+        // Auth commands (don't need context)
+        Commands::Auth { action } => commands::auth::run(action).await,
 
         // Utility commands (don't need context)
         Commands::Ps => commands::ps::run().await,

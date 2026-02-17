@@ -43,6 +43,16 @@ const (
 // - **awake**: Active state. Debugger listening, registered with daemon.
 type ClientState string
 
+// DiscoverResponse Daemon discovery response (no auth required)
+type DiscoverResponse struct {
+	// DaemonUrl External daemon URL (daemon_advertise_url if set, else daemon_url).
+	// Used by MCP bridge to discover which daemon to connect to.
+	DaemonUrl string `json:"daemon_url"`
+
+	// Name Connection name for this client
+	Name string `json:"name"`
+}
+
 // ErrorResponse Error response
 type ErrorResponse struct {
 	// Error Error message

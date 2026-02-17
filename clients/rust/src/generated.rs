@@ -122,6 +122,51 @@ impl ::std::convert::TryFrom<::std::string::String> for ClientState {
         value.parse()
     }
 }
+///Daemon discovery response (no auth required)
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "description": "Daemon discovery response (no auth required)",
+///  "type": "object",
+///  "required": [
+///    "daemon_url",
+///    "name"
+///  ],
+///  "properties": {
+///    "daemon_url": {
+///      "description": "External daemon URL (daemon_advertise_url if set, else daemon_url).\nUsed by MCP bridge to discover which daemon to connect to.\n",
+///      "type": "string",
+///      "example": "http://localhost:8095"
+///    },
+///    "name": {
+///      "description": "Connection name for this client",
+///      "type": "string",
+///      "example": "order-service"
+///    }
+///  },
+///  "example": {
+///    "daemon_url": "http://localhost:8095",
+///    "name": "order-service"
+///  }
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+pub struct DiscoverResponse {
+    /**External daemon URL (daemon_advertise_url if set, else daemon_url).
+    Used by MCP bridge to discover which daemon to connect to.
+    */
+    pub daemon_url: ::std::string::String,
+    ///Connection name for this client
+    pub name: ::std::string::String,
+}
+impl ::std::convert::From<&DiscoverResponse> for DiscoverResponse {
+    fn from(value: &DiscoverResponse) -> Self {
+        value.clone()
+    }
+}
 ///Error response
 ///
 /// <details><summary>JSON schema</summary>
