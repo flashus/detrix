@@ -81,7 +81,12 @@ async fn handle_fetch_response(
         }
         404 => Ok(None),
         status => {
-            tracing::debug!(status, "{} returned non-200 status", source_label);
+            tracing::warn!(
+                status,
+                source = source_label,
+                "{} returned unexpected status — file not fetched (401=auth mismatch, 403=IP blocked, 500=server error)",
+                source_label
+            );
             Ok(None)
         }
     }

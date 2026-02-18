@@ -8,7 +8,7 @@ import (
 )
 
 func TestUpdateToken(t *testing.T) {
-	s := NewServer("127.0.0.1", 0, "initial-token", nil, nil, nil, nil)
+	s := NewServer("127.0.0.1", 0, "initial-token", "", nil, nil, nil, nil)
 
 	// Verify initial token
 	if got := s.getToken(); got != "initial-token" {
@@ -31,7 +31,7 @@ func TestUpdateToken(t *testing.T) {
 }
 
 func TestWithAuthUsesCurrentToken(t *testing.T) {
-	s := NewServer("127.0.0.1", 0, "old-token", nil, nil, nil, nil)
+	s := NewServer("127.0.0.1", 0, "old-token", "", nil, nil, nil, nil)
 
 	handler := s.withAuth(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -85,7 +85,7 @@ func TestWithAuthUsesCurrentToken(t *testing.T) {
 }
 
 func TestWithAuthRejectsUnauthorized(t *testing.T) {
-	s := NewServer("127.0.0.1", 0, "secret", nil, nil, nil, nil)
+	s := NewServer("127.0.0.1", 0, "secret", "", nil, nil, nil, nil)
 
 	handler := s.withAuth(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

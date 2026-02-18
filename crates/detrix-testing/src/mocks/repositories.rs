@@ -700,6 +700,31 @@ impl ConnectionRepository for MockConnectionRepository {
         });
         Ok((initial_count - connections.len()) as u64)
     }
+
+    async fn delete_stale_same_project(
+        &self,
+        name: &str,
+        language: &str,
+        workspace_root: &str,
+        exclude_id: &ConnectionId,
+    ) -> Result<u64> {
+        let mut connections = self.connections.lock().await;
+        let initial_count = connections.len();
+        connections.retain(|id, c| {
+            if id == exclude_id {
+                return true; // keep the new connection
+            }
+            let is_same_project = c.name.as_deref() == Some(name)
+                && c.language.as_str() == language
+                && c.workspace_root == workspace_root;
+            let is_stale = matches!(
+                c.status,
+                ConnectionStatus::Disconnected | ConnectionStatus::Failed(_)
+            );
+            !(is_same_project && is_stale)
+        });
+        Ok((initial_count - connections.len()) as u64)
+    }
 }
 
 // ============================================================================

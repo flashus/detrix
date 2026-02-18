@@ -19,7 +19,10 @@ COPY fixtures/rust /src/fixtures/rust
 WORKDIR /src/fixtures/rust
 
 # Build with debug symbols (NOT --release) and client feature enabled
-RUN cargo build --features client
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    cargo build --features client
 
 # ---- Runtime Stage ----
 FROM debian:bookworm-slim

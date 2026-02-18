@@ -40,6 +40,7 @@ impl ControlServer {
         host: &str,
         port: u16,
         auth_token: Option<String>,
+        workspace_root: String,
         status_callback: StatusCallback,
         wake_callback: WakeCallback,
         sleep_callback: SleepCallback,
@@ -54,6 +55,7 @@ impl ControlServer {
         let auth_token = Arc::new(std::sync::RwLock::new(auth_token));
         let ctx = Arc::new(HandlerContext {
             auth_token: Arc::clone(&auth_token),
+            workspace_root,
             status_callback,
             wake_callback,
             sleep_callback,
@@ -251,6 +253,7 @@ mod tests {
         DiscoverResponse {
             daemon_url: "http://127.0.0.1:8090".to_string(),
             name: "test-client".to_string(),
+            control_plane_url: None,
         }
     }
 
@@ -260,6 +263,7 @@ mod tests {
             "127.0.0.1",
             0,
             None,
+            String::new(),
             Arc::new(mock_status),
             Arc::new(mock_wake),
             Arc::new(mock_sleep),
@@ -276,6 +280,7 @@ mod tests {
             "127.0.0.1",
             0,
             Some("initial-token".to_string()),
+            String::new(),
             Arc::new(mock_status),
             Arc::new(mock_wake),
             Arc::new(mock_sleep),
@@ -312,6 +317,7 @@ mod tests {
             "127.0.0.1",
             0,
             None,
+            String::new(),
             Arc::new(mock_status),
             Arc::new(mock_wake),
             Arc::new(mock_sleep),

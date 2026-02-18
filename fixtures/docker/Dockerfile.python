@@ -6,11 +6,13 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Install debugpy
-RUN pip install --no-cache-dir debugpy
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install debugpy
 
 # Copy and install the Detrix Python client
 COPY clients/python /tmp/detrix-client
-RUN pip install --no-cache-dir /tmp/detrix-client && rm -rf /tmp/detrix-client
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install /tmp/detrix-client && rm -rf /tmp/detrix-client
 
 # Copy the fixture app
 COPY fixtures/python/trade_bot_forever.py /app/trade_bot_forever.py

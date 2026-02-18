@@ -45,6 +45,16 @@ type ClientState string
 
 // DiscoverResponse Daemon discovery response (no auth required)
 type DiscoverResponse struct {
+	// ControlPlaneUrl Daemon-visible URL of this app's control plane.
+	// May differ from the user-visible URL in Docker/cloud deployments where
+	// the bind address (0.0.0.0) differs from the routable hostname.
+	// The MCP bridge uses this URL (instead of the user-provided app_url)
+	// when forwarding wake requests to the daemon, so the daemon can reach
+	// the app across network boundaries (e.g. http://order-service:8091).
+	// Present only when the client knows its routable hostname (advertise_host
+	// or non-bind-all control_host).
+	ControlPlaneUrl *string `json:"control_plane_url"`
+
 	// DaemonUrl External daemon URL (daemon_advertise_url if set, else daemon_url).
 	// Used by MCP bridge to discover which daemon to connect to.
 	DaemonUrl string `json:"daemon_url"`
@@ -93,6 +103,22 @@ type InfoResponse struct {
 
 	// RustVersion Rust version (Rust client only)
 	RustVersion *string `json:"rust_version,omitempty"`
+}
+
+// ReadFileRequest Request body for /detrix/files/read
+type ReadFileRequest struct {
+	// Commit Git commit SHA for pinned source fetching (optional).
+	// If provided, the file is fetched from the specified git commit.
+	Commit *string `json:"commit"`
+
+	// Path File path to read. Can be absolute or relative.
+	// Relative paths are resolved against the workspace root.
+	// Must not escape the workspace root.
+	Path string `json:"path"`
+
+	// WorkspaceRoot Workspace root hint from the daemon (optional).
+	// Overrides the client's own workspace root for path resolution.
+	WorkspaceRoot *string `json:"workspace_root"`
 }
 
 // SleepResponse Response from sleep operation
@@ -169,6 +195,9 @@ type WakeResponse struct {
 // WakeResponseStatus "awake" if the client transitioned from sleeping to awake.
 // "already_awake" if the client was already in awake state.
 type WakeResponseStatus string
+
+// ReadFileJSONRequestBody defines body for ReadFile for application/json ContentType.
+type ReadFileJSONRequestBody = ReadFileRequest
 
 // WakeJSONRequestBody defines body for Wake for application/json ContentType.
 type WakeJSONRequestBody = WakeRequest

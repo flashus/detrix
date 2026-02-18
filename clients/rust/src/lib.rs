@@ -187,6 +187,21 @@ pub fn init(config: Config) -> Result<()> {
         *guard = Some(daemon_client);
     }
 
+    // Best-effort: fetch advertise_url from daemon (daemon may not be up yet)
+    if let Ok(dc_guard) = dc_holder.lock() {
+        if let Some(ref dc) = *dc_guard {
+            if let Some(adv_url) =
+                dc.fetch_advertise_url(&config.daemon_url, Duration::from_secs(2))
+            {
+                debug!("Fetched daemon advertise URL at init: {}", adv_url);
+                let state = get();
+                if let Ok(mut guard) = state.write() {
+                    guard.daemon_advertise_url = Some(adv_url);
+                }
+            }
+        }
+    }
+
     // Initialize LLDB manager (resettable via Mutex<Option<T>>)
     let lldb_manager = LldbManager::new(lldb_dap_path.clone(), config.lldb_start_timeout);
     let lm_holder = LLDB_MANAGER.get_or_init(|| std::sync::Mutex::new(None));
@@ -206,6 +221,7 @@ pub fn init(config: Config) -> Result<()> {
         &config.control_host,
         config.control_port,
         auth_token,
+        config.workspace_root.clone().unwrap_or_default(),
         status_callback,
         wake_callback,
         sleep_callback,
@@ -386,13 +402,54 @@ fn status_provider() -> StatusResponse {
 fn discover_provider() -> DiscoverResponse {
     let state = get();
     let guard = state.read().unwrap_or_else(|e| e.into_inner());
-    let daemon_url = guard
-        .daemon_advertise_url
-        .clone()
-        .unwrap_or_else(|| guard.daemon_url.clone());
+    let mut daemon_url = guard.daemon_advertise_url.clone();
+    let daemon_base_url = guard.daemon_url.clone();
+    let name = guard.name.clone();
+    let control_host = guard.control_host.clone();
+    let advertise_host = guard.advertise_host.clone();
+    let actual_control_port = guard.actual_control_port;
+    drop(guard);
+
+    // Lazy-fetch: if advertise URL unknown, ask daemon now
+    if daemon_url.is_none() {
+        let fetched = DAEMON_CLIENT
+            .get()
+            .and_then(|dc_holder| dc_holder.lock().ok())
+            .and_then(|dc_guard| {
+                dc_guard
+                    .as_ref()
+                    .map(|dc| dc.fetch_advertise_url(&daemon_base_url, Duration::from_secs(2)))
+            })
+            .flatten();
+        if let Some(adv_url) = fetched {
+            debug!("Fetched daemon advertise URL on discover: {}", adv_url);
+            if let Ok(mut guard) = state.write() {
+                guard.daemon_advertise_url = Some(adv_url.clone());
+            }
+            daemon_url = Some(adv_url);
+        }
+    }
+
+    // Build control_plane_url: the daemon-visible URL of this app's control plane.
+    // Use advertise_host (DETRIX_HOST) if set; otherwise use control_host unless
+    // it's a bind-all address. This lets the MCP bridge route wake requests
+    // correctly in Docker/cloud where localhost:PORT != container:PORT.
+    const BIND_ALL: &[&str] = &["0.0.0.0", "::", ""];
+    let cp_host = advertise_host.as_deref().or_else(|| {
+        if !BIND_ALL.contains(&control_host.as_str()) {
+            Some(control_host.as_str())
+        } else {
+            None
+        }
+    });
+    let control_plane_url = cp_host
+        .filter(|_| actual_control_port > 0)
+        .map(|h| format!("http://{}:{}", h, actual_control_port));
+
     DiscoverResponse {
-        daemon_url,
-        name: guard.name.clone(),
+        daemon_url: daemon_url.unwrap_or(daemon_base_url),
+        name,
+        control_plane_url,
     }
 }
 

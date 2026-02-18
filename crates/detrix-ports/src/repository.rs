@@ -241,6 +241,31 @@ pub trait ConnectionRepository: Send + Sync {
     /// Removes connections with status: Disconnected, Failed
     /// Returns the number of deleted connections
     async fn delete_disconnected(&self) -> Result<u64>;
+
+    /// Delete stale connections for the same project, excluding a specific connection.
+    ///
+    /// When a new connection registers for (name, language, workspace_root) with a different
+    /// hostname (e.g. Docker container restart with new container ID), old disconnected/failed
+    /// connections with the same project identity are stale and should be removed.
+    ///
+    /// Only removes connections with status: Disconnected or Failed.
+    /// Connected/Connecting connections are preserved to avoid race conditions.
+    ///
+    /// # Arguments
+    /// * `name` - Connection name (app name)
+    /// * `language` - Source language (e.g. "go", "python")
+    /// * `workspace_root` - Workspace root path
+    /// * `exclude_id` - The newly registered connection to preserve
+    ///
+    /// # Returns
+    /// The number of stale connections deleted
+    async fn delete_stale_same_project(
+        &self,
+        name: &str,
+        language: &str,
+        workspace_root: &str,
+        exclude_id: &ConnectionId,
+    ) -> Result<u64>;
 }
 
 /// Minimal read-only lookup for connections.

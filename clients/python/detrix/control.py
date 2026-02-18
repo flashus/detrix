@@ -203,12 +203,48 @@ class ControlHandler(BaseHTTPRequestHandler):
         """Handle /detrix/discover endpoint (no auth required).
 
         Returns daemon discovery information for MCP bridge auto-switching.
+        If the daemon's advertise URL hasn't been fetched yet, attempts a
+        lazy fetch from the daemon's health endpoint before responding.
         """
         state = get_state()
         with state.lock:
-            daemon_url = state.daemon_advertise_url or state.daemon_url
+            daemon_url = state.daemon_advertise_url
+            daemon_base_url = state.daemon_url
             name = state.name
-        self._send_json_response({"daemon_url": daemon_url, "name": name})
+            http_client = state.http_client
+            control_host = state.control_host
+            advertise_host = state.advertise_host
+            actual_control_port = state.actual_control_port
+
+        # Lazy-fetch: if advertise URL unknown, ask daemon now
+        if not daemon_url and http_client:
+            try:
+                adv_url = http_client.fetch_advertise_url()
+                if adv_url:
+                    with state.lock:
+                        state.daemon_advertise_url = adv_url
+                    daemon_url = adv_url
+                    _logger.debug("Fetched daemon advertise URL on discover: %s", adv_url)
+            except Exception:
+                pass
+
+        if not daemon_url:
+            daemon_url = daemon_base_url
+
+        # Build control_plane_url: the URL the daemon can use to reach this app's
+        # control plane (may differ from the user-visible URL in Docker/cloud).
+        # Use advertise_host if set (e.g. DETRIX_HOST=order-service), otherwise
+        # use control_host unless it's a bind-all address.
+        _BIND_ALL = {"0.0.0.0", "::", ""}
+        cp_host = advertise_host or (control_host if control_host not in _BIND_ALL else None)
+        control_plane_url = (
+            f"http://{cp_host}:{actual_control_port}" if cp_host and actual_control_port else None
+        )
+
+        response: dict = {"daemon_url": daemon_url, "name": name}
+        if control_plane_url:
+            response["control_plane_url"] = control_plane_url
+        self._send_json_response(response)
 
     def _handle_wake(self) -> None:
         """Handle /detrix/wake endpoint.
@@ -260,14 +296,21 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._send_error_response("Invalid 'path' value", 400)
             return
 
-        # Resolve relative paths against the working directory
+        # Resolve workspace: prefer workspace_root from request body (daemon provides
+        # the connection's workspace root), fall back to cwd.
+        workspace_root = body.get("workspace_root")
+        if workspace_root and isinstance(workspace_root, str) and workspace_root.strip():
+            workspace = Path(workspace_root).resolve()
+        else:
+            workspace = Path(os.getcwd()).resolve()
+
+        # Resolve relative paths against the workspace
         resolved = Path(file_path)
         if not resolved.is_absolute():
-            resolved = Path(os.getcwd()) / resolved
+            resolved = workspace / resolved
         resolved = resolved.resolve()
 
         # Security: prevent directory traversal outside workspace
-        workspace = Path(os.getcwd()).resolve()
         try:
             resolved.relative_to(workspace)
         except ValueError:

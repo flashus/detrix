@@ -61,8 +61,9 @@ pub fn get_workspace_root() -> PathBuf {
 ///
 /// # Safety
 ///
-/// Only kills processes that have PID files in the tracking directory, ensuring
-/// we only clean up our own test processes.
+/// Only kills processes whose owning test binary is no longer running.
+/// Processes registered by a concurrently-running test binary are skipped
+/// to prevent cross-binary interference when running `cargo test --all`.
 #[cfg(unix)]
 pub fn cleanup_orphaned_e2e_processes() {
     use nix::sys::signal::{kill, Signal};
@@ -86,7 +87,21 @@ pub fn cleanup_orphaned_e2e_processes() {
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "pid") {
                 if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(pid) = content.trim().parse::<i32>() {
+                    let mut lines = content.lines();
+                    let pid_str = lines.next().unwrap_or("").trim();
+                    let owner_str = lines.next().unwrap_or("").trim();
+
+                    if let Ok(pid) = pid_str.parse::<i32>() {
+                        // If owner PID is present and still alive, this process is owned
+                        // by a concurrently-running test binary — do NOT kill it.
+                        if let Ok(owner) = owner_str.parse::<i32>() {
+                            let owner_alive = kill(Pid::from_raw(owner), None).is_ok();
+                            if owner_alive {
+                                // Owner still running: skip, will clean up itself
+                                continue;
+                            }
+                        }
+
                         let nix_pid = Pid::from_raw(pid);
 
                         // Check if process is still running using nix (silent, no stderr output)
@@ -125,15 +140,19 @@ pub fn cleanup_orphaned_e2e_processes() {
 
 /// Register a test process for cleanup tracking.
 ///
-/// Creates a PID file that will be used to clean up orphaned processes
-/// from crashed test runs.
+/// Creates a PID file recording both the process PID and the owning test
+/// binary's PID. Cleanup skips processes whose owner is still alive, which
+/// prevents cross-binary interference when `cargo test --all` runs multiple
+/// test binaries concurrently.
 pub fn register_e2e_process(name: &str, pid: u32) {
     let pid_dir = PathBuf::from(E2E_PID_DIR);
     fs::create_dir_all(&pid_dir).ok();
 
+    let owner_pid = std::process::id();
     let pid_file = pid_dir.join(format!("{}_{}.pid", name, pid));
     if let Ok(mut file) = fs::File::create(&pid_file) {
-        writeln!(file, "{}", pid).ok();
+        // Line 1: process PID, Line 2: owning test binary PID
+        writeln!(file, "{}\n{}", pid, owner_pid).ok();
     }
 }
 
@@ -348,6 +367,84 @@ fn find_available_port(base: u16, max_attempts: u16) -> u16 {
         base,
         base.saturating_add(search_range)
     );
+}
+
+/// Shared setup for test executors that manage their own daemon process.
+///
+/// Bundles the three fields every such executor needs at construction time:
+/// - `workspace_root` — derived from `CARGO_MANIFEST_DIR` (two levels up)
+/// - `temp_dir` — owned temporary directory; kept alive for the executor's lifetime
+/// - `daemon_log_path` — `<temp_dir>/daemon.log`
+///
+/// # Example
+/// ```rust,ignore
+/// let setup = TestDaemonSetup::new();
+/// let http_port = PORT_COUNTER.next(19000, 500);
+/// Self {
+///     workspace_root: setup.workspace_root,
+///     temp_dir: setup.temp_dir,
+///     daemon_log_path: setup.daemon_log_path,
+///     http_port,
+///     daemon_process: None,
+/// }
+/// ```
+pub struct TestDaemonSetup {
+    pub workspace_root: PathBuf,
+    pub temp_dir: tempfile::TempDir,
+    pub daemon_log_path: PathBuf,
+}
+
+impl Default for TestDaemonSetup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TestDaemonSetup {
+    pub fn new() -> Self {
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let daemon_log_path = temp_dir.path().join("daemon.log");
+        Self {
+            workspace_root: get_workspace_root(),
+            temp_dir,
+            daemon_log_path,
+        }
+    }
+}
+
+/// Per-file atomic port counter for tests that manage their own daemon processes.
+///
+/// Combines the `static AtomicU16` counter + `fetch_add` + overflow-safe port
+/// arithmetic into a single ergonomic type. Declare one `static` per test file
+/// so each file's tests have an independent sequence.
+///
+/// Uses `u32` arithmetic throughout to avoid overflow on macOS where process IDs
+/// can exceed `u16::MAX` (65535).
+///
+/// # Example
+/// ```rust,no_run
+/// # use detrix_testing::e2e::executor::TestPortCounter;
+/// static PORT_COUNTER: TestPortCounter = TestPortCounter::new(0);
+///
+/// // In a test executor constructor:
+/// let http_port = PORT_COUNTER.next(19000, 500);
+/// ```
+pub struct TestPortCounter(AtomicU16);
+
+impl TestPortCounter {
+    /// Create a new counter starting at `start`.
+    pub const fn new(start: u16) -> Self {
+        Self(AtomicU16::new(start))
+    }
+
+    /// Allocate the next port in the sequence.
+    ///
+    /// Returns `base + ((pid + counter) % range) as u16`. The `counter` is
+    /// atomically incremented on each call, so concurrent tests get distinct values.
+    pub fn next(&self, base: u16, range: u32) -> u16 {
+        let counter = self.0.fetch_add(1, Ordering::SeqCst) as u32;
+        base + ((std::process::id() + counter) % range) as u16
+    }
 }
 
 /// Get unique HTTP port for tests (ensures port is actually available)

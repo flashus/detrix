@@ -17,6 +17,9 @@ pub struct BridgeSource {
     /// Bridge file server URL, set per MCP session. Protected by RwLock
     /// for safe concurrent access from multiple handlers.
     bridge_url: RwLock<Option<String>>,
+    /// Auth token for the bridge file server, forwarded via X-Detrix-File-Server-Token.
+    /// Required when the daemon runs in Docker and cannot share the host's auth-token file.
+    bridge_token: RwLock<Option<String>>,
     max_size: usize,
 }
 
@@ -29,6 +32,7 @@ impl BridgeSource {
         Self {
             client,
             bridge_url: RwLock::new(None),
+            bridge_token: RwLock::new(None),
             max_size,
         }
     }
@@ -40,9 +44,21 @@ impl BridgeSource {
         }
     }
 
+    /// Set the bridge file server auth token.
+    pub fn set_bridge_token(&self, token: Option<String>) {
+        if let Ok(mut guard) = self.bridge_token.write() {
+            *guard = token;
+        }
+    }
+
     /// Get the current bridge URL.
     pub fn bridge_url(&self) -> Option<String> {
         self.bridge_url.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Get the current bridge token.
+    pub fn bridge_token(&self) -> Option<String> {
+        self.bridge_token.read().ok().and_then(|g| g.clone())
     }
 }
 
@@ -54,6 +70,7 @@ impl FileSource for BridgeSource {
 
     async fn fetch(&self, connection: &Connection, file_path: &str) -> Result<Option<FetchResult>> {
         let Some(url) = self.bridge_url() else {
+            debug!(file = file_path, "Bridge URL not set — skipping bridge fetch (bridge not active or not yet connected)");
             return Ok(None);
         };
 
@@ -75,7 +92,11 @@ impl FileSource for BridgeSource {
             },
         };
 
-        let resp = match self.client.post(&endpoint).json(&body).send().await {
+        let mut req = self.client.post(&endpoint).json(&body);
+        if let Some(token) = self.bridge_token() {
+            req = req.bearer_auth(token);
+        }
+        let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
                 debug!(error = %e, "Bridge request failed");

@@ -89,6 +89,41 @@ func (c *Client) setAuth(req *http.Request) {
 	}
 }
 
+// FetchAdvertiseURL queries the daemon's health endpoint to get its advertise URL.
+// Returns empty string if not configured or daemon unreachable.
+func (c *Client) FetchAdvertiseURL(daemonURL string, timeout time.Duration) string {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", daemonURL+"/health", nil)
+	if err != nil {
+		return ""
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Debug("failed to close response body", "error", err)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	var result struct {
+		AdvertiseURL string `json:"advertiseUrl"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize)).Decode(&result); err != nil {
+		return ""
+	}
+	return result.AdvertiseURL
+}
+
 // HealthCheck checks if the daemon is reachable.
 func (c *Client) HealthCheck(daemonURL string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)

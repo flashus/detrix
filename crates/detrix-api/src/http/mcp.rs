@@ -201,12 +201,23 @@ pub async fn mcp_handler(
         }
     }
 
-    // Extract bridge file server URL if present and update bridge source
+    // Extract bridge file server URL + token if present and update bridge source.
+    // The token lets the daemon authenticate with the bridge's file server,
+    // which is required when the daemon runs inside Docker (different process,
+    // no shared auth-token file).
     if let Some(file_server_header) = headers.get("X-Detrix-File-Server-Url") {
         if let Ok(url) = file_server_header.to_str() {
             if let Some(ref bridge_source) = state.bridge_file_source {
                 bridge_source.set_bridge_url(Some(url.to_string()));
                 debug!("MCP HTTP: Bridge file server URL set: {}", url);
+            }
+        }
+    }
+    if let Some(fs_token_header) = headers.get("X-Detrix-File-Server-Token") {
+        if let Ok(token) = fs_token_header.to_str() {
+            if let Some(ref bridge_source) = state.bridge_file_source {
+                bridge_source.set_bridge_token(Some(token.to_string()));
+                debug!("MCP HTTP: Bridge file server token set");
             }
         }
     }

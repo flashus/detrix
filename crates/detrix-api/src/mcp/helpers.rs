@@ -80,7 +80,7 @@ pub mod connection {
             return Ok(conn_id);
         }
 
-        // Auto-select if only one connection exists
+        // Auto-select if only one connection exists, or exactly one is active
         let connections = state
             .context
             .connection_service
@@ -95,17 +95,25 @@ pub mod connection {
                  create_connection(host='127.0.0.1', port=5678, language='python')",
                 None,
             )),
-            1 => {
-                let conn = &connections[0];
-                Ok(conn.id.clone())
-            }
-            n => {
+            1 => Ok(connections[0].id.clone()),
+            _ => {
+                // Multiple connections: auto-select if exactly one is active (Connected/Connecting).
+                // This handles Docker/container restarts where old Disconnected connections
+                // accumulate until TTL cleanup removes them.
+                let active: Vec<_> = connections
+                    .iter()
+                    .filter(|c| c.is_active())
+                    .collect();
+                if active.len() == 1 {
+                    return Ok(active[0].id.clone());
+                }
+
                 let ids: Vec<_> = connections.iter().map(|c| c.id.to_string()).collect();
                 Err(McpError::invalid_params(
                     format!(
                         "Multiple connections exist ({}). Specify connection_id.\n\
                          Available: {}",
-                        n,
+                        connections.len(),
                         ids.join(", ")
                     ),
                     None,

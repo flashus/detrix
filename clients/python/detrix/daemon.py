@@ -120,6 +120,17 @@ class DaemonClient(Protocol):
         """
         ...
 
+    def fetch_advertise_url(self, timeout: float = 2.0) -> str | None:
+        """Fetch the daemon's advertise URL from its health endpoint.
+
+        Args:
+            timeout: Request timeout in seconds
+
+        Returns:
+            The daemon's advertise URL, or None if not configured or unreachable.
+        """
+        ...
+
 
 class HttpDaemonClient:
     """HTTP-based implementation of DaemonClient using httpx.
@@ -218,6 +229,26 @@ class HttpDaemonClient:
         except (httpx.HTTPError, ValueError) as e:
             _logger.debug("Health check failed: %s", e)
         return False
+
+    def fetch_advertise_url(self, timeout: float = 2.0) -> str | None:
+        """Fetch the daemon's advertise URL from its health endpoint.
+
+        Returns None if not configured or daemon unreachable.
+
+        Args:
+            timeout: Request timeout in seconds
+
+        Returns:
+            The daemon's advertise URL, or None if not configured or unreachable.
+        """
+        try:
+            response = self._client.get("/health", timeout=timeout)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("advertiseUrl") or None
+        except (httpx.HTTPError, ValueError) as e:
+            _logger.debug("Failed to fetch advertise URL: %s", e)
+        return None
 
     def register(
         self,

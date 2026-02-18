@@ -5,16 +5,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/flashus/detrix/clients/go/internal/auth"
 )
+
+// maxFileSize is the maximum file size (bytes) served by /detrix/files/read.
+const maxFileSize = 10 * 1024 * 1024 // 10 MB
 
 // StatusProvider is a function that returns the current status.
 type StatusProvider func() map[string]any
@@ -38,6 +44,7 @@ type Server struct {
 	sleepHandler     SleepHandler
 	discoverProvider DiscoverProvider
 	authToken        string
+	workspaceRoot    string
 	tokenMu          sync.RWMutex // protects authToken
 	mu               sync.Mutex   // protects running, listener, httpServer, actualPort
 	running          bool
@@ -48,6 +55,7 @@ func NewServer(
 	host string,
 	port int,
 	authToken string,
+	workspaceRoot string,
 	statusProvider StatusProvider,
 	wakeHandler WakeHandler,
 	sleepHandler SleepHandler,
@@ -59,6 +67,7 @@ func NewServer(
 		sleepHandler:     sleepHandler,
 		discoverProvider: discoverProvider,
 		authToken:        authToken,
+		workspaceRoot:    workspaceRoot,
 	}
 }
 
@@ -101,6 +110,7 @@ func (s *Server) Start(host string, port int) (int, error) {
 	mux.HandleFunc("/detrix/info", s.withAuth(s.handleInfo))
 	mux.HandleFunc("/detrix/wake", s.withAuth(s.handleWake))
 	mux.HandleFunc("/detrix/sleep", s.withAuth(s.handleSleep))
+	mux.HandleFunc("/detrix/files/read", s.withAuth(s.handleFilesRead))
 
 	s.httpServer = &http.Server{
 		Handler: mux,
@@ -310,4 +320,71 @@ func (s *Server) handleSleep(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		slog.Debug("failed to write sleep response", "error", err)
 	}
+}
+
+func (s *Server) handleFilesRead(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxFileSize+1))
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Path          string  `json:"path"`
+		WorkspaceRoot *string `json:"workspace_root"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil || req.Path == "" {
+		http.Error(w, "Missing or invalid 'path' in request body", http.StatusBadRequest)
+		return
+	}
+
+	// Resolve workspace: prefer workspace_root from request body (daemon provides
+	// the connection's workspace root), fall back to server-configured root or cwd.
+	workspace := s.workspaceRoot
+	if req.WorkspaceRoot != nil && *req.WorkspaceRoot != "" {
+		workspace = *req.WorkspaceRoot
+	}
+	if workspace == "" {
+		workspace, _ = os.Getwd()
+	}
+	workspace = filepath.Clean(workspace)
+
+	// Resolve the requested path
+	resolved := req.Path
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(workspace, resolved)
+	}
+	resolved = filepath.Clean(resolved)
+
+	// Security: path must be within the workspace root
+
+	rel, err := filepath.Rel(workspace, resolved)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		http.Error(w, "Path not within workspace", http.StatusForbidden)
+		return
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if info.Size() > maxFileSize {
+		http.Error(w, "File exceeds maximum size", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	content, err := os.ReadFile(resolved)
+	if err != nil {
+		http.Error(w, "Failed to read file", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(content)
 }

@@ -6,16 +6,14 @@
 //!
 //! These tests verify the ConditionalRateLimitLayer behavior in production conditions.
 
-use detrix_testing::e2e::executor::find_detrix_binary;
+use detrix_testing::e2e::executor::{find_detrix_binary, TestDaemonSetup, TestPortCounter};
 use reqwest::StatusCode;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 
-/// Global port counter to ensure each test gets a unique port
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(100);
+static PORT_COUNTER: TestPortCounter = TestPortCounter::new(0);
 
 /// Test executor specialized for localhost exemption testing
 struct LocalhostExemptTestExecutor {
@@ -28,27 +26,14 @@ struct LocalhostExemptTestExecutor {
 
 impl LocalhostExemptTestExecutor {
     fn new() -> Self {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = manifest_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| manifest_dir.clone());
-
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-
-        // Use a unique port for this test
-        let counter = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let http_port = 19500 + ((std::process::id() as u16 + counter) % 500);
-
-        let daemon_log_path = temp_dir.path().join("daemon.log");
-
+        let setup = TestDaemonSetup::new();
+        let http_port = PORT_COUNTER.next(19500, 500);
         Self {
-            temp_dir,
+            temp_dir: setup.temp_dir,
             http_port,
             daemon_process: None,
-            daemon_log_path,
-            workspace_root,
+            daemon_log_path: setup.daemon_log_path,
+            workspace_root: setup.workspace_root,
         }
     }
 

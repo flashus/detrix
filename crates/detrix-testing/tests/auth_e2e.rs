@@ -12,7 +12,6 @@ use reqwest::{Client, StatusCode};
 use serial_test::serial;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -20,13 +19,12 @@ use detrix_api::generated::detrix::v1::{
     metrics_service_client::MetricsServiceClient, ListMetricsRequest,
 };
 use detrix_config::constants::{AUTHORIZATION_HEADER, AUTHORIZATION_METADATA_KEY, BEARER_PREFIX};
-use detrix_testing::e2e::executor::find_detrix_binary;
+use detrix_testing::e2e::executor::{find_detrix_binary, TestDaemonSetup, TestPortCounter};
 use detrix_testing::e2e::jwt::{JwtBuilder, JwtKeyPair, MockJwksServer, TestClaims};
 use tonic::transport::Channel;
 use tonic::Request;
 
-/// Global port counter for unique ports
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
+static PORT_COUNTER: TestPortCounter = TestPortCounter::new(0);
 
 /// Test executor for simple bearer token auth (no user management)
 struct SimpleBearerTestExecutor {
@@ -42,22 +40,10 @@ struct SimpleBearerTestExecutor {
 
 impl SimpleBearerTestExecutor {
     fn new(bearer_token: &str) -> Self {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = manifest_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| manifest_dir.clone());
-
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-
-        // Use unique ports for this test
-        let counter = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base_port = 19000 + ((std::process::id() as u16 + counter) % 500);
+        let setup = TestDaemonSetup::new();
+        let base_port = PORT_COUNTER.next(19000, 500);
         let http_port = base_port;
         let grpc_port = base_port + 1000;
-
-        let daemon_log_path = temp_dir.path().join("daemon.log");
 
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
@@ -65,12 +51,12 @@ impl SimpleBearerTestExecutor {
             .expect("Failed to create HTTP client");
 
         Self {
-            temp_dir,
+            temp_dir: setup.temp_dir,
             http_port,
             grpc_port,
             daemon_process: None,
-            daemon_log_path,
-            workspace_root,
+            daemon_log_path: setup.daemon_log_path,
+            workspace_root: setup.workspace_root,
             client,
             bearer_token: bearer_token.to_string(),
         }
@@ -530,22 +516,10 @@ struct ExternalJwtTestExecutor {
 
 impl ExternalJwtTestExecutor {
     async fn new() -> Self {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = manifest_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| manifest_dir.clone());
-
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-
-        // Use unique ports for this test
-        let counter = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base_port = 19500 + ((std::process::id() as u16 + counter) % 500);
+        let setup = TestDaemonSetup::new();
+        let base_port = PORT_COUNTER.next(19500, 500);
         let http_port = base_port;
         let grpc_port = base_port + 1000;
-
-        let daemon_log_path = temp_dir.path().join("daemon.log");
 
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
@@ -559,12 +533,12 @@ impl ExternalJwtTestExecutor {
         let audience = "detrix".to_string();
 
         Self {
-            temp_dir,
+            temp_dir: setup.temp_dir,
             http_port,
             grpc_port,
             daemon_process: None,
-            daemon_log_path,
-            workspace_root,
+            daemon_log_path: setup.daemon_log_path,
+            workspace_root: setup.workspace_root,
             client,
             key_pair,
             jwks_server: Some(jwks_server),
@@ -1112,23 +1086,12 @@ impl AutoAuthTestExecutor {
     }
 
     fn with_options(enable_grpc: bool, env_token: Option<String>) -> Self {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = manifest_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| manifest_dir.clone());
-
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-
+        let setup = TestDaemonSetup::new();
         // Port range 18500-18799: non-overlapping with SimpleBearerTestExecutor (19000-19499)
         // and ExternalJwtTestExecutor (19500-19999)
-        let counter = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base_port = 18500 + ((std::process::id() as u16 + counter) % 300);
+        let base_port = PORT_COUNTER.next(18500, 300);
         let http_port = base_port;
         let grpc_port = base_port + 1000;
-
-        let daemon_log_path = temp_dir.path().join("daemon.log");
 
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
@@ -1136,15 +1099,15 @@ impl AutoAuthTestExecutor {
             .expect("Failed to create HTTP client");
 
         Self {
-            temp_dir,
+            temp_dir: setup.temp_dir,
             http_port,
             grpc_port,
             enable_grpc,
             env_token,
             auto_token: None,
             daemon_process: None,
-            daemon_log_path,
-            workspace_root,
+            daemon_log_path: setup.daemon_log_path,
+            workspace_root: setup.workspace_root,
             client,
         }
     }
@@ -1517,4 +1480,265 @@ async fn test_auto_auth_grpc_enforcement() {
     );
 
     println!("✓ Auto-auth works on gRPC!");
+}
+
+/// Regression test: auth-token file must survive a concurrent daemon's lifecycle.
+///
+/// Scenario that caused a real bug:
+/// 1. Production daemon A writes `token_A` to `~/detrix/auth-token`
+/// 2. Integration test daemon B starts, overwrites the file with `token_B`
+/// 3. Daemon B shuts down — OLD behaviour: deletes the file → daemon A's clients get 401
+///                          FIXED behaviour: leaves the file → daemon A's clients get connection-refused (daemon down) not 401
+///
+/// This test simulates step 3 in isolation by writing a "foreign" token, starting
+/// a fresh daemon (which overwrites with its own token), stopping it, then verifying
+/// the token file was NOT deleted on shutdown.
+///
+/// NOTE: the test only checks the post-shutdown file presence; it does NOT start
+/// daemon A because we'd need to keep it running across the whole scenario.
+#[tokio::test]
+#[serial(auto_auth_token_file)]
+async fn test_auto_auth_token_file_not_deleted_on_shutdown() {
+    let token_path = detrix_config::paths::auth_token_path();
+
+    // Pre-condition: write a "production daemon" token to the file
+    let production_token = "production-daemon-token-do-not-delete";
+    if let Some(parent) = token_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&token_path, production_token).expect("Failed to write production token");
+    assert!(
+        token_path.exists(),
+        "Token file should exist before test starts"
+    );
+
+    // Start a "test" daemon — it overwrites ~/detrix/auth-token with its own token
+    let mut executor = AutoAuthTestExecutor::new();
+    if let Err(e) = executor.start_daemon().await {
+        executor.print_daemon_logs(100);
+        panic!("Failed to start test daemon: {}", e);
+    }
+
+    // The file now contains the test daemon's token (overwrote the production token)
+    let test_token = executor
+        .auto_token
+        .as_ref()
+        .expect("Test daemon should have written a token");
+    let current = std::fs::read_to_string(&token_path).unwrap_or_default();
+    assert_eq!(
+        current.trim(),
+        test_token.as_str(),
+        "Test daemon should have overwritten token file with its own token"
+    );
+    assert_ne!(
+        current.trim(),
+        production_token,
+        "Sanity: production token should have been overwritten"
+    );
+
+    // Stop the test daemon — this is where the old code deleted the file
+    executor.stop();
+
+    // The fix: file must still exist after daemon shutdown.
+    // If this assertion fails, it means the daemon deleted ~/detrix/auth-token on shutdown,
+    // which would leave any concurrently-running daemon's clients unable to authenticate.
+    assert!(
+        token_path.exists(),
+        "Auth-token file must NOT be deleted on daemon shutdown — \
+         doing so leaves concurrent daemons' clients unable to authenticate (401 instead of connection-refused). \
+         Fix: remove the std::fs::remove_file call in serve.rs cleanup section."
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&token_path);
+    println!("✓ Auth-token file correctly survived daemon shutdown!");
+}
+
+/// Test that credential resolution for a remote daemon returns the configured
+/// credential, NOT the local daemon's auto-generated auth-token.
+///
+/// Regression test for the bug where `is_local_daemon=true` was passed to
+/// `resolve_token_for_target` for ALL daemons in the MCP bridge, causing the
+/// local daemon's auth-token to be forwarded to remote daemons → 401.
+///
+/// Fixed by: always pass `is_local_daemon=false` in `switch_daemon`, so the
+/// auth-token file fallback is never used for remote/discovered daemons.
+#[tokio::test]
+#[serial(auto_auth_token_file)]
+async fn test_credential_resolution_does_not_leak_local_auth_token_to_remote_daemon() {
+    let token_path = detrix_config::paths::auth_token_path();
+    let creds_path = detrix_config::paths::credentials_path();
+
+    // Write a local daemon token to the global auth-token file
+    let local_token = "local-daemon-auto-token-should-not-leak";
+    if let Some(parent) = token_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&token_path, local_token).expect("Failed to write local auth-token");
+
+    // Add a credential specifically for the "remote" daemon
+    let remote_hp = "127.0.0.1:18777";
+    let remote_token = "remote-daemon-explicit-credential";
+    if let Some(parent) = creds_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let mut creds =
+        detrix_config::credentials::CredentialsFile::load_from(&creds_path).unwrap_or_default();
+    creds.add(remote_hp, remote_token);
+    creds.save_to(&creds_path).unwrap();
+
+    // Case 1: remote daemon with a configured credential → returns the credential
+    let resolved = detrix_config::credentials::resolve_token_for_target(remote_hp, false);
+    assert_eq!(
+        resolved.as_deref(),
+        Some(remote_token),
+        "Should return the configured credential for the remote daemon"
+    );
+
+    // Case 2: remote daemon with NO credential → returns None
+    // (NOT the local auth-token file content)
+    let unconfigured_hp = "127.0.0.1:18778";
+    let resolved_none =
+        detrix_config::credentials::resolve_token_for_target(unconfigured_hp, false);
+    assert_eq!(
+        resolved_none, None,
+        "Should return None for unconfigured remote host when is_local_daemon=false"
+    );
+    assert_ne!(
+        resolved_none.as_deref(),
+        Some(local_token),
+        "Must NOT return local auth-token for unconfigured remote daemon"
+    );
+
+    // Cleanup
+    creds.remove(remote_hp);
+    creds.save_to(&creds_path).unwrap();
+    let _ = std::fs::remove_file(&token_path);
+    println!(
+        "✓ Credential resolution correctly scoped: remote daemon gets credential, not auth-token"
+    );
+}
+
+/// E2E test: bridge switches to a remote daemon and uses the configured credential.
+///
+/// Starts two daemons:
+/// - Local daemon: auto-auth (bridge connects here initially)
+/// - Remote daemon: explicit token `remote-e2e-test-token`
+///
+/// Verifies that:
+/// 1. Using the local token on the remote daemon is rejected (401) — sanity check
+/// 2. Using the remote token on the remote daemon succeeds (200)
+/// 3. `resolve_token_for_target(remote_hp, false)` returns the credential, not local token
+///
+/// This is the credential chain that the MCP bridge follows after `switch_daemon`.
+#[tokio::test]
+#[serial(auto_auth_token_file)]
+async fn test_e2e_bridge_uses_credential_after_discovery_switch() {
+    let token_path = detrix_config::paths::auth_token_path();
+    let creds_path = detrix_config::paths::credentials_path();
+
+    const REMOTE_TOKEN: &str = "remote-e2e-test-token-abcdef123";
+    const LOCAL_TOKEN: &str = "local-daemon-auto-token-xyz";
+
+    // Write local daemon token to global auth-token file
+    if let Some(parent) = token_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&token_path, LOCAL_TOKEN).expect("Failed to write local auth-token");
+
+    // Start remote daemon with an explicit token
+    let mut remote = AutoAuthTestExecutor::with_env_token(REMOTE_TOKEN);
+    if let Err(e) = remote.start_daemon().await {
+        remote.print_daemon_logs(50);
+        let _ = std::fs::remove_file(&token_path);
+        panic!("Failed to start remote daemon: {}", e);
+    }
+
+    let remote_hp = format!("127.0.0.1:{}", remote.http_port);
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("client");
+
+    // Sanity: local token rejected by remote daemon → 401
+    let res = http
+        .get(format!("http://{}/api/v1/metrics", remote_hp))
+        .header(
+            AUTHORIZATION_HEADER,
+            format!("{}{}", BEARER_PREFIX, LOCAL_TOKEN),
+        )
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "Local auth-token must be rejected by remote daemon (different token)"
+    );
+
+    // Remote token accepted → 200
+    let res = http
+        .get(format!("http://{}/api/v1/metrics", remote_hp))
+        .header(
+            AUTHORIZATION_HEADER,
+            format!("{}{}", BEARER_PREFIX, REMOTE_TOKEN),
+        )
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "Remote token must be accepted by remote daemon"
+    );
+
+    // Now simulate what switch_daemon does: resolve_token_for_target(remote_hp, false)
+    // Before adding credential → None
+    let before = detrix_config::credentials::resolve_token_for_target(&remote_hp, false);
+    assert_eq!(
+        before, None,
+        "Without credential, should return None (not local auth-token)"
+    );
+
+    // Add credential for remote daemon
+    if let Some(parent) = creds_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let mut creds =
+        detrix_config::credentials::CredentialsFile::load_from(&creds_path).unwrap_or_default();
+    creds.add(&remote_hp, REMOTE_TOKEN);
+    creds.save_to(&creds_path).unwrap();
+
+    // After adding credential → resolves to remote token
+    let after = detrix_config::credentials::resolve_token_for_target(&remote_hp, false);
+    assert_eq!(
+        after.as_deref(),
+        Some(REMOTE_TOKEN),
+        "With credential configured, should return the remote token"
+    );
+
+    // Confirm: make request using the resolved token → 200
+    let resolved_token = after.unwrap();
+    let res = http
+        .get(format!("http://{}/api/v1/metrics", remote_hp))
+        .header(
+            AUTHORIZATION_HEADER,
+            format!("{}{}", BEARER_PREFIX, resolved_token),
+        )
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "Resolved credential must grant access to remote daemon"
+    );
+
+    // Cleanup
+    creds.remove(&remote_hp);
+    creds.save_to(&creds_path).unwrap();
+    let _ = std::fs::remove_file(&token_path);
+    remote.stop();
+
+    println!("✓ Bridge credential resolution for remote daemon verified end-to-end!");
 }

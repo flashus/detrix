@@ -26,6 +26,7 @@ Known Limitations:
 """
 
 import contextlib
+import logging
 import threading
 from typing import Any
 
@@ -43,6 +44,8 @@ from .errors import (
     DebuggerError,
     DetrixError,
 )
+
+_logger = logging.getLogger("detrix")
 
 __version__ = "1.0.0"
 __all__ = [
@@ -261,6 +264,16 @@ def _init_inner(
         verify_ssl=state.verify_ssl,
         ca_bundle=state.ca_bundle,
     )
+
+    # Best-effort: fetch advertise_url from daemon (daemon may not be up yet)
+    try:
+        adv_url = state.http_client.fetch_advertise_url()
+        if adv_url:
+            with state.lock:
+                state.daemon_advertise_url = adv_url
+            _logger.debug("Fetched daemon advertise URL at init: %s", adv_url)
+    except Exception:
+        pass  # Daemon may not be running yet
 
     # Start control server
     actual_port = start_control_server(resolved_control_host, resolved_control_port)

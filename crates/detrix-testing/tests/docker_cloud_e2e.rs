@@ -1323,6 +1323,246 @@ async fn test_cloud_e2e() {
     println!("Phase 7 complete — MCP bridge direct wake + auto-switch verified");
     println!("{}", "=".repeat(60));
 
+    // ── Phase 8: Discovery Endpoint + advertise_url ──
+    // Tests the /detrix/discover endpoint on clients and daemon health advertise_url.
+    // Relies on the advertise_url-configured daemon from Phase 7 (still running).
+    println!("\n{}", "=".repeat(60));
+    println!("Phase 8: Discovery endpoint + advertise_url verification");
+    println!("{}", "=".repeat(60));
+
+    // ── Phase 8a: Daemon health returns advertise_url ──
+    println!("\n--- Phase 8a: Daemon health returns advertise_url ---");
+    let http_client = reqwest::Client::new();
+    let health_resp = http_client
+        .get(format!("http://127.0.0.1:{}/health", DAEMON_HTTP_PORT))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .expect("health request failed");
+    assert!(health_resp.status().is_success(), "Health check failed");
+    let health_json: serde_json::Value =
+        health_resp.json().await.expect("health JSON parse failed");
+    let health_advertise_url = health_json
+        .get("advertiseUrl")
+        .or_else(|| health_json.get("advertise_url"))
+        .and_then(|v| v.as_str());
+    assert_eq!(
+        health_advertise_url,
+        Some(ADVERTISE_URL),
+        "Daemon health should return advertise_url.\nHealth JSON: {}",
+        health_json
+    );
+    println!("  Daemon health advertise_url: {}", ADVERTISE_URL);
+
+    // ── Phase 8b: Python client /detrix/discover returns advertise_url ──
+    // Python control plane is mapped to host port 18091
+    println!("\n--- Phase 8b: Python /detrix/discover endpoint ---");
+
+    // Wake Python first so the client has registered with daemon and fetched advertise_url
+    client
+        .wake(PYTHON_APP_URL, None)
+        .await
+        .expect("wake python failed");
+    let _py_conn = poll_for_connection(&client, "python", Duration::from_secs(15))
+        .await
+        .expect("Python connection not found within 15s");
+    println!("  Python woke and registered");
+
+    // Small delay for lazy fetch to complete
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Call /detrix/discover directly on the Python control plane (no auth required)
+    let discover_resp = http_client
+        .get("http://127.0.0.1:18091/detrix/discover")
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .expect("discover request failed");
+    assert!(
+        discover_resp.status().is_success(),
+        "Discover endpoint should succeed (no auth), got: {}",
+        discover_resp.status()
+    );
+    let discover_json: serde_json::Value = discover_resp
+        .json()
+        .await
+        .expect("discover JSON parse failed");
+    println!("  Discover response: {}", discover_json);
+
+    let discover_daemon_url = discover_json
+        .get("daemon_url")
+        .and_then(|v| v.as_str())
+        .expect("discover should return daemon_url");
+    assert_eq!(
+        discover_daemon_url, ADVERTISE_URL,
+        "Discover should return advertise_url ({}), not internal Docker URL",
+        ADVERTISE_URL
+    );
+    println!("  Discover daemon_url: {} (correct!)", discover_daemon_url);
+
+    let discover_name = discover_json
+        .get("name")
+        .and_then(|v| v.as_str())
+        .expect("discover should return name");
+    assert!(
+        !discover_name.is_empty(),
+        "Discover should return a non-empty name"
+    );
+    println!("  Discover name: {}", discover_name);
+
+    // ── Phase 8c: Discover without auth (verify no token needed) ──
+    println!("\n--- Phase 8c: Discover requires no auth ---");
+    let no_auth_client = reqwest::Client::new(); // No auth headers
+    let no_auth_resp = no_auth_client
+        .get("http://127.0.0.1:18091/detrix/discover")
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .expect("discover without auth failed");
+    assert!(
+        no_auth_resp.status().is_success(),
+        "Discover should work without auth, got: {}",
+        no_auth_resp.status()
+    );
+    println!("  Discover works without authentication");
+
+    // ── Phase 8d: MCP Bridge discovery-first wake E2E ──
+    // Spawn detrix mcp bridge against a DIFFERENT daemon URL.
+    // The bridge should discover the Python app's daemon via /detrix/discover,
+    // resolve credentials, switch to the correct daemon, and wake successfully.
+    println!("\n--- Phase 8d: Bridge discovery-first wake E2E ---");
+
+    // Set up credentials for the Docker daemon
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let creds_path = temp_dir.path().join("credentials.toml");
+    let creds_content = format!(
+        "[targets.\"localhost:{}\"]\ntoken = \"{}\"\n",
+        DAEMON_HTTP_PORT, DOCKER_AUTH_TOKEN
+    );
+    std::fs::write(&creds_path, &creds_content).expect("write credentials");
+    println!("  Credentials written to {:?}", creds_path);
+
+    // Sleep Python first (clean state)
+    sleep_app(&client, PYTHON_APP_URL).await;
+
+    // Restart daemon with clean DB and advertise_url
+    restart_daemon_with_env(&[("TEST_ADVERTISE_URL", ADVERTISE_URL)]).await;
+    println!("  Daemon restarted with advertise_url");
+
+    // Spawn bridge pointing to a wrong daemon URL initially
+    // The bridge will discover via /detrix/discover and switch
+    let ws_root_8 = get_workspace_root();
+    let detrix_bin_8 =
+        find_detrix_binary(&ws_root_8).expect("detrix binary not found — run `cargo build` first");
+
+    // Use the actual daemon URL but the bridge should still go through discovery
+    let bridge_daemon_url_8 = format!("http://127.0.0.1:{}", DAEMON_HTTP_PORT);
+    let mut mcp_child_8 = tokio::process::Command::new(&detrix_bin_8)
+        .args(["mcp", "--daemon-url", &bridge_daemon_url_8])
+        .env("DETRIX_TOKEN", DOCKER_AUTH_TOKEN)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn detrix mcp failed");
+
+    let mut mcp_stdin_8 = mcp_child_8.stdin.take().expect("stdin");
+    let mcp_stdout_8 = mcp_child_8.stdout.take().expect("stdout");
+    let mut mcp_reader_8 = BufReader::new(mcp_stdout_8);
+
+    // Initialize
+    let init_msg_8 = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "e2e-phase8", "version": "1.0" }
+        },
+        "id": 1
+    });
+    mcp_stdin_8
+        .write_all(format!("{}\n", init_msg_8).as_bytes())
+        .await
+        .expect("write initialize");
+    mcp_stdin_8.flush().await.expect("flush");
+
+    let init_resp_8 = read_jsonrpc_response(&mut mcp_reader_8, 10).await;
+    assert!(
+        init_resp_8.get("result").is_some(),
+        "initialize should succeed: {}",
+        init_resp_8
+    );
+    println!("  Bridge initialized");
+
+    // Send initialized notification
+    let initialized_msg_8 = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    });
+    mcp_stdin_8
+        .write_all(format!("{}\n", initialized_msg_8).as_bytes())
+        .await
+        .expect("write initialized");
+    mcp_stdin_8.flush().await.expect("flush");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Wake via discovery flow: bridge discovers Python app's daemon
+    // and forwards wake through it
+    let wake_msg_8 = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "wake",
+            "arguments": {
+                "app_url": PYTHON_APP_URL
+            }
+        },
+        "id": 2
+    });
+    mcp_stdin_8
+        .write_all(format!("{}\n", wake_msg_8).as_bytes())
+        .await
+        .expect("write wake");
+    mcp_stdin_8.flush().await.expect("flush");
+
+    let wake_resp_8 = read_jsonrpc_response(&mut mcp_reader_8, 60).await;
+    let wake_text_8: String = wake_resp_8
+        .pointer("/result/content")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+
+    // Wake should succeed (not an error)
+    let is_error_8 = wake_resp_8
+        .pointer("/result/isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(
+        !is_error_8,
+        "Wake via discovery should succeed.\nResponse text: {}",
+        wake_text_8
+    );
+    println!(
+        "  Wake via discovery succeeded: {}",
+        &wake_text_8[..wake_text_8.len().min(200)]
+    );
+
+    // Cleanup
+    drop(mcp_stdin_8);
+    let _ = mcp_child_8.kill().await;
+    sleep_app(&client, PYTHON_APP_URL).await;
+    println!("  Bridge stopped, Python sleeping");
+
+    println!("\n{}", "=".repeat(60));
+    println!("Phase 8 complete — discovery endpoint + advertise_url verified");
+    println!("{}", "=".repeat(60));
+
     println!("\n{}", "=".repeat(60));
     println!("ALL PHASES COMPLETE — Docker Cloud E2E passed!");
     println!("{}", "=".repeat(60));

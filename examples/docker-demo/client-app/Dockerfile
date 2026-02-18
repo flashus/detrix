@@ -2,7 +2,12 @@ FROM golang:1.24 AS builder
 
 WORKDIR /src
 
-# Copy Go client (referenced via replace directive)
+# Install Delve — cache mount keeps the module download across base image updates
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go install github.com/go-delve/delve/cmd/dlv@latest
+
+# Copy Go client (referenced via replace directive, no external deps)
 COPY clients/go /src/clients/go
 
 # Copy order-service source
@@ -11,10 +16,9 @@ COPY examples/docker-demo/client-app /src/examples/docker-demo/client-app
 WORKDIR /src/examples/docker-demo/client-app
 
 # Build with debug symbols (required for Delve), static binary
-RUN CGO_ENABLED=0 go build -gcflags="all=-N -l" -o /build/order-service .
-
-# Install Delve (static binary)
-RUN CGO_ENABLED=0 go install github.com/go-delve/delve/cmd/dlv@latest
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go build -gcflags="all=-N -l" -o /build/order-service .
 
 FROM scratch
 

@@ -103,7 +103,10 @@ pub async fn run(
     // Auto-generate auth token for all daemons when auth is not explicitly configured.
     // This ensures daemons are secure by default — clients discover the token via
     // DETRIX_TOKEN env var or ~/detrix/auth-token file.
-    let mut token_file_written = false;
+    // `our_written_token` holds the token we wrote to auth-token, if any.
+    // Kept until shutdown so we can verify the file still contains our token
+    // before deleting — concurrent test daemons overwrite the same file.
+    let mut our_written_token: Option<String> = None;
     if config.api.auth.mode.is_none() {
         // Use DETRIX_TOKEN env var if set, otherwise generate a new one
         let (auto_token, from_env) = match std::env::var("DETRIX_TOKEN")
@@ -115,21 +118,25 @@ pub async fn run(
             None => (generate_secure_token(), false),
         };
 
-        // Only write token file if auto-generated (env var is already the source of truth)
+        // Write token file for both auto-generated and env-supplied tokens so that
+        // other bridge instances running in different processes can discover it.
         // Note: Single token file means one daemon per machine for auto-auth.
-        // For concurrent daemons, use DETRIX_TOKEN env var or explicit [api.auth] config.
-        if !from_env {
-            let token_path = detrix_config::paths::auth_token_path();
-            if let Err(e) = detrix_config::paths::ensure_parent_dir(&token_path) {
-                warn!("Failed to create token directory: {}", e);
-            } else if let Err(e) = write_token_securely(&token_path, &auto_token) {
-                warn!("Failed to write auth token file: {}", e);
+        // For concurrent daemons, use explicit [api.auth] config.
+        let token_path = detrix_config::paths::auth_token_path();
+        if let Err(e) = detrix_config::paths::ensure_parent_dir(&token_path) {
+            warn!("Failed to create token directory: {}", e);
+        } else if let Err(e) = write_token_securely(&token_path, &auto_token) {
+            warn!("Failed to write auth token file: {}", e);
+        } else {
+            if from_env {
+                info!(
+                    "🔐 Auth token (from DETRIX_TOKEN) saved to {}",
+                    token_path.display()
+                );
             } else {
                 info!("🔐 Auth token saved to {}", token_path.display());
-                token_file_written = true;
             }
-        } else {
-            info!("🔐 Using DETRIX_TOKEN from environment");
+            our_written_token = Some(auto_token.clone());
         }
 
         // Enable auth with the token
@@ -202,6 +209,30 @@ pub async fn run(
             );
         }
     }
+
+    // Move the PID file guard into a dedicated sentinel task.
+    //
+    // Problem: in release builds the MIR optimizer may drop `pid_file_guard`
+    // early (right after the last *syntactic* reference at set_ports_with_host)
+    // because it is not referenced again until the explicit `drop()` at the end
+    // of the shutdown sequence. Dropping it early releases the exclusive flock,
+    // allowing a second daemon to start while the first is still running.
+    //
+    // Fix: move the guard into a separate Tokio task that holds it until it
+    // receives an explicit "drop now" signal via a oneshot channel. The guard
+    // never enters the `serve()` async state machine again, so the optimizer
+    // cannot touch it.
+    let pid_guard_sentinel_tx = if let Some(guard) = pid_file_guard.take() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _guard = guard; // holds the flock for the daemon's lifetime
+            let _ = rx.await; // blocks until sender signals or is dropped
+                              // _guard is dropped here, releasing the flock
+        });
+        Some(tx)
+    } else {
+        None
+    };
     info!("🚀 Starting Detrix server...");
     info!("✓ Configuration loaded from {}", config_path);
     info!("📁 Database path: {:?}", config.storage.path);
@@ -693,25 +724,20 @@ pub async fn run(
     }
     info!("✓ All adapters stopped");
 
-    // Clean up token file if we wrote one (prevents stale tokens after restart)
-    if token_file_written {
-        let token_path = detrix_config::paths::auth_token_path();
-        match std::fs::remove_file(&token_path) {
-            Ok(()) => {
-                debug!("✓ Removed auth token file: {}", token_path.display());
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Token file already gone, that's fine
-            }
-            Err(e) => {
-                warn!("Could not remove auth token file: {}", e);
-            }
-        }
-    }
+    // NOTE: We intentionally do NOT delete the auth-token file on shutdown.
+    //
+    // The file is always overwritten when a new daemon starts, so there is no
+    // stale-token problem. Deleting it causes a worse failure mode: if a
+    // concurrent daemon (e.g. an integration test) overwrites the file and then
+    // shuts down, the production daemon's clients suddenly get 401 instead of
+    // a clean "connection refused". Leaving a stale file on disk is harmless —
+    // bridges will get a connection error (daemon is down), not a spurious 401.
+    let _ = our_written_token; // suppress unused warning
 
-    // Explicitly drop the PID file guard here to ensure the flock is held
-    // for the daemon's entire lifetime (not dropped early at last use site).
-    drop(pid_file_guard);
+    // Signal the PID file sentinel task to drop the guard (releases the flock).
+    // Dropping the sender causes the sentinel's rx.await to resolve, which drops
+    // the PidFile and releases the exclusive flock.
+    drop(pid_guard_sentinel_tx);
     if daemon {
         info!("✓ PID file released");
     }

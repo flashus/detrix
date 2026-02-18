@@ -130,6 +130,26 @@ impl DaemonClient {
         }
     }
 
+    /// Fetch the daemon's advertise URL from its health endpoint.
+    ///
+    /// Returns `None` if the daemon is unreachable, the health endpoint
+    /// doesn't include `advertiseUrl`, or the URL is empty.
+    pub fn fetch_advertise_url(&self, daemon_url: &str, timeout: Duration) -> Option<String> {
+        let url = format!("{}/health", daemon_url.trim_end_matches('/'));
+        let resp = self
+            .set_auth(self.client.get(&url).timeout(timeout))
+            .send()
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let data: serde_json::Value = resp.json().ok()?;
+        data.get("advertiseUrl")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    }
+
     /// Check if the daemon is reachable.
     pub fn health_check(&self, daemon_url: &str, timeout: Duration) -> Result<()> {
         let url = format!("{}/health", daemon_url);

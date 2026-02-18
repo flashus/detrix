@@ -15,10 +15,14 @@ COPY fixtures/go /src/fixtures/go
 WORKDIR /src/fixtures/go
 
 # Build with debug symbols (required for Delve), static binary (no CGO)
-RUN CGO_ENABLED=0 go build -gcflags="all=-N -l" -o /build/detrix_example_app .
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go build -gcflags="all=-N -l" -o /build/detrix_example_app .
 
 # Install Delve (static binary)
-RUN CGO_ENABLED=0 go install github.com/go-delve/delve/cmd/dlv@latest
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go install github.com/go-delve/delve/cmd/dlv@latest
 
 # ---- Runtime Stage (scratch — no OS, ~30MB total) ----
 FROM scratch

@@ -52,6 +52,8 @@ tags:
     description: Status and info endpoints (auth required for remote)
   - name: Lifecycle
     description: State transition endpoints (auth required for remote)
+  - name: Files
+    description: File serving for daemon anchor capture (auth required for remote)
 
 paths:
   /detrix/health:
@@ -194,6 +196,63 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+
+  /detrix/files/read:
+    post:
+      tags:
+        - Files
+      summary: Read a source file
+      description: |
+        Reads a source file from the application's workspace and returns its content.
+        Used by the Detrix daemon (running on the same Docker network) to fetch source
+        files for anchor capture and file inspection when the daemon cannot access
+        the host filesystem directly.
+
+        The path is resolved relative to the workspace root (DETRIX_WORKSPACE_ROOT
+        or cwd). Absolute paths are also accepted but must be within the workspace.
+
+        **Security:** Path traversal outside the workspace root is rejected (403).
+        This endpoint requires authentication for non-localhost requests.
+      operationId: readFile
+      security:
+        - bearerAuth: []
+        - localhostAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReadFileRequest"
+      responses:
+        "200":
+          description: File content as plain text
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "package main\n\nimport \"fmt\"\n"
+        "400":
+          description: Missing or invalid path field
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Path escapes workspace root
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: File not found or not a regular file
+        "413":
+          description: File exceeds 10 MB maximum size
 
   /detrix/sleep:
     post:
@@ -465,9 +524,51 @@ components:
           type: string
           description: Connection name for this client
           example: "order-service"
+        control_plane_url:
+          type: string
+          nullable: true
+          description: |
+            Daemon-visible URL of this app's control plane.
+            May differ from the user-visible URL in Docker/cloud deployments where
+            the bind address (0.0.0.0) differs from the routable hostname.
+            The MCP bridge uses this URL (instead of the user-provided app_url)
+            when forwarding wake requests to the daemon, so the daemon can reach
+            the app across network boundaries (e.g. http://order-service:8091).
+            Present only when the client knows its routable hostname (advertise_host
+            or non-bind-all control_host).
+          example: "http://order-service:8091"
       example:
         daemon_url: "http://localhost:8095"
         name: "order-service"
+        control_plane_url: "http://order-service:8091"
+
+    ReadFileRequest:
+      type: object
+      description: Request body for /detrix/files/read
+      required:
+        - path
+      properties:
+        path:
+          type: string
+          description: |
+            File path to read. Can be absolute or relative.
+            Relative paths are resolved against the workspace root.
+            Must not escape the workspace root.
+          example: "/src/examples/docker-demo/client-app/main.go"
+        commit:
+          type: string
+          nullable: true
+          description: |
+            Git commit SHA for pinned source fetching (optional).
+            If provided, the file is fetched from the specified git commit.
+          example: "abc123def456"
+        workspace_root:
+          type: string
+          nullable: true
+          description: |
+            Workspace root hint from the daemon (optional).
+            Overrides the client's own workspace root for path resolution.
+          example: "/src/examples/docker-demo/client-app"
 
     ErrorResponse:
       type: object

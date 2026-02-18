@@ -32,10 +32,36 @@ pub struct McpBridge {
     pub(crate) auth_token: RwLock<Option<String>>,
     /// Backoff state for daemon restart attempts
     restart_backoff: RwLock<RestartBackoff>,
-    /// URL of the local file server (set after start_file_server)
+    /// URL advertised to the daemon for fetching source files.
+    /// Rebuilt from `file_server_port` + `file_server_host` when either changes.
     file_server_url: RwLock<Option<String>>,
-    /// Host to advertise for file server (for daemon switching)
+    /// Actual bound port of the file server (0 = not started).
+    file_server_port: RwLock<u16>,
+    /// Host to advertise in the file server URL sent to the daemon.
+    /// Defaults to "127.0.0.1" for local daemons; auto-switched to
+    /// "host.docker.internal" when discovery switches to a Docker daemon.
     file_server_host: RwLock<String>,
+    /// IP allowlist for the file server. Shared with the running server so it
+    /// can be updated at runtime when the daemon changes.
+    ///
+    /// - `Some(set)`: only IPs in this set are allowed (resolved from daemon URL).
+    ///   Loopback addresses are always included.
+    /// - `None`: any IP is allowed — used for Docker where the daemon container
+    ///   connects from an unpredictable bridge IP. Token auth guards the endpoint.
+    allowed_file_server_ips: Arc<RwLock<Option<std::collections::HashSet<std::net::IpAddr>>>>,
+    /// Container→host source path prefix mapping for Docker connections.
+    ///
+    /// When a Docker daemon sends file requests, paths are container-internal
+    /// (e.g. `/src/examples/app/main.go`). This mapping rewrites them to the
+    /// host-side equivalent so the file server can find the source files.
+    ///
+    /// - `None` — no rewriting (local daemon, paths are already host paths).
+    /// - `Some((container_prefix, host_prefix))` — rewrite on every file request.
+    source_prefix_map: super::file_server::SourcePrefixMap,
+    /// Auth token used to protect the bridge file server.
+    /// Sent to the daemon as `X-Detrix-File-Server-Token` so it can authenticate
+    /// when fetching files (especially after switching to a Docker/remote daemon).
+    file_server_token: RwLock<Option<String>>,
     /// Connections this bridge has auto-attached to (for cleanup on switch)
     attached_connections: RwLock<HashSet<String>>,
 }
@@ -56,6 +82,10 @@ impl McpBridge {
 
         let file_server_host_val = config.file_server_host.clone();
 
+        // Seed the IP allowlist from the initial daemon URL (synchronous best-effort).
+        // Loopback IPs are always allowed; if resolution fails we start with loopback only.
+        let initial_ips = resolve_daemon_ips_sync(&config.daemon_url);
+
         Ok(Self {
             config,
             client,
@@ -64,7 +94,11 @@ impl McpBridge {
             auth_token,
             restart_backoff,
             file_server_url: RwLock::new(None),
+            file_server_port: RwLock::new(0),
             file_server_host: RwLock::new(file_server_host_val),
+            file_server_token: RwLock::new(None),
+            allowed_file_server_ips: Arc::new(RwLock::new(Some(initial_ips))),
+            source_prefix_map: Arc::new(RwLock::new(None)),
             attached_connections: RwLock::new(HashSet::new()),
         })
     }
@@ -169,14 +203,16 @@ impl McpBridge {
 
     /// Internal method to forward request without retry logic
     pub async fn try_forward_request(&self, request: &Value) -> Result<Value> {
-        let (url, token, file_server) = {
+        let (url, token, file_server, fs_token) = {
             let daemon_url = self.daemon_url.read().await;
             let auth_token = self.auth_token.read().await;
             let file_server_url = self.file_server_url.read().await;
+            let file_server_token = self.file_server_token.read().await;
             (
                 format!("{}/mcp", daemon_url),
                 auth_token.clone(),
                 file_server_url.clone(),
+                file_server_token.clone(),
             )
         };
         debug!("Forwarding request to {}", url);
@@ -200,9 +236,14 @@ impl McpBridge {
                 .header("X-Detrix-Bridge-Pid", parent.bridge_pid.to_string());
         }
 
-        // Add file server URL so daemon can fetch source files from this machine
+        // Add file server URL + token so daemon can fetch source files from this machine.
+        // The token is the same one the file server was started with; without it the
+        // daemon (especially a Docker daemon) would get 401 from the file server.
         if let Some(ref url) = file_server {
             req_builder = req_builder.header("X-Detrix-File-Server-Url", url);
+            if let Some(ref t) = fs_token {
+                req_builder = req_builder.header("X-Detrix-File-Server-Token", t);
+            }
         }
 
         let response = req_builder
@@ -323,12 +364,27 @@ impl McpBridge {
             self.client_id, self.config.daemon_url
         );
 
-        // Start local file server so daemon can fetch source files from this machine
-        match super::file_server::start_file_server().await {
+        // Start file server bound to 0.0.0.0 so Docker daemons can reach it via
+        // host.docker.internal. Advertise with the configured host (default: 127.0.0.1).
+        let auth_token_for_fs = self.auth_token.read().await.clone();
+        let allowed_ips = Arc::clone(&self.allowed_file_server_ips);
+        let prefix_map = Arc::clone(&self.source_prefix_map);
+        match super::file_server::start_file_server(
+            auth_token_for_fs.clone(),
+            allowed_ips,
+            prefix_map,
+        )
+        .await
+        {
             Ok(port) => {
-                let url = format!("http://127.0.0.1:{}", port);
+                let host = self.file_server_host.read().await.clone();
+                let url = format!("http://{}:{}", host, port);
                 info!(url = %url, "Bridge file server ready");
+                *self.file_server_port.write().await = port;
                 *self.file_server_url.write().await = Some(url);
+                // Store token so it can be forwarded to the daemon via
+                // X-Detrix-File-Server-Token on every request.
+                *self.file_server_token.write().await = auth_token_for_fs;
             }
             Err(e) => {
                 warn!(error = %e, "Failed to start bridge file server (file fetching disabled)");
@@ -891,6 +947,258 @@ impl McpBridge {
         }
     }
 
+    /// Detect the container→host source path mapping for a Docker connection.
+    ///
+    /// After waking a Docker app, the connection's `workspace_root` is a container-
+    /// internal path (e.g. `/src/examples/app`). The file server runs on the host
+    /// and needs to translate this to a host path.
+    ///
+    /// Algorithm: walk from the longest suffix of `container_workspace` down to 1
+    /// component. For each suffix, check if `<host_cwd>/<suffix>` exists as a
+    /// directory. The first match gives us:
+    ///   - container prefix = everything before the matching suffix
+    ///   - host prefix = host_cwd
+    ///
+    /// Example:
+    ///   container: `/src/examples/docker-demo/client-app`
+    ///   host_cwd:  `/Users/me/detrix-release`
+    ///   → finds `/Users/me/detrix-release/examples/docker-demo/client-app` exists
+    ///   → container_prefix = `/src`, host_prefix = `/Users/me/detrix-release`
+    fn find_container_prefix_mapping(
+        container_workspace: &str,
+        host_cwd: &str,
+    ) -> Option<(String, String)> {
+        use std::path::{Component, Path, PathBuf};
+
+        let comps: Vec<Component> = Path::new(container_workspace).components().collect();
+        let n = comps.len();
+        let host_path = Path::new(host_cwd);
+
+        // Strategy 1: host_cwd is a PARENT of the container workspace on the host.
+        //
+        // Append decreasing suffixes of the container path to host_cwd and check
+        // whether the resulting directory exists.
+        //
+        // Example: container=/src/examples/app, host_cwd=/home/user
+        //   → try /home/user/src/examples/app  (suffix_len=3)
+        //   → try /home/user/examples/app       (suffix_len=2) ← exists → mapping: /src → /home/user
+        for suffix_len in (1..n).rev() {
+            let suffix_start = n - suffix_len;
+            let mut candidate = host_path.to_path_buf();
+            for comp in &comps[suffix_start..] {
+                candidate.push(comp);
+            }
+            if candidate.is_dir() {
+                let container_prefix = comps[..suffix_start]
+                    .iter()
+                    .fold(PathBuf::new(), |mut p, c| {
+                        p.push(c);
+                        p
+                    })
+                    .to_string_lossy()
+                    .into_owned();
+                debug!(
+                    container_prefix = %container_prefix,
+                    host_prefix = %host_cwd,
+                    "Auto-detected Docker source path mapping (parent strategy)"
+                );
+                return Some((container_prefix, host_cwd.to_string()));
+            }
+        }
+
+        // Strategy 2: host_cwd IS the container workspace (or shares its trailing
+        // components). Used when the MCP bridge is launched from inside the project
+        // directory (e.g. Claude Code opened examples/docker-demo/client-app/).
+        //
+        // Find the longest common suffix of path components between the container
+        // path and host_cwd, then strip it from both to get the prefixes.
+        //
+        // Example: container=/src/examples/app, host_cwd=/home/user/examples/app
+        //   common suffix: examples/app (len=2)
+        //   container prefix: /src, host prefix: /home/user → mapping: /src → /home/user
+        let host_comps: Vec<Component> = host_path.components().collect();
+        let hn = host_comps.len();
+        // Keep at least 1 component on each side so the prefix is non-trivial.
+        let max_suffix = (n - 1).min(hn - 1);
+        let mut match_len = 0;
+        for i in 1..=max_suffix {
+            if comps[n - i] == host_comps[hn - i] {
+                match_len = i;
+            } else {
+                break;
+            }
+        }
+        if match_len > 0 {
+            let container_prefix_comps = &comps[..n - match_len];
+            let host_prefix_comps = &host_comps[..hn - match_len];
+            if !container_prefix_comps.is_empty() && !host_prefix_comps.is_empty() {
+                let container_prefix = container_prefix_comps
+                    .iter()
+                    .fold(PathBuf::new(), |mut p, c| {
+                        p.push(c);
+                        p
+                    })
+                    .to_string_lossy()
+                    .into_owned();
+                let host_prefix = host_prefix_comps
+                    .iter()
+                    .fold(PathBuf::new(), |mut p, c| {
+                        p.push(c);
+                        p
+                    })
+                    .to_string_lossy()
+                    .into_owned();
+                debug!(
+                    container_prefix = %container_prefix,
+                    host_prefix = %host_prefix,
+                    "Auto-detected Docker source path mapping (suffix-match strategy)"
+                );
+                return Some((container_prefix, host_prefix));
+            }
+        }
+
+        None
+    }
+
+    /// Fetch a connection's workspace_root from the current daemon and, if it looks
+    /// like a container path, store a host path mapping in `source_prefix_map`.
+    ///
+    /// Called after a successful Docker app wake so that subsequent `observe` /
+    /// `inspect_file` calls can find source files on the host.
+    async fn detect_and_store_prefix_mapping(&self, connection_id: &str) {
+        self.detect_and_store_prefix_mapping_inner(connection_id, None)
+            .await;
+    }
+
+    /// Inner implementation that accepts an optional `host_cwd` override for testing.
+    async fn detect_and_store_prefix_mapping_inner(
+        &self,
+        connection_id: &str,
+        host_cwd_override: Option<&str>,
+    ) {
+        let daemon_url = self.get_current_daemon_url().await;
+        let url = format!(
+            "{}/api/v1/connections/{}",
+            daemon_url.trim_end_matches('/'),
+            connection_id
+        );
+
+        let token = self.auth_token.read().await.clone();
+        let mut req = self.client.get(&url);
+        if let Some(tok) = &token {
+            req = req.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, tok));
+        }
+
+        let workspace_root = match req.send().await {
+            Ok(r) if r.status().is_success() => {
+                r.json::<serde_json::Value>().await.ok().and_then(|v| {
+                    v.get("workspaceRoot")
+                        .and_then(|s| s.as_str())
+                        .map(String::from)
+                })
+            }
+            Ok(r) => {
+                warn!(
+                    status = r.status().as_u16(),
+                    conn_id = connection_id,
+                    "Failed to fetch connection for path mapping (auth issue?)"
+                );
+                return;
+            }
+            Err(e) => {
+                warn!(error = %e, conn_id = connection_id, "Network error fetching connection for path mapping");
+                return;
+            }
+        };
+
+        let Some(container_workspace) = workspace_root.filter(|r| !r.is_empty() && r != "/unknown")
+        else {
+            debug!(conn_id = connection_id, "Connection has no usable workspaceRoot — skipping path mapping");
+            return;
+        };
+
+        let host_cwd = if let Some(override_cwd) = host_cwd_override {
+            override_cwd.to_string()
+        } else {
+            match std::env::current_dir() {
+                Ok(p) => p.to_string_lossy().into_owned(),
+                Err(_) => return,
+            }
+        };
+
+        if let Some(mapping) = Self::find_container_prefix_mapping(&container_workspace, &host_cwd)
+        {
+            info!(
+                container_prefix = %mapping.0,
+                host_prefix = %mapping.1,
+                "Docker source path mapping stored"
+            );
+            *self.source_prefix_map.write().await = Some(mapping);
+        } else {
+            debug!(
+                container_workspace = %container_workspace,
+                host_cwd = %host_cwd,
+                "No Docker source path mapping found (paths don't share a common suffix)"
+            );
+        }
+    }
+
+    /// Fetch the first active connection from a Docker daemon and detect the
+    /// container→host source path prefix mapping.
+    ///
+    /// Called automatically when switching to a Docker daemon so that file requests
+    /// (observe / inspect_file) work even without an explicit `wake` call in the
+    /// current session — i.e., when the Docker container is already running from
+    /// a previous session.
+    async fn detect_prefix_from_active_connections(&self, daemon_url: &str) {
+        let url = format!("{}/api/v1/connections?active_only=true", daemon_url);
+
+        let token = self.auth_token.read().await.clone();
+        let mut req = self.client.get(&url);
+        if let Some(tok) = &token {
+            req = req.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, tok));
+        }
+
+        let conn_id = match req
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok().and_then(
+                |v| {
+                    v.as_array()
+                        .and_then(|arr| arr.first())
+                        .and_then(|c| c.get("connectionId"))
+                        .and_then(|s| s.as_str())
+                        .map(String::from)
+                },
+            ),
+            Ok(r) => {
+                warn!(
+                    status = r.status().as_u16(),
+                    daemon_url,
+                    "Failed to list connections for path mapping (401=missing credentials, add with: detrix auth add <host:port> --token <token>)"
+                );
+                return;
+            }
+            Err(e) => {
+                debug!(error = %e, daemon_url, "Network error listing connections for path mapping");
+                return;
+            }
+        };
+
+        let Some(conn_id) = conn_id else {
+            debug!(daemon_url, "No active connections on Docker daemon — path mapping deferred until wake");
+            return;
+        };
+
+        debug!(
+            conn_id = %conn_id,
+            "Auto-detecting source prefix map from existing Docker connection"
+        );
+        self.detect_and_store_prefix_mapping(&conn_id).await;
+    }
+
     /// Switch to a different daemon URL at runtime
     ///
     /// File server behavior: The file server keeps running on the same port.
@@ -928,17 +1236,53 @@ impl McpBridge {
         *url_guard = new_url.clone();
         drop(url_guard);
 
-        // Resolve and update auth token for the new daemon
+        // Resolve and update auth token for the new daemon.
+        // Always update (even to None) so we don't accidentally forward the
+        // previous daemon's token to the new one.
         if let Some(hp) = extract_host_port(&new_url) {
-            if let Some(token) = resolve_token_for_host(&hp, true) {
-                *self.auth_token.write().await = Some(token);
+            let token = resolve_token_for_host(&hp, false);
+            if token.is_none() {
+                warn!(
+                    "No credentials found for {}. Requests may fail with 401. \
+                     Add credentials with: detrix auth add {} --token <token>",
+                    hp, hp
+                );
             }
+            *self.auth_token.write().await = token;
         }
 
-        // Update file server host if provided
+        // Always update the IP allowlist for the new daemon, even if the file server
+        // host didn't change. This ensures any daemon switch (post-wake, auto-switch)
+        // keeps the allowlist in sync with the actual daemon.
+        let is_docker_host = new_file_server_host.as_deref() == Some("host.docker.internal");
+        let new_allowed = if is_docker_host {
+            // Docker: container connects from an unknown bridge IP — skip IP check.
+            None
+        } else {
+            // Resolve daemon hostname to IPs; fallback to loopback-only on failure.
+            Some(resolve_daemon_ips_sync(&new_url))
+        };
+        *self.allowed_file_server_ips.write().await = new_allowed;
+
+        // Update the source prefix map based on the new daemon type:
+        // - Leaving Docker → clear the map (container paths won't apply to local daemon).
+        // - Entering Docker → proactively detect from existing active connections so that
+        //   observe/inspect_file work even in a new session without calling wake first.
+        if is_docker_host {
+            self.detect_prefix_from_active_connections(&new_url).await;
+        } else {
+            *self.source_prefix_map.write().await = None;
+        }
+
+        // Update file server host and rebuild advertised URL if host changed.
         if let Some(host) = new_file_server_host {
-            let mut host_guard = self.file_server_host.write().await;
-            *host_guard = host;
+            *self.file_server_host.write().await = host.clone();
+            let port = *self.file_server_port.read().await;
+            if port > 0 {
+                let new_fs_url = format!("http://{}:{}", host, port);
+                info!(url = %new_fs_url, "File server advertise URL updated");
+                *self.file_server_url.write().await = Some(new_fs_url);
+            }
         }
 
         info!("Switched to new daemon: {}", new_url);
@@ -956,7 +1300,7 @@ impl McpBridge {
     /// looks up credentials, switches daemon if needed, then forwards through the daemon.
     ///
     /// For non-wake requests: forwards directly to the current daemon.
-    async fn forward_or_fallback(&self, request: &Value) -> Value {
+    pub(crate) async fn forward_or_fallback(&self, request: &Value) -> Value {
         // For wake requests: use discovery-first flow
         if let Some(app_url) = extract_wake_app_url(request) {
             return self.handle_wake_with_discovery(request, &app_url).await;
@@ -982,31 +1326,103 @@ impl McpBridge {
 
     /// Discovery-first wake flow.
     ///
-    /// 1. GET `{app_url}/detrix/discover` (no auth) to find the app's daemon URL
-    /// 2. Look up token for that daemon from credentials
-    /// 3. Switch daemon if it differs from current
-    /// 4. Forward wake request through the (now-correct) daemon
+    /// Key insight: the app registers its debugger with its *own* configured
+    /// daemon (e.g. the Docker daemon), but the bridge's current daemon is the
+    /// one reachable from the host. We must:
+    ///   1. Discover which daemon the app will register with
+    ///   2. Forward the wake to the CURRENT daemon (which CAN reach app_url from
+    ///      the host network — e.g. localhost:8091 published from a Docker container)
+    ///   3. AFTER wake succeeds, switch to the app's daemon so the connection
+    ///      is on the right daemon for subsequent observe/metric calls
+    ///
+    /// `control_plane_url` in the discover response (new field) overrides step 2:
+    /// when present it means the current daemon can also reach the app via that URL
+    /// (Docker-internal name like http://order-service:8091). In that case we switch
+    /// first and let the remote daemon handle the wake call.
     async fn handle_wake_with_discovery(&self, request: &Value, app_url: &str) -> Value {
         let id = request.get("id").cloned().unwrap_or(Value::Null);
 
-        // 1. Discover app's daemon
-        if let Some((daemon_url, app_name)) = self.discover_app_daemon(app_url).await {
-            let current = self.get_current_daemon_url().await;
-            if daemon_url.trim_end_matches('/') != current.trim_end_matches('/') {
-                info!(
-                    "Discovery: {} uses daemon {}, switching from {}",
-                    app_name, daemon_url, current
-                );
-                // Look up token for target daemon
-                if let Some(hp) = extract_host_port(&daemon_url) {
-                    let token = resolve_token_for_host(&hp, true);
-                    // Switch daemon + update token
-                    if let Ok(()) = self.switch_daemon(daemon_url.clone(), None).await {
-                        if let Some(t) = token {
-                            *self.auth_token.write().await = Some(t);
+        // 1. Discover which daemon the app uses (and optional daemon-visible URL)
+        let discovery = self.discover_app_daemon(app_url).await;
+
+        let target_daemon = discovery.as_ref().map(|(url, _, _)| url.as_str());
+        let control_plane_url = discovery.as_ref().and_then(|(_, _, cp)| cp.as_deref());
+
+        // 2. Decide how to route the wake:
+        //    - If control_plane_url is provided, the daemon-internal URL is known →
+        //      switch first, then let the remote daemon call control_plane_url.
+        //    - Otherwise, wake through the CURRENT daemon (host-reachable app_url),
+        //      then switch so the connection appears on the right daemon.
+        let switch_before_wake = control_plane_url.is_some();
+
+        if switch_before_wake {
+            // Daemon knows how to reach the app (control_plane_url supplied)
+            let cp_url = control_plane_url.unwrap();
+            if let Some((daemon_url, app_name, _)) = &discovery {
+                let current = self.get_current_daemon_url().await;
+                if daemon_url.trim_end_matches('/') != current.trim_end_matches('/') {
+                    info!(
+                        "Discovery: {} uses daemon {}, switching from {} (control_plane_url={})",
+                        app_name, daemon_url, current, cp_url
+                    );
+                    // control_plane_url is present → daemon is inside Docker.
+                    // Advertise host.docker.internal so the Docker daemon can reach
+                    // our file server, and open the IP restriction.
+                    let _ = self
+                        .switch_daemon(daemon_url.clone(), Some("host.docker.internal".to_string()))
+                        .await;
+                }
+            }
+            // Rewrite app_url with the daemon-visible URL (it lives in params.arguments.app_url)
+            let mut wake_request = request.clone();
+            if cp_url != app_url {
+                if let Some(params) = wake_request.get_mut("params") {
+                    if let Some(arguments) = params.get_mut("arguments") {
+                        if let Some(obj) = arguments.as_object_mut() {
+                            obj.insert("app_url".to_string(), Value::String(cp_url.to_string()));
                         }
                     }
                 }
+            }
+            return match self.forward_request(wake_request).await {
+                Ok(r) if !is_jsonrpc_error(&r) => {
+                    self.auto_attach_from_response(&r).await;
+                    // Docker wake succeeded: detect container→host path mapping so
+                    // inspect_file / observe can find source files on the host.
+                    if let Some(conn_id) = extract_connection_id_from_response(&r) {
+                        self.detect_and_store_prefix_mapping(&conn_id).await;
+                    }
+                    r
+                }
+                Ok(r) => r,
+                Err(e) => jsonrpc_error(id, -32603, format!("Wake failed: {}", e)),
+            };
+        }
+
+        // Wake through CURRENT daemon (host-visible app_url works from here)
+        let wake_result = match self.forward_request(request.clone()).await {
+            Ok(r) if !is_jsonrpc_error(&r) => Ok(r),
+            Ok(r) => return r,
+            Err(e) => Err(jsonrpc_error(id, -32603, format!("Wake failed: {}", e))),
+        };
+        let wake_response = match wake_result {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        // Now switch to the app's daemon so subsequent calls go to the right place
+        if let Some(daemon_url) = target_daemon {
+            let current = self.get_current_daemon_url().await;
+            if daemon_url.trim_end_matches('/') != current.trim_end_matches('/') {
+                let app_name = discovery
+                    .as_ref()
+                    .map(|(_, n, _)| n.as_str())
+                    .unwrap_or("app");
+                info!(
+                    "Post-wake: {} registered with {}, switching from {}",
+                    app_name, daemon_url, current
+                );
+                let _ = self.switch_daemon(daemon_url.to_string(), None).await;
             }
         } else {
             debug!(
@@ -1015,21 +1431,21 @@ impl McpBridge {
             );
         }
 
-        // 2. Forward wake to (now-correct) daemon
-        match self.forward_request(request.clone()).await {
-            Ok(r) if !is_jsonrpc_error(&r) => {
-                self.auto_attach_from_response(&r).await;
-                r
-            }
-            Ok(r) => r,
-            Err(e) => jsonrpc_error(id, -32603, format!("Wake failed: {}", e)),
-        }
+        // Auto-attach on the (now-switched) daemon
+        self.auto_attach_from_response(&wake_response).await;
+        wake_response
     }
 
     /// Discover which daemon an app uses by calling its `/detrix/discover` endpoint.
     ///
-    /// Returns `(daemon_url, app_name)` on success. This endpoint requires no authentication.
-    async fn discover_app_daemon(&self, app_url: &str) -> Option<(String, String)> {
+    /// Returns `(daemon_url, app_name, control_plane_url)` on success.
+    /// `control_plane_url` is the daemon-visible URL of the app's control plane
+    /// (may differ from the user-visible URL in Docker/cloud deployments).
+    /// This endpoint requires no authentication.
+    pub(crate) async fn discover_app_daemon(
+        &self,
+        app_url: &str,
+    ) -> Option<(String, String, Option<String>)> {
         let url = format!("{}/detrix/discover", app_url.trim_end_matches('/'));
         debug!("Discovering app daemon at {}", url);
 
@@ -1049,7 +1465,8 @@ impl McpBridge {
         let data: Value = resp.json().await.ok()?;
         let daemon_url = data["daemon_url"].as_str()?.to_string();
         let name = data["name"].as_str().unwrap_or("unknown").to_string();
-        Some((daemon_url, name))
+        let control_plane_url = data["control_plane_url"].as_str().map(|s| s.to_string());
+        Some((daemon_url, name, control_plane_url))
     }
 
     /// Check a wake response for `daemon_url` and auto-switch if present.
@@ -1083,6 +1500,56 @@ impl McpBridge {
             format!("\n\nAuto-switched to daemon at {}", daemon_url),
         );
     }
+}
+
+// ============================================================================
+// File Server IP Resolution
+// ============================================================================
+
+/// Resolve the hostname from a daemon URL to a set of IPs, always including loopback.
+///
+/// Used to seed/update the file server IP allowlist when the daemon changes.
+/// Falls back to loopback-only set on resolution failure.
+fn resolve_daemon_ips_sync(daemon_url: &str) -> std::collections::HashSet<std::net::IpAddr> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+    let mut ips = std::collections::HashSet::new();
+    // Always allow loopback.
+    ips.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    ips.insert(IpAddr::V6(Ipv6Addr::LOCALHOST));
+
+    if let Some(host) = extract_host_only(daemon_url) {
+        // Use (host, port) form of ToSocketAddrs for DNS resolution.
+        if let Ok(addrs) = (host.as_str(), 0u16).to_socket_addrs() {
+            for addr in addrs {
+                ips.insert(addr.ip());
+            }
+        }
+    }
+
+    ips
+}
+
+/// Extract just the hostname (no port, no scheme, no path) from a URL.
+fn extract_host_only(url: &str) -> Option<String> {
+    // Strip scheme.
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    // Take authority (up to first '/').
+    let authority = rest.split('/').next()?;
+    // Strip port: for IPv6 [::1]:8090, strip brackets and port.
+    let host = if authority.starts_with('[') {
+        let end = authority.find(']')?;
+        authority[1..end].to_string()
+    } else {
+        // host:port — take everything before the last ':'.
+        match authority.rfind(':') {
+            Some(colon) => authority[..colon].to_string(),
+            None => authority.to_string(),
+        }
+    };
+    Some(host)
 }
 
 // ============================================================================
@@ -1136,7 +1603,7 @@ fn append_to_response_text(response: &mut Value, text: String) {
 }
 
 /// Check if a JSON-RPC request is a `wake` tool call and extract the `app_url` argument.
-fn extract_wake_app_url(request: &Value) -> Option<String> {
+pub(crate) fn extract_wake_app_url(request: &Value) -> Option<String> {
     if request.get("method")?.as_str()? != "tools/call" {
         return None;
     }
@@ -1185,4 +1652,333 @@ fn jsonrpc_error(id: Value, code: i32, message: impl Into<String>) -> Value {
         },
         "id": id
     })
+}
+
+#[cfg(test)]
+mod prefix_mapping_tests {
+    use super::McpBridge;
+
+    /// Create a temp directory tree and return the base path string.
+    fn mk_tree(parts: &[&str]) -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = tmp.path().to_path_buf();
+        for part in parts {
+            p.push(part);
+            std::fs::create_dir_all(&p).unwrap();
+        }
+        let base = tmp.path().to_string_lossy().into_owned();
+        (tmp, base)
+    }
+
+    #[test]
+    fn detects_typical_docker_mapping() {
+        // Simulate: container workspace = /src/examples/docker-demo/client-app
+        //           host cwd = /some/project  (which has examples/docker-demo/client-app)
+        let (_tmp, host_cwd) = mk_tree(&["examples", "docker-demo", "client-app"]);
+        let result = McpBridge::find_container_prefix_mapping(
+            "/src/examples/docker-demo/client-app",
+            &host_cwd,
+        );
+        let (container_prefix, host_prefix) = result.expect("Should detect mapping");
+        assert_eq!(container_prefix, "/src");
+        assert_eq!(host_prefix, host_cwd);
+    }
+
+    #[test]
+    fn returns_none_when_no_match() {
+        let (_tmp, host_cwd) = mk_tree(&["unrelated", "dir"]);
+        let result = McpBridge::find_container_prefix_mapping(
+            "/src/examples/docker-demo/client-app",
+            &host_cwd,
+        );
+        assert!(
+            result.is_none(),
+            "Should return None when paths don't match"
+        );
+    }
+
+    /// Strategy 2: host_cwd IS the container workspace (Claude Code opened the project dir).
+    ///
+    /// When the MCP bridge runs with CWD = examples/docker-demo/client-app (because
+    /// Claude Code opened that directory), Strategy 1 fails (no subdirs match), so
+    /// Strategy 2 strips the common suffix to derive the prefix.
+    #[test]
+    fn detects_mapping_when_host_cwd_is_container_workspace() {
+        // Simulate: container workspace = /src/examples/docker-demo/client-app
+        //           host cwd = /abs/detrix-release/examples/docker-demo/client-app
+        //           (Claude Code opened the client-app directory directly)
+        let (_tmp, base) = mk_tree(&["detrix-release", "examples", "docker-demo", "client-app"]);
+        // host_cwd = the leaf (client-app), not the root
+        let host_cwd = format!("{}/detrix-release/examples/docker-demo/client-app", base);
+        let result = McpBridge::find_container_prefix_mapping(
+            "/src/examples/docker-demo/client-app",
+            &host_cwd,
+        );
+        let (container_prefix, host_prefix) = result.expect("Strategy 2 should detect mapping");
+        assert_eq!(container_prefix, "/src");
+        // host_prefix should be the parent that strips the common suffix
+        assert!(
+            host_prefix.ends_with("detrix-release"),
+            "host_prefix ({host_prefix}) should end with the project root (detrix-release)"
+        );
+    }
+
+    /// Strategy 2: single trailing component match.
+    #[test]
+    fn detects_mapping_single_suffix_component() {
+        // container=/workspace/app, host_cwd=/home/user/app
+        let (_tmp, base) = mk_tree(&["user", "app"]);
+        let host_cwd = format!("{}/user/app", base);
+        let result = McpBridge::find_container_prefix_mapping("/workspace/app", &host_cwd);
+        let (container_prefix, host_prefix) = result.expect("Single suffix should match");
+        assert_eq!(container_prefix, "/workspace");
+        assert!(host_prefix.ends_with("user"), "host_prefix should be parent of app");
+    }
+
+    #[test]
+    fn shorter_common_suffix_works() {
+        let (_tmp, host_cwd) = mk_tree(&["client-app"]);
+        let result = McpBridge::find_container_prefix_mapping("/workspace/client-app", &host_cwd);
+        let (container_prefix, _) = result.expect("Should find single-component suffix");
+        assert_eq!(container_prefix, "/workspace");
+    }
+
+    // =========================================================================
+    // Integration tests: detect_and_store_prefix_mapping_inner
+    //
+    // These tests spin up a minimal axum mock server that simulates the Detrix
+    // daemon's GET /api/v1/connections/{id} endpoint.  The bridge fetches the
+    // connection's workspaceRoot from this fake daemon and should auto-detect
+    // the container→host prefix mapping.
+    // =========================================================================
+
+    /// Helper: start a one-shot axum mock server that serves a fixed JSON body at
+    /// `GET /api/v1/connections/<conn_id>`.  Returns `(port, _keep_alive)`.
+    /// The server lives until `_keep_alive` is dropped.
+    async fn mock_connection_server(
+        conn_id: &str,
+        workspace_root: &str,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
+        use axum::{extract::Path, routing::get, Router};
+        use std::sync::Arc;
+        use tokio::net::TcpListener;
+
+        let ws = Arc::new(workspace_root.to_string());
+        let id = conn_id.to_string();
+
+        let app = Router::new().route(
+            "/api/v1/connections/{id}",
+            get(move |Path(got_id): Path<String>| {
+                let ws = Arc::clone(&ws);
+                let expected = id.clone();
+                async move {
+                    if got_id == expected {
+                        axum::Json(serde_json::json!({ "workspaceRoot": *ws }))
+                    } else {
+                        axum::Json(serde_json::json!({ "error": "not found" }))
+                    }
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        // Give the server a tick to bind
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        (port, handle)
+    }
+
+    fn make_bridge_for_daemon(daemon_url: &str) -> std::sync::Arc<McpBridge> {
+        use super::super::config::BridgeConfig;
+        let cfg = BridgeConfig {
+            daemon_url: daemon_url.to_string(),
+            ..Default::default()
+        };
+        std::sync::Arc::new(McpBridge::new(cfg).unwrap())
+    }
+
+    /// When the daemon returns a container workspace_root that shares a suffix
+    /// with the host cwd, the prefix map should be populated.
+    #[tokio::test]
+    async fn detect_stores_prefix_map_on_match() {
+        let (_tmp, host_cwd) = mk_tree(&["examples", "docker-demo", "client-app"]);
+        let container_workspace = "/src/examples/docker-demo/client-app";
+        let conn_id = "abc123";
+
+        let (port, _server) = mock_connection_server(conn_id, container_workspace).await;
+        let daemon_url = format!("http://127.0.0.1:{}", port);
+        let bridge = make_bridge_for_daemon(&daemon_url);
+
+        bridge
+            .detect_and_store_prefix_mapping_inner(conn_id, Some(&host_cwd))
+            .await;
+
+        let map = bridge.source_prefix_map.read().await.clone();
+        let (container_prefix, host_prefix) = map.expect("Prefix map should be set");
+        assert_eq!(container_prefix, "/src");
+        assert_eq!(host_prefix, host_cwd);
+    }
+
+    /// When no common suffix is found, the prefix map stays None.
+    #[tokio::test]
+    async fn detect_leaves_map_none_on_no_match() {
+        let (_tmp, host_cwd) = mk_tree(&["unrelated", "dir"]);
+        let container_workspace = "/src/examples/docker-demo/client-app";
+        let conn_id = "abc456";
+
+        let (port, _server) = mock_connection_server(conn_id, container_workspace).await;
+        let daemon_url = format!("http://127.0.0.1:{}", port);
+        let bridge = make_bridge_for_daemon(&daemon_url);
+
+        bridge
+            .detect_and_store_prefix_mapping_inner(conn_id, Some(&host_cwd))
+            .await;
+
+        let map = bridge.source_prefix_map.read().await.clone();
+        assert!(map.is_none(), "No common suffix — map must stay None");
+    }
+
+    /// When the daemon returns a blank or /unknown workspace_root, no mapping is stored.
+    #[tokio::test]
+    async fn detect_ignores_unknown_workspace_root() {
+        let (_tmp, host_cwd) = mk_tree(&["examples", "client-app"]);
+        let conn_id = "abc789";
+
+        let (port, _server) = mock_connection_server(conn_id, "/unknown").await;
+        let daemon_url = format!("http://127.0.0.1:{}", port);
+        let bridge = make_bridge_for_daemon(&daemon_url);
+
+        bridge
+            .detect_and_store_prefix_mapping_inner(conn_id, Some(&host_cwd))
+            .await;
+
+        let map = bridge.source_prefix_map.read().await.clone();
+        assert!(map.is_none(), "/unknown workspace_root must be ignored");
+    }
+
+    /// The correct REST API path `/api/v1/connections/{id}` is used — not `/connections/{id}`.
+    /// Verified by the mock server only responding to the correct path; a wrong path → 404 → no map.
+    #[tokio::test]
+    async fn detect_uses_api_v1_path() {
+        use axum::{routing::get, Router};
+        use tokio::net::TcpListener;
+
+        // Server that ONLY responds at the correct path.
+        let container_workspace = "/src/app";
+        let app = Router::new().route(
+            "/api/v1/connections/testid",
+            get(move || async move {
+                axum::Json(serde_json::json!({ "workspaceRoot": container_workspace }))
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let (_tmp, host_cwd) = mk_tree(&["app"]);
+        let daemon_url = format!("http://127.0.0.1:{}", port);
+        let bridge = make_bridge_for_daemon(&daemon_url);
+
+        bridge
+            .detect_and_store_prefix_mapping_inner("testid", Some(&host_cwd))
+            .await;
+
+        // If the correct path is used, the server responds with workspaceRoot → mapping is set.
+        let map = bridge.source_prefix_map.read().await.clone();
+        assert!(
+            map.is_some(),
+            "Correct /api/v1/connections/{{id}} path must be used — mapping should be detected"
+        );
+    }
+
+    // =========================================================================
+    // End-to-end: mock daemon + file server + prefix map
+    //
+    // Simulates the full Docker debugging flow:
+    //   1. `detect_and_store_prefix_mapping_inner` fetches workspace_root from
+    //      the mock daemon and stores the container→host mapping.
+    //   2. The bridge file server (already running with the shared prefix map)
+    //      rewrites incoming container paths before serving files.
+    // =========================================================================
+
+    /// Full end-to-end: mock daemon sets prefix map, file server rewrites paths.
+    #[tokio::test]
+    async fn e2e_docker_path_rewriting_via_prefix_map() {
+        use super::super::file_server::start_file_server;
+        use std::io::Write;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        // Create a real file on the host under a structure that mirrors the container
+        // workspace suffix: container = /src/myapp, host = <tmp>/myapp
+        let tmp = tempfile::tempdir().unwrap();
+        let app_dir = tmp.path().join("myapp");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let mut src_file = tempfile::NamedTempFile::new_in(&app_dir).unwrap();
+        write!(src_file, "e2e file content").unwrap();
+        let filename = src_file
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let host_cwd = tmp.path().to_string_lossy().into_owned();
+        let container_workspace = "/src/myapp"; // same suffix as tmp/myapp
+
+        // Start a mock daemon that returns this workspace_root for our connection
+        let conn_id = "e2e_conn";
+        let (mock_port, _server) = mock_connection_server(conn_id, container_workspace).await;
+        let daemon_url = format!("http://127.0.0.1:{}", mock_port);
+
+        // Start the bridge file server (no IP restriction, no auth)
+        let prefix_map: super::super::file_server::SourcePrefixMap = Arc::new(RwLock::new(None));
+        let allowed_ips = Arc::new(RwLock::new(None));
+        let fs_port = start_file_server(None, allowed_ips, Arc::clone(&prefix_map))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Build a bridge pointing at the mock daemon, with the shared prefix map
+        let bridge = make_bridge_for_daemon(&daemon_url);
+        // Inject the shared prefix map into the bridge
+        *bridge.source_prefix_map.write().await = None;
+
+        // Simulate wake: detect + store the prefix mapping
+        bridge
+            .detect_and_store_prefix_mapping_inner(conn_id, Some(&host_cwd))
+            .await;
+
+        // Verify the prefix map was detected
+        let detected_map = bridge.source_prefix_map.read().await.clone();
+        let (c_prefix, h_prefix) = detected_map.expect("Map must be detected");
+        assert_eq!(c_prefix, "/src");
+        assert_eq!(h_prefix, host_cwd);
+
+        // Now apply the same map to the file server (simulating what bridge.run() wires up)
+        *prefix_map.write().await = Some((c_prefix, h_prefix));
+
+        // File server request uses the container path — should be rewritten to host path
+        let container_path = format!("/src/myapp/{}", filename);
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/detrix/files/read", fs_port))
+            .json(&serde_json::json!({ "path": container_path }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            200,
+            "File should be found after path rewriting"
+        );
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["content"], "e2e file content");
+    }
 }

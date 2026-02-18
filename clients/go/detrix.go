@@ -230,11 +230,20 @@ func Init(cfg Config) error {
 		return fmt.Errorf("failed to create daemon client: %w", err2)
 	}
 
+	// Best-effort: fetch advertise_url from daemon (daemon may not be up yet)
+	if advURL := daemonClient.FetchAdvertiseURL(cfg.DaemonURL, 2*time.Second); advURL != "" {
+		s.Lock()
+		s.DaemonAdvertiseURL = advURL
+		s.Unlock()
+		slog.Debug("fetched daemon advertise URL at init", "advertise_url", advURL)
+	}
+
 	// Create and start control server
 	controlServer = control.NewServer(
 		cfg.ControlHost,
 		cfg.ControlPort,
 		authToken,
+		s.WorkspaceRoot,
 		statusProvider,
 		wakeHandler,
 		sleepHandler,
@@ -708,15 +717,48 @@ func statusProvider() map[string]any {
 func discoverProvider() map[string]any {
 	s := state.Get()
 	s.RLock()
-	defer s.RUnlock()
 	daemonURL := s.DaemonAdvertiseURL
+	stDaemonURL := s.DaemonURL
+	name := s.Name
+	controlHost := s.ControlHost
+	advertiseHost := s.AdvertiseHost
+	actualControlPort := s.ActualControlPort
+	s.RUnlock()
+
+	// Lazy-fetch: if advertise URL unknown, ask daemon now
 	if daemonURL == "" {
-		daemonURL = s.DaemonURL
+		if advURL := daemonClient.FetchAdvertiseURL(stDaemonURL, 2*time.Second); advURL != "" {
+			s.Lock()
+			s.DaemonAdvertiseURL = advURL
+			s.Unlock()
+			daemonURL = advURL
+			slog.Debug("fetched daemon advertise URL on discover", "advertise_url", advURL)
+		}
 	}
-	return map[string]any{
+
+	if daemonURL == "" {
+		daemonURL = stDaemonURL
+	}
+
+	result := map[string]any{
 		"daemon_url": daemonURL,
-		"name":       s.Name,
+		"name":       name,
 	}
+
+	// Build control_plane_url: daemon-visible URL of this app's control plane.
+	// Use advertise_host (DETRIX_HOST) if set; otherwise use control_host
+	// unless it's a bind-all address. Lets the MCP bridge route wake requests
+	// correctly in Docker/cloud (e.g. http://order-service:8091).
+	bindAll := map[string]bool{"0.0.0.0": true, "::": true, "": true}
+	cpHost := advertiseHost
+	if cpHost == "" && !bindAll[controlHost] {
+		cpHost = controlHost
+	}
+	if cpHost != "" && actualControlPort > 0 {
+		result["control_plane_url"] = fmt.Sprintf("http://%s:%d", cpHost, actualControlPort)
+	}
+
+	return result
 }
 
 func wakeHandler(daemonURL string) (map[string]any, error) {

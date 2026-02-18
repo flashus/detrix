@@ -12,11 +12,10 @@
 //!
 //! Note: These tests must run serially as they use the daemon process.
 
-use detrix_testing::e2e::executor::find_detrix_binary;
+use detrix_testing::e2e::executor::{find_detrix_binary, TestDaemonSetup, TestPortCounter};
 use reqwest::StatusCode;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -25,8 +24,7 @@ use tempfile::TempDir;
 /// https://datatracker.ietf.org/doc/html/rfc5737
 const EXTERNAL_TEST_IP: &str = "203.0.113.1";
 
-/// Global port counter to ensure each test gets a unique port
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
+static PORT_COUNTER: TestPortCounter = TestPortCounter::new(0);
 
 /// Test executor specialized for rate limit testing
 struct RateLimitTestExecutor {
@@ -39,27 +37,14 @@ struct RateLimitTestExecutor {
 
 impl RateLimitTestExecutor {
     fn new() -> Self {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = manifest_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| manifest_dir.clone());
-
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-
-        // Use a unique port for this test - combine PID with atomic counter
-        let counter = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let http_port = 19000 + ((std::process::id() as u16 + counter) % 500);
-
-        let daemon_log_path = temp_dir.path().join("daemon.log");
-
+        let setup = TestDaemonSetup::new();
+        let http_port = PORT_COUNTER.next(19000, 500);
         Self {
-            temp_dir,
+            temp_dir: setup.temp_dir,
             http_port,
             daemon_process: None,
-            daemon_log_path,
-            workspace_root,
+            daemon_log_path: setup.daemon_log_path,
+            workspace_root: setup.workspace_root,
         }
     }
 
