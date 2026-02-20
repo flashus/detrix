@@ -14,3 +14,8 @@ too-many-arguments-threshold = 8
 
 # Configure too-many-lines threshold
 too-many-lines-threshold = 150
+
+# Allow unwrap/expect/panic in test code, forbid in production
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

@@ -339,6 +339,17 @@ impl PortRegistry {
     pub fn is_allocated(&self, service: ServiceType) -> bool {
         self.get(service).is_some()
     }
+
+    /// Override the actual allocated port for a service.
+    ///
+    /// Used after early TCP binding to record the true bound port when a TOCTOU
+    /// fallback occurred (the port returned by `allocate` was stolen between the
+    /// availability check and the actual `TcpListener::bind`).
+    pub fn set_actual(&mut self, service: ServiceType, port: u16) {
+        if let Some(alloc) = self.allocations.get_mut(&service) {
+            alloc.actual = Some(port);
+        }
+    }
 }
 
 // ============================================================================

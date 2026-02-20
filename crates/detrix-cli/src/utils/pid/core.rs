@@ -129,25 +129,65 @@ impl PidFile {
         // On Unix, use file locking as the primary mechanism
         #[cfg(not(windows))]
         {
-            let file_result = OpenOptions::new()
+            let file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
                 .truncate(false)
-                .open(&path);
+                .open(&path)
+                .with_context(|| format!("Failed to open PID file: {:?}", path))?;
 
-            let file =
-                file_result.with_context(|| format!("Failed to open PID file: {:?}", path))?;
+            // Try to acquire exclusive lock with retries for transient contention.
+            //
+            // PidFile::read_info() momentarily acquires an exclusive flock to probe
+            // daemon liveness. If our acquire() races with that probe, try_lock_exclusive
+            // fails even though no real daemon is running. Retrying with a short delay
+            // handles this gracefully while still failing fast when a genuine daemon
+            // holds the lock (verified via process liveness check).
+            const LOCK_RETRIES: u32 = 5;
+            const LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 
-            // Try to acquire exclusive lock (non-blocking)
+            for attempt in 0..LOCK_RETRIES {
+                match file.try_lock_exclusive() {
+                    Ok(_) => {
+                        let mut file = file;
+                        let host = default_api_host();
+                        write_pid_info(&mut file, &HashMap::new(), &host)?;
+                        return Ok(Self {
+                            path,
+                            file,
+                            ports: HashMap::new(),
+                            host,
+                        });
+                    }
+                    Err(_) => {
+                        // Check if a real daemon process holds the lock
+                        let info = read_pid_info_from_file(&file).unwrap_or(PidInfo::new(0));
+                        if info.pid > 0 && is_process_running(info.pid) {
+                            // Confirmed running daemon — fail immediately
+                            bail!(
+                                "Daemon already running (PID: {}, PID file: {})",
+                                info.pid,
+                                path.display()
+                            );
+                        }
+                        // No running daemon — likely transient contention from read_info()
+                        debug!(
+                            attempt = attempt + 1,
+                            max_retries = LOCK_RETRIES,
+                            "PID file lock contention (transient), retrying"
+                        );
+                        std::thread::sleep(LOCK_RETRY_DELAY);
+                    }
+                }
+            }
+
+            // Final attempt after retries
             match file.try_lock_exclusive() {
                 Ok(_) => {
-                    // Lock acquired - either new file or stale (previous crash)
-                    // Overwrite with current PID (ports/host will be added later via set_ports_with_host)
                     let mut file = file;
                     let host = default_api_host();
                     write_pid_info(&mut file, &HashMap::new(), &host)?;
-
                     Ok(Self {
                         path,
                         file,
@@ -156,10 +196,7 @@ impl PidFile {
                     })
                 }
                 Err(_) => {
-                    // Lock failed - another instance is running
-                    // Read PID info from file to include in error message
                     let info = read_pid_info_from_file(&file).unwrap_or(PidInfo::new(0));
-
                     bail!(
                         "Daemon already running (PID: {}, PID file: {})",
                         info.pid,
@@ -301,12 +338,14 @@ impl PidFile {
                     // File opened successfully, try to acquire lock
                     match file.try_lock_exclusive() {
                         Ok(_) => {
-                            // Lock acquired - file may be stale (previous crash).
-                            // However, flock can be temporarily unavailable during daemon
-                            // initialization on some platforms, so verify the process is
-                            // actually not running before declaring stale.
+                            // Lock acquired successfully — no detrix daemon holds the flock.
+                            // The flock is the authoritative liveness mechanism on Unix:
+                            // our daemon holds it for its entire lifetime (PidFile::acquire →
+                            // PidFile::Drop). If we can acquire it, the daemon is not running,
+                            // regardless of whether the stored PID happens to belong to another
+                            // unrelated process (e.g. PID reuse by launchd/init = PID 1).
                             drop(file);
-                            Ok(verify_daemon_running(pid_info))
+                            Ok(None)
                         }
                         Err(_) => {
                             // Lock failed - daemon holds lock, verify process is alive

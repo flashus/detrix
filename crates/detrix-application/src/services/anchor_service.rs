@@ -325,7 +325,7 @@ impl DefaultAnchorService {
                 continue;
             }
 
-            if best_match.map_or(true, |(_, best_sim)| similarity > best_sim) {
+            if best_match.is_none_or(|(_, best_sim)| similarity > best_sim) {
                 best_match = Some((line_num, similarity));
             }
         }

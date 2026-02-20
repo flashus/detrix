@@ -611,8 +611,7 @@ impl Drop for DaemonDiscoveryTests {
         // Synchronous cleanup - kill daemon if still running
         #[cfg(unix)]
         if let Some(pid) = self.daemon_pid.take() {
-            use std::process::Command;
-            let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+            super::executor::kill_9(pid as u64);
         }
         #[cfg(not(unix))]
         {

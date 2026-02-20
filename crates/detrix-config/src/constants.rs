@@ -569,9 +569,11 @@ pub const DEFAULT_WS_IDLE_CHECK_INTERVAL_MS: u64 = 10_000;
 /// If no heartbeat received within this duration, client is considered dead
 pub const DEFAULT_MCP_HEARTBEAT_TIMEOUT_SECS: u64 = 30;
 
-/// MCP daemon spawn timeout (seconds)
-/// Maximum time to wait for daemon to become healthy after spawning
-pub const DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS: u64 = 30;
+/// MCP daemon spawn timeout per attempt (seconds)
+/// Maximum time to wait for daemon to become healthy after spawning.
+/// If the daemon dies during init, `spawn_daemon_for_mcp` retries up to 3 times
+/// (handles transient resource contention under heavy parallel load).
+pub const DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS: u64 = 60;
 
 /// MCP daemon health poll interval (milliseconds)
 /// How often to poll daemon health during startup

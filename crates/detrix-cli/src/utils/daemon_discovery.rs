@@ -240,38 +240,31 @@ impl DaemonDiscovery {
     /// Uses `probe_grpc_port` and `probe_http_port` which default to constants but can be
     /// configured via `with_probe_ports()`.
     /// This is useful when PID file is stale but daemon is actually running.
+    ///
+    /// NOTE: HTTP port must be open for a positive result. gRPC port alone is not
+    /// sufficient — any service could be listening on that port, and without HTTP
+    /// we cannot verify health or communicate with the daemon. Requiring HTTP avoids
+    /// false positives when an unrelated process holds the gRPC probe port.
     fn find_via_port_probe(&self) -> Option<DaemonInfo> {
-        // Try gRPC port first (primary protocol)
-        let grpc_addr = format!("{}:{}", self.probe_host, self.probe_grpc_port);
-        if self.is_port_open(&grpc_addr) {
-            // Also check HTTP port to confirm it's Detrix
-            let http_addr = format!("{}:{}", self.probe_host, self.probe_http_port);
-            if self.is_port_open(&http_addr) {
-                return Some(DaemonInfo::from_port_probe(
-                    self.probe_host.clone(),
-                    self.probe_http_port,
-                    self.probe_grpc_port,
-                ));
-            }
-            // Only gRPC port is open - might be Detrix
-            return Some(DaemonInfo::from_port_probe(
-                self.probe_host.clone(),
-                self.probe_http_port, // Assume default
-                self.probe_grpc_port,
-            ));
-        }
-
-        // Try HTTP port alone
+        // HTTP must be open — it is required for health checks and all REST/MCP traffic
         let http_addr = format!("{}:{}", self.probe_host, self.probe_http_port);
-        if self.is_port_open(&http_addr) {
-            return Some(DaemonInfo::from_port_probe(
-                self.probe_host.clone(),
-                self.probe_http_port,
-                self.probe_grpc_port, // Assume default
-            ));
+        if !self.is_port_open(&http_addr) {
+            return None;
         }
 
-        None
+        // Also check gRPC port to report an accurate grpc_port in the result
+        let grpc_addr = format!("{}:{}", self.probe_host, self.probe_grpc_port);
+        let grpc_open = self.is_port_open(&grpc_addr);
+
+        Some(DaemonInfo::from_port_probe(
+            self.probe_host.clone(),
+            self.probe_http_port,
+            if grpc_open {
+                self.probe_grpc_port
+            } else {
+                DEFAULT_GRPC_PORT
+            },
+        ))
     }
 
     /// Check if a port is open by attempting a TCP connection

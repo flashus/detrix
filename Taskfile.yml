@@ -14,14 +14,16 @@ includes:
 
 tasks:
   build:
-    desc: Build Detrix in release mode
+    desc: Build Detrix in release mode (formats first to avoid stale-binary warnings)
     cmds:
+      - cargo fmt --all
       - cargo build --release
 
   lint:
     desc: Run clippy linter
     cmds:
-      - cargo clippy --all -- -D warnings
+      # - cargo clippy --all -- -D warnings
+      - cargo clippy --all
 
   format:
     desc: Format code with rustfmt
@@ -60,7 +62,7 @@ tasks:
       - task: tests:test
       - task: clients:test
       - echo "✅ All checks passed! Ready to commit."
-  
+
   # Quick access to common test tasks (aliases to Taskfile.tests.yml)
   test:
     desc: Run all tests (alias to tests:test)

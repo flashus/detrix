@@ -100,10 +100,7 @@ pub mod connection {
                 // Multiple connections: auto-select if exactly one is active (Connected/Connecting).
                 // This handles Docker/container restarts where old Disconnected connections
                 // accumulate until TTL cleanup removes them.
-                let active: Vec<_> = connections
-                    .iter()
-                    .filter(|c| c.is_active())
-                    .collect();
+                let active: Vec<_> = connections.iter().filter(|c| c.is_active()).collect();
                 if active.len() == 1 {
                     return Ok(active[0].id.clone());
                 }

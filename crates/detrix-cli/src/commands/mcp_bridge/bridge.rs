@@ -1113,7 +1113,10 @@ impl McpBridge {
 
         let Some(container_workspace) = workspace_root.filter(|r| !r.is_empty() && r != "/unknown")
         else {
-            debug!(conn_id = connection_id, "Connection has no usable workspaceRoot — skipping path mapping");
+            debug!(
+                conn_id = connection_id,
+                "Connection has no usable workspaceRoot — skipping path mapping"
+            );
             return;
         };
 
@@ -1159,20 +1162,16 @@ impl McpBridge {
             req = req.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, tok));
         }
 
-        let conn_id = match req
-            .timeout(std::time::Duration::from_secs(3))
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok().and_then(
-                |v| {
+        let conn_id = match req.timeout(std::time::Duration::from_secs(3)).send().await {
+            Ok(r) if r.status().is_success() => {
+                r.json::<serde_json::Value>().await.ok().and_then(|v| {
                     v.as_array()
                         .and_then(|arr| arr.first())
                         .and_then(|c| c.get("connectionId"))
                         .and_then(|s| s.as_str())
                         .map(String::from)
-                },
-            ),
+                })
+            }
             Ok(r) => {
                 warn!(
                     status = r.status().as_u16(),
@@ -1188,7 +1187,10 @@ impl McpBridge {
         };
 
         let Some(conn_id) = conn_id else {
-            debug!(daemon_url, "No active connections on Docker daemon — path mapping deferred until wake");
+            debug!(
+                daemon_url,
+                "No active connections on Docker daemon — path mapping deferred until wake"
+            );
             return;
         };
 
@@ -1732,7 +1734,10 @@ mod prefix_mapping_tests {
         let result = McpBridge::find_container_prefix_mapping("/workspace/app", &host_cwd);
         let (container_prefix, host_prefix) = result.expect("Single suffix should match");
         assert_eq!(container_prefix, "/workspace");
-        assert!(host_prefix.ends_with("user"), "host_prefix should be parent of app");
+        assert!(
+            host_prefix.ends_with("user"),
+            "host_prefix should be parent of app"
+        );
     }
 
     #[test]

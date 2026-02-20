@@ -53,7 +53,7 @@ pub async fn handle_add_metric(
     }
 
     // If language is not provided, derive it from the connection (same pattern as MCP/REST)
-    if req.language.as_ref().map_or(true, |l| l.is_empty()) {
+    if req.language.as_ref().is_none_or(|l| l.is_empty()) {
         req.language = Some(connection.language.to_string());
     }
 

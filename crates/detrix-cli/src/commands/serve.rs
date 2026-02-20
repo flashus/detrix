@@ -29,6 +29,7 @@ use detrix_logging::{debug, error, info, warn};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::net::TcpListener;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -41,6 +42,14 @@ pub async fn run(
     pid_file: Option<String>,
     mcp_spawned: bool,
 ) -> Result<()> {
+    // Install SIGTERM handler with SA_SIGINFO as early as possible to capture sender PID.
+    // Must be done before PID file acquisition — otherwise the default SIGTERM action
+    // (terminate) can kill the daemon during the startup window, leaving a zombie that
+    // appears alive to kill(pid, 0) but doesn't hold the flock.
+    #[cfg(unix)]
+    let sigterm_pipe_fd =
+        sigterm_info::install().context("Failed to install early SIGTERM info handler")?;
+
     // Log executable path for debugging (helps identify which binary is running)
     if let Ok(exe_path) = std::env::current_exe() {
         info!("Detrix daemon starting (exe: {})", exe_path.display());
@@ -162,18 +171,65 @@ pub async fn run(
     };
     port_registry.register(ServiceType::Grpc, preferred_grpc_port, fallback_enabled);
 
-    // Allocate HTTP port
-    let http_port = port_registry
-        .allocate(ServiceType::Http)
-        .context("Failed to allocate HTTP port")?;
+    // Allocate HTTP port and immediately bind to hold it.
+    //
+    // Binding before writing to the PID file eliminates a TOCTOU race that occurs when
+    // multiple daemons start in parallel (e.g., during E2E tests): without early binding
+    // another process can grab the port between our availability check and the actual bind
+    // inside HttpServer::start_with_shutdown, causing "address already in use" failures.
+    let (http_port, http_listener) = if http_enabled {
+        let preferred = port_registry
+            .allocate(ServiceType::Http)
+            .context("Failed to allocate HTTP port")?;
 
-    if http_port != config.api.rest.port {
-        warn!(
-            "⚠️  Port {} is unavailable (in use by another process), using port {} instead. \
-             Set 'api.port_fallback = false' in config to fail instead of auto-selecting a port.",
-            config.api.rest.port, http_port
-        );
-    }
+        // Actually bind the socket now to hold the port.
+        // If the preferred port was taken (TOCTOU), try fallback ports.
+        let http_addr_str = format!("{}:{}", config.api.rest.host, preferred);
+        let listener = match TcpListener::bind(&http_addr_str).await {
+            Ok(l) => l,
+            Err(_) if fallback_enabled => {
+                // preferred was taken between check and bind; scan for a free port
+                let fallback = detrix_config::ports::find_available_port(
+                    preferred.saturating_add(1),
+                    preferred.saturating_add(100),
+                )
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Failed to bind HTTP port {} and no fallback found in range {}–{}",
+                        preferred,
+                        preferred + 1,
+                        preferred + 100
+                    )
+                })?;
+                let fallback_addr = format!("{}:{}", config.api.rest.host, fallback);
+                TcpListener::bind(&fallback_addr)
+                    .await
+                    .with_context(|| format!("Failed to bind fallback HTTP port {}", fallback))?
+            }
+            Err(e) => {
+                return Err(e).context(format!("Failed to bind HTTP port {}", preferred));
+            }
+        };
+        let actual_port = listener.local_addr()?.port();
+        if actual_port != config.api.rest.port {
+            warn!(
+                "⚠️  Port {} is unavailable (in use by another process), using port {} instead. \
+                 Set 'api.port_fallback = false' in config to fail instead of auto-selecting a port.",
+                config.api.rest.port, actual_port
+            );
+        }
+        (actual_port, Some(listener))
+    } else {
+        let preferred = port_registry
+            .allocate(ServiceType::Http)
+            .context("Failed to allocate HTTP port")?;
+        (preferred, None)
+    };
+
+    // Ensure the registry reflects the actual bound port so the PID file is correct.
+    // In the normal case these are the same; in the rare TOCTOU fallback the actual
+    // bound port differs from what allocate() returned.
+    port_registry.set_actual(ServiceType::Http, http_port);
 
     // Allocate gRPC port (if gRPC is enabled)
     let grpc_port = if grpc_enabled {
@@ -224,10 +280,17 @@ pub async fn run(
     // cannot touch it.
     let pid_guard_sentinel_tx = if let Some(guard) = pid_file_guard.take() {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let my_pid = std::process::id();
         tokio::spawn(async move {
-            let _guard = guard; // holds the flock for the daemon's lifetime
-            let _ = rx.await; // blocks until sender signals or is dropped
-                              // _guard is dropped here, releasing the flock
+            let guard = guard; // holds the flock for the daemon's lifetime
+            info!("PID {} sentinel task started — holding flock", my_pid);
+            let result = rx.await; // blocks until sender signals or is dropped
+            info!(
+                "PID {} sentinel task received shutdown signal (result={:?}) — releasing flock",
+                my_pid, result
+            );
+            drop(guard); // explicit drop AFTER await - ensures compiler keeps guard in state machine
+            info!("PID {} sentinel task — flock released", my_pid);
         });
         Some(tx)
     } else {
@@ -453,6 +516,13 @@ pub async fn run(
             None => HttpServer::new(http_addr, Arc::clone(&api_state)),
         };
 
+        // Pass the pre-bound listener so axum uses the socket we already hold.
+        // This eliminates the TOCTOU window between port allocation and server bind.
+        let http_server = match http_listener {
+            Some(listener) => http_server.with_listener(listener),
+            None => http_server,
+        };
+
         let handle = http_server
             .start_with_shutdown(shutdown_rx.clone())
             .await
@@ -635,23 +705,46 @@ pub async fn run(
     // Wait for shutdown signal (Ctrl+C, SIGTERM, or MCP auto-shutdown)
     #[cfg(unix)]
     {
+        use std::os::unix::io::FromRawFd;
+        use tokio::io::unix::AsyncFd;
         use tokio::signal::unix::{signal, SignalKind};
 
-        let mut sigterm =
-            signal(SignalKind::terminate()).context("Failed to install SIGTERM handler")?;
+        // Wrap the SIGTERM self-pipe (installed at top of run()) for async notification.
+        // SAFETY: sigterm_pipe_fd is a valid pipe fd from sigterm_info::install().
+        let sigterm_file: std::fs::File = unsafe { FromRawFd::from_raw_fd(sigterm_pipe_fd) };
+        let sigterm_async =
+            AsyncFd::new(sigterm_file).context("Failed to create async SIGTERM notifier")?;
+
+        // SIGINT still uses tokio's handler (no need for sender PID on Ctrl+C)
         let mut sigint =
             signal(SignalKind::interrupt()).context("Failed to install SIGINT handler")?;
 
-        tokio::select! {
-            _ = sigterm.recv() => {
-                info!("Received SIGTERM");
-            }
-            _ = sigint.recv() => {
-                info!("Received SIGINT (Ctrl+C)");
-            }
-            _ = mcp_shutdown_rx.changed() => {
-                if *mcp_shutdown_rx.borrow() {
-                    info!("All MCP clients disconnected - auto-shutdown triggered");
+        loop {
+            tokio::select! {
+                _ = sigterm_async.readable() => {
+                    let sender = sigterm_info::sender_pid();
+                    let my_pid = std::process::id();
+                    info!("Received SIGTERM (my PID: {}, sender PID: {})", my_pid, sender);
+                    break;
+                }
+                _ = sigint.recv() => {
+                    info!("Received SIGINT (Ctrl+C)");
+                    break;
+                }
+                result = mcp_shutdown_rx.changed() => {
+                    match result {
+                        Ok(()) => {
+                            if *mcp_shutdown_rx.borrow() {
+                                info!("All MCP clients disconnected - auto-shutdown triggered");
+                                break;
+                            }
+                            // Value changed to false or spurious wake — continue waiting
+                        }
+                        Err(_) => {
+                            // Sender dropped — shut down
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -668,16 +761,30 @@ pub async fn run(
         let mut ctrl_break =
             windows::ctrl_break().context("Failed to install Ctrl+Break handler")?;
 
-        tokio::select! {
-            _ = ctrl_c.recv() => {
-                info!("Received Ctrl+C");
-            }
-            _ = ctrl_break.recv() => {
-                info!("Received Ctrl+Break");
-            }
-            _ = mcp_shutdown_rx.changed() => {
-                if *mcp_shutdown_rx.borrow() {
-                    info!("All MCP clients disconnected - auto-shutdown triggered");
+        loop {
+            tokio::select! {
+                _ = ctrl_c.recv() => {
+                    info!("Received Ctrl+C");
+                    break;
+                }
+                _ = ctrl_break.recv() => {
+                    info!("Received Ctrl+Break");
+                    break;
+                }
+                result = mcp_shutdown_rx.changed() => {
+                    match result {
+                        Ok(()) => {
+                            if *mcp_shutdown_rx.borrow() {
+                                info!("All MCP clients disconnected - auto-shutdown triggered");
+                                break;
+                            }
+                            // Value changed to false or spurious wake — continue waiting
+                        }
+                        Err(_) => {
+                            // Sender dropped — shut down
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -686,13 +793,26 @@ pub async fn run(
     // Fallback for other non-unix platforms (unlikely but handles edge cases)
     #[cfg(all(not(unix), not(windows)))]
     {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("Received Ctrl+C");
-            }
-            _ = mcp_shutdown_rx.changed() => {
-                if *mcp_shutdown_rx.borrow() {
-                    info!("All MCP clients disconnected - auto-shutdown triggered");
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received Ctrl+C");
+                    break;
+                }
+                result = mcp_shutdown_rx.changed() => {
+                    match result {
+                        Ok(()) => {
+                            if *mcp_shutdown_rx.borrow() {
+                                info!("All MCP clients disconnected - auto-shutdown triggered");
+                                break;
+                            }
+                            // Value changed to false or spurious wake — continue waiting
+                        }
+                        Err(_) => {
+                            // Sender dropped — shut down
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -744,6 +864,78 @@ pub async fn run(
 
     info!("✓ Detrix server stopped");
     Ok(())
+}
+
+/// SIGTERM handler that captures the sender PID via SA_SIGINFO.
+///
+/// Uses a self-pipe to notify the tokio event loop (instead of tokio's built-in
+/// signal handler) so we can inspect `siginfo_t.si_pid` to identify which process
+/// sent the signal — critical for debugging cross-test PID interference.
+#[cfg(unix)]
+mod sigterm_info {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    /// PID of the process that sent SIGTERM (0 if not yet received).
+    static SENDER_PID: AtomicI32 = AtomicI32::new(0);
+
+    /// Write end of the self-pipe for notifying the event loop.
+    static PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+
+    /// SA_SIGINFO handler: stores sender PID and writes to self-pipe.
+    /// Only uses async-signal-safe operations (atomic store + write).
+    extern "C" fn handler(
+        _sig: nix::libc::c_int,
+        info: *mut nix::libc::siginfo_t,
+        _ctx: *mut nix::libc::c_void,
+    ) {
+        // SAFETY: Atomic store and libc::write are async-signal-safe.
+        unsafe {
+            if !info.is_null() {
+                SENDER_PID.store((*info).si_pid(), Ordering::SeqCst);
+            }
+            let fd = PIPE_WRITE_FD.load(Ordering::SeqCst);
+            if fd >= 0 {
+                let byte: u8 = 1;
+                nix::libc::write(fd, &byte as *const u8 as *const nix::libc::c_void, 1);
+            }
+        }
+    }
+
+    /// Install SIGTERM handler with SA_SIGINFO and return the read-end fd
+    /// of a self-pipe that gets a byte when SIGTERM arrives.
+    pub fn install() -> anyhow::Result<std::os::unix::io::RawFd> {
+        use anyhow::Context;
+
+        let mut fds = [0i32; 2];
+        if unsafe { nix::libc::pipe(fds.as_mut_ptr()) } != 0 {
+            anyhow::bail!("pipe() failed: {}", std::io::Error::last_os_error());
+        }
+        unsafe {
+            nix::libc::fcntl(fds[0], nix::libc::F_SETFL, nix::libc::O_NONBLOCK);
+            nix::libc::fcntl(fds[1], nix::libc::F_SETFL, nix::libc::O_NONBLOCK);
+            nix::libc::fcntl(fds[0], nix::libc::F_SETFD, nix::libc::FD_CLOEXEC);
+            nix::libc::fcntl(fds[1], nix::libc::F_SETFD, nix::libc::FD_CLOEXEC);
+        }
+
+        PIPE_WRITE_FD.store(fds[1], Ordering::SeqCst);
+
+        let action = nix::sys::signal::SigAction::new(
+            nix::sys::signal::SigHandler::SigAction(handler),
+            nix::sys::signal::SaFlags::SA_SIGINFO | nix::sys::signal::SaFlags::SA_RESTART,
+            nix::sys::signal::SigSet::empty(),
+        );
+        unsafe {
+            nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGTERM, &action)
+                .context("sigaction(SIGTERM) failed")?;
+        }
+
+        Ok(fds[0])
+    }
+
+    /// PID of the process that sent SIGTERM (0 if not yet received).
+    pub fn sender_pid() -> i32 {
+        SENDER_PID.load(Ordering::SeqCst)
+    }
 }
 
 /// Generate a cryptographically secure random token for MCP auto-auth.

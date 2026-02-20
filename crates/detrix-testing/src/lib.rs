@@ -1,4 +1,6 @@
 //! Test utilities for Detrix
+// This crate is test infrastructure — unwrap/expect/panic are acceptable here.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //!
 //! This crate provides mocks, fixtures, and helpers for testing Detrix components.
 //!

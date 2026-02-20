@@ -41,7 +41,7 @@ tasks:
         uv run datamodel-codegen \
           --input ../{{.SPEC_FILE}} \
           --input-file-type openapi \
-          --output detrix/_generated/models.py \
+          --output detrix/_generated/models.py.tmp \
           --output-model-type pydantic_v2.BaseModel \
           --use-annotated \
           --field-constraints \
@@ -49,7 +49,24 @@ tasks:
           --use-default-kwarg \
           --target-python-version 3.11 \
           --formatters ruff-format ruff-check
-      - echo "✅ Generated Python models in python/detrix/_generated/models.py"
+      # Only overwrite if content (ignoring timestamp) actually changed
+      - |
+        TARGET=detrix/_generated/models.py
+        TMP="${TARGET}.tmp"
+        if [ -f "$TARGET" ]; then
+          OLD=$(grep -v '#   timestamp:' "$TARGET")
+          NEW=$(grep -v '#   timestamp:' "$TMP")
+          if [ "$OLD" = "$NEW" ]; then
+            rm "$TMP"
+            echo "✅ Python models unchanged, skipping"
+          else
+            mv "$TMP" "$TARGET"
+            echo "✅ Generated Python models in python/detrix/_generated/models.py"
+          fi
+        else
+          mv "$TMP" "$TARGET"
+          echo "✅ Generated Python models in python/detrix/_generated/models.py"
+        fi
 
   generate-python-scaffold:
     desc: Generate Python client scaffold from OpenAPI spec

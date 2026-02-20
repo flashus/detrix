@@ -22,7 +22,7 @@ use std::io::Write as IoWrite;
 use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::OnceLock;
@@ -54,6 +54,48 @@ pub fn get_workspace_root() -> PathBuf {
         .unwrap_or(manifest_dir)
 }
 
+/// Check that no production Detrix daemon is running at the global PID path.
+///
+/// A running production daemon will overwrite `~/detrix/auth-token` when test
+/// daemons register, breaking the production MCP bridge (and vice-versa).
+///
+/// Set `DETRIX_SKIP_PRODUCTION_CHECK=1` to bypass (for intentional co-existence).
+#[cfg(unix)]
+pub fn check_no_production_daemon() {
+    if std::env::var("DETRIX_SKIP_PRODUCTION_CHECK").is_ok() {
+        return;
+    }
+
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    let pid_path = detrix_config::paths::default_pid_path();
+    let pid_info = match detrix_config::pid::PidInfo::read_from_file(&pid_path) {
+        Ok(Some(info)) => info,
+        Ok(None) => return, // No PID file — no production daemon
+        Err(_) => return,   // Unreadable/corrupt PID file — ignore
+    };
+
+    let pid = pid_info.pid as i32;
+    let is_running = kill(Pid::from_raw(pid), None).is_ok();
+    if is_running {
+        eprintln!(
+            "\n\
+             WARNING: Production Detrix daemon (PID {pid}) is running at:\n  {pid_path}\n\
+             \n\
+             Test daemons may interfere with your production MCP bridge.\n\
+             Consider: kill {pid}   (or: detrix stop)\n\
+             Suppress: DETRIX_SKIP_PRODUCTION_CHECK=1 cargo test ...\n",
+            pid = pid,
+            pid_path = pid_path.display(),
+        );
+    }
+}
+
+/// Windows stub for `check_no_production_daemon` (no-op).
+#[cfg(windows)]
+pub fn check_no_production_daemon() {}
+
 /// Clean up orphaned test processes from previous runs.
 ///
 /// This should be called at the start of each test session. It reads PID files
@@ -73,6 +115,8 @@ pub fn cleanup_orphaned_e2e_processes() {
     if E2E_CLEANUP_DONE.swap(true, Ordering::SeqCst) {
         return;
     }
+
+    check_no_production_daemon();
 
     let pid_dir = PathBuf::from(E2E_PID_DIR);
     if !pid_dir.exists() {
@@ -195,6 +239,97 @@ pub async fn kill_and_unregister_process_async(
     }
 }
 
+/// Send a signal to a process by PID, guarding against PID 0.
+///
+/// CRITICAL: On Unix, `kill -SIGNAL 0` sends the signal to ALL processes in the
+/// calling process's group. This has caused flaky tests where SIGTERM intended
+/// for one daemon killed unrelated test daemons running in parallel.
+///
+/// This function is the ONLY correct way to send signals to processes in tests.
+pub fn safe_kill(pid: u64, signal: &str) {
+    if pid == 0 {
+        eprintln!("[safe_kill] BUG: attempted to kill PID 0 with signal {signal} — skipping");
+        return;
+    }
+    let _ = Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .output();
+}
+
+/// Send SIGKILL (-9) to a process by PID (safe wrapper, guards against PID 0).
+pub fn kill_9(pid: u64) {
+    safe_kill(pid, "-9");
+}
+
+/// Check if a process is alive using signal 0 (safe wrapper, guards against PID 0).
+///
+/// Returns `true` if the process exists and we have permission to signal it.
+pub fn kill_check(pid: u64) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Send SIGTERM to a daemon only if its command line matches the expected config path.
+///
+/// This prevents PID reuse interference in parallel tests: if daemon A dies and its PID
+/// is reused by daemon B from another test, a delayed SIGTERM would kill the wrong daemon.
+/// By checking `ps -p PID -o args=` for the config path, we ensure we only SIGTERM our own daemon.
+///
+/// Returns `true` if the signal was sent, `false` if the PID was 0, the process doesn't exist,
+/// or the command line doesn't match.
+pub fn safe_sigterm_for_config(pid: u64, config_path: &str) -> bool {
+    if pid == 0 {
+        eprintln!("[safe_sigterm_for_config] BUG: attempted to SIGTERM PID 0 — skipping");
+        return false;
+    }
+    match Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .output()
+    {
+        Ok(output) => {
+            let args = String::from_utf8_lossy(&output.stdout);
+            if args.contains(config_path) {
+                safe_kill(pid, "-TERM");
+                true
+            } else {
+                eprintln!(
+                    "[safe_sigterm_for_config] PID {} command line does not contain config path '{}' — \
+                     likely PID reuse, skipping SIGTERM. Actual args: {}",
+                    pid,
+                    config_path,
+                    args.trim()
+                );
+                false
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "[safe_sigterm_for_config] Failed to check PID {} command line: {} — skipping SIGTERM",
+                pid, e
+            );
+            false
+        }
+    }
+}
+
+/// Kill a process by PID and unregister it from E2E cleanup tracking.
+///
+/// Use this for daemon processes where you only have a raw PID (not a `Child`).
+/// The `name` should match what was used during registration (e.g., "mcp_daemon").
+pub fn kill_and_unregister_pid(name: &str, pid: u64) {
+    if pid == 0 {
+        return;
+    }
+    kill_9(pid);
+    unregister_e2e_process(name, pid as u32);
+}
+
 /// Get candidate target directories for finding binaries
 ///
 /// Returns a list of potential target directories in priority order:
@@ -224,10 +359,17 @@ pub fn get_target_candidates(workspace_root: &std::path::Path) -> Vec<PathBuf> {
 ///
 /// Searches for detrix binary in order:
 /// 1. `DETRIX_BIN` env var (explicit path)
-/// 2. release/detrix in each target candidate
+/// 2. release/detrix in each target candidate (freshness-checked)
 /// 3. debug/detrix in each target candidate
+///
+/// # Panics
+///
+/// Panics with a clear error if a release binary is found but is older than the newest
+/// source file in the workspace. This prevents hard-to-diagnose test failures caused
+/// by running tests against a stale binary after code changes.
+/// Set `DETRIX_SKIP_FRESHNESS_CHECK=1` to bypass (e.g. in CI where build ordering is known).
 pub fn find_detrix_binary(workspace_root: &std::path::Path) -> Option<PathBuf> {
-    // 1. Check explicit DETRIX_BIN env var first
+    // 1. Check explicit DETRIX_BIN env var first (no freshness check — caller's responsibility)
     if let Ok(bin_path) = std::env::var(detrix_config::constants::ENV_DETRIX_BIN) {
         let path = PathBuf::from(bin_path);
         if path.exists() {
@@ -239,9 +381,15 @@ pub fn find_detrix_binary(workspace_root: &std::path::Path) -> Option<PathBuf> {
     let candidates = get_target_candidates(workspace_root);
 
     // Prefer release builds, then debug
+    let skip_check = std::env::var("DETRIX_SKIP_FRESHNESS_CHECK").is_ok();
     for target_dir in &candidates {
         let release_path = target_dir.join("release/detrix");
         if release_path.exists() {
+            if !skip_check {
+                if let Err(msg) = check_binary_freshness(&release_path, workspace_root) {
+                    eprintln!("\nWARNING: {msg}\n");
+                }
+            }
             return Some(release_path);
         }
     }
@@ -254,6 +402,81 @@ pub fn find_detrix_binary(workspace_root: &std::path::Path) -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Check whether the detrix binary is up-to-date with the workspace source.
+///
+/// Compares the binary's mtime against every `.rs` and `Cargo.toml` file under
+/// `<workspace_root>/crates/`. Returns `Err` with a human-readable message if any
+/// source file is newer than the binary.
+///
+/// Skips `target/` subdirectories to avoid false positives from generated files.
+pub fn check_binary_freshness(binary: &Path, workspace_root: &Path) -> Result<(), String> {
+    let binary_mtime = binary
+        .metadata()
+        .and_then(|m| m.modified())
+        .map_err(|e| format!("Cannot stat binary {}: {e}", binary.display()))?;
+
+    let src_root = workspace_root.join("crates");
+    if let Some((stale_path, _)) = newest_source_file(&src_root, binary_mtime) {
+        return Err(format!(
+            "Release binary is STALE — source was modified after the last build.\n\
+             Binary : {}\n\
+             Newer  : {}\n\n\
+             Fix    : cargo build --release\n\
+             Bypass : DETRIX_SKIP_FRESHNESS_CHECK=1 cargo test ...",
+            binary.display(),
+            stale_path.display(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Recursively find the newest source file under `dir` that is newer than `since`.
+/// Returns `None` if all source files are older than `since`.
+fn newest_source_file(
+    dir: &Path,
+    since: std::time::SystemTime,
+) -> Option<(PathBuf, std::time::SystemTime)> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut result: Option<(PathBuf, std::time::SystemTime)> = None;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+
+        if ft.is_dir() {
+            // Skip build artifacts
+            if path.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            if let Some(sub) = newest_source_file(&path, since) {
+                let is_newer = result.as_ref().map(|(_, m)| sub.1 > *m).unwrap_or(true);
+                if is_newer {
+                    result = Some(sub);
+                }
+            }
+        } else if ft.is_file() {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !matches!(ext, "rs" | "toml") && name != "build.rs" {
+                continue;
+            }
+            if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
+                if mtime > since {
+                    let is_newer = result.as_ref().map(|(_, m)| mtime > *m).unwrap_or(true);
+                    if is_newer {
+                        result = Some((path, mtime));
+                    }
+                }
+            }
+        }
+    }
+
+    result
 }
 
 /// Global cache for built Rust binary - builds once and reuses across all tests
@@ -287,86 +510,13 @@ fn rust_fixture_binary_path(fixture_dir: &std::path::Path) -> Result<PathBuf, St
     Ok(PathBuf::from(target_dir).join("debug/detrix_example_app"))
 }
 
-// Port counters for parallel tests - using random offset to avoid collisions between test runs
-static HTTP_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
-static GRPC_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
-static DEBUGPY_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
-static DELVE_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
-static LLDB_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
-static CODELLDB_PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
-
-/// Initialize port counters with random offsets to avoid collisions between test runs
-fn init_port_counters() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        // Use random offset based on process ID and time to avoid collisions
-        let seed = (std::process::id() as u64).wrapping_mul(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(12345),
-        );
-        let offset = ((seed % 1000) as u16) * 10; // 0-9990 in steps of 10
-
-        // Port ranges must not overlap! With 34 tests incrementing by 10 each,
-        // we need at least 340 port gap between ranges.
-        // NOTE: Avoid port 7000 which is used by macOS AirPlay Receiver
-        HTTP_PORT_COUNTER.store(8000 + offset, Ordering::SeqCst);
-        GRPC_PORT_COUNTER.store(50000 + offset, Ordering::SeqCst);
-        DEBUGPY_PORT_COUNTER.store(5000 + offset, Ordering::SeqCst);
-        DELVE_PORT_COUNTER.store(7100 + offset, Ordering::SeqCst); // Start above 7000 to avoid macOS AirPlay
-        LLDB_PORT_COUNTER.store(7600 + offset, Ordering::SeqCst); // 500 gap from delve
-        CODELLDB_PORT_COUNTER.store(8100 + offset, Ordering::SeqCst); // 500 gap from lldb
-    });
-}
+// Port allocation is delegated to the cross-process TestPortRegistry
+// (see port_registry.rs). Each test binary claims a unique non-overlapping
+// range at startup via file lock, eliminating cross-process collisions.
 
 /// Check if a port is available for binding
 pub fn is_port_available(port: u16) -> bool {
     TcpListener::bind(("127.0.0.1", port)).is_ok()
-}
-
-/// Ports known to be used by system services that should be skipped
-/// - 7000: macOS AirPlay Receiver (ControlCenter)
-/// - 5000: macOS AirPlay (older versions)
-const SYSTEM_RESERVED_PORTS: &[u16] = &[5000, 7000];
-
-/// Check if a port should be skipped (system reserved)
-fn is_system_reserved_port(port: u16) -> bool {
-    SYSTEM_RESERVED_PORTS.contains(&port)
-}
-
-/// Find an available port starting from the given base, incrementing until one is found.
-///
-/// This function:
-/// - Searches up to 100 ports from the base
-/// - Skips known system-reserved ports (e.g., 7000 for macOS AirPlay)
-/// - Panics with clear error if no port is available (test infrastructure issue)
-fn find_available_port(base: u16, max_attempts: u16) -> u16 {
-    // Use larger search range for robustness
-    let search_range = max_attempts.max(100);
-
-    for offset in 0..search_range {
-        let port = base.saturating_add(offset);
-
-        // Skip system-reserved ports
-        if is_system_reserved_port(port) {
-            continue;
-        }
-
-        if is_port_available(port) {
-            return port;
-        }
-    }
-
-    // Panic with clear message - this is a test infrastructure issue
-    panic!(
-        "Could not find available port in range {}-{}. \
-         Ports may be exhausted or blocked by firewall. \
-         Try closing other applications or restarting.",
-        base,
-        base.saturating_add(search_range)
-    );
 }
 
 /// Shared setup for test executors that manage their own daemon process.
@@ -447,46 +597,37 @@ impl TestPortCounter {
     }
 }
 
-/// Get unique HTTP port for tests (ensures port is actually available)
+/// Get unique HTTP port for tests (ensures port is actually available).
+///
+/// Delegates to the cross-process `TestPortRegistry` for guaranteed
+/// non-overlapping port ranges across parallel test binaries.
 pub fn get_http_port() -> u16 {
-    init_port_counters();
-    let base = HTTP_PORT_COUNTER.fetch_add(10, Ordering::SeqCst);
-    find_available_port(base, 10)
+    super::port_registry::TestPortRegistry::get().allocate()
 }
 
 /// Get unique gRPC port for tests (ensures port is actually available)
 pub fn get_grpc_port() -> u16 {
-    init_port_counters();
-    let base = GRPC_PORT_COUNTER.fetch_add(10, Ordering::SeqCst);
-    find_available_port(base, 10)
+    super::port_registry::TestPortRegistry::get().allocate()
 }
 
 /// Get unique debugpy port for tests (ensures port is actually available)
 pub fn get_debugpy_port() -> u16 {
-    init_port_counters();
-    let base = DEBUGPY_PORT_COUNTER.fetch_add(10, Ordering::SeqCst);
-    find_available_port(base, 10)
+    super::port_registry::TestPortRegistry::get().allocate()
 }
 
 /// Get unique delve port for tests (ensures port is actually available)
 pub fn get_delve_port() -> u16 {
-    init_port_counters();
-    let base = DELVE_PORT_COUNTER.fetch_add(10, Ordering::SeqCst);
-    find_available_port(base, 10)
+    super::port_registry::TestPortRegistry::get().allocate()
 }
 
 /// Get unique lldb-dap port for tests (ensures port is actually available)
 pub fn get_lldb_port() -> u16 {
-    init_port_counters();
-    let base = LLDB_PORT_COUNTER.fetch_add(10, Ordering::SeqCst);
-    find_available_port(base, 10)
+    super::port_registry::TestPortRegistry::get().allocate()
 }
 
 /// Get unique CodeLLDB port for tests (ensures port is actually available)
 pub fn get_codelldb_port() -> u16 {
-    init_port_counters();
-    let base = CODELLDB_PORT_COUNTER.fetch_add(10, Ordering::SeqCst);
-    find_available_port(base, 10)
+    super::port_registry::TestPortRegistry::get().allocate()
 }
 
 /// Kill any process listening on the specified port
@@ -512,8 +653,8 @@ pub fn kill_listening_process_on_port(port: u16) {
                         || command.starts_with("lldb");
 
                     if is_our_process {
-                        if let Ok(pid) = pid_str.parse::<i32>() {
-                            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output();
+                        if let Ok(pid) = pid_str.parse::<u64>() {
+                            kill_9(pid);
                         }
                     }
                 }
@@ -647,6 +788,29 @@ pub async fn wait_for_port(port: u16, timeout_secs: u64) -> bool {
     false
 }
 
+/// Find a Python executable that has debugpy available.
+///
+/// Checks `DETRIX_PYTHON` env var first, then tries `python` and `python3` in order.
+#[cfg(unix)]
+fn find_python() -> String {
+    if let Ok(py) = std::env::var("DETRIX_PYTHON") {
+        return py;
+    }
+    for candidate in &["python", "python3"] {
+        let ok = std::process::Command::new(candidate)
+            .args(["-c", "import debugpy"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return candidate.to_string();
+        }
+    }
+    "python".to_string() // last resort, will fail with a clear error
+}
+
 /// Start debugpy in a new process session using setsid
 ///
 /// This is required for DAP protocol to work correctly - creates a new
@@ -659,7 +823,8 @@ pub fn start_debugpy_setsid(port: u16, script_path: &str) -> Result<Child, std::
     let log = std::fs::File::create(&log_file)?;
     let log_stderr = log.try_clone()?;
 
-    let mut cmd = Command::new("python");
+    let python = find_python();
+    let mut cmd = Command::new(&python);
     cmd.args([
         "-Xfrozen_modules=off", // Disable frozen modules to prevent debugpy breakpoint issues
         "-m",
@@ -1041,10 +1206,12 @@ impl TestExecutor {
             temp_dir: tempfile::TempDir::new().expect("Failed to create temp dir"),
             http_port: get_http_port(),
             grpc_port: get_grpc_port(),
-            debugpy_port: get_debugpy_port(),
-            delve_port: get_delve_port(),
-            lldb_port: get_lldb_port(),
-            codelldb_port: get_codelldb_port(),
+            // Debugger ports are allocated lazily in start_debugpy/start_delve/start_lldb/start_codelldb
+            // to avoid wasting ports for tests that don't use debuggers
+            debugpy_port: 0,
+            delve_port: 0,
+            lldb_port: 0,
+            codelldb_port: 0,
             debugpy_process: None,
             delve_process: None,
             lldb_process: None,
@@ -1288,6 +1455,10 @@ impl TestExecutor {
 
     /// Start debugpy with --wait-for-client using setsid
     pub async fn start_debugpy(&mut self, script_path: &str) -> Result<(), String> {
+        // Lazy port allocation — only allocate when actually starting a debugger
+        if self.debugpy_port == 0 {
+            self.debugpy_port = get_debugpy_port();
+        }
         // Kill any process on this port (more reliable than pattern matching)
         self.kill_process_on_port(self.debugpy_port);
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1325,6 +1496,10 @@ impl TestExecutor {
     /// Note: The Go source file must be built first with debug symbols:
     /// `go build -gcflags='all=-N -l' -o detrix_example_app detrix_example_app.go`
     pub async fn start_delve(&mut self, source_path: &str) -> Result<(), String> {
+        // Lazy port allocation
+        if self.delve_port == 0 {
+            self.delve_port = get_delve_port();
+        }
         // Kill any process on this port (more reliable than pattern matching)
         self.kill_process_on_port(self.delve_port);
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1402,6 +1577,10 @@ impl TestExecutor {
     /// - lldb-serve handles type formatters and CodeLLDB detection
     /// - Works identically across platforms
     pub async fn start_lldb(&mut self, source_path: &str) -> Result<(), String> {
+        // Lazy port allocation
+        if self.lldb_port == 0 {
+            self.lldb_port = get_lldb_port();
+        }
         // Kill any process on this port (more reliable than pattern matching)
         self.kill_process_on_port(self.lldb_port);
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1509,6 +1688,10 @@ impl TestExecutor {
     /// * `Ok(())` if CodeLLDB started successfully
     /// * `Err(String)` with error message on failure
     pub async fn start_codelldb(&mut self, source_path: &str) -> Result<(), String> {
+        // Lazy port allocation
+        if self.codelldb_port == 0 {
+            self.codelldb_port = get_codelldb_port();
+        }
         // Kill any process on this port (more reliable than pattern matching)
         self.kill_process_on_port(self.codelldb_port);
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1708,8 +1891,8 @@ impl TestExecutor {
         let db_path_str = to_toml_path(&db_path);
         let pid_path_str = to_toml_path(&pid_path);
 
-        // Use port_fallback = true to let daemon find available ports if requested ones are busy
-        // We'll read actual ports from PID file after daemon starts
+        // port_fallback = false: the TestPortRegistry guarantees port availability,
+        // and fallback scanning can cause port stealing between concurrent tests
         let config_content = format!(
             r#"
 [metadata]
@@ -1726,7 +1909,7 @@ path = "{}"
 pid_file = "{}"
 
 [api]
-port_fallback = true
+port_fallback = false
 
 [api.rest]
 enabled = true
@@ -2160,15 +2343,12 @@ enable_ast_analysis = false
                             continue;
                         }
 
-                        if let Ok(pid_num) = pid_str.parse::<i32>() {
+                        if let Ok(pid_num) = pid_str.parse::<u64>() {
                             // Don't kill ourselves
-                            if pid_num == std::process::id() as i32 {
+                            if pid_num == std::process::id() as u64 {
                                 continue;
                             }
-                            // Send SIGKILL to the process
-                            let _ = Command::new("kill")
-                                .args(["-9", &pid_num.to_string()])
-                                .output();
+                            kill_9(pid_num);
                         }
                     }
                 }

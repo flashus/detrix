@@ -1,7 +1,7 @@
 //! Platform-specific process detection
 //!
 //! Provides functions to check if a process is running and if it's a detrix daemon.
-
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use std::process::Command;
 
 /// Check if a process with the given PID is running AND is a detrix process
