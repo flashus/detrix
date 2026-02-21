@@ -1225,42 +1225,163 @@ impl TestExecutor {
         }
     }
 
-    /// Clean up stale orphaned processes from previous test runs
+    /// Clean up stale orphaned processes from previous test runs.
     ///
-    /// Only cleans up processes that are orphaned (parent = 1) to avoid
+    /// Targets ALL process types that tests spawn:
+    /// - `detrix_example_app` (fixture apps)
+    /// - `lldb-dap` (LLDB debug adapters)
+    /// - `debugpy` (Python debug adapters)
+    /// - `dlv` (Delve Go debuggers — SIGTERM first for ptrace detach)
+    /// - `detrix serve` daemons running from temp dirs
+    ///
+    /// Only kills processes that are orphaned (PPID=1) to avoid
     /// interfering with currently running tests.
     #[cfg(unix)]
     fn cleanup_stale_orphans() {
+        // Immediate SIGKILL is fine for these — no ptrace involvement
+        Self::kill_orphaned_by_name("detrix_example_app", false);
+        Self::kill_orphaned_by_name("lldb-dap", false);
+        Self::kill_orphaned_by_name("debugpy", false);
+
+        // Delve needs SIGTERM first to trigger ptrace detach, then SIGKILL
+        Self::kill_orphaned_by_name("dlv", true);
+
+        // Test daemons running from /tmp/ directories
+        Self::kill_orphaned_test_daemons();
+    }
+
+    /// Find orphaned processes matching `name` (via `pgrep -f`) with PPID=1 and kill them.
+    ///
+    /// If `sigterm_first` is true, sends SIGTERM and waits up to 1s before SIGKILL.
+    /// This is needed for Delve which must detach ptrace before children can be reaped.
+    #[cfg(unix)]
+    fn kill_orphaned_by_name(name: &str, sigterm_first: bool) {
         use nix::sys::signal::{kill, Signal};
         use nix::unistd::Pid;
 
-        // Find orphaned detrix_example_app processes (parent PID = 1)
-        // These are safe to kill because they're from previous test runs
-        if let Ok(output) = Command::new("pgrep")
-            .args(["-f", "detrix_example_app"])
-            .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    if let Ok(pid) = line.trim().parse::<u32>() {
-                        // Check if this process is orphaned (PPID = 1)
-                        if let Ok(ppid_out) = Command::new("ps")
-                            .args(["-o", "ppid=", "-p", &pid.to_string()])
-                            .output()
-                        {
-                            let ppid = String::from_utf8_lossy(&ppid_out.stdout)
-                                .trim()
-                                .parse::<u32>()
-                                .unwrap_or(0);
-                            if ppid == 1 {
-                                // Orphaned - safe to kill
-                                let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-                            }
-                        }
+        let output = match Command::new("pgrep").args(["-f", name]).output() {
+            Ok(o) if o.status.success() => o,
+            _ => return,
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let pid = match line.trim().parse::<u32>() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            // Check if this process is orphaned (PPID = 1)
+            let ppid_out = match Command::new("ps")
+                .args(["-o", "ppid=", "-p", &pid.to_string()])
+                .output()
+            {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+
+            let ppid = String::from_utf8_lossy(&ppid_out.stdout)
+                .trim()
+                .parse::<u32>()
+                .unwrap_or(0);
+
+            if ppid != 1 {
+                continue;
+            }
+
+            let nix_pid = Pid::from_raw(pid as i32);
+
+            if sigterm_first {
+                // SIGTERM first for ptrace detach, wait up to 1s, then SIGKILL
+                let _ = kill(nix_pid, Signal::SIGTERM);
+                let mut exited = false;
+                for _ in 0..10 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    if kill(nix_pid, None).is_err() {
+                        exited = true;
+                        break;
                     }
                 }
+                if !exited {
+                    let _ = kill(nix_pid, Signal::SIGKILL);
+                }
+            } else {
+                let _ = kill(nix_pid, Signal::SIGKILL);
             }
+
+            eprintln!(
+                "cleanup_stale_orphans: killed orphaned {} process (pid={})",
+                name, pid
+            );
+        }
+    }
+
+    /// Kill orphaned `detrix serve` daemons that were spawned from test temp directories.
+    ///
+    /// Only kills daemons whose command line contains `/tmp/` or `/var/` (test temp dirs).
+    /// Never kills the user's production daemon at `~/detrix/`.
+    #[cfg(unix)]
+    fn kill_orphaned_test_daemons() {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+
+        let output = match Command::new("pgrep").args(["-f", "detrix.*serve"]).output() {
+            Ok(o) if o.status.success() => o,
+            _ => return,
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let pid = match line.trim().parse::<u32>() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            // Check PPID = 1 (orphaned)
+            let ppid_out = match Command::new("ps")
+                .args(["-o", "ppid=", "-p", &pid.to_string()])
+                .output()
+            {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+
+            let ppid = String::from_utf8_lossy(&ppid_out.stdout)
+                .trim()
+                .parse::<u32>()
+                .unwrap_or(0);
+
+            if ppid != 1 {
+                continue;
+            }
+
+            // Only kill if running from a test temp directory
+            let args_out = match Command::new("ps")
+                .args(["-o", "args=", "-p", &pid.to_string()])
+                .output()
+            {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+
+            let args = String::from_utf8_lossy(&args_out.stdout);
+            if !args.contains("/tmp/") && !args.contains("/var/") {
+                continue;
+            }
+
+            let nix_pid = Pid::from_raw(pid as i32);
+
+            // Graceful shutdown: SIGTERM, wait 200ms, then SIGKILL
+            let _ = kill(nix_pid, Signal::SIGTERM);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if kill(nix_pid, None).is_ok() {
+                let _ = kill(nix_pid, Signal::SIGKILL);
+            }
+
+            eprintln!(
+                "cleanup_stale_orphans: killed orphaned test daemon (pid={})",
+                pid
+            );
         }
     }
 
