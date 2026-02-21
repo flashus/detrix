@@ -74,13 +74,51 @@ pub async fn handle_sleep(
 }
 
 /// Handle disconnect_all request — stop all local adapters
+///
+/// Dual-mode behavior (mirrors REST handler):
+/// - **User-scoped**: if `x-detrix-client-id` metadata is present, only release
+///   that client's connection references. Safe for multi-user/cloud environments.
+/// - **Global**: if no client ID is provided, disconnect ALL adapters — but only
+///   from loopback callers. Remote callers without a client ID are rejected.
 pub async fn handle_disconnect_all(
     state: &Arc<ApiState>,
     request: Request<DisconnectAllRequest>,
 ) -> Result<Response<DisconnectAllResponse>, Status> {
     let client_id = crate::grpc::extract_client_id(&request)?;
+    let peer_addr = request.remote_addr();
     let _req = request.into_inner();
-    tracing::info!(?client_id, "gRPC: disconnect_all");
+
+    // User-scoped mode: client_id provided → release only caller's refs
+    if let Some(ref cid) = client_id {
+        let client_identity = detrix_core::connection_reference::ClientIdentity::bridge(cid);
+        tracing::info!(?client_identity, "gRPC: disconnect_all (user-scoped)");
+        let (released, disconnected) = state
+            .context
+            .connection_service
+            .disconnect_all_connections(&client_identity)
+            .await
+            .to_status()?;
+
+        return Ok(Response::new(DisconnectAllResponse {
+            status: status::DISCONNECTED.to_string(),
+            adapters_stopped: disconnected as u32,
+            message: format!(
+                "Released {} references, disconnected {} connections",
+                released, disconnected
+            ),
+            metadata: None,
+        }));
+    }
+
+    // Global mode: only loopback callers allowed
+    let is_loopback = peer_addr.map(|a| a.ip().is_loopback()).unwrap_or(false);
+    if !is_loopback {
+        return Err(Status::permission_denied(
+            "x-detrix-client-id metadata required for remote disconnect_all",
+        ));
+    }
+
+    tracing::info!("gRPC: disconnect_all (global, localhost)");
     let result = state
         .context
         .adapter_lifecycle_manager

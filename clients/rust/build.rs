@@ -29,13 +29,13 @@ fn main() {
 
     let build_info = format!(
         r#"/// Client version from Cargo.toml
-pub const VERSION: &str = "{}";
+pub const VERSION: &str = {:?};
 
 /// Git commit SHA at build time (or "unknown")
-pub const BUILD_COMMIT: &str = "{}";
+pub const BUILD_COMMIT: &str = {:?};
 
 /// Build tag/version (or VERSION if not set)
-pub const BUILD_TAG: &str = "{}";"#,
+pub const BUILD_TAG: &str = {:?};"#,
         version, build_commit, build_tag
     );
 

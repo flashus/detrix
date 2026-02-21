@@ -98,6 +98,8 @@ detrix-testing    → detrix-ports, detrix-core, detrix-application (test mocks)
 detrix-core       → NOTHING (pure domain)
 ```
 
+**Cross-cutting crates** (allowed as dependencies everywhere): `detrix-logging`. This is a thin tracing facade (macro re-exports + subscriber init) — a cross-cutting concern like config, not infrastructure.
+
 **CRITICAL:** `detrix-ports` defines port traits. `detrix-application` NEVER depends on infrastructure crates like `detrix-storage` or `detrix-dap`. Infrastructure crates implement traits from `detrix-ports`.
 
 **Note (*):** Infrastructure crates depend on `detrix-application` for shared types (JwksValidator, safety validators). This deviation is accepted - the key invariant (application never imports infrastructure) is maintained.

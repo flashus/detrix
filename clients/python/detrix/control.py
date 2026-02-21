@@ -298,11 +298,24 @@ class ControlHandler(BaseHTTPRequestHandler):
 
         # Resolve workspace: prefer workspace_root from request body (daemon provides
         # the connection's workspace root), fall back to cwd.
+        trust_boundary = Path(os.getcwd()).resolve()
         workspace_root = body.get("workspace_root")
         if workspace_root and isinstance(workspace_root, str) and workspace_root.strip():
             workspace = Path(workspace_root).resolve()
         else:
-            workspace = Path(os.getcwd()).resolve()
+            workspace = trust_boundary
+
+        # Security: validate that request's workspace_root is within (or equal to)
+        # the client's own cwd. Prevents setting workspace_root to "/" to bypass
+        # path containment checks.
+        try:
+            workspace.relative_to(trust_boundary)
+        except ValueError:
+            _logger.warning(
+                "File read blocked (workspace_root escapes trust boundary): %s", workspace
+            )
+            self._send_error_response("Workspace root escapes trust boundary", 403)
+            return
 
         # Resolve relative paths against the workspace
         resolved = Path(file_path)

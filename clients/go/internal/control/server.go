@@ -351,18 +351,47 @@ func (s *Server) handleFilesRead(w http.ResponseWriter, r *http.Request) {
 	if workspace == "" {
 		workspace, _ = os.Getwd()
 	}
-	workspace = filepath.Clean(workspace)
+
+	// Canonicalize workspace to resolve symlinks (prevents symlink traversal)
+	workspace, err = filepath.EvalSymlinks(workspace)
+	if err != nil {
+		http.Error(w, "Invalid workspace path", http.StatusBadRequest)
+		return
+	}
+
+	// Security: validate that the request's workspace_root is within (or equal to)
+	// the server's own configured workspace root. This prevents an attacker from
+	// setting workspace_root to "/" to bypass path containment checks.
+	trustBoundary := s.workspaceRoot
+	if trustBoundary == "" {
+		trustBoundary, _ = os.Getwd()
+	}
+	trustBoundary, err = filepath.EvalSymlinks(trustBoundary)
+	if err != nil {
+		http.Error(w, "Invalid trust boundary path", http.StatusInternalServerError)
+		return
+	}
+	rel, err := filepath.Rel(trustBoundary, workspace)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		http.Error(w, "Workspace root escapes trust boundary", http.StatusForbidden)
+		return
+	}
 
 	// Resolve the requested path
 	resolved := req.Path
 	if !filepath.IsAbs(resolved) {
 		resolved = filepath.Join(workspace, resolved)
 	}
-	resolved = filepath.Clean(resolved)
+
+	// Canonicalize resolved path to resolve symlinks
+	resolved, err = filepath.EvalSymlinks(resolved)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 
 	// Security: path must be within the workspace root
-
-	rel, err := filepath.Rel(workspace, resolved)
+	rel, err = filepath.Rel(workspace, resolved)
 	if err != nil || strings.HasPrefix(rel, "..") {
 		http.Error(w, "Path not within workspace", http.StatusForbidden)
 		return

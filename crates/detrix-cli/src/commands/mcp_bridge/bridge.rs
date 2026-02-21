@@ -796,11 +796,17 @@ impl McpBridge {
     /// Calls the user-scoped `/api/v1/connections/release` endpoint with the bridge's client ID.
     /// Returns (references_released, connections_disconnected).
     async fn release_my_references_on_daemon(&self, daemon_url: &str) -> Result<(u64, u64)> {
+        let token = self.auth_token.read().await.clone();
         let release_url = format!("{}/api/v1/connections/release", daemon_url);
-        let response = self
+        let mut req_builder = self
             .client
             .post(&release_url)
-            .header(detrix_api::common::CLIENT_ID_HEADER, &self.client_id)
+            .header(detrix_api::common::CLIENT_ID_HEADER, &self.client_id);
+        if let Some(ref token) = token {
+            req_builder =
+                req_builder.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, token));
+        }
+        let response = req_builder
             .send()
             .await
             .context("Failed to release connection references")?;
@@ -834,14 +840,16 @@ impl McpBridge {
     /// Lists all metrics and disables only those with `createdBy` matching this bridge's client ID.
     /// Returns the number of metrics successfully disabled.
     async fn disable_my_metrics_on_daemon(&self, daemon_url: &str) -> Result<usize> {
+        let token = self.auth_token.read().await.clone();
+
         // List all metrics
         let list_url = format!("{}/api/v1/metrics", daemon_url);
-        let response = self
-            .client
-            .get(&list_url)
-            .send()
-            .await
-            .context("Failed to list metrics")?;
+        let mut req_builder = self.client.get(&list_url);
+        if let Some(ref token) = token {
+            req_builder =
+                req_builder.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, token));
+        }
+        let response = req_builder.send().await.context("Failed to list metrics")?;
 
         if !response.status().is_success() {
             anyhow::bail!("Failed to list metrics: {}", response.status());
@@ -861,7 +869,12 @@ impl McpBridge {
             }
             if let Some(metric_id) = metric.get("metricId").and_then(|v| v.as_str()) {
                 let disable_url = format!("{}/api/v1/metrics/{}/disable", daemon_url, metric_id);
-                match self.client.post(&disable_url).send().await {
+                let mut disable_req = self.client.post(&disable_url);
+                if let Some(ref token) = token {
+                    disable_req = disable_req
+                        .header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, token));
+                }
+                match disable_req.send().await {
                     Ok(resp) if resp.status().is_success() => {
                         disabled_count += 1;
                     }
@@ -884,10 +897,14 @@ impl McpBridge {
     /// Only used for admin/force operations.
     #[allow(dead_code)]
     async fn force_disconnect_all_on_daemon(&self, daemon_url: &str) -> Result<usize> {
+        let token = self.auth_token.read().await.clone();
         let disconnect_url = format!("{}/api/v1/disconnect_all", daemon_url);
-        let response = self
-            .client
-            .post(&disconnect_url)
+        let mut req_builder = self.client.post(&disconnect_url);
+        if let Some(ref token) = token {
+            req_builder =
+                req_builder.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, token));
+        }
+        let response = req_builder
             .send()
             .await
             .context("Failed to disconnect all")?;

@@ -236,6 +236,25 @@ async fn handle_files_read(
         Err(_) => workspace,
     };
 
+    // Security: validate that the request's workspace_root is within (or equal to)
+    // the server's own configured workspace root. Prevents setting workspace_root
+    // to "/" to bypass path containment checks.
+    let trust_boundary = if ctx.workspace_root.is_empty() {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"))
+    } else {
+        std::path::PathBuf::from(&ctx.workspace_root)
+    };
+    let trust_boundary = match trust_boundary.canonicalize() {
+        Ok(p) => p,
+        Err(_) => trust_boundary,
+    };
+    if !workspace.starts_with(&trust_boundary) {
+        return plain_response(
+            StatusCode::FORBIDDEN,
+            "Workspace root escapes trust boundary",
+        );
+    }
+
     let requested = std::path::Path::new(&path_str);
     let resolved = if requested.is_absolute() {
         requested.to_path_buf()

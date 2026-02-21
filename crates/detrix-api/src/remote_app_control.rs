@@ -32,11 +32,48 @@ impl HttpRemoteAppControl {
     pub fn new(timeout_ms: u64) -> Result<Self, Error> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(timeout_ms))
+            // Disable automatic redirect following to prevent SSRF via redirect
+            // to blocked destinations (e.g., cloud metadata service).
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| Error::RemoteApp(format!("Failed to create HTTP client: {}", e)))?;
 
         Ok(Self { client })
     }
+}
+
+/// Validate an IPv4 address against blocked ranges.
+///
+/// Blocks private, link-local, and metadata service IPs.
+/// Allows loopback (127.0.0.0/8) for local development.
+fn validate_ipv4(ipv4: std::net::Ipv4Addr) -> detrix_core::Result<()> {
+    let octets = ipv4.octets();
+
+    // Allow loopback (127.0.0.0/8) for local development
+    if octets[0] == 127 {
+        return Ok(());
+    }
+
+    // Block cloud metadata service (169.254.0.0/16 — link-local)
+    if octets[0] == 169 && octets[1] == 254 {
+        return Err(Error::RemoteApp(format!(
+            "URL host '{}' points to link-local/metadata service address, which is blocked.",
+            ipv4
+        )));
+    }
+
+    // Block private IP ranges
+    if octets[0] == 10
+        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 168)
+    {
+        return Err(Error::RemoteApp(format!(
+            "URL host '{}' is a private IP address, which is blocked for security.",
+            ipv4
+        )));
+    }
+
+    Ok(())
 }
 
 /// Validate a remote app URL to prevent SSRF attacks.
@@ -45,6 +82,8 @@ impl HttpRemoteAppControl {
 /// - Non-HTTP/HTTPS schemes (file://, gopher://, ftp://, etc.)
 /// - Cloud metadata service IPs (169.254.169.254)
 /// - Private/reserved IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+/// - IPv4-mapped IPv6 addresses (e.g., ::ffff:169.254.169.254)
+/// - IPv6 link-local (fe80::/10) and unique-local (fc00::/7) addresses
 ///
 /// Allows:
 /// - localhost hostname and 127.0.0.0/8 (common for local development)
@@ -73,36 +112,33 @@ fn validate_app_url(url: &str) -> detrix_core::Result<()> {
         if let Ok(ip) = host.parse::<std::net::IpAddr>() {
             match ip {
                 std::net::IpAddr::V4(ipv4) => {
-                    let octets = ipv4.octets();
-
-                    // Allow loopback (127.0.0.0/8) for local development
-                    if octets[0] == 127 {
-                        return Ok(());
-                    }
-
-                    // Block cloud metadata service (169.254.169.254)
-                    if octets[0] == 169 && octets[1] == 254 {
-                        return Err(Error::RemoteApp(format!(
-                            "URL host '{}' points to link-local/metadata service address, which is blocked.",
-                            host
-                        )));
-                    }
-
-                    // Block private IP ranges
-                    if octets[0] == 10
-                        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
-                        || (octets[0] == 192 && octets[1] == 168)
-                    {
-                        return Err(Error::RemoteApp(format!(
-                            "URL host '{}' is a private IP address, which is blocked for security.",
-                            host
-                        )));
-                    }
+                    validate_ipv4(ipv4)?;
                 }
                 std::net::IpAddr::V6(ipv6) => {
                     // Allow loopback (::1) for local development
                     if ipv6.is_loopback() {
                         return Ok(());
+                    }
+
+                    // Block IPv4-mapped IPv6 (e.g., ::ffff:10.0.0.1, ::ffff:169.254.169.254)
+                    if let Some(mapped_v4) = ipv6.to_ipv4_mapped() {
+                        return validate_ipv4(mapped_v4);
+                    }
+
+                    // Block link-local (fe80::/10)
+                    if (ipv6.segments()[0] & 0xffc0) == 0xfe80 {
+                        return Err(Error::RemoteApp(format!(
+                            "URL host '{}' is a link-local IPv6 address, which is blocked.",
+                            host
+                        )));
+                    }
+
+                    // Block unique-local (fc00::/7) — IPv6 private range
+                    if (ipv6.segments()[0] & 0xfe00) == 0xfc00 {
+                        return Err(Error::RemoteApp(format!(
+                            "URL host '{}' is a private IPv6 address, which is blocked for security.",
+                            host
+                        )));
                     }
                 }
             }

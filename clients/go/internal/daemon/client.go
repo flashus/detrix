@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -22,6 +23,7 @@ const maxResponseSize = 1 << 20
 type Client struct {
 	httpClient *http.Client
 	token      string
+	tokenMu    sync.RWMutex // protects token
 }
 
 // ClientOptions configures the daemon client.
@@ -75,15 +77,18 @@ func NewClient(opts *ClientOptions) (*Client, error) {
 
 // UpdateToken updates the auth token (e.g., after daemon restart with a new token).
 //
-// Concurrency: This method is NOT thread-safe. It must be called under the wake lock
-// (state.AcquireWakeLock) to ensure no concurrent reads of c.token occur during the write.
-// Currently, all call sites (handleWake/WakeWithURL) hold the wake lock.
+// Concurrency: This method is safe for concurrent use. It acquires tokenMu
+// for writing. The setAuth method acquires tokenMu for reading.
 func (c *Client) UpdateToken(token string) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
 	c.token = token
 }
 
 // setAuth sets the Authorization header if a token is configured.
 func (c *Client) setAuth(req *http.Request) {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
