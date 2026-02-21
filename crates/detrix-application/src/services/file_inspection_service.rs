@@ -412,7 +412,7 @@ impl FileInspectionService {
                 language,
             )
         } else if let Some(ref var) = request.find_variable {
-            self.inspect_generic_variable(&lines, var, total_lines)
+            self.inspect_generic_variable(&lines, var, total_lines, &contents, language)
         } else {
             self.inspect_generic_overview(&lines, total_lines)
         }
@@ -483,6 +483,8 @@ impl FileInspectionService {
         lines: &[&str],
         variable: &str,
         _total_lines: usize,
+        contents: &str,
+        language: SourceLanguage,
     ) -> Result<FileInspectionResult> {
         let matches: Vec<TextSearchMatch> = lines
             .iter()
@@ -531,6 +533,22 @@ impl FileInspectionService {
         // Deduplicate by line number (keep first occurrence)
         let mut seen_lines = std::collections::HashSet::new();
         definitions.retain(|d| seen_lines.insert(d.line));
+
+        // Scope-based re-ordering: prefer lines inside function bodies over
+        // struct/type definitions. A struct field like `Amount float64` is not
+        // a variable in scope — the actual usage `txn.Amount` inside a function is.
+        // We check `containing_scope` (function name) rather than matching the
+        // specific variable name, because fields are accessed via their parent
+        // (e.g., `txn.Amount`) and won't appear as standalone variables.
+        if language.capabilities().has_ast_analysis && !definitions.is_empty() {
+            let (in_scope, out_of_scope): (Vec<_>, Vec<_>) =
+                definitions.into_iter().partition(|def| {
+                    let scope_result = analyze_scope(contents, def.line, language);
+                    scope_result.containing_scope.is_some()
+                });
+            definitions = in_scope;
+            definitions.extend(out_of_scope);
+        }
 
         let suggested_lines: Vec<u32> = definitions.iter().map(|d| d.line).collect();
 
@@ -1135,5 +1153,143 @@ mod tests {
 
         let result = service.inspect(request);
         assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Scope-aware Variable Search Tests
+    // ========================================================================
+
+    #[test]
+    fn test_variable_search_go_struct_field_deprioritized() {
+        // Go file where `Amount` appears as struct field (line 3) and in function body (line 8)
+        // The struct field is NOT in scope — it's a type definition, not a variable.
+        let mut file = NamedTempFile::with_suffix(".go").unwrap();
+        writeln!(file, "package main").unwrap();
+        writeln!(file, "").unwrap();
+        writeln!(file, "type Transaction struct {{").unwrap();
+        writeln!(file, "	Amount float64").unwrap();
+        writeln!(file, "}}").unwrap();
+        writeln!(file, "").unwrap();
+        writeln!(file, "func process(txn Transaction) {{").unwrap();
+        writeln!(file, "	fmt.Println(txn.Amount)").unwrap();
+        writeln!(file, "}}").unwrap();
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("Amount".to_string()),
+            workspace_root: None,
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(!search.definitions.is_empty());
+            // The function body line (8) should come first because `txn` is in scope there
+            // The struct field line (4) should be deprioritized (no variables in scope)
+            assert_eq!(
+                search.definitions[0].line, 8,
+                "Expected function body line first, got line {} (scope: {})",
+                search.definitions[0].line, search.definitions[0].scope
+            );
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_variable_search_rust_struct_field_deprioritized() {
+        // Rust file where `amount` appears as struct field and in function body
+        let mut file = NamedTempFile::with_suffix(".rs").unwrap();
+        writeln!(file, "struct Transaction {{").unwrap();
+        writeln!(file, "    amount: f64,").unwrap();
+        writeln!(file, "}}").unwrap();
+        writeln!(file, "").unwrap();
+        writeln!(file, "fn process(txn: Transaction) {{").unwrap();
+        writeln!(file, "    println!(\"{{:?}}\", txn.amount);").unwrap();
+        writeln!(file, "}}").unwrap();
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("amount".to_string()),
+            workspace_root: None,
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(!search.definitions.is_empty());
+            // Function body line (6) should come first — `txn` is in scope
+            // Struct field line (2) should be deprioritized
+            assert_eq!(
+                search.definitions[0].line, 6,
+                "Expected function body line first, got line {} (scope: {})",
+                search.definitions[0].line, search.definitions[0].scope
+            );
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_variable_search_python_scope_aware() {
+        // Python file where variable appears inside a function — should stay in scope
+        let mut file = NamedTempFile::with_suffix(".py").unwrap();
+        writeln!(file, "# module level comment about amount").unwrap();
+        writeln!(file, "def process(txn):").unwrap();
+        writeln!(file, "    amount = txn.amount").unwrap();
+        writeln!(file, "    print(amount)").unwrap();
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("amount".to_string()),
+            workspace_root: None,
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(!search.definitions.is_empty());
+            // Usage line (4) should come first, assignment bumped line next
+            // Comment line (1) should be deprioritized (not in scope)
+            assert_eq!(
+                search.definitions[0].line, 4,
+                "Expected usage line first, got line {} (scope: {})",
+                search.definitions[0].line, search.definitions[0].scope
+            );
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_variable_search_no_ast_language_unchanged() {
+        // Java (no AST analysis) — behavior should be unchanged (usage-first ordering)
+        let mut file = NamedTempFile::with_suffix(".java").unwrap();
+        writeln!(file, "class Txn {{").unwrap();
+        writeln!(file, "    double amount;").unwrap();
+        writeln!(file, "    void process() {{").unwrap();
+        writeln!(file, "        System.out.println(amount);").unwrap();
+        writeln!(file, "    }}").unwrap();
+        writeln!(file, "}}").unwrap();
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("amount".to_string()),
+            workspace_root: None,
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(!search.definitions.is_empty());
+            // Both lines are "usage" (no `=`), so order should be original order
+            assert_eq!(search.definitions[0].line, 2);
+        } else {
+            panic!("Expected VariableSearch result");
+        }
     }
 }
