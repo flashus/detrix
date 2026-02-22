@@ -359,6 +359,12 @@ def shutdown() -> None:
         # Stop control server
         stop_control_server()
 
+        # Close HTTP client to release connection pool
+        with contextlib.suppress(Exception):
+            state = get_state()
+            if state and state.http_client:
+                state.http_client.close()
+
         # Reset state
         reset_state()
 

@@ -276,7 +276,13 @@ async fn handle_read_file(
     req: ReadFileRequest,
 ) -> (StatusCode, String) {
     match service.read_file(&req).await {
-        Ok(resp) => (StatusCode::OK, serde_json::to_string(&resp).unwrap()),
+        Ok(resp) => match serde_json::to_string(&resp) {
+            Ok(json) => (StatusCode::OK, json),
+            Err(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"error": "Serialization error"}).to_string(),
+            ),
+        },
         Err(FileServingError::EmptyPath) => (
             StatusCode::BAD_REQUEST,
             serde_json::json!({"error": "Missing 'path'"}).to_string(),

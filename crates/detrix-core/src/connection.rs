@@ -364,33 +364,27 @@ impl Connection {
         self.last_active = Self::now_micros();
     }
 
-    /// Check if connection has been inactive for more than N calendar days
+    /// Check if connection has been inactive for more than N days
     ///
-    /// Uses date-based comparison: if last_active was "2025-01-10" and today is "2025-01-12",
-    /// that's 2 calendar days, even if it's only 25 hours elapsed.
+    /// Uses elapsed-time comparison consistent with `ConnectionReference::inactive_for_days`.
     ///
     /// # Arguments
-    /// * `days` - Number of calendar days to check against. If -1, returns false (indefinite TTL).
+    /// * `days` - Number of days to check against. If negative, returns false (indefinite TTL).
+    ///   If 0, returns true (remove all).
     /// * `now_micros` - Current timestamp in microseconds since epoch
     ///
     /// # Returns
-    /// `true` if the connection has been inactive for more than `days` calendar days.
+    /// `true` if the connection has been inactive for at least `days` elapsed days.
     pub fn inactive_for_days(&self, days: i64, now_micros: i64) -> bool {
         if days < 0 {
             return false; // -1 = indefinite, never cleanup
         }
-
-        use chrono::{DateTime, Utc};
-
-        let last_active_time =
-            DateTime::from_timestamp_micros(self.last_active).unwrap_or_else(Utc::now);
-        let now_time = DateTime::from_timestamp_micros(now_micros).unwrap_or_else(Utc::now);
-
-        let last_date = last_active_time.date_naive();
-        let now_date = now_time.date_naive();
-
-        let days_diff = (now_date - last_date).num_days();
-        days_diff > days
+        if days == 0 {
+            return true; // 0 = remove all
+        }
+        let micros_per_day: i64 = 86_400 * 1_000_000;
+        let elapsed = now_micros - self.last_active;
+        elapsed >= days * micros_per_day
     }
 }
 
@@ -778,58 +772,38 @@ mod tests {
     }
 
     #[test]
-    fn test_inactive_for_days_calendar_day_calculation() {
-        use chrono::DateTime;
+    fn test_inactive_for_days_elapsed_time() {
+        let micros_per_day: i64 = 86_400 * 1_000_000;
+        let now = chrono::Utc::now().timestamp_micros();
 
         let identity = ConnectionIdentity::new("app", SourceLanguage::Python, "/ws", "host");
         let mut conn =
             Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5678).unwrap();
 
-        // Set last_active to 2025-01-10 23:59:00 UTC
-        let last_active = DateTime::parse_from_rfc3339("2025-01-10T23:59:00Z")
-            .unwrap()
-            .timestamp_micros();
-        conn.last_active = last_active;
+        // Set last_active to 10 days ago
+        conn.last_active = now - 10 * micros_per_day;
 
-        // Now is 2025-01-12 00:01:00 UTC (only 25 hours later, but 2 calendar days)
-        let now = DateTime::parse_from_rfc3339("2025-01-12T00:01:00Z")
-            .unwrap()
-            .timestamp_micros();
-
-        // Jan 10 to Jan 12 = 2 calendar days elapsed
-        // inactive_for_days returns true if days_diff > threshold
-        // So days_diff = 2, therefore:
-        assert!(conn.inactive_for_days(1, now)); // 2 > 1 = true
-        assert!(!conn.inactive_for_days(2, now)); // 2 > 2 = false (exactly 2 days)
-        assert!(!conn.inactive_for_days(3, now)); // 2 > 3 = false
+        assert!(conn.inactive_for_days(7, now)); // 10 days >= 7 days
+        assert!(conn.inactive_for_days(10, now)); // 10 days >= 10 days (exactly)
+        assert!(!conn.inactive_for_days(14, now)); // 10 days < 14 days
+        assert!(!conn.inactive_for_days(-1, now)); // indefinite = never expire
+        assert!(conn.inactive_for_days(0, now)); // 0 = remove all
     }
 
     #[test]
-    fn test_inactive_for_days_same_day() {
+    fn test_inactive_for_days_recent_activity() {
         let identity = ConnectionIdentity::new("app", SourceLanguage::Python, "/ws", "host");
         let mut conn =
             Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5678).unwrap();
 
-        // Set last_active to today at 00:01
-        let today_morning = chrono::Utc::now()
-            .date_naive()
-            .and_hms_opt(0, 1, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp_micros();
-        conn.last_active = today_morning;
+        let now = chrono::Utc::now().timestamp_micros();
+        // Set last_active to 1 hour ago (well under 1 day)
+        conn.last_active = now - 3_600 * 1_000_000;
 
-        // Now is today at 23:59 (same calendar day)
-        let today_evening = chrono::Utc::now()
-            .date_naive()
-            .and_hms_opt(23, 59, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp_micros();
-
-        // Should NOT be inactive for even 1 day (same calendar day)
-        assert!(!conn.inactive_for_days(0, today_evening));
-        assert!(!conn.inactive_for_days(1, today_evening));
+        // Should NOT be inactive for 1 day
+        assert!(!conn.inactive_for_days(1, now));
+        // But days=0 always returns true
+        assert!(conn.inactive_for_days(0, now));
     }
 
     #[test]

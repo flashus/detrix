@@ -3,6 +3,7 @@
 //! Supports saved daemon configurations in ~/.detrix/daemons.toml
 //! for easy switching between local and cloud Detrix daemons.
 
+use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -44,10 +45,7 @@ impl DaemonsConfig {
 
     /// Get the default path for daemons.toml (~/.detrix/daemons.toml)
     pub fn default_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let path = dirs::home_dir()
-            .ok_or("Cannot determine home directory")?
-            .join(".detrix")
-            .join("daemons.toml");
+        let path = paths::detrix_home().join("daemons.toml");
         Ok(path)
     }
 

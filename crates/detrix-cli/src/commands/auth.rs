@@ -117,7 +117,10 @@ fn mask_token(token: &str) -> String {
     if token.len() <= 4 {
         return "***".to_string();
     }
-    format!("{}***", &token[..4])
+    match token.get(..4) {
+        Some(prefix) => format!("{}***", prefix),
+        None => "***".to_string(),
+    }
 }
 
 #[cfg(test)]

@@ -71,10 +71,20 @@ impl CachedFileSystem {
 
 impl VirtualFileSystem for CachedFileSystem {
     fn read_to_string(&self, path: &str) -> Result<String> {
-        // Check TTL for hot-reload languages
-        self.check_ttl_expiry(path);
+        // Phase 1: read-lock to check if TTL expired
+        let needs_expiry = {
+            let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
+            cache.iter().any(|((_, p), entry)| {
+                p == path && !entry.stale && entry.stored_at.elapsed() > self.hot_reload_ttl
+            })
+        };
 
-        // Look in cache (any connection)
+        // Phase 2: write-lock only if something needs marking stale
+        if needs_expiry {
+            self.check_ttl_expiry(path);
+        }
+
+        // Phase 3: read-lock for cache lookup
         {
             let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
             for ((_, p), entry) in cache.iter() {

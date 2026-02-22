@@ -144,7 +144,7 @@ impl MetricRepository for SqliteStorage {
                 .bind(safety_level)
                 .bind(now)
                 .bind(now)
-                .bind("system") // created_by
+                .bind(metric.created_by.as_deref().unwrap_or("system"))
                 .bind(metric.capture_stack_trace)
                 .bind(metric.stack_trace_ttl.map(|t| t as i64))
                 .bind(&stack_trace_slice_json)
@@ -198,7 +198,7 @@ impl MetricRepository for SqliteStorage {
                 .bind(safety_level)
                 .bind(now)
                 .bind(now)
-                .bind("system") // created_by
+                .bind(metric.created_by.as_deref().unwrap_or("system"))
                 .bind(metric.capture_stack_trace)
                 .bind(metric.stack_trace_ttl.map(|t| t as i64))
                 .bind(&stack_trace_slice_json)

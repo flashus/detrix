@@ -339,12 +339,13 @@ pub trait NotFoundError {
 
 impl NotFoundError for Error {
     fn is_not_found(&self) -> bool {
-        matches!(self, Error::MetricNotFound(_))
+        matches!(self, Error::MetricNotFound(_) | Error::FileNotFound(_))
     }
 
     fn resource_type(&self) -> Option<&'static str> {
         match self {
             Error::MetricNotFound(_) => Some("metric"),
+            Error::FileNotFound(_) => Some("file"),
             _ => None,
         }
     }
@@ -352,6 +353,7 @@ impl NotFoundError for Error {
     fn resource_id(&self) -> Option<&str> {
         match self {
             Error::MetricNotFound(id) => Some(id),
+            Error::FileNotFound(path) => Some(path),
             _ => None,
         }
     }
