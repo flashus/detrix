@@ -142,6 +142,15 @@ tasks:
     cmds:
       - cargo test --package detrix-testing --test unified_e2e basic -- --nocapture
 
+  # Rebuild only the daemon Docker image (no cache) without touching app containers.
+  rebuild-daemon-container:
+    desc: Force-rebuild the detrix daemon Docker image
+    vars:
+      COMPOSE_FILE: fixtures/docker/docker-compose.yml
+      PROJECT: detrix-cloud-test
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} build --no-cache detrix
+
   # Docker Cloud E2E Tests
   test-cloud:
     desc: Run Docker cloud E2E tests (resource-intensive, requires Docker)

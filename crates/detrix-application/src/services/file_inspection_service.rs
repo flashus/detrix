@@ -535,19 +535,31 @@ impl FileInspectionService {
         definitions.retain(|d| seen_lines.insert(d.line));
 
         // Scope-based re-ordering: prefer lines inside function bodies over
-        // struct/type definitions. A struct field like `Amount float64` is not
-        // a variable in scope — the actual usage `txn.Amount` inside a function is.
-        // We check `containing_scope` (function name) rather than matching the
-        // specific variable name, because fields are accessed via their parent
-        // (e.g., `txn.Amount`) and won't appear as standalone variables.
+        // struct/type definitions and function signatures.
+        //
+        // Three tiers (best → worst for logpoint placement):
+        //   1. Function body usage — executable code inside a function
+        //   2. Function signature — parameter list / return type (useless for logpoints)
+        //   3. Out of scope — struct fields, package-level declarations
         if language.capabilities().has_ast_analysis && !definitions.is_empty() {
-            let (in_scope, out_of_scope): (Vec<_>, Vec<_>) =
-                definitions.into_iter().partition(|def| {
-                    let scope_result = analyze_scope(contents, def.line, language);
-                    scope_result.containing_scope.is_some()
-                });
-            definitions = in_scope;
-            definitions.extend(out_of_scope);
+            let mut body_defs = Vec::new();
+            let mut sig_defs = Vec::new();
+            let mut out_defs = Vec::new();
+
+            for def in definitions {
+                let scope_result = analyze_scope(contents, def.line, language);
+                if scope_result.containing_scope.is_some() && !scope_result.is_function_signature {
+                    body_defs.push(def);
+                } else if scope_result.is_function_signature {
+                    sig_defs.push(def);
+                } else {
+                    out_defs.push(def);
+                }
+            }
+
+            definitions = body_defs;
+            definitions.extend(sig_defs);
+            definitions.extend(out_defs);
         }
 
         let suggested_lines: Vec<u32> = definitions.iter().map(|d| d.line).collect();
@@ -1288,6 +1300,91 @@ mod tests {
             assert!(!search.definitions.is_empty());
             // Both lines are "usage" (no `=`), so order should be original order
             assert_eq!(search.definitions[0].line, 2);
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_go_scope_aware_struct_and_func_header_deprioritized() {
+        // Go file with three places "symbol" appears:
+        //   1. Struct field definition (line 3)  — out of scope
+        //   2. Function signature/header (line 6) — useless for logpoints
+        //   3. Function body usage (line 11)      — best for logpoints
+        // The inspector should pick the function body usage first.
+        let mut file = NamedTempFile::with_suffix(".go").unwrap();
+        writeln!(file, "package main").unwrap(); // 1
+        writeln!(file, "type Order struct {{").unwrap(); // 2
+        writeln!(file, "    symbol string").unwrap(); // 3
+        writeln!(file, "    price  float64").unwrap(); // 4
+        writeln!(file, "}}").unwrap(); // 5
+        writeln!(file, "func placeOrder(symbol string) int {{").unwrap(); // 6
+        writeln!(file, "    return 42").unwrap(); // 7
+        writeln!(file, "}}").unwrap(); // 8
+        writeln!(file, "func main() {{").unwrap(); // 9
+        writeln!(file, "    symbols := []string{{\"BTC\"}}").unwrap(); // 10
+        writeln!(file, "    symbol := symbols[0]").unwrap(); // 11
+        writeln!(file, "    _ = symbol").unwrap(); // 12
+        writeln!(file, "}}").unwrap(); // 13
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("symbol".to_string()),
+            workspace_root: None,
+        };
+
+        let (lang, result) = service.inspect(request).unwrap();
+        assert_eq!(lang, SourceLanguage::Go);
+
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(
+                search.definitions.len() >= 3,
+                "Expected at least 3 matches, got {}",
+                search.definitions.len()
+            );
+
+            // First definition should be in main() body (line 12 = usage of symbol,
+            // or bumped line from assignment at line 11).
+            // It must NOT be the struct field (line 3) or func header (line 6).
+            let first = &search.definitions[0];
+            assert!(
+                first.line >= 9,
+                "First match should be inside main() (line >= 9), got line {} (code: {})",
+                first.line,
+                first.code
+            );
+
+            // Struct field (line 3) and func header (line 6) should be after body matches
+            let struct_pos = search
+                .definitions
+                .iter()
+                .position(|d| d.line == 3)
+                .expect("struct field should be in results");
+            let header_pos = search
+                .definitions
+                .iter()
+                .position(|d| d.line == 6)
+                .expect("func header should be in results");
+            let body_pos = search
+                .definitions
+                .iter()
+                .position(|d| d.line >= 9)
+                .expect("body usage should be in results");
+
+            assert!(
+                body_pos < header_pos,
+                "body usage (pos {}) should come before func header (pos {})",
+                body_pos,
+                header_pos
+            );
+            assert!(
+                body_pos < struct_pos,
+                "body usage (pos {}) should come before struct field (pos {})",
+                body_pos,
+                struct_pos
+            );
         } else {
             panic!("Expected VariableSearch result");
         }

@@ -84,6 +84,7 @@ impl McpBridge {
 
         // Seed the IP allowlist from the initial daemon URL (synchronous best-effort).
         // Loopback IPs are always allowed; if resolution fails we start with loopback only.
+        // Unknown daemon IPs (e.g. Docker bridge) get learned on first successful token auth.
         let initial_ips = resolve_daemon_ips_sync(&config.daemon_url);
 
         Ok(Self {
@@ -1128,11 +1129,13 @@ impl McpBridge {
             }
         };
 
-        let Some(container_workspace) = workspace_root.filter(|r| !r.is_empty() && r != "/unknown")
+        let Some(container_workspace) =
+            workspace_root.filter(|r| !r.is_empty() && r != "/" && r != "/unknown")
         else {
             debug!(
                 conn_id = connection_id,
-                "Connection has no usable workspaceRoot — skipping path mapping"
+                "Connection has no usable workspaceRoot — skipping path mapping \
+                 (file server will use lazy CWD-based fallback on first file request)"
             );
             return;
         };
@@ -1273,15 +1276,11 @@ impl McpBridge {
         // Always update the IP allowlist for the new daemon, even if the file server
         // host didn't change. This ensures any daemon switch (post-wake, auto-switch)
         // keeps the allowlist in sync with the actual daemon.
+        // Note: for Docker, the daemon connects from an unpredictable bridge IP — the
+        // file server will learn it on the first successful token-authenticated request.
         let is_docker_host = new_file_server_host.as_deref() == Some("host.docker.internal");
-        let new_allowed = if is_docker_host {
-            // Docker: container connects from an unknown bridge IP — skip IP check.
-            None
-        } else {
-            // Resolve daemon hostname to IPs; fallback to loopback-only on failure.
-            Some(resolve_daemon_ips_sync(&new_url))
-        };
-        *self.allowed_file_server_ips.write().await = new_allowed;
+        let new_allowed = resolve_daemon_ips_sync(&new_url);
+        *self.allowed_file_server_ips.write().await = Some(new_allowed);
 
         // Update the source prefix map based on the new daemon type:
         // - Leaving Docker → clear the map (container paths won't apply to local daemon).

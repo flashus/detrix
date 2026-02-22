@@ -18,11 +18,14 @@ COPY fixtures/rust /src/fixtures/rust
 
 WORKDIR /src/fixtures/rust
 
-# Build with debug symbols (NOT --release) and client feature enabled
+# Build with debug symbols (NOT --release) and client feature enabled.
+# The binary must be copied out of the cache mount in the same RUN step,
+# because --mount=type=cache contents are not persisted to the image layer.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    cargo build --features client
+    cargo build --features client \
+    && cp /build/target/debug/detrix_example_app /src/fixtures/rust/detrix_example_app
 
 # ---- Runtime Stage ----
 FROM debian:bookworm-slim
@@ -45,7 +48,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN ln -s /usr/lib/llvm-21/bin/lldb-dap /usr/local/bin/lldb-dap \
     && ln -s /usr/lib/llvm-21/bin/lldb-server /usr/local/bin/lldb-server
 
-# Copy binary from build stage
-COPY --from=builder /build/target/debug/detrix_example_app /usr/local/bin/detrix_example_app
+# Copy binary from build stage (extracted from cache mount during build)
+COPY --from=builder /src/fixtures/rust/detrix_example_app /usr/local/bin/detrix_example_app
 
 CMD ["detrix_example_app"]

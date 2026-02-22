@@ -143,6 +143,7 @@ generate_tests_all_backends! {
 
 mod dap_workflow_tests {
     use detrix_application::services::file_inspection_types::SourceLanguageExt;
+    use detrix_testing::e2e::dap_scenarios::go_lines;
     use detrix_testing::e2e::dap_scenarios::{DapWorkflowConfig, DapWorkflowScenarios};
     use detrix_testing::e2e::executor::TestExecutor;
     use detrix_testing::e2e::mcp::McpClient;
@@ -385,11 +386,18 @@ mod dap_workflow_tests {
 
         // Metric 1: Simple variable (logpoint mode) - line 117 where 'symbol' is assigned
         // This will use logpoint (setBreakpoints with logMessage)
-        // Use line 122 (orderID := placeOrder) where symbol is in scope
-        let location1 = format!("@{}#122", script_path.display());
+        // Use OFFSET_ORDER_ID (orderID := placeOrder) where symbol is in scope
+        let location1 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::line(go_lines::OFFSET_ORDER_ID)
+        );
         let step = reporter.step_start(
             "Add Logpoint Metric",
-            "Add simple variable 'symbol' at line 122 (logpoint mode)",
+            &format!(
+                "Add simple variable 'symbol' at line {} (logpoint mode)",
+                go_lines::line(go_lines::OFFSET_ORDER_ID)
+            ),
         );
 
         let mut request1 =
@@ -409,11 +417,18 @@ mod dap_workflow_tests {
         // Metric 2: Function call (breakpoint mode) - line 127 where pnl is calculated
         // This will use breakpoint (pauses execution) because it's a function call
         // Using len() which is a non-variadic function that Delve supports
-        // Use line 127 (pnl := calculatePnl) which is a function call
-        let location2 = format!("@{}#127", script_path.display());
+        // Use OFFSET_PNL (pnl := calculatePnl) which is a function call
+        let location2 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::line(go_lines::OFFSET_PNL)
+        );
         let step = reporter.step_start(
             "Add Breakpoint Metric",
-            "Add function 'len(symbol)' at line 127 (breakpoint mode)",
+            &format!(
+                "Add function 'len(symbol)' at line {} (breakpoint mode)",
+                go_lines::line(go_lines::OFFSET_PNL)
+            ),
         );
 
         let mut request2 = AddMetricRequest::new(
@@ -593,12 +608,19 @@ mod dap_workflow_tests {
         // ====================================================================
         reporter.section("PHASE 2: ADD METRICS (2 LOGPOINTS + 2 BREAKPOINTS)");
 
-        // Metric 1: LOGPOINT — simple variable 'symbol' at line 118
-        // symbol is assigned on line 117, in scope from line 118
-        let location1 = format!("@{}#118", script_path.display());
+        // Metric 1: LOGPOINT — simple variable 'symbol' at OFFSET_QUANTITY
+        // symbol is assigned on line 117, in scope from OFFSET_QUANTITY
+        let location1 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::line(go_lines::OFFSET_QUANTITY)
+        );
         let step = reporter.step_start(
             "Add Logpoint #1",
-            "order_symbol: simple variable 'symbol' at line 118 (LOGPOINT)",
+            &format!(
+                "order_symbol: simple variable 'symbol' at line {} (LOGPOINT)",
+                go_lines::line(go_lines::OFFSET_QUANTITY)
+            ),
         );
         let mut req1 = AddMetricRequest::new("order_symbol", &location1, "symbol", &connection_id);
         req1.language = Some("go".to_string());
@@ -610,12 +632,19 @@ mod dap_workflow_tests {
             }
         }
 
-        // Metric 2: LOGPOINT — simple variable 'pnl' at line 130
-        // pnl is assigned on line 127, in scope from line 128
-        let location2 = format!("@{}#130", script_path.display());
+        // Metric 2: LOGPOINT — simple variable 'pnl' at OFFSET_TOTAL_PNL
+        // pnl is assigned at OFFSET_PNL, in scope from there
+        let location2 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::line(go_lines::OFFSET_TOTAL_PNL)
+        );
         let step = reporter.step_start(
             "Add Logpoint #2",
-            "pnl_value: simple variable 'pnl' at line 130 (LOGPOINT)",
+            &format!(
+                "pnl_value: simple variable 'pnl' at line {} (LOGPOINT)",
+                go_lines::line(go_lines::OFFSET_TOTAL_PNL)
+            ),
         );
         let mut req2 = AddMetricRequest::new("pnl_value", &location2, "pnl", &connection_id);
         req2.language = Some("go".to_string());
@@ -627,12 +656,19 @@ mod dap_workflow_tests {
             }
         }
 
-        // Metric 3: BREAKPOINT — Go function call len(symbol) at line 122
+        // Metric 3: BREAKPOINT — Go function call len(symbol) at OFFSET_ORDER_ID
         // symbol is in scope; len() is a non-variadic function Delve supports via "call" prefix
-        let location3 = format!("@{}#122", script_path.display());
+        let location3 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::line(go_lines::OFFSET_ORDER_ID)
+        );
         let step = reporter.step_start(
             "Add Breakpoint #1",
-            "symbol_length: function call 'len(symbol)' at line 122 (BREAKPOINT)",
+            &format!(
+                "symbol_length: function call 'len(symbol)' at line {} (BREAKPOINT)",
+                go_lines::line(go_lines::OFFSET_ORDER_ID)
+            ),
         );
         let mut req3 =
             AddMetricRequest::new("symbol_length", &location3, "len(symbol)", &connection_id);
@@ -645,12 +681,16 @@ mod dap_workflow_tests {
             }
         }
 
-        // Metric 4: BREAKPOINT — simple variable with stack trace at line 126
-        // entryPrice assigned on line 125, in scope from line 126
-        let location4 = format!("@{}#126", script_path.display());
+        // Metric 4: BREAKPOINT — simple variable with stack trace at OFFSET_CURRENT_PRICE
+        // entryPrice assigned at OFFSET_ENTRY_PRICE, in scope from OFFSET_CURRENT_PRICE
+        let location4 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::line(go_lines::OFFSET_CURRENT_PRICE)
+        );
         let step = reporter.step_start(
             "Add Breakpoint #2",
-            "entry_price_with_stack: 'entryPrice' with captureStackTrace at line 126 (BREAKPOINT)",
+            &format!("entry_price_with_stack: 'entryPrice' with captureStackTrace at line {} (BREAKPOINT)", go_lines::line(go_lines::OFFSET_CURRENT_PRICE)),
         );
         let mut req4 = AddMetricRequest::new(
             "entry_price_with_stack",
@@ -965,7 +1005,11 @@ mod dap_workflow_tests {
         reporter.section("PART A: REMOVE BREAKPOINT, VERIFY LOGPOINT SURVIVES");
 
         // Add logpoint metric (simple variable)
-        let location1 = format!("@{}#122", script_path.display());
+        let location1 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::line(go_lines::OFFSET_ORDER_ID)
+        );
         let mut req1 = AddMetricRequest::new("lp_symbol", &location1, "symbol", &connection_id);
         req1.language = Some("go".to_string());
         client
@@ -974,7 +1018,11 @@ mod dap_workflow_tests {
             .expect("Failed to add logpoint metric");
 
         // Add breakpoint metric (introspection)
-        let location2 = format!("@{}#130", script_path.display());
+        let location2 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::line(go_lines::OFFSET_TOTAL_PNL)
+        );
         let mut req2 = AddMetricRequest::new("bp_order", &location2, "orderID", &connection_id);
         req2.language = Some("go".to_string());
         req2.capture_stack_trace = Some(true);
@@ -1077,7 +1125,11 @@ mod dap_workflow_tests {
         // Add logpoint metric
         let mut req3 = AddMetricRequest::new(
             "lp_pnl",
-            &format!("@{}#127", script_path.display()),
+            &format!(
+                "@{}#{}",
+                script_path.display(),
+                go_lines::line(go_lines::OFFSET_PNL)
+            ),
             "pnl",
             &connection_id,
         );
@@ -1090,7 +1142,11 @@ mod dap_workflow_tests {
         // Add breakpoint metric
         let mut req4 = AddMetricRequest::new(
             "bp_entry_price",
-            &format!("@{}#130", script_path.display()),
+            &format!(
+                "@{}#{}",
+                script_path.display(),
+                go_lines::line(go_lines::OFFSET_TOTAL_PNL)
+            ),
             "entryPrice",
             &connection_id,
         );
@@ -1257,8 +1313,12 @@ mod dap_workflow_tests {
         // Step 2: Add metric with variadic function (should fail)
         reporter.section("PHASE 2: ADD VARIADIC FUNCTION METRIC");
 
-        // Use a line where 'symbol' is in scope (line 122 after it's assigned on 117)
-        let location = format!("@{}#122", script_path.display());
+        // Use a line where 'symbol' is in scope (OFFSET_ORDER_ID, after it's assigned at OFFSET_SYMBOL)
+        let location = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::line(go_lines::OFFSET_ORDER_ID)
+        );
 
         let step = reporter.step_start(
             "Add Variadic Metric",
@@ -4205,6 +4265,7 @@ mod error_handling_tests {
 
 mod observe_workflow_tests {
     use detrix_testing::e2e::client::{ApiClient, ObserveRequest};
+    use detrix_testing::e2e::dap_scenarios::go_lines;
     use detrix_testing::e2e::dap_scenarios::DapWorkflowConfig;
     use detrix_testing::e2e::executor::TestExecutor;
     use detrix_testing::e2e::mcp::McpClient;
@@ -4574,15 +4635,18 @@ mod observe_workflow_tests {
         reporter.section("STEP 5: OBSERVE GO VARIABLES");
         let step = reporter.step_start(
             "Observe (Go)",
-            "Using observe tool on line 127 (all variables in scope)",
+            &format!(
+                "Using observe tool on line {} (all variables in scope)",
+                go_lines::line(go_lines::OFFSET_PNL)
+            ),
         );
         reporter.info(&format!("  File: {}", source_path.display()));
         reporter.info("  Expression: orderID");
-        reporter.info("  Line: 127");
+        reporter.info(&format!("  Line: {}", go_lines::line(go_lines::OFFSET_PNL)));
 
-        // Line 127 is `pnl := calculatePnl(...)` where all variables are in scope
+        // OFFSET_PNL is `pnl := calculatePnl(...)` where all variables are in scope
         let observe_request = ObserveRequest::new(source_path.to_str().unwrap(), "orderID")
-            .with_line(127)
+            .with_line(go_lines::line(go_lines::OFFSET_PNL))
             .with_connection_id(&connection_id)
             .with_name("observe_go_orderid");
 

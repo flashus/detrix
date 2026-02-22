@@ -9,6 +9,7 @@
 //! This is critical for production observability - logpoints must work
 //! in the wake/sleep model where the debugger attaches on-demand.
 
+use detrix_testing::e2e::dap_scenarios::go_lines;
 use detrix_testing::e2e::{
     executor::TestExecutor, reporter::TestReporter, require_tool, ToolDependency,
 };
@@ -146,9 +147,19 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
 
     let fixture_file = fixture_dir.join("detrix_example_app.go");
 
-    // Metric 1: LOGPOINT - simple variable 'symbol' at line 118
-    let step = reporter.step_start("Add Logpoint #1", "order_symbol: 'symbol' at line 118");
-    let location1 = format!("@{}#118", fixture_file.display());
+    // Metric 1: LOGPOINT - simple variable 'symbol' at OFFSET_QUANTITY line
+    let step = reporter.step_start(
+        "Add Logpoint #1",
+        &format!(
+            "order_symbol: 'symbol' at line {}",
+            go_lines::line(go_lines::OFFSET_QUANTITY)
+        ),
+    );
+    let location1 = format!(
+        "@{}#{}",
+        fixture_file.display(),
+        go_lines::line(go_lines::OFFSET_QUANTITY)
+    );
     let req1 = serde_json::json!({
         "name": "order_symbol",
         "location": location1,
@@ -173,9 +184,19 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     let metric1_id = metric1_response["metricId"].as_u64().expect("No metricId");
     reporter.step_success(step, Some(&format!("ID={}", metric1_id)));
 
-    // Metric 2: LOGPOINT - simple variable 'pnl' at line 130
-    let step = reporter.step_start("Add Logpoint #2", "pnl_value: 'pnl' at line 130");
-    let location2 = format!("@{}#130", fixture_file.display());
+    // Metric 2: LOGPOINT - simple variable 'pnl' at OFFSET_TOTAL_PNL line
+    let step = reporter.step_start(
+        "Add Logpoint #2",
+        &format!(
+            "pnl_value: 'pnl' at line {}",
+            go_lines::line(go_lines::OFFSET_TOTAL_PNL)
+        ),
+    );
+    let location2 = format!(
+        "@{}#{}",
+        fixture_file.display(),
+        go_lines::line(go_lines::OFFSET_TOTAL_PNL)
+    );
     let req2 = serde_json::json!({
         "name": "pnl_value",
         "location": location2,
@@ -200,12 +221,19 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     let metric2_id = metric2_response["metricId"].as_u64().expect("No metricId");
     reporter.step_success(step, Some(&format!("ID={}", metric2_id)));
 
-    // Metric 3: BREAKPOINT - function call 'len(symbol)' at line 122
+    // Metric 3: BREAKPOINT - function call 'len(symbol)' at OFFSET_ORDER_ID line
     let step = reporter.step_start(
         "Add Breakpoint #1",
-        "symbol_length: 'len(symbol)' at line 122",
+        &format!(
+            "symbol_length: 'len(symbol)' at line {}",
+            go_lines::line(go_lines::OFFSET_ORDER_ID)
+        ),
     );
-    let location3 = format!("@{}#122", fixture_file.display());
+    let location3 = format!(
+        "@{}#{}",
+        fixture_file.display(),
+        go_lines::line(go_lines::OFFSET_ORDER_ID)
+    );
     let req3 = serde_json::json!({
         "name": "symbol_length",
         "location": location3,
@@ -230,12 +258,19 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     let metric3_id = metric3_response["metricId"].as_u64().expect("No metricId");
     reporter.step_success(step, Some(&format!("ID={}", metric3_id)));
 
-    // Metric 4: BREAKPOINT - with stack trace at line 126
+    // Metric 4: BREAKPOINT - with stack trace at OFFSET_CURRENT_PRICE line
     let step = reporter.step_start(
         "Add Breakpoint #2",
-        "entry_price_with_stack: 'entryPrice' at line 126",
+        &format!(
+            "entry_price_with_stack: 'entryPrice' at line {}",
+            go_lines::line(go_lines::OFFSET_CURRENT_PRICE)
+        ),
     );
-    let location4 = format!("@{}#126", fixture_file.display());
+    let location4 = format!(
+        "@{}#{}",
+        fixture_file.display(),
+        go_lines::line(go_lines::OFFSET_CURRENT_PRICE)
+    );
     let req4 = serde_json::json!({
         "name": "entry_price_with_stack",
         "location": location4,

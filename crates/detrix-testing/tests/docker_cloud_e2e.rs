@@ -12,11 +12,11 @@
 //! docker compose -f fixtures/docker/docker-compose.yml -p detrix-cloud-test down -v
 //! ```
 
-use detrix_testing::e2e::client::{AddMetricRequest, ApiClient, EventInfo, ObserveRequest};
-use detrix_testing::e2e::test_file_server::start_test_file_server;
+use detrix_testing::e2e::client::ApiClient;
+use detrix_testing::e2e::dap_scenarios::go_lines;
 use detrix_testing::e2e::{find_detrix_binary, get_workspace_root, McpClient};
-use std::collections::HashMap;
-use std::path::PathBuf;
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -66,28 +66,9 @@ fn compose_file_abs() -> String {
     ws.to_string_lossy().into_owned()
 }
 
-/// Poll `query_events` until at least one event appears or timeout expires.
-async fn poll_for_events(
-    client: &McpClient,
-    metric_name: &str,
-    timeout: Duration,
-) -> Vec<EventInfo> {
-    let start = Instant::now();
-    loop {
-        if let Ok(response) = client.query_events(metric_name, 10).await {
-            if !response.data.is_empty() {
-                return response.data;
-            }
-        }
-        if start.elapsed() > timeout {
-            return vec![];
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-}
-
 /// Poll `list_connections` until a connected connection with the given language appears.
 /// Returns the connection_id.
+/// NOTE: Used only by Phase 8b (kept as-is). Other phases use poll_for_connection_bridge.
 async fn poll_for_connection(
     client: &McpClient,
     language: &str,
@@ -245,32 +226,8 @@ async fn restart_daemon_with_env(envs: &[(&str, &str)]) {
     }
 }
 
-/// Assert that a wake response contains daemon_url in both text and raw JSON.
-fn assert_wake_has_daemon_url(
-    wake_result: &detrix_testing::e2e::client::ApiResponse<String>,
-    expected_url: &str,
-) {
-    // Check text content
-    assert!(
-        wake_result.data.contains("daemon_url")
-            || wake_result.data.contains("daemonUrl")
-            || wake_result.data.contains(expected_url),
-        "Wake text should contain daemon_url or the URL itself.\nText: {}",
-        wake_result.data
-    );
-
-    // Check raw JSON response
-    if let Some(ref raw) = wake_result.raw_response {
-        assert!(
-            raw.contains(expected_url),
-            "Wake raw JSON should contain advertise URL '{}'.\nRaw: {}",
-            expected_url,
-            raw
-        );
-    }
-}
-
 /// Sleep an app (stops its debugger) and wait briefly for cleanup.
+/// NOTE: Used only by Phase 7/8 (kept as-is). Other phases use BridgeProcess::sleep_app.
 async fn sleep_app(client: &McpClient, app_url: &str) {
     let _ = client.sleep(app_url).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -355,6 +312,433 @@ async fn force_recreate_with_env(service: &str, envs: &[(&str, &str)]) {
 }
 
 // =============================================================================
+// BridgeProcess — manages a `detrix mcp` child process (stdin/stdout JSON-RPC)
+// =============================================================================
+
+/// Manages a `detrix mcp` bridge subprocess for E2E testing.
+/// Communicates via JSON-RPC over stdin/stdout, matching the real agent experience.
+struct BridgeProcess {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    reader: BufReader<tokio::process::ChildStdout>,
+    next_id: u64,
+}
+
+impl BridgeProcess {
+    /// Spawn a bridge process pointing at the given daemon.
+    async fn spawn(daemon_url: &str, token: &str, file_server_host: Option<&str>) -> Self {
+        Self::spawn_inner(daemon_url, token, file_server_host, None).await
+    }
+
+    /// Spawn a bridge process with a custom CWD (needed for git-pinned tests
+    /// where the bridge's file server must serve from a temp repo directory).
+    async fn spawn_in_dir(
+        daemon_url: &str,
+        token: &str,
+        file_server_host: Option<&str>,
+        cwd: &Path,
+    ) -> Self {
+        Self::spawn_inner(daemon_url, token, file_server_host, Some(cwd)).await
+    }
+
+    async fn spawn_inner(
+        daemon_url: &str,
+        token: &str,
+        file_server_host: Option<&str>,
+        cwd: Option<&Path>,
+    ) -> Self {
+        let ws_root = get_workspace_root();
+        let detrix_bin = find_detrix_binary(&ws_root)
+            .expect("detrix binary not found — run `cargo build` first");
+
+        let mut args = vec![
+            "mcp".to_string(),
+            "--daemon-url".to_string(),
+            daemon_url.to_string(),
+        ];
+        if let Some(host) = file_server_host {
+            args.push("--file-server-host".to_string());
+            args.push(host.to_string());
+        }
+
+        let mut cmd = tokio::process::Command::new(&detrix_bin);
+        cmd.args(&args)
+            .env("DETRIX_TOKEN", token)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+
+        let mut child = cmd.spawn().expect("spawn detrix mcp failed");
+        let stdin = child.stdin.take().expect("stdin");
+        let stdout = child.stdout.take().expect("stdout");
+        let reader = BufReader::new(stdout);
+
+        let mut bridge = Self {
+            child,
+            stdin,
+            reader,
+            next_id: 1,
+        };
+
+        // Perform MCP initialization handshake
+        bridge.initialize().await;
+        bridge
+    }
+
+    async fn initialize(&mut self) {
+        // Send initialize request
+        let id = self.next_id;
+        self.next_id += 1;
+        let init_req = json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "e2e-bridge", "version": "1.0" }
+            },
+            "id": id
+        });
+        self.write_message(&init_req).await;
+        let resp = self.read_response(10).await;
+        assert!(
+            resp.get("result").is_some(),
+            "initialize should succeed: {}",
+            resp
+        );
+
+        // Send initialized notification (required by MCP protocol)
+        let initialized = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        });
+        self.write_message(&initialized).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    async fn write_message(&mut self, msg: &Value) {
+        let line = format!("{}\n", msg);
+        self.stdin
+            .write_all(line.as_bytes())
+            .await
+            .expect("write to bridge stdin");
+        self.stdin.flush().await.expect("flush bridge stdin");
+    }
+
+    /// Read a JSON-RPC response (skips notifications).
+    async fn read_response(&mut self, timeout_secs: u64) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            let mut line = String::new();
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                panic!("Bridge response timeout ({}s)", timeout_secs);
+            }
+            let n = tokio::time::timeout(remaining, self.reader.read_line(&mut line))
+                .await
+                .unwrap_or_else(|_| panic!("Bridge response timeout ({}s)", timeout_secs))
+                .expect("read bridge response");
+            assert!(
+                n > 0,
+                "EOF from bridge (response timeout {}s)",
+                timeout_secs
+            );
+            if let Ok(parsed) = serde_json::from_str::<Value>(line.trim()) {
+                // Skip notifications (no "id" or "id":null)
+                if parsed.get("id").is_some_and(|v| !v.is_null()) {
+                    return parsed;
+                }
+            }
+        }
+    }
+
+    /// Call an MCP tool and return the result object. Returns Err on JSON-RPC error or isError.
+    async fn call_tool(&mut self, name: &str, args: Value) -> Result<Value, String> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": args
+            },
+            "id": id
+        });
+
+        self.write_message(&request).await;
+        let resp = self.read_response(60).await;
+
+        // Check for JSON-RPC error
+        if let Some(error) = resp.get("error") {
+            return Err(format!("JSON-RPC error: {}", error));
+        }
+
+        let result = resp
+            .get("result")
+            .cloned()
+            .ok_or_else(|| "no result in response".to_string())?;
+
+        // Check for isError flag
+        if result.get("isError") == Some(&Value::Bool(true)) {
+            let text = Self::extract_text(&result);
+            return Err(format!("Tool error: {}", text));
+        }
+
+        Ok(result)
+    }
+
+    /// Extract concatenated text from MCP result.content array.
+    fn extract_text(result: &Value) -> String {
+        result
+            .get("content")
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    // ── High-level tool wrappers ──
+
+    /// Wake an app. Returns response text.
+    async fn wake(&mut self, app_url: &str) -> Result<String, String> {
+        let result = self.call_tool("wake", json!({"app_url": app_url})).await?;
+        Ok(Self::extract_text(&result))
+    }
+
+    /// Sleep an app (stops its debugger) and wait briefly for cleanup.
+    async fn sleep_app(&mut self, app_url: &str) {
+        let _ = self.call_tool("sleep", json!({"app_url": app_url})).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    /// Add a metric with a single expression.
+    async fn add_metric(
+        &mut self,
+        name: &str,
+        location: &str,
+        expression: &str,
+        connection_id: &str,
+    ) -> Result<(), String> {
+        self.call_tool(
+            "add_metric",
+            json!({
+                "name": name,
+                "location": location,
+                "expressions": [expression],
+                "connection_id": connection_id
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Observe (auto-find line, auto-select connection). Returns parsed ObserveInfo.
+    async fn observe(&mut self, args: Value) -> Result<ObserveInfo, String> {
+        let result = self.call_tool("observe", args).await?;
+        let text = Self::extract_text(&result);
+        ObserveInfo::parse(&text)
+    }
+
+    /// Remove a metric by name.
+    async fn remove_metric(&mut self, name: &str) -> Result<(), String> {
+        self.call_tool("remove_metric", json!({"name": name}))
+            .await?;
+        Ok(())
+    }
+
+    /// List metric names (for cleanup).
+    async fn list_metrics_names(&mut self) -> Vec<String> {
+        if let Ok(result) = self
+            .call_tool("list_metrics", json!({"format": "json"}))
+            .await
+        {
+            let text = Self::extract_text(&result);
+            if let Some(start) = text.find('[') {
+                if let Ok(arr) = serde_json::from_str::<Vec<Value>>(&text[start..]) {
+                    return arr
+                        .iter()
+                        .filter_map(|m| {
+                            m.get("name")
+                                .and_then(|n| n.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect();
+                }
+            }
+        }
+        vec![]
+    }
+
+    /// Kill the bridge process.
+    async fn kill(&mut self) {
+        let _ = self.child.kill().await;
+    }
+}
+
+/// Parsed observe response (minimal fields needed by test assertions).
+struct ObserveInfo {
+    success: bool,
+    metric_name: String,
+    file: String,
+    line: u32,
+    warnings: Vec<String>,
+}
+
+impl ObserveInfo {
+    /// Parse from the text content of an observe MCP response.
+    /// The observe tool returns nested JSON: {success, metric: {id, name, location, ...}, context: {...}, warnings: [...]}
+    fn parse(text: &str) -> Result<Self, String> {
+        // Try single-line JSON with "metric" key
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('{') && trimmed.contains("\"metric\"") {
+                if let Ok(json) = serde_json::from_str::<Value>(trimmed) {
+                    return Self::from_json(&json);
+                }
+            }
+        }
+        // Try multiline JSON
+        if let Some(start) = text.find("\n{") {
+            if let Ok(json) = serde_json::from_str::<Value>(&text[start + 1..]) {
+                if json.get("metric").is_some() {
+                    return Self::from_json(&json);
+                }
+            }
+        }
+        // Try whole text as JSON
+        if text.trim().starts_with('{') {
+            if let Ok(json) = serde_json::from_str::<Value>(text.trim()) {
+                if json.get("metric").is_some() {
+                    return Self::from_json(&json);
+                }
+            }
+        }
+        Err(format!(
+            "Failed to parse observe response: {}",
+            &text[..text.len().min(500)]
+        ))
+    }
+
+    fn from_json(json: &Value) -> Result<Self, String> {
+        let success = json
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let metric = json.get("metric").unwrap_or(&Value::Null);
+        let metric_name = metric
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        // Parse location "@file#line"
+        let location = metric
+            .get("location")
+            .and_then(|v| v.as_str())
+            .unwrap_or("@unknown#0");
+        let location = location.strip_prefix('@').unwrap_or(location);
+        let (file, line) = if let Some((f, l)) = location.rsplit_once('#') {
+            (f.to_string(), l.parse::<u32>().unwrap_or(0))
+        } else {
+            (location.to_string(), 0)
+        };
+
+        let warnings = json
+            .get("warnings")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(Self {
+            success,
+            metric_name,
+            file,
+            line,
+            warnings,
+        })
+    }
+}
+
+/// Poll `list_connections` via BridgeProcess until a connected connection with the given language.
+/// Returns the connection_id.
+async fn poll_for_connection_bridge(
+    bridge: &mut BridgeProcess,
+    language: &str,
+    timeout: Duration,
+) -> Option<String> {
+    let start = Instant::now();
+    loop {
+        if let Ok(result) = bridge.call_tool("list_connections", json!({})).await {
+            let text = BridgeProcess::extract_text(&result);
+            // Parse TOON-format CSV lines (same format as daemon returns)
+            for line in text.lines() {
+                if line.contains(',') && !line.starts_with('[') && !line.starts_with("Found") {
+                    let parts: Vec<&str> = line.trim().split(',').collect();
+                    if parts.len() >= 5 {
+                        let lang = parts[3].trim().trim_matches('"');
+                        let status_raw = parts[4].trim().trim_matches('"');
+                        let is_connected = status_raw == "3" || status_raw == "connected";
+                        if lang == language && is_connected {
+                            return Some(parts[0].trim().trim_matches('"').to_string());
+                        }
+                    }
+                }
+            }
+        }
+        if start.elapsed() > timeout {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Poll `query_metrics` via BridgeProcess until events appear. Returns event count (0 = timeout).
+async fn poll_for_events_bridge(
+    bridge: &mut BridgeProcess,
+    metric_name: &str,
+    timeout: Duration,
+) -> usize {
+    let start = Instant::now();
+    loop {
+        if let Ok(result) = bridge
+            .call_tool(
+                "query_metrics",
+                json!({"name": metric_name, "limit": 10, "format": "json"}),
+            )
+            .await
+        {
+            let text = BridgeProcess::extract_text(&result);
+            // Look for JSON array in text (format=json returns "Found N events...\n[{...}, ...]")
+            if let Some(arr_start) = text.find('[') {
+                if let Ok(arr) = serde_json::from_str::<Vec<Value>>(&text[arr_start..]) {
+                    if !arr.is_empty() {
+                        return arr.len();
+                    }
+                }
+            }
+        }
+        if start.elapsed() > timeout {
+            return 0;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+// =============================================================================
 // Orchestrator
 // =============================================================================
 
@@ -362,100 +746,136 @@ async fn force_recreate_with_env(service: &str, envs: &[(&str, &str)]) {
 #[ignore]
 async fn test_cloud_e2e() {
     // Docker Compose assumed running (Taskfile manages lifecycle).
-    // All McpClient instances include Authorization: Bearer docker-test-token.
+    // McpClient kept only for Phase 7/8 (kept as-is); all other phases use BridgeProcess.
     let client = McpClient::with_auth(DAEMON_HTTP_PORT, DOCKER_AUTH_TOKEN);
 
-    // Verify daemon is reachable
+    // Print daemon build datetime (docker exec) to verify the image is fresh.
+    let compose_abs = compose_file_abs();
+    if let Ok(output) = std::process::Command::new("docker")
+        .args([
+            "compose",
+            "-f",
+            &compose_abs,
+            "-p",
+            COMPOSE_PROJECT,
+            "exec",
+            "detrix",
+            "/usr/local/bin/detrix",
+            "--version",
+        ])
+        .output()
+    {
+        let ver = String::from_utf8_lossy(&output.stdout);
+        let ver = ver.trim();
+        if ver.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            println!("WARNING: could not get daemon version: {}", stderr.trim());
+        } else {
+            println!("Daemon binary version:\n  {}", ver.replace('\n', "\n  "));
+        }
+    }
+
+    // Verify daemon is reachable via direct HTTP (fast sanity check)
     let healthy = client.health().await.expect("health check failed");
     assert!(healthy, "Daemon should be healthy before starting tests");
     println!("Daemon healthy at port {}", DAEMON_HTTP_PORT);
 
+    let daemon_url = format!("http://127.0.0.1:{}", DAEMON_HTTP_PORT);
+
     // ── Phase 1: Basic observation (Python + Go + Rust) ──
-    // Wake each app, poll for connection, add_metric with explicit line,
+    // Wake each app via real MCP bridge, poll for connection, add_metric,
     // poll for events, assert events > 0.
     println!("\n{}", "=".repeat(60));
     println!("Phase 1: Basic observation");
     println!("{}", "=".repeat(60));
 
+    let mut bridge = BridgeProcess::spawn(&daemon_url, DOCKER_AUTH_TOKEN, None).await;
+
     // ── Phase 1a: Python ──
     println!("\n--- Phase 1a: Python ---");
-    client
-        .wake(PYTHON_APP_URL, None)
+    bridge
+        .wake(PYTHON_APP_URL)
         .await
         .expect("wake python failed");
 
-    let py_conn = poll_for_connection(&client, "python", Duration::from_secs(15))
+    let py_conn = poll_for_connection_bridge(&mut bridge, "python", Duration::from_secs(15))
         .await
         .expect("Python connection not found within 15s");
     println!("  Python connection: {}", py_conn);
 
-    let py_metric = AddMetricRequest::new(
-        "cloud-py-basic",
-        &format!("{}#60", PYTHON_FILE),
-        "order_id",
-        &py_conn,
-    );
-    client
-        .add_metric(py_metric)
+    bridge
+        .add_metric(
+            "cloud-py-basic",
+            &format!("{}#60", PYTHON_FILE),
+            "order_id",
+            &py_conn,
+        )
         .await
         .expect("add python metric failed");
 
-    let py_events = poll_for_events(&client, "cloud-py-basic", Duration::from_secs(15)).await;
+    let py_event_count =
+        poll_for_events_bridge(&mut bridge, "cloud-py-basic", Duration::from_secs(15)).await;
     assert!(
-        !py_events.is_empty(),
+        py_event_count > 0,
         "Expected Python events but got none (waited 15s)"
     );
-    println!("  Python events captured: {}", py_events.len());
+    println!("  Python events captured: {}", py_event_count);
 
     // ── Phase 1b: Go ──
     println!("\n--- Phase 1b: Go ---");
-    client.wake(GO_APP_URL, None).await.expect("wake go failed");
+    bridge.wake(GO_APP_URL).await.expect("wake go failed");
 
-    let go_conn = poll_for_connection(&client, "go", Duration::from_secs(15))
+    let go_conn = poll_for_connection_bridge(&mut bridge, "go", Duration::from_secs(15))
         .await
         .expect("Go connection not found within 15s");
     println!("  Go connection: {}", go_conn);
 
-    let go_metric = AddMetricRequest::new(
-        "cloud-go-basic",
-        &format!("{}#117", GO_FILE),
-        "symbol",
-        &go_conn,
-    );
-    client
-        .add_metric(go_metric)
+    bridge
+        .add_metric(
+            "cloud-go-basic",
+            &format!("{}#{}", GO_FILE, go_lines::line(go_lines::OFFSET_SYMBOL)),
+            "symbol",
+            &go_conn,
+        )
         .await
         .expect("add go metric failed");
 
-    let go_events = poll_for_events(&client, "cloud-go-basic", Duration::from_secs(15)).await;
+    let go_event_count =
+        poll_for_events_bridge(&mut bridge, "cloud-go-basic", Duration::from_secs(15)).await;
     assert!(
-        !go_events.is_empty(),
+        go_event_count > 0,
         "Expected Go events but got none (waited 15s)"
     );
-    println!("  Go events captured: {}", go_events.len());
+    println!("  Go events captured: {}", go_event_count);
 
     // ── Phase 1c: Rust (skip if lldb-dap unavailable in container) ──
     println!("\n--- Phase 1c: Rust ---");
-    let rust_available = match client.wake(RUST_APP_URL, None).await {
+    let rust_available = match bridge.wake(RUST_APP_URL).await {
         Ok(_) => {
             if let Some(rust_conn) =
-                poll_for_connection(&client, "rust", Duration::from_secs(15)).await
+                poll_for_connection_bridge(&mut bridge, "rust", Duration::from_secs(15)).await
             {
                 println!("  Rust connection: {}", rust_conn);
-                let rust_metric = AddMetricRequest::new(
-                    "cloud-rust-basic",
-                    &format!("{}#108", RUST_FILE),
-                    "symbol",
-                    &rust_conn,
-                );
-                if let Err(e) = client.add_metric(rust_metric).await {
+                if let Err(e) = bridge
+                    .add_metric(
+                        "cloud-rust-basic",
+                        &format!("{}#108", RUST_FILE),
+                        "symbol",
+                        &rust_conn,
+                    )
+                    .await
+                {
                     println!("  Rust add_metric failed (skipping): {}", e);
                     false
                 } else {
-                    let rust_events =
-                        poll_for_events(&client, "cloud-rust-basic", Duration::from_secs(15)).await;
-                    println!("  Rust events captured: {}", rust_events.len());
-                    !rust_events.is_empty()
+                    let rust_event_count = poll_for_events_bridge(
+                        &mut bridge,
+                        "cloud-rust-basic",
+                        Duration::from_secs(15),
+                    )
+                    .await;
+                    println!("  Rust events captured: {}", rust_event_count);
+                    rust_event_count > 0
                 }
             } else {
                 println!("  Rust connection not found (skipping)");
@@ -473,10 +893,13 @@ async fn test_cloud_e2e() {
 
     // ── Cleanup: Sleep all apps (debuggers stop) ──
     println!("\n--- Phase 1 cleanup: sleeping all apps ---");
-    sleep_app(&client, PYTHON_APP_URL).await;
-    sleep_app(&client, GO_APP_URL).await;
-    sleep_app(&client, RUST_APP_URL).await;
+    bridge.sleep_app(PYTHON_APP_URL).await;
+    bridge.sleep_app(GO_APP_URL).await;
+    bridge.sleep_app(RUST_APP_URL).await;
     println!("  All apps sleeping");
+
+    // Kill bridge before daemon restart
+    bridge.kill().await;
 
     // ── DAEMON RESTART (stale connections deleted — debuggers were stopped) ──
     println!("\n--- Restarting daemon (clean state for Phase 2) ---");
@@ -495,72 +918,58 @@ async fn test_cloud_e2e() {
     println!("{}", "=".repeat(60));
 
     // ── Phase 2: Control plane file serving (Python) ──
-    // No bridge header → daemon fetches from app's /detrix/files/read endpoint.
+    // Bridge sends file-server-url, but Python's /app/ path won't map to host,
+    // so daemon falls back to app's /detrix/files/read endpoint (control plane).
     // observe() auto-finds the line via VFS (control_plane source).
     println!("\n{}", "=".repeat(60));
     println!("Phase 2: Control plane file serving (Python)");
     println!("{}", "=".repeat(60));
 
-    // Wake Python and use explicit connection_id (stale connections may survive restart)
+    let mut bridge = BridgeProcess::spawn(&daemon_url, DOCKER_AUTH_TOKEN, None).await;
+
+    // Wake Python and use explicit connection_id
     println!("\n--- Phase 2: waking Python ---");
-    client
-        .wake(PYTHON_APP_URL, None)
+    bridge
+        .wake(PYTHON_APP_URL)
         .await
         .expect("wake python failed");
 
-    let py_conn = poll_for_connection(&client, "python", Duration::from_secs(15))
+    let py_conn = poll_for_connection_bridge(&mut bridge, "python", Duration::from_secs(15))
         .await
         .expect("Python connection not found within 15s");
     println!("  Python connection: {}", py_conn);
 
     // observe with auto-find line (VFS fetches file from control plane)
-    let observe_req = ObserveRequest::new("trade_bot_forever.py", "order_id")
-        .with_name("cloud-py-cp")
-        .with_connection_id(&py_conn);
-    let observe_resp = client
-        .observe(observe_req)
+    let observe_resp = bridge
+        .observe(json!({
+            "file": "trade_bot_forever.py",
+            "expressions": ["order_id"],
+            "name": "cloud-py-cp",
+            "connection_id": &py_conn
+        }))
         .await
         .expect("observe python via control plane failed");
-    assert!(
-        observe_resp.data.success,
-        "observe should succeed: {:?}",
-        observe_resp.data
-    );
+    assert!(observe_resp.success, "observe should succeed");
     println!(
         "  observe ok: metric={} at {}#{}",
-        observe_resp.data.metric_name, observe_resp.data.file, observe_resp.data.line
+        observe_resp.metric_name, observe_resp.file, observe_resp.line
     );
-    if !observe_resp.data.warnings.is_empty() {
-        println!("  observe warnings: {:?}", observe_resp.data.warnings);
+    if !observe_resp.warnings.is_empty() {
+        println!("  observe warnings: {:?}", observe_resp.warnings);
     }
 
-    let cp_events = poll_for_events(&client, "cloud-py-cp", Duration::from_secs(15)).await;
-    if cp_events.is_empty() {
-        // Print diagnostic info before failing
-        if let Ok(metric) = client.get_metric("cloud-py-cp").await {
-            println!(
-                "  DIAG: metric enabled={}, location={}",
-                metric.data.enabled, metric.data.location
-            );
-        }
-        if let Ok(conns) = client.list_connections().await {
-            for c in &conns.data {
-                println!(
-                    "  DIAG: conn={} lang={} status={}",
-                    c.connection_id, c.language, c.status
-                );
-            }
-        }
-    }
+    let cp_event_count =
+        poll_for_events_bridge(&mut bridge, "cloud-py-cp", Duration::from_secs(15)).await;
     assert!(
-        !cp_events.is_empty(),
+        cp_event_count > 0,
         "Expected control-plane events but got none (waited 15s)"
     );
-    println!("  Control plane events captured: {}", cp_events.len());
+    println!("  Control plane events captured: {}", cp_event_count);
 
     // Cleanup
     println!("\n--- Phase 2 cleanup: sleeping Python ---");
-    sleep_app(&client, PYTHON_APP_URL).await;
+    bridge.sleep_app(PYTHON_APP_URL).await;
+    bridge.kill().await;
 
     // ── DAEMON RESTART (clean state for Phase 3) ──
     println!("\n--- Restarting daemon (clean state for Phase 3) ---");
@@ -572,52 +981,26 @@ async fn test_cloud_e2e() {
     println!("{}", "=".repeat(60));
 
     // ── Phase 3: Bridge file serving (Go) ──
-    // Start a test file server on the host. The daemon fetches files via the
-    // bridge source using the X-Detrix-File-Server-Url header.
+    // Real MCP bridge starts its own file server and auto-maps container paths.
+    // The daemon fetches files via the bridge's file server (X-Detrix-File-Server-Url).
     println!("\n{}", "=".repeat(60));
     println!("Phase 3: Bridge file serving (Go)");
     println!("{}", "=".repeat(60));
 
-    // Resolve host fixture path (relative to workspace root)
-    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let go_fixture_path = workspace_root.join("fixtures/go");
-
-    // Start test file server with path mapping:
-    // /src/fixtures/go/ → host fixtures/go/ (matches DWARF debug info paths)
-    let mut mappings = HashMap::new();
-    mappings.insert("/src/fixtures/go".to_string(), go_fixture_path.clone());
-    // Fallback: /app/ mapping in case the connection reports /app/ as workspace
-    mappings.insert("/app".to_string(), go_fixture_path);
-
-    let (bridge_port, bridge_handle) = start_test_file_server(mappings, None)
-        .await
-        .expect("start test file server failed");
-    println!("  Test file server started on port {}", bridge_port);
-
-    // Create MCP client with bridge URL header
-    let mut bridge_headers = reqwest::header::HeaderMap::new();
-    bridge_headers.insert(
-        "X-Detrix-File-Server-Url",
-        format!("http://host.docker.internal:{}", bridge_port)
-            .parse()
-            .unwrap(),
-    );
-    let bridge_client =
-        McpClient::with_auth_and_headers(DAEMON_HTTP_PORT, DOCKER_AUTH_TOKEN, bridge_headers);
+    let ws_root = get_workspace_root();
+    let mut bridge = BridgeProcess::spawn_in_dir(
+        &daemon_url,
+        DOCKER_AUTH_TOKEN,
+        Some("host.docker.internal"),
+        &ws_root,
+    )
+    .await;
 
     // Wake Go and use explicit connection_id
     println!("\n--- Phase 3: waking Go ---");
-    bridge_client
-        .wake(GO_APP_URL, None)
-        .await
-        .expect("wake go failed");
+    bridge.wake(GO_APP_URL).await.expect("wake go failed");
 
-    let go_conn = poll_for_connection(&bridge_client, "go", Duration::from_secs(15))
+    let go_conn = poll_for_connection_bridge(&mut bridge, "go", Duration::from_secs(15))
         .await
         .expect("Go connection not found within 15s");
     println!("  Go connection: {}", go_conn);
@@ -625,36 +1008,34 @@ async fn test_cloud_e2e() {
     // observe via bridge file serving
     // Use absolute path because Go workspace_root is "/" and relative "detrix_example_app.go"
     // would resolve to "/detrix_example_app.go" instead of the DWARF path.
-    let observe_req = ObserveRequest::new(GO_FILE, "symbol")
-        .with_name("cloud-go-bridge")
-        .with_connection_id(&go_conn);
-    let observe_resp = bridge_client
-        .observe(observe_req)
+    let observe_resp = bridge
+        .observe(json!({
+            "file": GO_FILE,
+            "expressions": ["symbol"],
+            "name": "cloud-go-bridge",
+            "connection_id": &go_conn
+        }))
         .await
         .expect("observe go via bridge failed");
-    assert!(
-        observe_resp.data.success,
-        "observe should succeed: {:?}",
-        observe_resp.data
-    );
+    assert!(observe_resp.success, "observe should succeed");
     println!(
         "  observe ok: metric={} at {}#{}",
-        observe_resp.data.metric_name, observe_resp.data.file, observe_resp.data.line
+        observe_resp.metric_name, observe_resp.file, observe_resp.line
     );
 
-    let bridge_events =
-        poll_for_events(&bridge_client, "cloud-go-bridge", Duration::from_secs(15)).await;
+    let bridge_event_count =
+        poll_for_events_bridge(&mut bridge, "cloud-go-bridge", Duration::from_secs(15)).await;
     assert!(
-        !bridge_events.is_empty(),
+        bridge_event_count > 0,
         "Expected bridge events but got none (waited 15s)"
     );
-    println!("  Bridge events captured: {}", bridge_events.len());
+    println!("  Bridge events captured: {}", bridge_event_count);
 
     // Cleanup
     println!("\n--- Phase 3 cleanup ---");
-    sleep_app(&bridge_client, GO_APP_URL).await;
-    bridge_handle.abort();
-    println!("  Go sleeping, test file server stopped");
+    bridge.sleep_app(GO_APP_URL).await;
+    bridge.kill().await;
+    println!("  Go sleeping, bridge stopped");
 
     // ── DAEMON RESTART (clean state for Phase 4) ──
     println!("\n--- Restarting daemon (clean state for Phase 4) ---");
@@ -667,11 +1048,19 @@ async fn test_cloud_e2e() {
 
     // ── Phase 4: Git-pinned + drift detection (Python) ──
     // Create a temp git repo with the Python fixture, modify working tree
-    // (drift), force-recreate Python with GIT_COMMIT, serve via bridge with
-    // git support → daemon does `git show` → detects drift.
+    // (drift), force-recreate Python with GIT_COMMIT, spawn bridge with CWD
+    // in the temp repo → bridge file server auto-maps /app/ → repo path,
+    // daemon does git show → detects drift.
     println!("\n{}", "=".repeat(60));
     println!("Phase 4: Git-pinned + drift detection (Python)");
     println!("{}", "=".repeat(60));
+
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
 
     // 1. Create temp git repo with Python fixture
     let py_fixture = workspace_root.join("fixtures/python/trade_bot_forever.py");
@@ -694,34 +1083,25 @@ async fn test_cloud_e2e() {
     force_recreate_with_env("test-app-python", &[("TEST_GIT_COMMIT", &commit_sha)]).await;
     println!("  Python container recreated");
 
-    // 4. Start test file server with git support
-    let mut git_mappings = HashMap::new();
-    git_mappings.insert("/app".to_string(), git_dir.path().to_path_buf());
-    let (git_bridge_port, git_bridge_handle) =
-        start_test_file_server(git_mappings, Some(git_dir.path().to_path_buf()))
-            .await
-            .expect("start git test file server failed");
-    println!("  Git-enabled file server on port {}", git_bridge_port);
+    // 4. Spawn bridge with CWD = temp git repo so the bridge file server
+    //    can serve files from the repo and the auto-mapping finds /app → repo path.
+    let mut bridge = BridgeProcess::spawn_in_dir(
+        &daemon_url,
+        DOCKER_AUTH_TOKEN,
+        Some("host.docker.internal"),
+        git_dir.path(),
+    )
+    .await;
+    println!("  Bridge spawned with CWD={:?}", git_dir.path());
 
-    // 5. Create MCP client with bridge URL
-    let mut git_headers = reqwest::header::HeaderMap::new();
-    git_headers.insert(
-        "X-Detrix-File-Server-Url",
-        format!("http://host.docker.internal:{}", git_bridge_port)
-            .parse()
-            .unwrap(),
-    );
-    let git_client =
-        McpClient::with_auth_and_headers(DAEMON_HTTP_PORT, DOCKER_AUTH_TOKEN, git_headers);
-
-    // 6. Wake Python → it registers with build_commit=sha
+    // 5. Wake Python → it registers with build_commit=sha
     println!("\n--- Phase 4: waking Python ---");
-    git_client
-        .wake(PYTHON_APP_URL, None)
+    bridge
+        .wake(PYTHON_APP_URL)
         .await
         .expect("wake python failed");
 
-    let py_conn = poll_for_connection(&git_client, "python", Duration::from_secs(15))
+    let py_conn = poll_for_connection_bridge(&mut bridge, "python", Duration::from_secs(15))
         .await
         .expect("Python connection not found within 15s");
     println!(
@@ -729,38 +1109,37 @@ async fn test_cloud_e2e() {
         py_conn
     );
 
-    // 7. observe → bridge → git show → drift detected
-    let observe_req = ObserveRequest::new("trade_bot_forever.py", "order_id")
-        .with_name("cloud-py-git")
-        .with_connection_id(&py_conn);
-    let observe_resp = git_client
-        .observe(observe_req)
+    // 6. observe → bridge file server → git show → drift detected
+    let observe_resp = bridge
+        .observe(json!({
+            "file": "trade_bot_forever.py",
+            "expressions": ["order_id"],
+            "name": "cloud-py-git",
+            "connection_id": &py_conn
+        }))
         .await
         .expect("observe python via git-pinned bridge failed");
-    assert!(
-        observe_resp.data.success,
-        "observe should succeed: {:?}",
-        observe_resp.data
-    );
+    assert!(observe_resp.success, "observe should succeed");
     println!(
         "  observe ok: metric={} at {}#{}",
-        observe_resp.data.metric_name, observe_resp.data.file, observe_resp.data.line
+        observe_resp.metric_name, observe_resp.file, observe_resp.line
     );
 
-    // 8. Poll for events
-    let git_events = poll_for_events(&git_client, "cloud-py-git", Duration::from_secs(15)).await;
+    // 7. Poll for events
+    let git_event_count =
+        poll_for_events_bridge(&mut bridge, "cloud-py-git", Duration::from_secs(15)).await;
     assert!(
-        !git_events.is_empty(),
+        git_event_count > 0,
         "Expected git-pinned events but got none (waited 15s)"
     );
-    println!("  Git-pinned events captured: {}", git_events.len());
+    println!("  Git-pinned events captured: {}", git_event_count);
 
     // Cleanup
     println!("\n--- Phase 4 cleanup ---");
-    sleep_app(&git_client, PYTHON_APP_URL).await;
-    git_bridge_handle.abort();
+    bridge.sleep_app(PYTHON_APP_URL).await;
+    bridge.kill().await;
     // git_dir (TempDir) will be cleaned up when dropped
-    println!("  Python sleeping, git file server stopped");
+    println!("  Python sleeping, bridge stopped");
 
     println!("\n{}", "=".repeat(60));
     println!("Phase 4 complete — git-pinned + drift detection verified");
@@ -926,7 +1305,7 @@ async fn test_cloud_e2e() {
 
     // ── Phase 6: Daemon Advertise URL + Observe (All Clients) ──
     // Restart daemon with DETRIX_ADVERTISE_URL, verify daemon_url flows through
-    // wake responses, then observe with each client language.
+    // wake responses via real MCP bridge, then observe with each client language.
     println!("\n{}", "=".repeat(60));
     println!("Phase 6: Daemon Advertise URL + Observe (All Clients)");
     println!("{}", "=".repeat(60));
@@ -941,169 +1320,175 @@ async fn test_cloud_e2e() {
 
     // ── Phase 6a: Python (control plane file serving) ──
     println!("\n--- Phase 6a: Python (control plane file serving) ---");
-    let wake_resp = client
-        .wake(PYTHON_APP_URL, None)
-        .await
-        .expect("wake python failed");
-    assert_wake_has_daemon_url(&wake_resp, ADVERTISE_URL);
-    println!("  daemon_url verified: {}", ADVERTISE_URL);
+    {
+        let mut bridge = BridgeProcess::spawn(&daemon_url, DOCKER_AUTH_TOKEN, None).await;
 
-    let py_conn = poll_for_connection(&client, "python", Duration::from_secs(15))
-        .await
-        .expect("Python connection not found within 15s");
-    println!("  Python connection: {}", py_conn);
+        let wake_text = bridge
+            .wake(PYTHON_APP_URL)
+            .await
+            .expect("wake python failed");
+        assert!(
+            wake_text.contains("daemon_url")
+                || wake_text.contains("daemonUrl")
+                || wake_text.contains(ADVERTISE_URL),
+            "Wake text should contain daemon_url or the URL itself.\nText: {}",
+            wake_text
+        );
+        println!("  daemon_url verified: {}", ADVERTISE_URL);
 
-    // observe with auto-find line (VFS fetches file from control plane)
-    let observe_req = ObserveRequest::new("trade_bot_forever.py", "order_id")
-        .with_name("cloud-py-adv")
-        .with_connection_id(&py_conn);
-    let observe_resp = client
-        .observe(observe_req)
-        .await
-        .expect("observe python via control plane failed");
-    assert!(
-        observe_resp.data.success,
-        "observe should succeed: {:?}",
-        observe_resp.data
-    );
-    println!(
-        "  observe ok: {} at {}#{}",
-        observe_resp.data.metric_name, observe_resp.data.file, observe_resp.data.line
-    );
+        let py_conn = poll_for_connection_bridge(&mut bridge, "python", Duration::from_secs(15))
+            .await
+            .expect("Python connection not found within 15s");
+        println!("  Python connection: {}", py_conn);
 
-    let adv_py_events = poll_for_events(&client, "cloud-py-adv", Duration::from_secs(15)).await;
-    assert!(
-        !adv_py_events.is_empty(),
-        "Expected Python advertise-URL events but got none (waited 15s)"
-    );
-    println!("  Events captured: {}", adv_py_events.len());
+        // observe with auto-find line (VFS fetches file from control plane)
+        let observe_resp = bridge
+            .observe(json!({
+                "file": "trade_bot_forever.py",
+                "expressions": ["order_id"],
+                "name": "cloud-py-adv",
+                "connection_id": &py_conn
+            }))
+            .await
+            .expect("observe python via control plane failed");
+        assert!(observe_resp.success, "observe should succeed");
+        println!(
+            "  observe ok: {} at {}#{}",
+            observe_resp.metric_name, observe_resp.file, observe_resp.line
+        );
 
-    sleep_app(&client, PYTHON_APP_URL).await;
-    println!("  Python sleeping");
+        let adv_py_event_count =
+            poll_for_events_bridge(&mut bridge, "cloud-py-adv", Duration::from_secs(15)).await;
+        assert!(
+            adv_py_event_count > 0,
+            "Expected Python advertise-URL events but got none (waited 15s)"
+        );
+        println!("  Events captured: {}", adv_py_event_count);
+
+        bridge.sleep_app(PYTHON_APP_URL).await;
+        bridge.kill().await;
+        println!("  Python sleeping");
+    }
 
     // ── Phase 6b: Go (bridge file serving) ──
     println!("\n--- Phase 6b: Go (bridge file serving) ---");
+    {
+        let mut bridge = BridgeProcess::spawn_in_dir(
+            &daemon_url,
+            DOCKER_AUTH_TOKEN,
+            Some("host.docker.internal"),
+            &ws_root,
+        )
+        .await;
 
-    let workspace_root_6b = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let go_fixture_path_6b = workspace_root_6b.join("fixtures/go");
+        let go_wake_text = bridge.wake(GO_APP_URL).await.expect("wake go failed");
+        assert!(
+            go_wake_text.contains("daemon_url")
+                || go_wake_text.contains("daemonUrl")
+                || go_wake_text.contains(ADVERTISE_URL),
+            "Wake text should contain daemon_url or the URL itself.\nText: {}",
+            go_wake_text
+        );
+        println!("  daemon_url verified: {}", ADVERTISE_URL);
 
-    let mut mappings_6b = HashMap::new();
-    mappings_6b.insert("/src/fixtures/go".to_string(), go_fixture_path_6b.clone());
-    mappings_6b.insert("/app".to_string(), go_fixture_path_6b);
+        let go_conn_6b = poll_for_connection_bridge(&mut bridge, "go", Duration::from_secs(15))
+            .await
+            .expect("Go connection not found within 15s");
+        println!("  Go connection: {}", go_conn_6b);
 
-    let (bridge_port_6b, bridge_handle_6b) = start_test_file_server(mappings_6b, None)
-        .await
-        .expect("start test file server for Phase 6b failed");
-    println!("  Test file server started on port {}", bridge_port_6b);
+        let observe_resp = bridge
+            .observe(json!({
+                "file": GO_FILE,
+                "expressions": ["symbol"],
+                "name": "cloud-go-adv",
+                "connection_id": &go_conn_6b
+            }))
+            .await
+            .expect("observe go via bridge failed");
+        assert!(observe_resp.success, "observe should succeed");
+        println!(
+            "  observe ok: {} at {}#{}",
+            observe_resp.metric_name, observe_resp.file, observe_resp.line
+        );
 
-    let mut bridge_headers_6b = reqwest::header::HeaderMap::new();
-    bridge_headers_6b.insert(
-        "X-Detrix-File-Server-Url",
-        format!("http://host.docker.internal:{}", bridge_port_6b)
-            .parse()
-            .unwrap(),
-    );
-    let bridge_client_6b =
-        McpClient::with_auth_and_headers(DAEMON_HTTP_PORT, DOCKER_AUTH_TOKEN, bridge_headers_6b);
+        let adv_go_event_count =
+            poll_for_events_bridge(&mut bridge, "cloud-go-adv", Duration::from_secs(15)).await;
+        assert!(
+            adv_go_event_count > 0,
+            "Expected Go advertise-URL events but got none (waited 15s)"
+        );
+        println!("  Events captured: {}", adv_go_event_count);
 
-    let go_wake_resp = bridge_client_6b
-        .wake(GO_APP_URL, None)
-        .await
-        .expect("wake go failed");
-    assert_wake_has_daemon_url(&go_wake_resp, ADVERTISE_URL);
-    println!("  daemon_url verified: {}", ADVERTISE_URL);
+        bridge.sleep_app(GO_APP_URL).await;
+        bridge.kill().await;
+        println!("  Go sleeping, bridge stopped");
+    }
 
-    let go_conn_6b = poll_for_connection(&bridge_client_6b, "go", Duration::from_secs(15))
-        .await
-        .expect("Go connection not found within 15s");
-    println!("  Go connection: {}", go_conn_6b);
+    // ── Phase 6c: Rust (explicit line, no file serving needed, skip if unavailable) ──
+    println!("\n--- Phase 6c: Rust (explicit line) ---");
+    let rust_adv_available = {
+        let mut bridge = BridgeProcess::spawn(&daemon_url, DOCKER_AUTH_TOKEN, None).await;
 
-    let observe_req = ObserveRequest::new(GO_FILE, "symbol")
-        .with_name("cloud-go-adv")
-        .with_connection_id(&go_conn_6b);
-    let observe_resp = bridge_client_6b
-        .observe(observe_req)
-        .await
-        .expect("observe go via bridge failed");
-    assert!(
-        observe_resp.data.success,
-        "observe should succeed: {:?}",
-        observe_resp.data
-    );
-    println!(
-        "  observe ok: {} at {}#{}",
-        observe_resp.data.metric_name, observe_resp.data.file, observe_resp.data.line
-    );
+        match bridge.wake(RUST_APP_URL).await {
+            Ok(rust_wake_text) => {
+                // Check daemon_url even if we might skip later
+                if rust_wake_text.contains(ADVERTISE_URL) {
+                    println!("  daemon_url verified: {}", ADVERTISE_URL);
+                }
 
-    let adv_go_events =
-        poll_for_events(&bridge_client_6b, "cloud-go-adv", Duration::from_secs(15)).await;
-    assert!(
-        !adv_go_events.is_empty(),
-        "Expected Go advertise-URL events but got none (waited 15s)"
-    );
-    println!("  Events captured: {}", adv_go_events.len());
-
-    sleep_app(&bridge_client_6b, GO_APP_URL).await;
-    bridge_handle_6b.abort();
-    println!("  Go sleeping, test file server stopped");
-
-    // ── Phase 6c: Rust (control plane file serving, skip if unavailable) ──
-    println!("\n--- Phase 6c: Rust (control plane file serving) ---");
-    let rust_adv_available = match client.wake(RUST_APP_URL, None).await {
-        Ok(rust_wake) => {
-            // Check daemon_url even if we might skip later
-            let has_daemon_url = rust_wake.data.contains(ADVERTISE_URL)
-                || rust_wake
-                    .raw_response
-                    .as_ref()
-                    .is_some_and(|r| r.contains(ADVERTISE_URL));
-            if has_daemon_url {
-                println!("  daemon_url verified: {}", ADVERTISE_URL);
-            }
-
-            if let Some(rust_conn) =
-                poll_for_connection(&client, "rust", Duration::from_secs(15)).await
-            {
-                println!("  Rust connection: {}", rust_conn);
-                let rust_metric = AddMetricRequest::new(
-                    "cloud-rust-adv",
-                    &format!("{}#108", RUST_FILE),
-                    "symbol",
-                    &rust_conn,
-                );
-                if let Err(e) = client.add_metric(rust_metric).await {
-                    println!("  Rust add_metric failed (skipping): {}", e);
-                    false
-                } else {
-                    let rust_events =
-                        poll_for_events(&client, "cloud-rust-adv", Duration::from_secs(15)).await;
-                    if rust_events.is_empty() {
-                        println!("  Rust events: 0 (skipping)");
+                if let Some(rust_conn) =
+                    poll_for_connection_bridge(&mut bridge, "rust", Duration::from_secs(15)).await
+                {
+                    println!("  Rust connection: {}", rust_conn);
+                    if let Err(e) = bridge
+                        .add_metric(
+                            "cloud-rust-adv",
+                            &format!("{}#108", RUST_FILE),
+                            "symbol",
+                            &rust_conn,
+                        )
+                        .await
+                    {
+                        println!("  Rust add_metric failed (skipping): {}", e);
+                        bridge.sleep_app(RUST_APP_URL).await;
+                        bridge.kill().await;
                         false
                     } else {
-                        println!("  Events captured: {}", rust_events.len());
-                        true
+                        let rust_event_count = poll_for_events_bridge(
+                            &mut bridge,
+                            "cloud-rust-adv",
+                            Duration::from_secs(15),
+                        )
+                        .await;
+                        if rust_event_count == 0 {
+                            println!("  Rust events: 0 (skipping)");
+                            bridge.sleep_app(RUST_APP_URL).await;
+                            bridge.kill().await;
+                            false
+                        } else {
+                            println!("  Events captured: {}", rust_event_count);
+                            bridge.sleep_app(RUST_APP_URL).await;
+                            bridge.kill().await;
+                            true
+                        }
                     }
+                } else {
+                    println!("  Rust connection not found (skipping)");
+                    bridge.sleep_app(RUST_APP_URL).await;
+                    bridge.kill().await;
+                    false
                 }
-            } else {
-                println!("  Rust connection not found (skipping)");
+            }
+            Err(e) => {
+                println!("  Rust wake failed (lldb-dap likely unavailable): {}", e);
+                bridge.kill().await;
                 false
             }
-        }
-        Err(e) => {
-            println!("  Rust wake failed (lldb-dap likely unavailable): {}", e);
-            false
         }
     };
     if !rust_adv_available {
         println!("  [SKIP] Rust advertise-URL tests skipped");
     }
-    sleep_app(&client, RUST_APP_URL).await;
 
     println!("\n{}", "=".repeat(60));
     println!(
@@ -1561,6 +1946,106 @@ async fn test_cloud_e2e() {
 
     println!("\n{}", "=".repeat(60));
     println!("Phase 8 complete — discovery endpoint + advertise_url verified");
+    println!("{}", "=".repeat(60));
+
+    // ── Phase 9: Scope-aware find_variable (Go) ──
+    // Tests that observe() with find_variable="symbol" (no explicit line) picks
+    // the function body usage (inside main()) rather than the struct field
+    // definition (Order.Symbol) added before main().
+    println!("\n{}", "=".repeat(60));
+    println!("Phase 9: Scope-aware find_variable (Go)");
+    println!("{}", "=".repeat(60));
+
+    // Restart daemon (clean state)
+    println!("\n--- Restarting daemon (clean state for Phase 9) ---");
+    restart_daemon().await;
+    println!("  Daemon restarted");
+
+    let ws_root_9 = get_workspace_root();
+    let mut bridge = BridgeProcess::spawn_in_dir(
+        &daemon_url,
+        DOCKER_AUTH_TOKEN,
+        Some("host.docker.internal"),
+        &ws_root_9,
+    )
+    .await;
+
+    // Wake Go app
+    println!("\n--- Phase 9: waking Go ---");
+    bridge.wake(GO_APP_URL).await.expect("wake go failed");
+
+    let go_conn_9 = poll_for_connection_bridge(&mut bridge, "go", Duration::from_secs(15))
+        .await
+        .expect("Go connection not found within 15s");
+    println!("  Go connection: {}", go_conn_9);
+
+    // Clean up any existing metrics
+    for name in bridge.list_metrics_names().await {
+        let _ = bridge.remove_metric(&name).await;
+    }
+
+    // Observe with find_variable="symbol" — no explicit line.
+    // The Go fixture has Order.Symbol struct field AND symbol := ... in main().
+    // Scope-aware logic should pick the function body usage, not the struct field.
+    let observe_resp = bridge
+        .observe(json!({
+            "file": GO_FILE,
+            "expressions": ["symbol"],
+            "find_variable": "symbol",
+            "name": "cloud-go-scope-aware",
+            "connection_id": &go_conn_9
+        }))
+        .await
+        .expect("observe go scope-aware failed");
+    assert!(observe_resp.success, "observe should succeed");
+    println!(
+        "  observe ok: metric={} at {}#{}",
+        observe_resp.metric_name, observe_resp.file, observe_resp.line
+    );
+
+    // Assert the chosen line is inside a function BODY, not at the struct field
+    // definition (lines 83-87) or a function signature like `func placeOrder(symbol ...)` (line 89).
+    // The scope-aware logic in inspect_generic_variable() deprioritizes both
+    // struct fields (out-of-scope) and function signatures (is_function_signature).
+    // The first valid body match is line 92: `log(..., symbol, ...)` inside placeOrder.
+    let place_order_signature_line = go_lines::ORDER_STRUCT_END + 2; // line 89
+    assert!(
+        observe_resp.line > go_lines::ORDER_STRUCT_END,
+        "Scope-aware find_variable should pick line inside a function body (> {}), \
+         but got line {} (likely struct field definition).",
+        go_lines::ORDER_STRUCT_END,
+        observe_resp.line
+    );
+    assert!(
+        observe_resp.line != place_order_signature_line,
+        "Scope-aware find_variable should NOT pick function signature line {}, \
+         but got it. Function signatures should be deprioritized.",
+        place_order_signature_line
+    );
+    println!(
+        "  Scope-aware line {} > ORDER_STRUCT_END {} and != signature {} — correctly deprioritized",
+        observe_resp.line,
+        go_lines::ORDER_STRUCT_END,
+        place_order_signature_line
+    );
+
+    // Poll for events to confirm metric actually fires
+    let scope_event_count =
+        poll_for_events_bridge(&mut bridge, "cloud-go-scope-aware", Duration::from_secs(15)).await;
+    assert!(
+        scope_event_count > 0,
+        "Expected scope-aware events but got none (waited 15s)"
+    );
+    println!("  Scope-aware events captured: {}", scope_event_count);
+
+    // Cleanup
+    println!("\n--- Phase 9 cleanup ---");
+    bridge.sleep_app(GO_APP_URL).await;
+    bridge.kill().await;
+    println!("  Go sleeping, bridge stopped");
+
+    println!("\n{}", "=".repeat(60));
+    println!("Phase 9 complete — scope-aware find_variable verified");
     println!("{}", "=".repeat(60));
 
     println!("\n{}", "=".repeat(60));

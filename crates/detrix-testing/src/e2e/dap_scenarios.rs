@@ -51,6 +51,37 @@ impl DapLanguageExt for SourceLanguage {
     }
 }
 
+// Go fixture line numbers — single source of truth.
+// Update MAIN_LINE if you add/remove lines before `func main()` in
+// fixtures/go/detrix_example_app.go
+pub mod go_lines {
+    /// Line of `func main()` in detrix_example_app.go
+    pub const MAIN_LINE: u32 = 101;
+
+    /// Last line of the Order struct (`}` on line 87).
+    /// Used by scope-aware tests to verify struct fields are deprioritized.
+    pub const ORDER_STRUCT_END: u32 = 87;
+
+    // Offsets from main()
+    pub const OFFSET_SIGNAL_HANDLER: u32 = 13; // line 104: go signalHandler(...)
+    pub const OFFSET_SYMBOL: u32 = 26; // line 117: symbol := ...
+    pub const OFFSET_QUANTITY: u32 = 27; // line 118: quantity := ...
+    pub const OFFSET_PRICE: u32 = 28; // line 119: price := ...
+    pub const OFFSET_ORDER_ID: u32 = 31; // line 122: orderID := placeOrder(...)
+    pub const OFFSET_ENTRY_PRICE: u32 = 34; // line 125: entryPrice := price
+    pub const OFFSET_CURRENT_PRICE: u32 = 35; // line 126: currentPrice := ...
+    pub const OFFSET_PNL: u32 = 36; // line 127: pnl := calculatePnl(...)
+    pub const OFFSET_TOTAL_PNL: u32 = 39; // line 130: totalPnl = totalPnl + pnl
+    pub const OFFSET_LAST_ORDER_ID: u32 = 40; // line 131: lastOrderID := orderID
+    pub const OFFSET_LOG: u32 = 42; // line 133: log(...)
+    pub const OFFSET_SLEEP: u32 = 44; // line 135: time.Sleep(...)
+
+    /// Helper: absolute line from offset
+    pub const fn line(offset: u32) -> u32 {
+        MAIN_LINE + offset
+    }
+}
+
 /// Configuration for a metric point in a specific language
 #[derive(Debug, Clone)]
 pub struct MetricPoint {
@@ -201,44 +232,49 @@ impl DapWorkflowConfig {
 
     /// Create a Go workflow config using detrix_example_app.go
     ///
+    /// LINE NUMBER CALCULATION:
+    /// All line numbers are calculated as MAIN_LINE + offset via `go_lines::line()`.
+    /// If you modify fixtures/go/detrix_example_app.go, only update `go_lines::MAIN_LINE`.
+    ///
     /// IMPORTANT: DAP logpoints evaluate BEFORE the line executes, so we must use
     /// lines where variables are already in scope from PREVIOUS assignments.
     ///
-    /// Variables defined at (with Detrix client init block + log function):
-    /// - Line 117: `symbol := symbols[...]`
-    /// - Line 118: `quantity := rand.Intn(50) + 1`
-    /// - Line 119: `price := rand.Float64()*900 + 100`
-    /// - Line 122: `orderID := placeOrder(...)` <- symbol, quantity, price in scope here
-    /// - Line 125: `entryPrice := price`
-    /// - Line 126: `currentPrice := ...`
-    /// - Line 127: `pnl := calculatePnl(...)` <- all variables in scope here
-    /// - Line 130: `_ = orderID` <- all variables in scope here
-    /// - Line 131: `_ = pnl` <- all variables in scope here
-    /// - Line 133: `log(...)` <- all variables in scope here
-    ///
-    /// So we use:
-    /// - Line 122 for symbol, quantity, price (on orderID assignment, after others assigned)
-    /// - Line 127 for orderID (after it's assigned on line 122, on pnl calculation)
-    /// - Line 130-133 for introspection (all variables in scope)
+    /// Offset definitions (from main):
+    /// - main+26: symbol assignment
+    /// - main+27: quantity assignment
+    /// - main+28: price assignment
+    /// - main+31: orderID = placeOrder (symbol, quantity, price in scope)
+    /// - main+34: entryPrice assignment
+    /// - main+35: currentPrice assignment
+    /// - main+36: pnl = calculatePnl (all vars in scope)
+    /// - main+39: totalPnl accumulation (introspection point 1)
+    /// - main+40: lastOrderID assignment (introspection point 2)
+    /// - main+42: log(...) (introspection point 3)
+    /// - main+44: time.Sleep (multi-expression metric)
     pub fn go() -> Self {
+        use go_lines::*;
+
         Self {
             language: SourceLanguage::Go,
             source_file: PathBuf::from("fixtures/go/detrix_example_app.go"),
             metrics: vec![
-                // orderID is assigned on line 122, so evaluate after that on line 127
-                // Use line 127 (`pnl := calculatePnl(...)`) which is a real executable statement
-                MetricPoint::new("order_metric", 127, "orderID").with_group("go_workflow"),
-                // price is assigned on line 119, so evaluate after that (line 122)
-                MetricPoint::new("price_metric", 122, "price").with_group("go_workflow"),
+                // orderID is assigned at OFFSET_ORDER_ID, evaluate after that at OFFSET_PNL
+                MetricPoint::new("order_metric", line(OFFSET_PNL), "orderID")
+                    .with_group("go_workflow"),
+                // price is assigned at OFFSET_PRICE, evaluate after that at OFFSET_ORDER_ID
+                MetricPoint::new("price_metric", line(OFFSET_ORDER_ID), "price")
+                    .with_group("go_workflow"),
                 // IMPORTANT: Each metric must be on a DIFFERENT line because DAP logpoints
                 // evaluate only one expression per breakpoint location
-                // quantity is assigned on line 118, evaluate on line 125 (entryPrice := price)
-                MetricPoint::new("quantity_metric", 125, "quantity").with_group("go_workflow"),
-                // symbol is assigned on line 117, evaluate on line 126 (currentPrice := ...)
-                MetricPoint::new("symbol_metric", 126, "symbol").with_group("go_workflow"),
+                // quantity is assigned at OFFSET_QUANTITY, evaluate at OFFSET_ENTRY_PRICE
+                MetricPoint::new("quantity_metric", line(OFFSET_ENTRY_PRICE), "quantity")
+                    .with_group("go_workflow"),
+                // symbol is assigned at OFFSET_SYMBOL, evaluate at OFFSET_CURRENT_PRICE
+                MetricPoint::new("symbol_metric", line(OFFSET_CURRENT_PRICE), "symbol")
+                    .with_group("go_workflow"),
                 // Multi-expression metric: capture symbol + quantity + price on a single metric
-                // Line 135: time.Sleep(3 * time.Second) - all vars in scope
-                MetricPoint::new("trade_details", 135, "symbol")
+                // OFFSET_SLEEP: time.Sleep(3 * time.Second) - all vars in scope
+                MetricPoint::new("trade_details", line(OFFSET_SLEEP), "symbol")
                     .with_extra_expressions(vec!["quantity", "price"])
                     .with_group("go_workflow"),
             ],
@@ -246,25 +282,30 @@ impl DapWorkflowConfig {
             // Each metric MUST be on a different line (Detrix allows only one metric per line)
             // Lines must be REAL executable statements (not `_ = x` dead assignments).
             // Delve requires actual code at the line to set a verified breakpoint.
-            // - Line 130: `totalPnl = totalPnl + pnl` - real assignment
-            // - Line 131: `lastOrderID := orderID` - real assignment
-            // - Line 133: `log(...)` - function call
             introspection_metrics: vec![
-                MetricPoint::new("stack_trace_metric", 130, "orderID")
+                // OFFSET_TOTAL_PNL: `totalPnl = totalPnl + pnl` - real assignment
+                MetricPoint::new("stack_trace_metric", line(OFFSET_TOTAL_PNL), "orderID")
                     .with_group("go_introspection")
                     .with_stack_trace(),
-                MetricPoint::new("memory_snapshot_metric", 131, "price")
-                    .with_group("go_introspection")
-                    .with_memory_snapshot(),
-                MetricPoint::new("full_introspection_metric", 133, "quantity")
+                // OFFSET_LAST_ORDER_ID: `lastOrderID := orderID` - real assignment
+                MetricPoint::new(
+                    "memory_snapshot_metric",
+                    line(OFFSET_LAST_ORDER_ID),
+                    "price",
+                )
+                .with_group("go_introspection")
+                .with_memory_snapshot(),
+                // OFFSET_LOG: `log(...)` - function call
+                MetricPoint::new("full_introspection_metric", line(OFFSET_LOG), "quantity")
                     .with_group("go_introspection")
                     .with_introspection(),
             ],
-            inspect_line: 127,
+            inspect_line: line(OFFSET_PNL),
             inspect_variable: "price".to_string(),
             invalid_metric: Some(
-                // Line 104 is `go signalHandler(sigChan)` - sigChan is only variable in scope
-                MetricPoint::new("bad_metric", 104, "nonexistent_var").with_group("go_workflow"),
+                // OFFSET_SIGNAL_HANDLER: `go signalHandler(sigChan)` - sigChan is only variable in scope
+                MetricPoint::new("bad_metric", line(OFFSET_SIGNAL_HANDLER), "nonexistent_var")
+                    .with_group("go_workflow"),
             ),
             group_name: "go_workflow".to_string(),
             event_wait_secs: 15,

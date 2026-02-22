@@ -15,6 +15,10 @@ pub struct ScopeResult {
     pub available_variables: Vec<String>,
     /// The function/method name containing the target line (if any)
     pub containing_scope: Option<String>,
+    /// True if the target line is a function/method signature (parameter list,
+    /// return type) rather than executable code inside the function body.
+    /// Such lines are useless for DAP logpoints.
+    pub is_function_signature: bool,
 }
 
 /// Analyze scope at a specific line in a file
@@ -58,6 +62,7 @@ fn analyze_python_scope(source: &str, target_line: u32) -> ScopeResult {
         target_line_0,
         &mut variables,
         &mut result.containing_scope,
+        &mut result.is_function_signature,
     );
 
     result.available_variables = variables.into_iter().collect();
@@ -72,6 +77,7 @@ fn find_python_scope(
     target_line: usize,
     variables: &mut HashSet<String>,
     containing_scope: &mut Option<String>,
+    is_func_sig: &mut bool,
 ) {
     let node_start = node.start_position().row;
     let node_end = node.end_position().row;
@@ -88,6 +94,15 @@ fn find_python_scope(
                 *containing_scope = Some(node_text(&name_node, source).to_string());
             }
 
+            // Check if target is on the `def` line (signature, not body)
+            if let Some(body) = node.child_by_field_name("body") {
+                if target_line < body.start_position().row {
+                    *is_func_sig = true;
+                }
+            } else {
+                *is_func_sig = true;
+            }
+
             // Get parameters
             if let Some(params) = node.child_by_field_name("parameters") {
                 extract_python_parameters(params, source, variables);
@@ -101,7 +116,14 @@ fn find_python_scope(
             // Check nested scopes
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                find_python_scope(child, source, target_line, variables, containing_scope);
+                find_python_scope(
+                    child,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
             }
         }
         "class_definition" => {
@@ -118,7 +140,14 @@ fn find_python_scope(
             // Check nested scopes
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                find_python_scope(child, source, target_line, variables, containing_scope);
+                find_python_scope(
+                    child,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
             }
         }
         "for_statement" => {
@@ -130,7 +159,14 @@ fn find_python_scope(
             }
             // Check body
             if let Some(body) = node.child_by_field_name("body") {
-                find_python_scope(body, source, target_line, variables, containing_scope);
+                find_python_scope(
+                    body,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
             }
         }
         "with_statement" => {
@@ -168,7 +204,14 @@ fn find_python_scope(
             // Recurse into these nodes
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                find_python_scope(child, source, target_line, variables, containing_scope);
+                find_python_scope(
+                    child,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
             }
         }
         _ => {}
@@ -351,11 +394,35 @@ fn analyze_go_scope(source: &str, target_line: u32) -> ScopeResult {
         target_line_0,
         &mut variables,
         &mut result.containing_scope,
+        &mut result.is_function_signature,
     );
 
     result.available_variables = variables.into_iter().collect();
     result.available_variables.sort();
     result
+}
+
+/// Check if target_line is on the function signature rather than inside the body.
+/// For Go/Rust: signature ends at the opening `{` line.
+/// For Python: signature is the `def` line, body starts on the next line.
+fn is_on_signature(
+    target_line: usize,
+    func_node: &tree_sitter::Node,
+    body: &tree_sitter::Node,
+) -> bool {
+    let func_start = func_node.start_position().row;
+    let body_start = body.start_position().row;
+
+    if target_line < body_start {
+        // Before body — definitely signature (multi-line signature)
+        return true;
+    }
+    if target_line == body_start && body_start == func_start {
+        // Single-line signature like `func foo(x int) {` — the `{` is on
+        // the same line as the func keyword, so this line is the signature.
+        return true;
+    }
+    false
 }
 
 /// Recursively find Go scope and variables
@@ -365,6 +432,7 @@ fn find_go_scope(
     target_line: usize,
     variables: &mut HashSet<String>,
     containing_scope: &mut Option<String>,
+    is_func_sig: &mut bool,
 ) {
     let node_start = node.start_position().row;
     let node_end = node.end_position().row;
@@ -392,8 +460,21 @@ fn find_go_scope(
 
             // Get body and extract locals
             if let Some(body) = node.child_by_field_name("body") {
+                if is_on_signature(target_line, &node, &body) {
+                    *is_func_sig = true;
+                }
                 extract_go_locals(body, source, target_line, variables);
-                find_go_scope(body, source, target_line, variables, containing_scope);
+                find_go_scope(
+                    body,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
+            } else {
+                // No body — forward declaration or interface method
+                *is_func_sig = true;
             }
         }
         "func_literal" => {
@@ -403,7 +484,14 @@ fn find_go_scope(
             }
             if let Some(body) = node.child_by_field_name("body") {
                 extract_go_locals(body, source, target_line, variables);
-                find_go_scope(body, source, target_line, variables, containing_scope);
+                find_go_scope(
+                    body,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
             }
         }
         "for_statement" => {
@@ -423,7 +511,14 @@ fn find_go_scope(
                         }
                     }
                 }
-                find_go_scope(child, source, target_line, variables, containing_scope);
+                find_go_scope(
+                    child,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
             }
         }
         "if_statement" => {
@@ -435,13 +530,27 @@ fn find_go_scope(
             }
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                find_go_scope(child, source, target_line, variables, containing_scope);
+                find_go_scope(
+                    child,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
             }
         }
         "source_file" | "block" | "switch_statement" | "select_statement" => {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                find_go_scope(child, source, target_line, variables, containing_scope);
+                find_go_scope(
+                    child,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
             }
         }
         _ => {}
@@ -584,6 +693,7 @@ fn analyze_rust_scope(source: &str, target_line: u32) -> ScopeResult {
         target_line_0,
         &mut variables,
         &mut result.containing_scope,
+        &mut result.is_function_signature,
     );
 
     result.available_variables = variables.into_iter().collect();
@@ -598,6 +708,7 @@ fn find_rust_scope(
     target_line: usize,
     variables: &mut HashSet<String>,
     containing_scope: &mut Option<String>,
+    is_func_sig: &mut bool,
 ) {
     let node_start = node.start_position().row;
     let node_end = node.end_position().row;
@@ -620,8 +731,20 @@ fn find_rust_scope(
 
             // Get body
             if let Some(body) = node.child_by_field_name("body") {
+                if is_on_signature(target_line, &node, &body) {
+                    *is_func_sig = true;
+                }
                 extract_rust_locals(body, source, target_line, variables);
-                find_rust_scope(body, source, target_line, variables, containing_scope);
+                find_rust_scope(
+                    body,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
+            } else {
+                *is_func_sig = true;
             }
         }
         "impl_item" => {
@@ -629,7 +752,14 @@ fn find_rust_scope(
             variables.insert("self".to_string());
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                find_rust_scope(child, source, target_line, variables, containing_scope);
+                find_rust_scope(
+                    child,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
             }
         }
         "closure_expression" => {
@@ -638,7 +768,14 @@ fn find_rust_scope(
                 extract_rust_closure_params(params, source, variables);
             }
             if let Some(body) = node.child_by_field_name("body") {
-                find_rust_scope(body, source, target_line, variables, containing_scope);
+                find_rust_scope(
+                    body,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
             }
         }
         "for_expression" => {
@@ -650,13 +787,27 @@ fn find_rust_scope(
             }
             if let Some(body) = node.child_by_field_name("body") {
                 extract_rust_locals(body, source, target_line, variables);
-                find_rust_scope(body, source, target_line, variables, containing_scope);
+                find_rust_scope(
+                    body,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
             }
         }
         "if_expression" | "match_expression" | "while_expression" | "loop_expression" => {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                find_rust_scope(child, source, target_line, variables, containing_scope);
+                find_rust_scope(
+                    child,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
             }
         }
         "match_arm" => {
@@ -672,14 +823,28 @@ fn find_rust_scope(
             extract_rust_locals(node, source, target_line, variables);
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                find_rust_scope(child, source, target_line, variables, containing_scope);
+                find_rust_scope(
+                    child,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
             }
         }
         _ => {
             // Recurse into unknown nodes to find nested functions/expressions
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                find_rust_scope(child, source, target_line, variables, containing_scope);
+                find_rust_scope(
+                    child,
+                    source,
+                    target_line,
+                    variables,
+                    containing_scope,
+                    is_func_sig,
+                );
             }
         }
     }
@@ -953,5 +1118,103 @@ fn process(pair: (i32, i32)) {
         assert!(result.available_variables.contains(&"pair".to_string()));
         assert!(result.available_variables.contains(&"x".to_string()));
         assert!(result.available_variables.contains(&"y".to_string()));
+    }
+
+    // ========================================================================
+    // is_function_signature tests
+    // ========================================================================
+
+    #[test]
+    fn test_go_signature_line_is_flagged() {
+        // Line 2 is the function signature: `func placeOrder(symbol string, ...) int {`
+        // Line 3 is inside the body
+        let source = r#"
+func placeOrder(symbol string, quantity int) int {
+    orderID := 42
+    return orderID
+}
+"#;
+        let sig = analyze_scope(source, 2, SourceLanguage::Go);
+        assert!(
+            sig.is_function_signature,
+            "func signature line should be flagged"
+        );
+        assert_eq!(sig.containing_scope, Some("placeOrder".to_string()));
+
+        let body = analyze_scope(source, 3, SourceLanguage::Go);
+        assert!(
+            !body.is_function_signature,
+            "body line should NOT be flagged"
+        );
+        assert_eq!(body.containing_scope, Some("placeOrder".to_string()));
+    }
+
+    #[test]
+    fn test_go_struct_field_is_not_signature() {
+        // Struct fields are out-of-scope (no containing_scope), not signatures
+        let source = r#"
+type Order struct {
+    symbol string
+    price  float64
+}
+
+func main() {
+    symbol := "BTCUSD"
+    _ = symbol
+}
+"#;
+        let field = analyze_scope(source, 3, SourceLanguage::Go);
+        assert!(
+            field.containing_scope.is_none(),
+            "struct field has no scope"
+        );
+        assert!(
+            !field.is_function_signature,
+            "struct field is not a signature"
+        );
+
+        let body = analyze_scope(source, 8, SourceLanguage::Go);
+        assert_eq!(body.containing_scope, Some("main".to_string()));
+        assert!(!body.is_function_signature);
+    }
+
+    #[test]
+    fn test_python_def_line_is_signature() {
+        let source = r#"
+def calculate(x, y):
+    result = x + y
+    return result
+"#;
+        let sig = analyze_scope(source, 2, SourceLanguage::Python);
+        assert!(sig.is_function_signature, "def line should be flagged");
+        assert_eq!(sig.containing_scope, Some("calculate".to_string()));
+
+        let body = analyze_scope(source, 3, SourceLanguage::Python);
+        assert!(
+            !body.is_function_signature,
+            "body line should NOT be flagged"
+        );
+    }
+
+    #[test]
+    fn test_rust_fn_line_is_signature() {
+        let source = r#"
+fn calculate(x: i32, y: i32) -> i32 {
+    let result = x + y;
+    result
+}
+"#;
+        let sig = analyze_scope(source, 2, SourceLanguage::Rust);
+        assert!(
+            sig.is_function_signature,
+            "fn signature line should be flagged"
+        );
+        assert_eq!(sig.containing_scope, Some("calculate".to_string()));
+
+        let body = analyze_scope(source, 3, SourceLanguage::Rust);
+        assert!(
+            !body.is_function_signature,
+            "body line should NOT be flagged"
+        );
     }
 }
