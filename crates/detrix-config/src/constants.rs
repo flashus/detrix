@@ -438,6 +438,10 @@ pub const DEFAULT_VFS_FETCH_TIMEOUT_SECONDS: u64 = 10;
 /// Default maximum file size for VFS caching (10 MB)
 pub const DEFAULT_VFS_MAX_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
 
+/// Default VFS cache hot-reload TTL in seconds
+/// Cached files are re-read from source after this duration
+pub const DEFAULT_VFS_HOT_RELOAD_TTL_SECONDS: u64 = 60;
+
 // ============================================================================
 // FILE INSPECTION
 // ============================================================================

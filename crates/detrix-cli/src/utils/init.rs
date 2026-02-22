@@ -89,7 +89,7 @@ impl InfrastructureComponents {
 
         // Create VFS: CachedFileSystem with disk fallback for production use
         let vfs: detrix_application::VfsRef = Arc::new(detrix_storage::CachedFileSystem::new(
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(vfs_config.hot_reload_ttl_seconds),
         ));
 
         // Build pluggable file source chain from VFS config

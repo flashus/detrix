@@ -20,7 +20,14 @@ fn main() {
     let build_tag = env::var("DETRIX_BUILD_TAG")
         .or_else(|_| env::var("GIT_TAG"))
         .or_else(|_| env::var("CI_COMMIT_TAG"))
-        .or_else(|_| env::var("GITHUB_REF_NAME"))
+        .or_else(|_| {
+            // Only use GITHUB_REF_NAME when it's a tag ref, not a branch
+            if env::var("GITHUB_REF_TYPE").as_deref() == Ok("tag") {
+                env::var("GITHUB_REF_NAME")
+            } else {
+                Err(env::VarError::NotPresent)
+            }
+        })
         .unwrap_or_else(|_| version.clone());
 
     // Generate build_info.rs
@@ -50,4 +57,5 @@ pub const BUILD_TAG: &str = {:?};"#,
     println!("cargo:rerun-if-env-changed=GIT_TAG");
     println!("cargo:rerun-if-env-changed=CI_COMMIT_TAG");
     println!("cargo:rerun-if-env-changed=GITHUB_REF_NAME");
+    println!("cargo:rerun-if-env-changed=GITHUB_REF_TYPE");
 }

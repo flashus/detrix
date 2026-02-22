@@ -71,7 +71,7 @@ async fn test_observe_fetches_file_from_control_plane() {
     let chain = FileSourceChain::new(
         vfs.clone() as VfsRef,
         vec![cp_source],
-        &["control_plane".to_string()],
+        &[detrix_config::SourceKind::ControlPlane],
     );
 
     let conn = test_connection_with_cp(Some(&mock_server.uri()));
@@ -123,7 +123,7 @@ async fn test_observe_uses_vfs_cache() {
     let chain = FileSourceChain::new(
         vfs.clone() as VfsRef,
         vec![cp_source],
-        &["control_plane".to_string()],
+        &[detrix_config::SourceKind::ControlPlane],
     );
 
     let conn = test_connection_with_cp(Some(&mock_server.uri()));
@@ -169,7 +169,7 @@ async fn test_inspect_file_fetches_transparently() {
     let chain = FileSourceChain::new(
         vfs.clone() as VfsRef,
         vec![cp_source],
-        &["control_plane".to_string()],
+        &[detrix_config::SourceKind::ControlPlane],
     );
 
     let conn = test_connection_with_cp(Some(&mock_server.uri()));
@@ -222,7 +222,10 @@ async fn test_fallthrough_to_disk() {
     let chain = FileSourceChain::new(
         vfs.clone() as VfsRef,
         vec![cp_source, disk_source],
-        &["control_plane".to_string(), "disk".to_string()],
+        &[
+            detrix_config::SourceKind::ControlPlane,
+            detrix_config::SourceKind::Disk,
+        ],
     );
 
     let conn = test_connection_with_cp(Some(&mock_server.uri()));
@@ -254,7 +257,7 @@ async fn test_bridge_source_via_header() {
     let chain = FileSourceChain::new(
         vfs.clone() as VfsRef,
         vec![bridge_source as FileSourceRef],
-        &["bridge".to_string()],
+        &[detrix_config::SourceKind::Bridge],
     );
 
     let conn = test_connection();
@@ -303,7 +306,10 @@ async fn test_priority_ordering_e2e() {
     let chain = FileSourceChain::new(
         vfs.clone() as VfsRef,
         vec![disk_source, cp_source],
-        &["disk".to_string(), "control_plane".to_string()],
+        &[
+            detrix_config::SourceKind::Disk,
+            detrix_config::SourceKind::ControlPlane,
+        ],
     );
 
     let conn = test_connection_with_cp(Some(&mock_server.uri()));

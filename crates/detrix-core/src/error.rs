@@ -118,6 +118,8 @@ pub enum ErrorCode {
     // Auth errors (6xxx)
     /// Unauthorized (6001)
     Unauthorized = 6001,
+    /// Forbidden (6002)
+    Forbidden = 6002,
 
     // Remote app errors (7xxx)
     /// Remote app error (7001)
@@ -233,6 +235,7 @@ impl ErrorCode {
 
             // Security - authentication/authorization failures
             ErrorCode::Unauthorized => ErrorCategory::Security,
+            ErrorCode::Forbidden => ErrorCategory::Security,
 
             // Remote app - retryable (network calls to remote apps)
             ErrorCode::RemoteAppError => ErrorCategory::Retryable,
@@ -304,6 +307,7 @@ impl ErrorCode {
 
             // Auth errors (6xxx)
             ErrorCode::Unauthorized => "UNAUTHORIZED",
+            ErrorCode::Forbidden => "FORBIDDEN",
 
             // Remote app errors (7xxx)
             ErrorCode::RemoteAppError => "REMOTE_APP_ERROR",

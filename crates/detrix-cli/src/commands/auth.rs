@@ -68,16 +68,16 @@ async fn run_add(target: &str, token: Option<String>, stdin: bool) -> Result<()>
         anyhow::bail!("Token cannot be empty");
     }
 
-    let mut creds = CredentialsFile::load().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mut creds = CredentialsFile::load()?;
     creds.add(target, &resolved_token);
-    creds.save().map_err(|e| anyhow::anyhow!("{}", e))?;
+    creds.save()?;
 
     println!("Credentials saved for {}", target);
     Ok(())
 }
 
 async fn run_list() -> Result<()> {
-    let creds = CredentialsFile::load().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let creds = CredentialsFile::load()?;
 
     if creds.targets.is_empty() {
         println!(
@@ -100,10 +100,10 @@ async fn run_list() -> Result<()> {
 }
 
 async fn run_remove(target: &str) -> Result<()> {
-    let mut creds = CredentialsFile::load().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mut creds = CredentialsFile::load()?;
 
     if creds.remove(target) {
-        creds.save().map_err(|e| anyhow::anyhow!("{}", e))?;
+        creds.save()?;
         println!("Credentials removed for {}", target);
     } else {
         println!("No credentials found for {}", target);

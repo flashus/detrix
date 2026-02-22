@@ -7,6 +7,15 @@ use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Errors that can occur during daemon config operations.
+#[derive(Debug, thiserror::Error)]
+pub enum DaemonsConfigError {
+    #[error("Failed to read daemons config: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Failed to parse daemons config: {0}")]
+    Parse(#[from] toml::de::Error),
+}
+
 /// Configuration for a single daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
@@ -28,11 +37,11 @@ pub struct DaemonsConfig {
 }
 
 impl DaemonsConfig {
-    /// Load daemon configurations from ~/.detrix/daemons.toml
+    /// Load daemon configurations from ~/detrix/daemons.toml
     ///
     /// Returns an empty config if the file doesn't exist.
-    pub fn load_from_home() -> Result<Self, Box<dyn std::error::Error>> {
-        let path = Self::default_path()?;
+    pub fn load_from_home() -> Result<Self, DaemonsConfigError> {
+        let path = Self::default_path();
 
         if !path.exists() {
             return Ok(Self::default());
@@ -43,10 +52,9 @@ impl DaemonsConfig {
         Ok(config)
     }
 
-    /// Get the default path for daemons.toml (~/.detrix/daemons.toml)
-    pub fn default_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let path = paths::detrix_home().join("daemons.toml");
-        Ok(path)
+    /// Get the default path for daemons.toml (~/detrix/daemons.toml)
+    pub fn default_path() -> PathBuf {
+        paths::detrix_home().join("daemons.toml")
     }
 
     /// Find a daemon by alias

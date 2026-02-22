@@ -316,11 +316,12 @@ class HttpDaemonClient:
         if build_commit:
             payload["buildCommit"] = build_commit
 
-        build_tag = (
-            os.environ.get("GIT_TAG")
-            or os.environ.get("CI_COMMIT_TAG")
-            or os.environ.get("GITHUB_REF_NAME")
+        github_ref_tag = (
+            os.environ.get("GITHUB_REF_NAME")
+            if os.environ.get("GITHUB_REF_TYPE") == "tag"
+            else None
         )
+        build_tag = os.environ.get("GIT_TAG") or os.environ.get("CI_COMMIT_TAG") or github_ref_tag
         if build_tag:
             payload["buildTag"] = build_tag
 

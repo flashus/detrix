@@ -13,6 +13,7 @@
 //! - If all sources fail, returns `Ok(())` — downstream will get the
 //!   "file not found" error from `FileInspectionService.inspect()`.
 
+use detrix_config::SourceKind;
 use detrix_core::Connection;
 use detrix_logging::{debug, warn};
 use detrix_ports::{FileSourceRef, VfsRef};
@@ -31,13 +32,17 @@ impl FileSourceChain {
     ///
     /// Sources not matching any name in `priority` are excluded.
     /// Duplicate names in priority list are handled (first match wins).
-    pub fn new(vfs: VfsRef, available_sources: Vec<FileSourceRef>, priority: &[String]) -> Self {
+    pub fn new(
+        vfs: VfsRef,
+        available_sources: Vec<FileSourceRef>,
+        priority: &[SourceKind],
+    ) -> Self {
         let mut sources = Vec::new();
-        for name in priority {
-            if let Some(source) = available_sources.iter().find(|s| s.name() == name.as_str()) {
+        for kind in priority {
+            if let Some(source) = available_sources.iter().find(|s| s.name() == kind.as_str()) {
                 sources.push(source.clone());
             } else {
-                debug!(source = %name, "File source not available, skipping");
+                debug!(source = %kind, "File source not available, skipping");
             }
         }
         Self { sources, vfs }
@@ -187,7 +192,7 @@ mod tests {
         let chain = FileSourceChain::new(
             vfs,
             vec![source.clone() as FileSourceRef],
-            &["disk".to_string()],
+            &[SourceKind::Disk],
         );
 
         let conn = test_connection();
@@ -208,7 +213,7 @@ mod tests {
         let chain = FileSourceChain::new(
             vfs.clone(),
             vec![source.clone() as FileSourceRef],
-            &["disk".to_string()],
+            &[SourceKind::Disk],
         );
 
         let conn = test_connection();
@@ -237,7 +242,7 @@ mod tests {
                 source1.clone() as FileSourceRef,
                 source2.clone() as FileSourceRef,
             ],
-            &["control_plane".to_string(), "disk".to_string()],
+            &[SourceKind::ControlPlane, SourceKind::Disk],
         );
 
         let conn = test_connection();
@@ -264,7 +269,7 @@ mod tests {
                 source1.clone() as FileSourceRef,
                 source2.clone() as FileSourceRef,
             ],
-            &["control_plane".to_string(), "disk".to_string()],
+            &[SourceKind::ControlPlane, SourceKind::Disk],
         );
 
         let conn = test_connection();
@@ -290,7 +295,7 @@ mod tests {
         let chain = FileSourceChain::new(
             vfs.clone(),
             vec![disk.clone() as FileSourceRef, cp.clone() as FileSourceRef],
-            &["disk".to_string(), "control_plane".to_string()],
+            &[SourceKind::Disk, SourceKind::ControlPlane],
         );
 
         let conn = test_connection();
@@ -303,25 +308,6 @@ mod tests {
             "CP source should NOT be tried (disk succeeded)"
         );
         assert_eq!(vfs.read_to_string("/app/main.py").unwrap(), "disk version");
-    }
-
-    #[tokio::test]
-    async fn test_unknown_source_ignored() {
-        let vfs = Arc::new(MockVfs::new());
-        let disk = MockFileSource::returning("disk", Some("content"));
-
-        // Priority includes "unknown" which doesn't match any source
-        let chain = FileSourceChain::new(
-            vfs.clone(),
-            vec![disk.clone() as FileSourceRef],
-            &["unknown".to_string(), "disk".to_string()],
-        );
-
-        let conn = test_connection();
-        chain.ensure_available(&conn, "/app/main.py").await.unwrap();
-
-        assert_eq!(disk.calls(), 1);
-        assert_eq!(vfs.read_to_string("/app/main.py").unwrap(), "content");
     }
 
     #[tokio::test]
@@ -351,7 +337,7 @@ mod tests {
         let chain = FileSourceChain::new(
             vfs.clone(),
             vec![source.clone() as FileSourceRef],
-            &["disk".to_string()],
+            &[SourceKind::Disk],
         );
 
         let conn = test_connection();

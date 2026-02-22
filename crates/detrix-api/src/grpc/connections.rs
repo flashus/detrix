@@ -4,6 +4,7 @@
 //! ALL business logic is in services::ConnectionService.
 
 use crate::constants::status;
+use crate::error::ToStatusResult;
 use crate::generated::detrix::v1::{connection_service_server::ConnectionService, *};
 use crate::grpc::conversions::connection_to_info;
 use crate::state::ApiState;
@@ -24,17 +25,6 @@ impl ConnectionServiceImpl {
     /// Get connection service reference
     fn get_connection_service(&self) -> &Arc<detrix_application::ConnectionService> {
         &self.state.context.connection_service
-    }
-}
-
-/// Extension trait for converting core Results to gRPC Status Results
-trait CoreToStatus<T> {
-    fn to_status(self) -> std::result::Result<T, Status>;
-}
-
-impl<T> CoreToStatus<T> for std::result::Result<T, detrix_core::Error> {
-    fn to_status(self) -> std::result::Result<T, Status> {
-        self.map_err(|err| Status::internal(err.to_string()))
     }
 }
 

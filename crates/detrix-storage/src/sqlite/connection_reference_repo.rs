@@ -2,10 +2,10 @@
 
 use super::{now_micros, SqliteStorage};
 use async_trait::async_trait;
-use detrix_application::ConnectionReferenceRepository;
 use detrix_core::connection_reference::{ClientIdentity, ConnectionReference, ReferenceKind};
 use detrix_core::error::Result;
 use detrix_core::ConnectionId;
+use detrix_ports::ConnectionReferenceRepository;
 use sqlx::Row;
 use tracing::debug;
 

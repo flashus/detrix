@@ -132,14 +132,8 @@ pub async fn wake(
             .await;
     }
 
-    // Determine daemon URL for auto-discovery
-    let daemon_url = {
-        let config = state.config_service.get_config().await;
-        Some(format!(
-            "http://{}:{}",
-            config.api.rest.host, config.api.rest.port
-        ))
-    };
+    // Return daemon's advertise URL for auto-discovery
+    let daemon_url = state.advertise_url.clone();
 
     Ok(Json(WakeResponse {
         status: result.status,

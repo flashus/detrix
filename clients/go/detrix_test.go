@@ -113,7 +113,7 @@ func TestDetectBuildInfo(t *testing.T) {
 	envVars := []string{
 		"DETRIX_BUILD_COMMIT", "DETRIX_BUILD_TAG",
 		"GIT_COMMIT", "CI_COMMIT_SHA", "GITHUB_SHA",
-		"GIT_TAG", "CI_COMMIT_TAG", "GITHUB_REF_NAME",
+		"GIT_TAG", "CI_COMMIT_TAG", "GITHUB_REF_NAME", "GITHUB_REF_TYPE",
 	}
 	for _, key := range envVars {
 		origEnv[key] = os.Getenv(key)
@@ -158,6 +158,7 @@ func TestDetectBuildInfo(t *testing.T) {
 			name: "CI env vars - GitHub",
 			envVars: map[string]string{
 				"GITHUB_SHA":      "github-commit",
+				"GITHUB_REF_TYPE": "tag",
 				"GITHUB_REF_NAME": "v1.0.0",
 			},
 			expectCommit: "github-commit",

@@ -21,6 +21,17 @@ use tracing::debug;
 use crate::constants::ENV_DETRIX_TOKEN;
 use crate::paths;
 
+/// Errors that can occur during credential operations.
+#[derive(Debug, thiserror::Error)]
+pub enum CredentialsError {
+    #[error("Failed to read credentials: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Failed to parse credentials: {0}")]
+    Parse(#[from] toml::de::Error),
+    #[error("Failed to serialize credentials: {0}")]
+    Serialize(#[from] toml::ser::Error),
+}
+
 /// Credential for a single target daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TargetCredential {
@@ -43,12 +54,12 @@ impl CredentialsFile {
     /// Load credentials from the default path.
     ///
     /// Returns `Default` if the file doesn't exist.
-    pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load() -> Result<Self, CredentialsError> {
         Self::load_from(&Self::default_path())
     }
 
     /// Load credentials from a specific path.
-    pub fn load_from(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load_from(path: &Path) -> Result<Self, CredentialsError> {
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -58,12 +69,12 @@ impl CredentialsFile {
     }
 
     /// Save credentials to the default path with secure permissions (0600).
-    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save(&self) -> Result<(), CredentialsError> {
         self.save_to(&Self::default_path())
     }
 
     /// Save credentials to a specific path with secure permissions (0600).
-    pub fn save_to(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_to(&self, path: &Path) -> Result<(), CredentialsError> {
         paths::ensure_parent_dir(path)?;
         let content = toml::to_string_pretty(self)?;
         write_file_securely(path, &content)?;

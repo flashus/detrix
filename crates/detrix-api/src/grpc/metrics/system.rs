@@ -43,7 +43,7 @@ pub async fn handle_wake(
         debug_port: result.debug_port.unwrap_or(0),
         message: format!("Wake request sent to {}", app_url),
         metadata: None,
-        daemon_url: None, // TODO: Will be populated in Phase 5 from config
+        daemon_url: state.advertise_url.clone(),
     }))
 }
 

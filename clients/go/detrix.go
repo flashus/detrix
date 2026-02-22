@@ -322,8 +322,10 @@ func detectBuildInfo(cfg *Config) (commit string, tag string) {
 			tag = t
 		} else if t := os.Getenv("CI_COMMIT_TAG"); t != "" {
 			tag = t
-		} else if t := os.Getenv("GITHUB_REF_NAME"); t != "" {
-			tag = t
+		} else if os.Getenv("GITHUB_REF_TYPE") == "tag" {
+			if t := os.Getenv("GITHUB_REF_NAME"); t != "" {
+				tag = t
+			}
 		}
 	}
 
