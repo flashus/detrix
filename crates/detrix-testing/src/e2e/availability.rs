@@ -184,16 +184,34 @@ pub async fn require_tool(tool: ToolDependency) -> bool {
 // Individual Availability Checks
 // ============================================================================
 
-/// Check if debugpy (Python debugger) is available
+/// Check if debugpy (Python debugger) is available.
+///
+/// Checks `DETRIX_PYTHON` first (e.g. a uv-managed venv), then falls back to
+/// `python3` and `python` in PATH.
 pub async fn is_debugpy_available() -> bool {
-    let result = Command::new("python3")
-        .args(["-c", "import debugpy; print(debugpy.__version__)"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
+    let candidates: Vec<String> = {
+        let mut v = Vec::new();
+        if let Ok(py) = std::env::var("DETRIX_PYTHON") {
+            v.push(py);
+        }
+        v.push("python3".to_string());
+        v.push("python".to_string());
+        v
+    };
 
-    matches!(result, Ok(status) if status.success())
+    for python in &candidates {
+        let result = Command::new(python)
+            .args(["-c", "import debugpy; print(debugpy.__version__)"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+
+        if matches!(result, Ok(status) if status.success()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Check if rust-analyzer (Rust LSP) is available

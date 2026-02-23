@@ -38,6 +38,7 @@ pub const API_V1_CONNECTION_ATTACH: &str = "/api/v1/connections/{id}/attach";
 pub const API_V1_CONNECTION_RELEASE: &str = "/api/v1/connections/{id}/release";
 pub const API_V1_CONNECTION_REFERENCES: &str = "/api/v1/connections/{id}/references";
 pub const API_V1_ADMIN_DISCONNECT_ALL: &str = "/api/v1/admin/disconnect-all";
+pub const API_V1_ADMIN_DISABLE_METRICS_BY_OWNER: &str = "/api/v1/admin/disable-metrics-by-owner";
 
 pub const API_V1_CONFIG: &str = "/api/v1/config";
 pub const API_V1_CONFIG_RELOAD: &str = "/api/v1/config/reload";

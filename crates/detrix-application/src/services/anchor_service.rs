@@ -11,6 +11,7 @@
 //! - Symbol lookup via LSP (when available)
 //! - Multi-tier relocation fallback chain
 
+use crate::error::InvalidConfigResultExt;
 use crate::ports::{AnchorService, SourceContext, SymbolInfo};
 use async_trait::async_trait;
 use detrix_config::constants::{
@@ -190,9 +191,9 @@ impl DefaultAnchorService {
         let content = if let Some(ref vfs) = self.vfs {
             vfs.read_to_string(file)?
         } else {
-            fs::read_to_string(file).await.map_err(|e| {
-                Error::InvalidConfig(format!("Failed to read file '{}': {}", file, e).into())
-            })?
+            fs::read_to_string(file)
+                .await
+                .invalid_config(format!("Failed to read file '{}'", file))?
         };
         Ok(content.lines().map(|l| l.to_string()).collect())
     }

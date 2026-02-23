@@ -128,6 +128,19 @@ pub trait MetricRepository: Send + Sync {
     /// # Returns
     /// The number of metrics deleted.
     async fn delete_by_connection_id(&self, connection_id: &ConnectionId) -> Result<u64>;
+
+    /// Migrate all metrics from one connection to another.
+    ///
+    /// Used when a container restarts with a new hostname (new `connection_id`) but the same
+    /// project identity. Metrics from the old connection carry over to the new one so debugging
+    /// can continue without re-adding them.
+    ///
+    /// Metrics that would conflict with an existing metric at the same location on the target
+    /// connection are skipped (keeping the target's version).
+    ///
+    /// # Returns
+    /// The number of metrics migrated.
+    async fn migrate_connection_id(&self, from: &ConnectionId, to: &ConnectionId) -> Result<u64>;
 }
 
 /// Repository for metric events
@@ -242,14 +255,15 @@ pub trait ConnectionRepository: Send + Sync {
     /// Returns the number of deleted connections
     async fn delete_disconnected(&self) -> Result<u64>;
 
-    /// Delete stale connections for the same project, excluding a specific connection.
+    /// Find stale connections for the same project, excluding a specific connection.
     ///
     /// When a new connection registers for (name, language, workspace_root) with a different
     /// hostname (e.g. Docker container restart with new container ID), old disconnected/failed
-    /// connections with the same project identity are stale and should be removed.
+    /// connections with the same project identity are stale. This method returns their IDs so
+    /// the caller can migrate metrics before cleaning up the stale connections.
     ///
-    /// Only removes connections with status: Disconnected or Failed.
-    /// Connected/Connecting connections are preserved to avoid race conditions.
+    /// Only returns connections with status: Disconnected or Failed.
+    /// Connected/Connecting connections are excluded to avoid race conditions.
     ///
     /// # Arguments
     /// * `name` - Connection name (app name)
@@ -258,14 +272,14 @@ pub trait ConnectionRepository: Send + Sync {
     /// * `exclude_id` - The newly registered connection to preserve
     ///
     /// # Returns
-    /// The number of stale connections deleted
-    async fn delete_stale_same_project(
+    /// IDs of stale connections that should be migrated and cleaned up
+    async fn find_stale_same_project(
         &self,
         name: &str,
         language: &str,
         workspace_root: &str,
         exclude_id: &ConnectionId,
-    ) -> Result<u64>;
+    ) -> Result<Vec<ConnectionId>>;
 }
 
 /// Minimal read-only lookup for connections.

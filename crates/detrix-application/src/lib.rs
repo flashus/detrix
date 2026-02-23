@@ -77,13 +77,16 @@ pub use error::{
     FileInspectionError,
     FileIoResultExt,
     GroupOperationResult,
+    InvalidConfigResultExt,
     IoErrorWithContext,
     JsonParseErrorWithContext,
     OperationOutcome,
     OperationWarning,
+    PathCanonicalizeExt,
     Result,
     SafetyError,
     SafetyJsonParseError,
+    VfsReadResultExt,
 };
 
 // Re-export port types from detrix-ports for convenience

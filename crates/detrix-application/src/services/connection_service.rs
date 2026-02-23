@@ -185,6 +185,65 @@ impl ConnectionService {
         // 3. Save connection to repository (initially Disconnected, ON CONFLICT upserts)
         self.connection_repo.save(&connection).await?;
 
+        // 3b. Migrate metrics from stale same-project connections to the new connection,
+        //     then clean them up. This handles the container restart case where the hostname
+        //     changes — existing metrics carry over to the new connection seamlessly.
+        match self
+            .connection_repo
+            .find_stale_same_project(
+                connection.name.as_deref().unwrap_or_default(),
+                connection.language.as_str(),
+                &connection.workspace_root,
+                &connection_id,
+            )
+            .await
+        {
+            Ok(stale_ids) if !stale_ids.is_empty() => {
+                for stale_id in &stale_ids {
+                    // Migrate metrics first so they carry over to the new connection
+                    match self
+                        .metric_repo
+                        .migrate_connection_id(stale_id, &connection_id)
+                        .await
+                    {
+                        Ok(migrated) if migrated > 0 => {
+                            info!(
+                                from = %stale_id.0,
+                                to = %connection_id.0,
+                                migrated,
+                                "Migrated metrics from stale connection (container restart)"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                stale_id = %stale_id.0,
+                                error = %e,
+                                "Metric migration from stale connection failed (non-fatal)"
+                            );
+                        }
+                    }
+                    // Clean up the stale connection; delete_by_connection_id inside
+                    // delete_connection finds 0 metrics since they were just migrated above.
+                    if let Err(e) = self.delete_connection(stale_id).await {
+                        tracing::warn!(
+                            stale_id = %stale_id.0,
+                            error = %e,
+                            "Stale connection cleanup failed (non-fatal)"
+                        );
+                    }
+                }
+            }
+            Ok(_) => {} // no stale connections
+            Err(e) => {
+                tracing::warn!(
+                    connection_id = %connection_id.0,
+                    error = %e,
+                    "Stale same-project lookup failed (non-fatal)"
+                );
+            }
+        }
+
         // 4. Start adapter via lifecycle manager (handles everything: start, subscribe, route events)
         //    Note: start_adapter returns degradation info (sync_failed, resume_failed) which is logged internally
         let _start_result = self

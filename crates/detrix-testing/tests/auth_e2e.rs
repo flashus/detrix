@@ -19,12 +19,12 @@ use detrix_api::generated::detrix::v1::{
     metrics_service_client::MetricsServiceClient, ListMetricsRequest,
 };
 use detrix_config::constants::{AUTHORIZATION_HEADER, AUTHORIZATION_METADATA_KEY, BEARER_PREFIX};
-use detrix_testing::e2e::executor::{find_detrix_binary, TestDaemonSetup, TestPortCounter};
+use detrix_testing::e2e::executor::{
+    find_detrix_binary, get_grpc_port, get_http_port, TestDaemonSetup,
+};
 use detrix_testing::e2e::jwt::{JwtBuilder, JwtKeyPair, MockJwksServer, TestClaims};
 use tonic::transport::Channel;
 use tonic::Request;
-
-static PORT_COUNTER: TestPortCounter = TestPortCounter::new(0);
 
 /// Test executor for simple bearer token auth (no user management)
 struct SimpleBearerTestExecutor {
@@ -41,9 +41,8 @@ struct SimpleBearerTestExecutor {
 impl SimpleBearerTestExecutor {
     fn new(bearer_token: &str) -> Self {
         let setup = TestDaemonSetup::new();
-        let base_port = PORT_COUNTER.next(19000, 500);
-        let http_port = base_port;
-        let grpc_port = base_port + 1000;
+        let http_port = get_http_port();
+        let grpc_port = get_grpc_port();
 
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
@@ -78,7 +77,7 @@ storage_type = "sqlite"
 path = "{}"
 
 [api]
-port_fallback = true
+port_fallback = false
 
 [api.rest]
 enabled = true
@@ -517,9 +516,8 @@ struct ExternalJwtTestExecutor {
 impl ExternalJwtTestExecutor {
     async fn new() -> Self {
         let setup = TestDaemonSetup::new();
-        let base_port = PORT_COUNTER.next(19500, 500);
-        let http_port = base_port;
-        let grpc_port = base_port + 1000;
+        let http_port = get_http_port();
+        let grpc_port = get_grpc_port();
 
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
@@ -564,7 +562,7 @@ storage_type = "sqlite"
 path = "{}"
 
 [api]
-port_fallback = true
+port_fallback = false
 
 [api.rest]
 enabled = true
@@ -1085,13 +1083,18 @@ impl AutoAuthTestExecutor {
         Self::with_options(false, Some(token.to_string()))
     }
 
+    /// Isolated auth token path inside this executor's temp dir.
+    ///
+    /// When DETRIX_HOME is pointed at `temp_dir`, the daemon writes its
+    /// auto-generated token here instead of the global `~/detrix/auth-token`.
+    fn auth_token_path(&self) -> PathBuf {
+        self.temp_dir.path().join("auth-token")
+    }
+
     fn with_options(enable_grpc: bool, env_token: Option<String>) -> Self {
         let setup = TestDaemonSetup::new();
-        // Port range 18500-18799: non-overlapping with SimpleBearerTestExecutor (19000-19499)
-        // and ExternalJwtTestExecutor (19500-19999)
-        let base_port = PORT_COUNTER.next(18500, 300);
-        let http_port = base_port;
-        let grpc_port = base_port + 1000;
+        let http_port = get_http_port();
+        let grpc_port = get_grpc_port();
 
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
@@ -1138,7 +1141,7 @@ storage_type = "sqlite"
 path = "{}"
 
 [api]
-port_fallback = true
+port_fallback = false
 
 [api.rest]
 enabled = true
@@ -1176,6 +1179,10 @@ enable_ast_analysis = false
         cmd.args(["serve", "--config", config_path.to_str().unwrap()])
             .current_dir(&self.workspace_root)
             .env("RUST_LOG", "debug")
+            // Isolate DETRIX_HOME so the daemon writes auth-token to our temp dir
+            // instead of the global ~/detrix/auth-token. This prevents cross-binary
+            // races between concurrent test processes (e.g. mcp_bridge_e2e).
+            .env("DETRIX_HOME", self.temp_dir.path())
             .stdin(Stdio::null())
             .stdout(Stdio::from(daemon_log_file))
             .stderr(Stdio::from(daemon_log_stderr));
@@ -1198,11 +1205,11 @@ enable_ast_analysis = false
                 if self.enable_grpc && !wait_for_port(self.grpc_port, 10).await {
                     return Err(format!("gRPC not responding on port {}", self.grpc_port));
                 }
-                // Capture the auto-generated token immediately after daemon starts.
-                // Reading later is unreliable because other test binaries (mcp_bridge_e2e)
-                // may overwrite ~/detrix/auth-token with their own daemon's token.
+                // Capture the auto-generated token from the isolated temp dir.
+                // Because DETRIX_HOME points to temp_dir, the daemon writes here
+                // instead of the global ~/detrix/auth-token.
                 if self.env_token.is_none() {
-                    let token_path = detrix_config::paths::auth_token_path();
+                    let token_path = self.auth_token_path();
                     if let Ok(token) = std::fs::read_to_string(&token_path) {
                         let token = token.trim().to_string();
                         if !token.is_empty() {
@@ -1269,18 +1276,12 @@ impl Drop for AutoAuthTestExecutor {
 ///
 /// When no [api.auth] section is in the config, the daemon should:
 /// 1. Auto-generate a bearer token
-/// 2. Write it to ~/detrix/auth-token
+/// 2. Write it to $DETRIX_HOME/auth-token (isolated per executor)
 /// 3. Reject unauthenticated requests to protected endpoints
 /// 4. Accept requests with the auto-generated token
 /// 5. Keep health endpoint public
 #[tokio::test]
-#[serial(auto_auth_token_file)]
 async fn test_auto_auth_enforces_auth_on_protected_endpoints() {
-    let token_path = detrix_config::paths::auth_token_path();
-
-    // Clean up any existing token file
-    let _ = std::fs::remove_file(&token_path);
-
     let mut executor = AutoAuthTestExecutor::new();
 
     if let Err(e) = executor.start_daemon().await {
@@ -1288,18 +1289,17 @@ async fn test_auto_auth_enforces_auth_on_protected_endpoints() {
         panic!("Failed to start daemon: {}", e);
     }
 
-    // Use the token captured immediately after daemon started (resilient to
-    // cross-binary interference — other test binaries may overwrite the global token file)
+    // Use the token captured immediately after daemon started (from isolated temp dir)
     let token = executor
         .auto_token
         .as_ref()
         .expect("Auto-generated token should have been captured by start_daemon");
 
-    // Verify token file permissions on Unix (file may be overwritten by another binary,
-    // but if it exists and was written by our daemon, it should have secure permissions)
+    // Verify token file permissions on Unix (daemon writes to isolated temp dir)
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let token_path = executor.auth_token_path();
         if let Ok(meta) = std::fs::metadata(&token_path) {
             let mode = meta.mode() & 0o777;
             assert_eq!(
@@ -1367,10 +1367,9 @@ async fn test_auto_auth_enforces_auth_on_protected_endpoints() {
 /// 1. Use the env var token (not generate a new one)
 /// 2. Enforce auth using the env var token
 ///
-/// Note: We don't assert on token file absence because other test binaries
-/// (mcp_bridge_e2e) may write to ~/detrix/auth-token concurrently.
+/// Note: When DETRIX_TOKEN is set, no token file is written, so there is
+/// no cross-binary race to guard against.
 #[tokio::test]
-#[serial(auto_auth_token_file)]
 async fn test_auto_auth_uses_detrix_token_env_var() {
     let env_token = "my-env-token-for-auto-auth-test";
 
@@ -1418,11 +1417,7 @@ async fn test_auto_auth_uses_detrix_token_env_var() {
 
 /// Test: Auto-auth also works on gRPC (not just REST).
 #[tokio::test]
-#[serial(auto_auth_token_file)]
 async fn test_auto_auth_grpc_enforcement() {
-    let token_path = detrix_config::paths::auth_token_path();
-    let _ = std::fs::remove_file(&token_path);
-
     let mut executor = AutoAuthTestExecutor::new();
 
     if let Err(e) = executor.start_daemon().await {
@@ -1430,8 +1425,7 @@ async fn test_auto_auth_grpc_enforcement() {
         panic!("Failed to start daemon: {}", e);
     }
 
-    // Use the token captured immediately after daemon started (resilient to
-    // cross-binary interference — other test binaries may overwrite the global token file)
+    // Use the token captured immediately after daemon started (from isolated temp dir)
     let token = executor
         .auto_token
         .as_ref()
@@ -1497,23 +1491,24 @@ async fn test_auto_auth_grpc_enforcement() {
 /// NOTE: the test only checks the post-shutdown file presence; it does NOT start
 /// daemon A because we'd need to keep it running across the whole scenario.
 #[tokio::test]
-#[serial(auto_auth_token_file)]
 async fn test_auto_auth_token_file_not_deleted_on_shutdown() {
-    let token_path = detrix_config::paths::auth_token_path();
+    // Create the executor first so we know its isolated DETRIX_HOME path
+    let mut executor = AutoAuthTestExecutor::new();
+    let token_path = executor.auth_token_path();
 
-    // Pre-condition: write a "production daemon" token to the file
-    let production_token = "production-daemon-token-do-not-delete";
+    // Pre-condition: write a "production daemon" token to the isolated file.
+    // The executor's temp dir already exists; create the parent just in case.
     if let Some(parent) = token_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
+    let production_token = "production-daemon-token-do-not-delete";
     std::fs::write(&token_path, production_token).expect("Failed to write production token");
     assert!(
         token_path.exists(),
         "Token file should exist before test starts"
     );
 
-    // Start a "test" daemon — it overwrites ~/detrix/auth-token with its own token
-    let mut executor = AutoAuthTestExecutor::new();
+    // Start a "test" daemon — it overwrites the isolated auth-token with its own token
     if let Err(e) = executor.start_daemon().await {
         executor.print_daemon_logs(100);
         panic!("Failed to start test daemon: {}", e);

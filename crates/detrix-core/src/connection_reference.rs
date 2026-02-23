@@ -24,9 +24,16 @@ pub enum ClientIdentity {
 pub const DAEMON_IDENTITY: &str = "__daemon__";
 
 impl ClientIdentity {
-    /// Create a bridge client identity
+    /// Create a bridge client identity.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Panics in debug builds if `id` is empty. An empty bridge identity
+    /// is semantically invalid — callers must supply a non-empty UUID.
     pub fn bridge(id: impl Into<String>) -> Self {
-        Self::Bridge(id.into())
+        let id = id.into();
+        debug_assert!(!id.is_empty(), "bridge identity must not be empty");
+        Self::Bridge(id)
     }
 
     /// Create the daemon identity
@@ -149,21 +156,6 @@ impl ConnectionReference {
     pub fn touch(&mut self) {
         self.last_active = chrono::Utc::now().timestamp_micros();
     }
-
-    /// Check if this reference has been inactive for more than `days` calendar days.
-    ///
-    /// Uses the same calendar-day logic as `Connection::inactive_for_days`.
-    pub fn inactive_for_days(&self, days: i64, now_micros: i64) -> bool {
-        if days < 0 {
-            return false; // -1 = indefinite
-        }
-        if days == 0 {
-            return true; // 0 = remove all
-        }
-        let micros_per_day: i64 = 86_400 * 1_000_000;
-        let elapsed = now_micros - self.last_active;
-        elapsed >= days * micros_per_day
-    }
 }
 
 #[cfg(test)]
@@ -225,25 +217,6 @@ mod tests {
 
         assert!(r.last_active >= original);
         assert_eq!(r.created_at, original); // created_at unchanged
-    }
-
-    #[test]
-    fn test_reference_inactive_for_days() {
-        let micros_per_day: i64 = 86_400 * 1_000_000;
-        let now = chrono::Utc::now().timestamp_micros();
-
-        let r = ConnectionReference {
-            connection_id: ConnectionId::from("conn-1"),
-            client_identity: ClientIdentity::bridge("client-1"),
-            kind: ReferenceKind::Client,
-            created_at: now - 10 * micros_per_day,
-            last_active: now - 10 * micros_per_day,
-        };
-
-        assert!(r.inactive_for_days(7, now)); // 10 days > 7 days
-        assert!(!r.inactive_for_days(14, now)); // 10 days < 14 days
-        assert!(!r.inactive_for_days(-1, now)); // indefinite = never expire
-        assert!(r.inactive_for_days(0, now)); // 0 = remove all
     }
 
     #[test]

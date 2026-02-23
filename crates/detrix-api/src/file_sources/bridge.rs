@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use detrix_application::services::file_serving::ReadFileRequest;
 use detrix_application::{FetchResult, FileSource};
+use detrix_config::SourceKind;
 use detrix_core::{Connection, Result};
 use std::sync::RwLock;
 use std::time::Duration;
@@ -65,7 +66,7 @@ impl BridgeSource {
 #[async_trait]
 impl FileSource for BridgeSource {
     fn name(&self) -> &str {
-        "bridge"
+        SourceKind::Bridge.as_str()
     }
 
     async fn fetch(&self, connection: &Connection, file_path: &str) -> Result<Option<FetchResult>> {
@@ -104,7 +105,8 @@ impl FileSource for BridgeSource {
             }
         };
 
-        super::handle_fetch_response(resp, "bridge", self.max_size, "Bridge").await
+        super::handle_fetch_response(resp, SourceKind::Bridge.as_str(), self.max_size, "Bridge")
+            .await
     }
 }
 

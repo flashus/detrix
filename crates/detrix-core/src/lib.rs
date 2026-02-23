@@ -27,7 +27,9 @@ pub mod expressions;
 pub mod formatting;
 pub mod system_event;
 
-pub use connection::{Connection, ConnectionId, ConnectionStatus, MIN_UNRESERVED_PORT};
+pub use connection::{
+    Connection, ConnectionId, ConnectionStatus, MIN_UNRESERVED_PORT, UNKNOWN_WORKSPACE_ROOT,
+};
 pub use connection_identity::ConnectionIdentity;
 pub use connection_reference::{
     ClientIdentity, ConnectionReference, ReferenceKind, DAEMON_IDENTITY,

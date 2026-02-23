@@ -56,6 +56,11 @@ enabled = false
 host = "127.0.0.1"
 port = 8090
 
+# Enable admin-only REST endpoints (disconnect-all, disable-metrics-by-owner).
+# These bypass reference counting and affect all users — disable in shared envs.
+# Default: false
+# admin_endpoints_enabled = false
+
 # ╔════════════════════════════════════════════════════════════════════════════╗
 # ║                       ADVANCED CONFIGURATION                                ║
 # ║            Defaults work for most users - modify only if needed             ║
@@ -478,6 +483,19 @@ sensitive_patterns = [
 
 # pid_file = "~/detrix/daemon.pid"
 
+# URL this daemon advertises to MCP bridges and remote apps for discovery.
+# Set this when the daemon is behind NAT or inside Docker (e.g. "http://10.0.0.5:8090").
+# Default: not set (bridges discover via PID file or port probe)
+# advertise_url = "http://my-host:8090"
+
+# Timeout in milliseconds for remote app wake/sleep control-plane calls.
+# Default: 30000 (30 seconds)
+# remote_app_timeout_ms = 30000
+
+# How many days to retain connections before marking them for cleanup.
+# -1 = indefinite (never expire); 0 = expire immediately.
+# Default: 7
+# connection_ttl_days = 7
 
 # Graceful shutdown drain timeout in milliseconds
 drain_timeout_ms = 5000
@@ -771,6 +789,34 @@ source_host = "detrix-local"
 # [output.gelf.extra_fields]
 # environment = "production"
 # service = "my-app"
+
+# ============================================================================
+# Virtual File System (VFS) Configuration
+# ============================================================================
+# The VFS provides file content to the daemon from multiple sources.
+# Source priority controls where files are fetched from first.
+[vfs]
+# Source priority order: which sources to try when fetching file content.
+# Valid values: "control_plane", "bridge", "disk"
+# - control_plane: fetch from cloud control plane (requires cloud setup)
+# - bridge: fetch from the MCP bridge's local file server (Docker/remote mode)
+# - disk: read directly from the daemon's local filesystem
+# Default: ["control_plane", "bridge", "disk"]
+# source_priority = ["control_plane", "bridge", "disk"]
+
+# Timeout for fetching files from control_plane or bridge sources (seconds).
+# Default: 30
+# fetch_timeout_seconds = 30
+
+# Maximum file size the VFS will serve (bytes).
+# Files larger than this are rejected with a 413 error.
+# Default: 10485760 (10 MB)
+# max_file_size_bytes = 10485760
+
+# How long the VFS caches file content before re-fetching on the next access.
+# Increase for large or stable codebases; decrease if files change frequently.
+# Default: 60 (seconds)
+# hot_reload_ttl_seconds = 60
 
 # ════════════════════════════════════════════════════════════════════════════
 # End of Configuration

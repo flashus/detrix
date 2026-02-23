@@ -227,6 +227,26 @@ impl MetricRepository for MockMetricRepository {
         metrics.retain(|_, m| m.connection_id != *connection_id);
         Ok((before - metrics.len()) as u64)
     }
+
+    async fn migrate_connection_id(&self, from: &ConnectionId, to: &ConnectionId) -> Result<u64> {
+        let mut metrics = self.metrics.write().unwrap();
+        // Collect locations already occupied on the target connection (conflict detection)
+        let occupied: std::collections::HashSet<(String, u32)> = metrics
+            .values()
+            .filter(|m| &m.connection_id == to)
+            .map(|m| (m.location.file.clone(), m.location.line))
+            .collect();
+        let mut migrated = 0u64;
+        for metric in metrics.values_mut() {
+            if &metric.connection_id == from
+                && !occupied.contains(&(metric.location.file.clone(), metric.location.line))
+            {
+                metric.connection_id = to.clone();
+                migrated += 1;
+            }
+        }
+        Ok(migrated)
+    }
 }
 
 // ============================================================================
@@ -701,29 +721,29 @@ impl ConnectionRepository for MockConnectionRepository {
         Ok((initial_count - connections.len()) as u64)
     }
 
-    async fn delete_stale_same_project(
+    async fn find_stale_same_project(
         &self,
         name: &str,
         language: &str,
         workspace_root: &str,
         exclude_id: &ConnectionId,
-    ) -> Result<u64> {
-        let mut connections = self.connections.lock().await;
-        let initial_count = connections.len();
-        connections.retain(|id, c| {
-            if id == exclude_id {
-                return true; // keep the new connection
-            }
-            let is_same_project = c.name.as_deref() == Some(name)
-                && c.language.as_str() == language
-                && c.workspace_root == workspace_root;
-            let is_stale = matches!(
-                c.status,
-                ConnectionStatus::Disconnected | ConnectionStatus::Failed(_)
-            );
-            !(is_same_project && is_stale)
-        });
-        Ok((initial_count - connections.len()) as u64)
+    ) -> Result<Vec<ConnectionId>> {
+        let connections = self.connections.lock().await;
+        let stale_ids = connections
+            .iter()
+            .filter(|(id, c)| {
+                *id != exclude_id
+                    && c.name.as_deref() == Some(name)
+                    && c.language.as_str() == language
+                    && c.workspace_root == workspace_root
+                    && matches!(
+                        c.status,
+                        ConnectionStatus::Disconnected | ConnectionStatus::Failed(_)
+                    )
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        Ok(stale_ids)
     }
 }
 

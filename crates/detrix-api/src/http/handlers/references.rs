@@ -240,3 +240,52 @@ pub async fn admin_disconnect_all(
         connections_disconnected: disconnected as u32,
     }))
 }
+
+/// Request body for disable-metrics-by-owner
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisableMetricsByOwnerRequest {
+    pub client_identity: String,
+}
+
+/// Response for disable-metrics-by-owner
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisableMetricsByOwnerResponse {
+    pub disabled: u64,
+}
+
+/// Admin: Disable all enabled metrics owned by a client identity.
+///
+/// Bulk-disables metrics whose `created_by` matches the given client identity.
+/// Used for user-scoped cleanup when a bridge session ends.
+/// Gated by `api.rest.admin_endpoints_enabled` config.
+#[instrument(skip(state))]
+pub async fn admin_disable_metrics_by_owner(
+    State(state): State<Arc<ApiState>>,
+    axum::Json(req): axum::Json<DisableMetricsByOwnerRequest>,
+) -> Result<axum::Json<DisableMetricsByOwnerResponse>, HttpError> {
+    // Gate by config flag
+    let config = state.config_service.get_config().await;
+    if !config.api.rest.admin_endpoints_enabled {
+        return Err(HttpError::with_code(
+            axum::http::StatusCode::FORBIDDEN,
+            "Admin endpoints are disabled. Set api.rest.admin_endpoints_enabled = true in config.",
+            detrix_core::ErrorCode::Unauthorized,
+        ));
+    }
+
+    info!(
+        "REST: admin_disable_metrics_by_owner client_identity={}",
+        req.client_identity
+    );
+
+    let disabled = state
+        .context
+        .metric_service
+        .disable_metrics_by_owner(&req.client_identity)
+        .await
+        .http_context("Failed to disable metrics by owner")?;
+
+    Ok(axum::Json(DisableMetricsByOwnerResponse { disabled }))
+}

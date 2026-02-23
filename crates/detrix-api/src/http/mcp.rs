@@ -23,6 +23,10 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use detrix_config::constants::{
+    HEADER_BRIDGE_PID, HEADER_FILE_SERVER_TOKEN, HEADER_FILE_SERVER_URL, HEADER_PARENT_NAME,
+    HEADER_PARENT_PID,
+};
 use rmcp::ServerHandler;
 use serde_json::Value;
 use std::sync::Arc;
@@ -36,17 +40,17 @@ use tracing::{debug, error, info};
 /// - `X-Detrix-Bridge-Pid`: Bridge process ID (the MCP bridge process)
 fn extract_parent_process_info(headers: &HeaderMap) -> Option<ParentProcessInfo> {
     let parent_pid = headers
-        .get("X-Detrix-Parent-Pid")
+        .get(HEADER_PARENT_PID)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok())?;
 
     let parent_name = headers
-        .get("X-Detrix-Parent-Name")
+        .get(HEADER_PARENT_NAME)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())?;
 
     let bridge_pid = headers
-        .get("X-Detrix-Bridge-Pid")
+        .get(HEADER_BRIDGE_PID)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok())?;
 
@@ -205,7 +209,7 @@ pub async fn mcp_handler(
     // The token lets the daemon authenticate with the bridge's file server,
     // which is required when the daemon runs inside Docker (different process,
     // no shared auth-token file).
-    if let Some(file_server_header) = headers.get("X-Detrix-File-Server-Url") {
+    if let Some(file_server_header) = headers.get(HEADER_FILE_SERVER_URL) {
         if let Ok(url) = file_server_header.to_str() {
             if let Some(ref bridge_source) = state.bridge_file_source {
                 bridge_source.set_bridge_url(Some(url.to_string()));
@@ -213,7 +217,7 @@ pub async fn mcp_handler(
             }
         }
     }
-    if let Some(fs_token_header) = headers.get("X-Detrix-File-Server-Token") {
+    if let Some(fs_token_header) = headers.get(HEADER_FILE_SERVER_TOKEN) {
         if let Ok(token) = fs_token_header.to_str() {
             if let Some(ref bridge_source) = state.bridge_file_source {
                 bridge_source.set_bridge_token(Some(token.to_string()));

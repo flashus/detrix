@@ -58,6 +58,22 @@ impl From<serde_json::Error> for JwtError {
     }
 }
 
+/// Extension trait for converting jsonwebtoken errors to specific JwtError variants
+trait JwtTokenResultExt<T> {
+    fn invalid_header(self) -> Result<T, JwtError>;
+    fn validation_failed(self) -> Result<T, JwtError>;
+}
+
+impl<T> JwtTokenResultExt<T> for Result<T, jsonwebtoken::errors::Error> {
+    fn invalid_header(self) -> Result<T, JwtError> {
+        self.map_err(|e| JwtError::InvalidHeader(e.to_string()))
+    }
+
+    fn validation_failed(self) -> Result<T, JwtError> {
+        self.map_err(|e| JwtError::ValidationFailed(e.to_string()))
+    }
+}
+
 /// JWT claims extracted after validation
 ///
 /// Standard claims plus common custom claims from identity providers.
@@ -204,7 +220,7 @@ impl JwksValidator {
     /// 4. Return the decoded claims
     pub async fn validate_token(&self, token: &str) -> Result<JwtClaims, JwtError> {
         // Extract header to get kid
-        let header = decode_header(token).map_err(|e| JwtError::InvalidHeader(e.to_string()))?;
+        let header = decode_header(token).invalid_header()?;
 
         let kid = header
             .kid
@@ -234,8 +250,8 @@ impl JwksValidator {
         // Note: If audience is not set, validation.aud remains None and audience is not validated
 
         // Validate and decode token
-        let token_data: TokenData<JwtClaims> = decode(token, &decoding_key, &validation)
-            .map_err(|e| JwtError::ValidationFailed(e.to_string()))?;
+        let token_data: TokenData<JwtClaims> =
+            decode(token, &decoding_key, &validation).validation_failed()?;
 
         debug!(
             sub = ?token_data.claims.sub,

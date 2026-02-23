@@ -14,6 +14,12 @@ use std::fmt;
 /// Minimum unreserved port number (ports 0-1023 are reserved for system services)
 pub const MIN_UNRESERVED_PORT: u16 = 1024;
 
+/// Placeholder workspace root used when the actual workspace is unknown.
+///
+/// Clients send this value when they cannot determine their working directory.
+/// Use `Connection::valid_workspace_root()` to filter this out before path resolution.
+pub const UNKNOWN_WORKSPACE_ROOT: &str = "/unknown";
+
 /// Unique identifier for a debugger connection
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConnectionId(pub String);
@@ -207,7 +213,7 @@ impl Connection {
     /// Use this instead of accessing `workspace_root` directly when
     /// resolving relative file paths.
     pub fn valid_workspace_root(&self) -> Option<&str> {
-        Some(self.workspace_root.as_str()).filter(|r| *r != "/unknown" && !r.is_empty())
+        Some(self.workspace_root.as_str()).filter(|r| *r != UNKNOWN_WORKSPACE_ROOT && !r.is_empty())
     }
 
     /// Get current timestamp in microseconds
@@ -301,7 +307,7 @@ impl Connection {
         Ok(Self {
             id,
             name: None,
-            workspace_root: "/unknown".to_string(),
+            workspace_root: UNKNOWN_WORKSPACE_ROOT.to_string(),
             hostname: "unknown".to_string(),
             host,
             port,

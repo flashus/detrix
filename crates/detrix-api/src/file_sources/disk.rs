@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use detrix_application::{FetchResult, FileSource, SourceMetadata};
+use detrix_config::SourceKind;
 use detrix_core::{Connection, Result};
 use tracing::debug;
 
@@ -13,7 +14,7 @@ pub struct DiskSource;
 #[async_trait]
 impl FileSource for DiskSource {
     fn name(&self) -> &str {
-        "disk"
+        SourceKind::Disk.as_str()
     }
 
     async fn fetch(
@@ -31,7 +32,7 @@ impl FileSource for DiskSource {
                 Ok(Some(FetchResult {
                     content,
                     metadata: SourceMetadata {
-                        source_kind: "disk".into(),
+                        source_kind: SourceKind::Disk.as_str().to_string(),
                         ..Default::default()
                     },
                 }))

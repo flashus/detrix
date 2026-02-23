@@ -8,7 +8,11 @@ use super::auth::{
 };
 use super::config::{BridgeConfig, RestartBackoff};
 use anyhow::{Context, Result};
-use detrix_config::constants::{AUTHORIZATION_HEADER, BEARER_PREFIX};
+use detrix_config::constants::{
+    AUTHORIZATION_HEADER, BEARER_PREFIX, DOCKER_INTERNAL_HOST, HEADER_BRIDGE_PID,
+    HEADER_FILE_SERVER_TOKEN, HEADER_FILE_SERVER_URL, HEADER_PARENT_NAME, HEADER_PARENT_PID,
+};
+use detrix_core::UNKNOWN_WORKSPACE_ROOT;
 use detrix_logging::{debug, error, info, warn};
 use reqwest::Client;
 use serde_json::Value;
@@ -232,18 +236,18 @@ impl McpBridge {
         // Add parent process info headers if available
         if let Some(ref parent) = self.config.parent_process {
             req_builder = req_builder
-                .header("X-Detrix-Parent-Pid", parent.pid.to_string())
-                .header("X-Detrix-Parent-Name", &parent.name)
-                .header("X-Detrix-Bridge-Pid", parent.bridge_pid.to_string());
+                .header(HEADER_PARENT_PID, parent.pid.to_string())
+                .header(HEADER_PARENT_NAME, &parent.name)
+                .header(HEADER_BRIDGE_PID, parent.bridge_pid.to_string());
         }
 
         // Add file server URL + token so daemon can fetch source files from this machine.
         // The token is the same one the file server was started with; without it the
         // daemon (especially a Docker daemon) would get 401 from the file server.
         if let Some(ref url) = file_server {
-            req_builder = req_builder.header("X-Detrix-File-Server-Url", url);
+            req_builder = req_builder.header(HEADER_FILE_SERVER_URL, url);
             if let Some(ref t) = fs_token {
-                req_builder = req_builder.header("X-Detrix-File-Server-Token", t);
+                req_builder = req_builder.header(HEADER_FILE_SERVER_TOKEN, t);
             }
         }
 
@@ -293,9 +297,9 @@ impl McpBridge {
         // Add parent process info headers if available
         if let Some(ref parent) = self.config.parent_process {
             req_builder = req_builder
-                .header("X-Detrix-Parent-Pid", parent.pid.to_string())
-                .header("X-Detrix-Parent-Name", &parent.name)
-                .header("X-Detrix-Bridge-Pid", parent.bridge_pid.to_string());
+                .header(HEADER_PARENT_PID, parent.pid.to_string())
+                .header(HEADER_PARENT_NAME, &parent.name)
+                .header(HEADER_BRIDGE_PID, parent.bridge_pid.to_string());
         }
 
         let response = req_builder
@@ -1130,7 +1134,7 @@ impl McpBridge {
         };
 
         let Some(container_workspace) =
-            workspace_root.filter(|r| !r.is_empty() && r != "/" && r != "/unknown")
+            workspace_root.filter(|r| !r.is_empty() && r != "/" && r != UNKNOWN_WORKSPACE_ROOT)
         else {
             debug!(
                 conn_id = connection_id,
@@ -1278,7 +1282,7 @@ impl McpBridge {
         // keeps the allowlist in sync with the actual daemon.
         // Note: for Docker, the daemon connects from an unpredictable bridge IP — the
         // file server will learn it on the first successful token-authenticated request.
-        let is_docker_host = new_file_server_host.as_deref() == Some("host.docker.internal");
+        let is_docker_host = new_file_server_host.as_deref() == Some(DOCKER_INTERNAL_HOST);
         let new_allowed = resolve_daemon_ips_sync(&new_url);
         *self.allowed_file_server_ips.write().await = Some(new_allowed);
 
@@ -1387,7 +1391,7 @@ impl McpBridge {
                     // Advertise host.docker.internal so the Docker daemon can reach
                     // our file server, and open the IP restriction.
                     let _ = self
-                        .switch_daemon(daemon_url.clone(), Some("host.docker.internal".to_string()))
+                        .switch_daemon(daemon_url.clone(), Some(DOCKER_INTERNAL_HOST.to_string()))
                         .await;
                 }
             }

@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::constants::ENV_DETRIX_CONFIG;
+use crate::constants::{ENV_DETRIX_CONFIG, ENV_DETRIX_HOME};
 
 /// Default detrix data directory name
 pub const DETRIX_DIR_NAME: &str = "detrix";
@@ -42,17 +42,28 @@ pub const DEFAULT_CONFIG_FILENAME: &str = "detrix.toml";
 
 /// Get user's detrix home directory.
 ///
-/// Returns `~/detrix` on Unix or `%USERPROFILE%\detrix` on Windows.
+/// Resolution order:
+/// 1. `DETRIX_HOME` environment variable (if set and non-empty)
+/// 2. `~/detrix` on Unix or `%USERPROFILE%\detrix` on Windows
+///
 /// Falls back to current directory if home cannot be determined.
+///
+/// Setting `DETRIX_HOME` is useful for test isolation: each test process
+/// can point to a separate temp directory to avoid shared file races.
 ///
 /// # Example
 /// ```
 /// use detrix_config::paths::detrix_home;
 /// let home = detrix_home();
-/// // On Unix: /home/user/detrix
+/// // On Unix: /home/user/detrix (or $DETRIX_HOME if set)
 /// // On Windows: C:\Users\user\detrix
 /// ```
 pub fn detrix_home() -> PathBuf {
+    if let Ok(home) = std::env::var(ENV_DETRIX_HOME) {
+        if !home.is_empty() {
+            return PathBuf::from(home);
+        }
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(DETRIX_DIR_NAME)
@@ -283,9 +294,27 @@ mod tests {
 
     #[test]
     fn test_detrix_home_not_empty() {
+        // Only check when DETRIX_HOME override is not set
+        if std::env::var(crate::constants::ENV_DETRIX_HOME).is_err() {
+            let home = detrix_home();
+            assert!(!home.as_os_str().is_empty());
+            assert!(home.ends_with(DETRIX_DIR_NAME));
+        }
+    }
+
+    #[test]
+    fn test_detrix_home_env_var_override() {
+        let tmp = std::env::temp_dir().join("detrix_test_home_override_12345");
+        // Use a unique env key approach: set, test, restore
+        let key = crate::constants::ENV_DETRIX_HOME;
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, &tmp);
         let home = detrix_home();
-        assert!(!home.as_os_str().is_empty());
-        assert!(home.ends_with(DETRIX_DIR_NAME));
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        assert_eq!(home, tmp);
     }
 
     #[test]

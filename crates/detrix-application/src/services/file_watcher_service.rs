@@ -9,6 +9,7 @@
 //! a channel. Events are debounced to prevent processing the same
 //! file multiple times during rapid changes (e.g., editor auto-save).
 
+use crate::error::InvalidConfigResultExt;
 use crate::ports::{FileEvent, FileWatcher, FileWatcherConfig};
 use async_trait::async_trait;
 use detrix_logging::{debug, error, trace, warn};
@@ -89,11 +90,7 @@ impl NotifyFileWatcher {
                 }
             },
         )
-        .map_err(|e| {
-            detrix_core::Error::InvalidConfig(
-                format!("Failed to create file watcher: {}", e).into(),
-            )
-        })?;
+        .invalid_config("Failed to create file watcher")?;
 
         let watcher = Self {
             config,
@@ -123,16 +120,10 @@ impl FileWatcher for NotifyFileWatcher {
         }
 
         // Canonicalize path for consistent comparison
-        let canonical_path = path.canonicalize().map_err(|e| {
-            detrix_core::Error::InvalidConfig(
-                format!(
-                    "Path '{}' does not exist or cannot be resolved: {}",
-                    path.display(),
-                    e
-                )
-                .into(),
-            )
-        })?;
+        let canonical_path = path.canonicalize().invalid_config(format!(
+            "Path '{}' does not exist or cannot be resolved",
+            path.display()
+        ))?;
 
         // Check if already watching
         {
@@ -156,11 +147,7 @@ impl FileWatcher for NotifyFileWatcher {
                 debouncer
                     .watcher()
                     .watch(&canonical_path, recursive_mode)
-                    .map_err(|e| {
-                        detrix_core::Error::InvalidConfig(
-                            format!("Failed to watch '{}': {}", canonical_path.display(), e).into(),
-                        )
-                    })?;
+                    .invalid_config(format!("Failed to watch '{}'", canonical_path.display()))?;
             } else {
                 return Err(detrix_core::Error::InvalidConfig(
                     "File watcher has been shut down".into(),

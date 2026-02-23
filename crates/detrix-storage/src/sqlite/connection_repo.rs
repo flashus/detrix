@@ -349,16 +349,16 @@ impl ConnectionRepository for SqliteStorage {
         Ok(result.rows_affected())
     }
 
-    async fn delete_stale_same_project(
+    async fn find_stale_same_project(
         &self,
         name: &str,
         language: &str,
         workspace_root: &str,
         exclude_id: &ConnectionId,
-    ) -> Result<u64> {
-        let result = sqlx::query(
+    ) -> Result<Vec<ConnectionId>> {
+        let rows = sqlx::query_scalar::<_, String>(
             r#"
-            DELETE FROM connections
+            SELECT id FROM connections
             WHERE name = ?
               AND language = ?
               AND workspace_root = ?
@@ -370,20 +370,10 @@ impl ConnectionRepository for SqliteStorage {
         .bind(language)
         .bind(workspace_root)
         .bind(&exclude_id.0)
-        .execute(self.pool())
+        .fetch_all(self.pool())
         .await?;
 
-        let deleted = result.rows_affected();
-        if deleted > 0 {
-            debug!(
-                name, language, workspace_root,
-                excluded_id = %exclude_id.0,
-                deleted,
-                "Removed stale same-project connections (hostname changed)"
-            );
-        }
-
-        Ok(deleted)
+        Ok(rows.into_iter().map(ConnectionId).collect())
     }
 }
 

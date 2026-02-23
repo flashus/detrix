@@ -62,6 +62,9 @@ pub use generated::{
 };
 
 use control::ControlServer;
+
+/// Fallback workspace root used when the current directory cannot be determined.
+const UNKNOWN_WORKSPACE_ROOT: &str = "/unknown";
 use daemon::{DaemonClient, RegisterRequest};
 use lldb::LldbManager;
 use state::{get, is_initialized, set_initialized};
@@ -586,7 +589,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
             .and_then(|p| p.to_str().map(String::from))
             .unwrap_or_else(|| {
                 warn!("Failed to get current directory, using /unknown");
-                "/unknown".to_string()
+                UNKNOWN_WORKSPACE_ROOT.to_string()
             })
     });
 

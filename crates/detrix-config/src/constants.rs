@@ -29,6 +29,10 @@
 /// Default host for API servers (localhost only for security)
 pub const DEFAULT_API_HOST: &str = "127.0.0.1";
 
+/// Docker internal host — used when bridge connects to a daemon running in Docker.
+/// Resolves to the Docker host machine from within a container.
+pub const DOCKER_INTERNAL_HOST: &str = "host.docker.internal";
+
 /// Default host as IPv4 address (for direct socket connections)
 pub const LOCALHOST_IPV4: std::net::Ipv4Addr = std::net::Ipv4Addr::new(127, 0, 0, 1);
 
@@ -51,6 +55,28 @@ pub const AUTHORIZATION_METADATA_KEY: &str = "authorization";
 
 /// Bearer token prefix for Authorization headers.
 pub const BEARER_PREFIX: &str = "Bearer ";
+
+// ============================================================================
+// MCP BRIDGE HTTP HEADERS
+// ============================================================================
+
+/// HTTP header carrying the parent process PID for the MCP bridge session.
+pub const HEADER_PARENT_PID: &str = "X-Detrix-Parent-Pid";
+
+/// HTTP header carrying the parent process name for the MCP bridge session.
+pub const HEADER_PARENT_NAME: &str = "X-Detrix-Parent-Name";
+
+/// HTTP header carrying the bridge process PID.
+pub const HEADER_BRIDGE_PID: &str = "X-Detrix-Bridge-Pid";
+
+/// HTTP header carrying the file server URL for bridge file serving.
+pub const HEADER_FILE_SERVER_URL: &str = "X-Detrix-File-Server-Url";
+
+/// HTTP header carrying the auth token for the bridge file server.
+pub const HEADER_FILE_SERVER_TOKEN: &str = "X-Detrix-File-Server-Token";
+
+/// HTTP header carrying the client ID for disconnect_all scoping.
+pub const HEADER_CLIENT_ID: &str = "X-Detrix-Client-Id";
 
 /// Override gRPC port (highest priority, typically for testing)
 pub const ENV_DETRIX_GRPC_PORT_OVERRIDE: &str = "DETRIX_GRPC_PORT_OVERRIDE";
@@ -441,6 +467,9 @@ pub const DEFAULT_VFS_MAX_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
 /// Default VFS cache hot-reload TTL in seconds
 /// Cached files are re-read from source after this duration
 pub const DEFAULT_VFS_HOT_RELOAD_TTL_SECONDS: u64 = 60;
+
+/// Server identifier included in gRPC response metadata
+pub const DEFAULT_SERVER_ID: &str = "detrix-server";
 
 // ============================================================================
 // FILE INSPECTION

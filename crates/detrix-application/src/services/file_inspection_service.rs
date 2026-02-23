@@ -8,7 +8,7 @@
 //! The service is protocol-agnostic - it returns domain types that can be
 //! converted to any presentation format (MCP, gRPC, REST, etc.)
 
-use crate::error::{FileInspectionError, IoErrorWithContext};
+use crate::error::{FileInspectionError, PathCanonicalizeExt, VfsReadResultExt};
 use crate::safety::treesitter::analyze_scope;
 use crate::services::file_inspection_types::{
     CodeContext, CodeLine, FileInspectionRequest, FileInspectionResult, FileOverview,
@@ -142,9 +142,7 @@ fn validate_file_path(file_path: &str) -> Result<PathBuf> {
 
     // Canonicalize to get absolute path and resolve symlinks/..
     // This is the key security step - it resolves path traversal attempts
-    let canonical = path.canonicalize().map_err(|e| {
-        FileInspectionError::InvalidPath(format!("Cannot resolve path '{}': {}", file_path, e))
-    })?;
+    let canonical = path.canonicalize().path_canonicalize(file_path)?;
 
     // Verify it's a file (not a directory)
     if !canonical.is_file() {
@@ -391,14 +389,10 @@ impl FileInspectionService {
         language: SourceLanguage,
     ) -> Result<FileInspectionResult> {
         // Read the file via VFS (cache → disk fallback)
-        let contents = self.vfs.read_to_string(&request.file_path).map_err(|e| {
-            // Wrap as IoErrorWithContext for consistent error handling
-            let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string());
-            IoErrorWithContext {
-                error: io_err,
-                path: request.file_path.clone(),
-            }
-        })?;
+        let contents = self
+            .vfs
+            .read_to_string(&request.file_path)
+            .vfs_read_context(&request.file_path)?;
 
         let lines: Vec<&str> = contents.lines().collect();
         let total_lines = lines.len();

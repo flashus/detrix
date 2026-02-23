@@ -155,9 +155,7 @@ impl DaemonClient {
         let url = format!("{}/health", daemon_url);
 
         let response = self
-            .client
-            .get(&url)
-            .timeout(timeout)
+            .set_auth(self.client.get(&url).timeout(timeout))
             .send()
             .daemon_unreachable(daemon_url)?;
 

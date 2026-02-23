@@ -10,6 +10,7 @@ use detrix_api::generated::detrix::v1::{
 };
 use detrix_api::grpc::request_with_machine_client_id;
 use detrix_api::grpc::AuthChannel;
+use detrix_core::UNKNOWN_WORKSPACE_ROOT;
 
 /// gRPC client for connection operations
 pub struct ConnectionsClient {
@@ -51,7 +52,7 @@ impl ConnectionsClient {
         let workspace_root = std::env::current_dir()
             .ok()
             .and_then(|p| p.to_str().map(String::from))
-            .unwrap_or_else(|| "/unknown".to_string());
+            .unwrap_or_else(|| UNKNOWN_WORKSPACE_ROOT.to_string());
 
         let hostname = detrix_api::common::resolve_hostname();
 

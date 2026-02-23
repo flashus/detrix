@@ -202,11 +202,15 @@ pub async fn inspect_file(
         workspace_root,
     };
 
-    // Use FileInspectionService from application layer (shared VFS)
-    let file_inspection = &state.context.file_inspection;
-    let (language, result) = file_inspection
-        .inspect(inspection_request)
-        .http_context("File inspection failed")?;
+    // Use FileInspectionService from application layer (shared VFS).
+    // `inspect()` is synchronous and may call std::fs::read_to_string; offload to
+    // a blocking thread pool so we don't block the async executor.
+    let file_inspection = state.context.file_inspection.clone();
+    let (language, result) =
+        tokio::task::spawn_blocking(move || file_inspection.inspect(inspection_request))
+            .await
+            .map_err(|e| HttpError::internal(format!("File inspection task panicked: {e}")))?
+            .http_context("File inspection failed")?;
 
     // Convert domain result to DTO using From implementations
     let language_name = language.display_name().to_string();

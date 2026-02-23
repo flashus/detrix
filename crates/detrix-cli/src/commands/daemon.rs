@@ -4,7 +4,7 @@
 //! the single-instance Detrix daemon process.
 
 use crate::context::ClientContext;
-use crate::utils::daemon_discovery::{DaemonDiscovery, DaemonInfo, DiscoveryMethod};
+use crate::utils::daemon_discovery::{DaemonDiscovery, DiscoveredDaemon, DiscoveryMethod};
 use crate::utils::pid::PidFile;
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -321,7 +321,7 @@ pub async fn status(
 }
 
 /// Print detailed daemon information
-fn print_daemon_info(info: &DaemonInfo, pid_file_path: &Path) {
+fn print_daemon_info(info: &DiscoveredDaemon, pid_file_path: &Path) {
     // Show discovery method
     let method = match info.discovery_method {
         DiscoveryMethod::PidFile => "PID file",

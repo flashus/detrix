@@ -8,6 +8,7 @@ use crate::generated::detrix::v1::{
     ProvideFileResponse, ResponseMetadata, ValidateCacheRequest, ValidateCacheResponse,
 };
 use crate::state::ApiState;
+use detrix_config::constants::DEFAULT_SERVER_ID;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::{debug, instrument};
@@ -21,7 +22,7 @@ fn create_response_metadata(
         request_id: request_metadata
             .map(|m| m.request_id.clone())
             .unwrap_or_default(),
-        server_id: String::from("detrix-server"), // TODO: Make configurable
+        server_id: DEFAULT_SERVER_ID.to_string(),
     }
 }
 

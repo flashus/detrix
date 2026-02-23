@@ -33,6 +33,38 @@ use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
 // ============================================================================
+// Python helpers
+// ============================================================================
+
+/// Find a Python binary that has debugpy importable.
+///
+/// Checks `DETRIX_PYTHON` first (e.g. a uv-managed venv), then `python3`,
+/// then `python`. Returns `None` if none of them can import debugpy.
+async fn find_python() -> Option<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(py) = std::env::var("DETRIX_PYTHON") {
+        candidates.push(py);
+    }
+    candidates.push("python3".to_string());
+    candidates.push("python".to_string());
+
+    for candidate in candidates {
+        let ok = Command::new(&candidate)
+            .args(["-c", "import debugpy"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+// ============================================================================
 // Python Test Fixture
 // ============================================================================
 
@@ -50,19 +82,12 @@ impl DapTestFixture for PythonFixture {
     }
 
     async fn is_available() -> bool {
-        let output = Command::new("python")
-            .args(["-c", "import debugpy; print(debugpy.__version__)"])
-            .output()
-            .await;
-
-        match output {
-            Ok(out) => out.status.success(),
-            Err(_) => false,
-        }
+        find_python().await.is_some()
     }
 
     async fn start_debug_server(port: u16, script_path: &str) -> Result<Child, std::io::Error> {
-        Command::new("python")
+        let python = find_python().await.unwrap_or_else(|| "python3".to_string());
+        Command::new(&python)
             .args([
                 "-m",
                 "debugpy",

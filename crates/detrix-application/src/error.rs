@@ -461,6 +461,60 @@ impl<T> EnvValidationOptionExt<T> for Option<T> {
     }
 }
 
+/// Extension trait for converting errors to detrix_core::Error::InvalidConfig with context
+pub trait InvalidConfigResultExt<T> {
+    /// Convert any Display error to InvalidConfig with context message
+    fn invalid_config(self, context: impl Into<String>) -> detrix_core::Result<T>;
+}
+
+impl<T, E: std::fmt::Display> InvalidConfigResultExt<T> for std::result::Result<T, E> {
+    fn invalid_config(self, context: impl Into<String>) -> detrix_core::Result<T> {
+        self.map_err(|e| {
+            detrix_core::Error::InvalidConfig(format!("{}: {}", context.into(), e).into())
+        })
+    }
+}
+
+/// Extension trait for path canonicalization to FileInspectionError::InvalidPath
+pub trait PathCanonicalizeExt<T> {
+    /// Convert a canonicalize IO error to FileInspectionError::InvalidPath with context
+    fn path_canonicalize(self, original: impl AsRef<str>) -> Result<T>;
+}
+
+impl<T> PathCanonicalizeExt<T> for std::result::Result<T, std::io::Error> {
+    fn path_canonicalize(self, original: impl AsRef<str>) -> Result<T> {
+        self.map_err(|e| {
+            FileInspectionError::InvalidPath(format!(
+                "Cannot resolve path '{}': {}",
+                original.as_ref(),
+                e
+            ))
+            .into()
+        })
+    }
+}
+
+/// Extension trait for converting VFS read errors to application errors with path context
+pub trait VfsReadResultExt<T> {
+    /// Convert a VFS read error into IoErrorWithContext; use `?` to coerce to application Error
+    fn vfs_read_context(
+        self,
+        path: impl Into<String>,
+    ) -> std::result::Result<T, IoErrorWithContext>;
+}
+
+impl<T> VfsReadResultExt<T> for detrix_core::Result<T> {
+    fn vfs_read_context(
+        self,
+        path: impl Into<String>,
+    ) -> std::result::Result<T, IoErrorWithContext> {
+        self.map_err(|e| IoErrorWithContext {
+            error: std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()),
+            path: path.into(),
+        })
+    }
+}
+
 // ============================================================================
 // From trait implementations for automatic error conversion
 // ============================================================================

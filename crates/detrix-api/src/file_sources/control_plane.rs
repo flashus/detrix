@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use detrix_application::services::file_serving::ReadFileRequest;
 use detrix_application::{FetchResult, FileSource};
+use detrix_config::SourceKind;
 use detrix_core::{Connection, Result};
 use std::time::Duration;
 use tracing::debug;
@@ -35,7 +36,7 @@ impl ControlPlaneSource {
 #[async_trait]
 impl FileSource for ControlPlaneSource {
     fn name(&self) -> &str {
-        "control_plane"
+        SourceKind::ControlPlane.as_str()
     }
 
     async fn fetch(&self, connection: &Connection, file_path: &str) -> Result<Option<FetchResult>> {
@@ -74,7 +75,13 @@ impl FileSource for ControlPlaneSource {
             }
         };
 
-        super::handle_fetch_response(resp, "control_plane", self.max_size, "Control plane").await
+        super::handle_fetch_response(
+            resp,
+            SourceKind::ControlPlane.as_str(),
+            self.max_size,
+            "Control plane",
+        )
+        .await
     }
 }
 

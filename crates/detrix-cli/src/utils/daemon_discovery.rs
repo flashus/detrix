@@ -9,7 +9,7 @@
 //! ## Usage
 //!
 //! ```no_run
-//! use detrix_cli::utils::daemon_discovery::{DaemonDiscovery, DaemonInfo};
+//! use detrix_cli::utils::daemon_discovery::{DaemonDiscovery, DiscoveredDaemon};
 //!
 //! let discovery = DaemonDiscovery::new();
 //! match discovery.find_daemon() {
@@ -33,7 +33,7 @@ use std::time::Duration;
 
 /// Information about a discovered daemon
 #[derive(Debug, Clone)]
-pub struct DaemonInfo {
+pub struct DiscoveredDaemon {
     /// Process ID of the daemon (if known)
     pub pid: Option<u32>,
     /// Host the daemon is listening on
@@ -46,7 +46,7 @@ pub struct DaemonInfo {
     pub discovery_method: DiscoveryMethod,
 }
 
-impl DaemonInfo {
+impl DiscoveredDaemon {
     /// Create from PidInfo
     pub fn from_pid_info(info: &PidInfo) -> Self {
         Self {
@@ -177,7 +177,7 @@ impl DaemonDiscovery {
     /// - `Ok(Some(info))` if daemon is found
     /// - `Ok(None)` if daemon is not running
     /// - `Err(e)` if there was an error checking
-    pub fn find_daemon(&self) -> Result<Option<DaemonInfo>> {
+    pub fn find_daemon(&self) -> Result<Option<DiscoveredDaemon>> {
         // Strategy 1: Check PID file
         match self.find_via_pid_file()? {
             Some(info) => {
@@ -227,9 +227,9 @@ impl DaemonDiscovery {
     }
 
     /// Find daemon via PID file
-    fn find_via_pid_file(&self) -> Result<Option<DaemonInfo>> {
+    fn find_via_pid_file(&self) -> Result<Option<DiscoveredDaemon>> {
         match PidFile::read_info(&self.pid_file_path).context("Failed to read PID file")? {
-            Some(pid_info) => Ok(Some(DaemonInfo::from_pid_info(&pid_info))),
+            Some(pid_info) => Ok(Some(DiscoveredDaemon::from_pid_info(&pid_info))),
             None => Ok(None),
         }
     }
@@ -245,7 +245,7 @@ impl DaemonDiscovery {
     /// sufficient — any service could be listening on that port, and without HTTP
     /// we cannot verify health or communicate with the daemon. Requiring HTTP avoids
     /// false positives when an unrelated process holds the gRPC probe port.
-    fn find_via_port_probe(&self) -> Option<DaemonInfo> {
+    fn find_via_port_probe(&self) -> Option<DiscoveredDaemon> {
         // HTTP must be open — it is required for health checks and all REST/MCP traffic
         let http_addr = format!("{}:{}", self.probe_host, self.probe_http_port);
         if !self.is_port_open(&http_addr) {
@@ -256,7 +256,7 @@ impl DaemonDiscovery {
         let grpc_addr = format!("{}:{}", self.probe_host, self.probe_grpc_port);
         let grpc_open = self.is_port_open(&grpc_addr);
 
-        Some(DaemonInfo::from_port_probe(
+        Some(DiscoveredDaemon::from_port_probe(
             self.probe_host.clone(),
             self.probe_http_port,
             if grpc_open {
@@ -279,13 +279,13 @@ impl DaemonDiscovery {
 
 /// Convenience function to find daemon with default settings
 #[allow(dead_code)]
-pub fn find_daemon() -> Result<Option<DaemonInfo>> {
+pub fn find_daemon() -> Result<Option<DiscoveredDaemon>> {
     DaemonDiscovery::new().find_daemon()
 }
 
 /// Convenience function to find daemon with custom PID file path
 #[allow(dead_code)]
-pub fn find_daemon_with_pid_file(pid_file_path: &Path) -> Result<Option<DaemonInfo>> {
+pub fn find_daemon_with_pid_file(pid_file_path: &Path) -> Result<Option<DiscoveredDaemon>> {
     DaemonDiscovery::new()
         .with_pid_file(pid_file_path)
         .find_daemon()
@@ -309,7 +309,7 @@ mod tests {
         pid_info.ports.insert(ServiceType::Grpc, 59051);
         pid_info.host = "192.168.1.1".to_string();
 
-        let daemon_info = DaemonInfo::from_pid_info(&pid_info);
+        let daemon_info = DiscoveredDaemon::from_pid_info(&pid_info);
 
         assert_eq!(daemon_info.pid, Some(12345));
         assert_eq!(daemon_info.host, "192.168.1.1");
@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_daemon_info_endpoints() {
-        let info = DaemonInfo::from_port_probe("localhost".to_string(), 8080, 50051);
+        let info = DiscoveredDaemon::from_port_probe("localhost".to_string(), 8080, 50051);
 
         assert_eq!(info.grpc_endpoint(), "http://localhost:50051");
         assert_eq!(info.http_endpoint(), "http://localhost:8080");

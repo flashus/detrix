@@ -413,6 +413,10 @@ impl MetricRepository for MockMetricRepository {
     async fn delete_by_connection_id(&self, _connection_id: &ConnectionId) -> Result<u64> {
         Ok(0)
     }
+
+    async fn migrate_connection_id(&self, _from: &ConnectionId, _to: &ConnectionId) -> Result<u64> {
+        Ok(0)
+    }
 }
 
 // =============================================================================

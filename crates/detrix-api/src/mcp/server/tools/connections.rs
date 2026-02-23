@@ -9,7 +9,7 @@ use crate::mcp::params::{
     CloseConnectionParams, CreateConnectionParams, GetConnectionParams, ListConnectionsParams,
 };
 use crate::state::ApiState;
-use detrix_core::ConnectionId;
+use detrix_core::{ConnectionId, UNKNOWN_WORKSPACE_ROOT};
 use rmcp::ErrorData as McpError;
 use std::sync::Arc;
 use tracing::info;
@@ -62,7 +62,7 @@ pub async fn create_connection_impl(
         .unwrap_or_else(|| format!("mcp-{}-{}:{}", params.language, params.host, params.port));
     let workspace_root = params
         .workspace_root
-        .unwrap_or_else(|| "/unknown".to_string());
+        .unwrap_or_else(|| UNKNOWN_WORKSPACE_ROOT.to_string());
     let hostname = params
         .hostname
         .unwrap_or_else(crate::common::resolve_hostname);

@@ -13,6 +13,22 @@ use tokio::sync::broadcast;
 
 use super::MetricService;
 
+/// Extension trait for mapping io::Error to the appropriate detrix_core::Error variant
+trait DiskReadExt {
+    fn disk_read(self, path: &str) -> detrix_core::Result<String>;
+}
+
+impl DiskReadExt for std::result::Result<String, std::io::Error> {
+    fn disk_read(self, path: &str) -> detrix_core::Result<String> {
+        self.map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => {
+                detrix_core::Error::FileNotFound(format!("File not found: {}", path))
+            }
+            _ => detrix_core::Error::Io(format!("Failed to read '{}': {}", path, e)),
+        })
+    }
+}
+
 /// Create a default disk-only VFS (reads from std::fs, no caching).
 ///
 /// Used when no VFS is explicitly configured (local daemon mode).
@@ -22,12 +38,7 @@ fn default_vfs() -> VfsRef {
 
     impl detrix_ports::VirtualFileSystem for DiskVfs {
         fn read_to_string(&self, path: &str) -> detrix_core::Result<String> {
-            std::fs::read_to_string(path).map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => {
-                    detrix_core::Error::FileNotFound(format!("File not found: {}", path))
-                }
-                _ => detrix_core::Error::Io(format!("Failed to read '{}': {}", path, e)),
-            })
+            std::fs::read_to_string(path).disk_read(path)
         }
         fn exists(&self, path: &str) -> detrix_core::Result<bool> {
             Ok(std::path::Path::new(path).exists())

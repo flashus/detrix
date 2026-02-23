@@ -28,8 +28,8 @@ use super::middleware::{auth_middleware, AuthState};
 use super::paths;
 use super::websocket::websocket_handler;
 use crate::http::handlers::references::{
-    admin_disconnect_all, attach_connection, list_references, release_connection,
-    release_connections,
+    admin_disable_metrics_by_owner, admin_disconnect_all, attach_connection, list_references,
+    release_connection, release_connections,
 };
 use crate::http::handlers::{
     add_metric, cleanup_connections, close_connection, create_connection, delete_metric,
@@ -333,6 +333,10 @@ pub fn create_router_with_jwt_validator(
         .route(
             paths::API_V1_ADMIN_DISCONNECT_ALL,
             post(admin_disconnect_all),
+        )
+        .route(
+            paths::API_V1_ADMIN_DISABLE_METRICS_BY_OWNER,
+            post(admin_disable_metrics_by_owner),
         )
         // Config management REST API
         .route(paths::API_V1_CONFIG, get(get_config).put(update_config))

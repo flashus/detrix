@@ -12,6 +12,7 @@ use crate::http::error::{HttpError, ToHttpResult};
 use crate::mcp_client_tracker::McpClientSummary;
 use crate::state::{ApiState, DaemonInfo};
 use axum::{extract::State, http::HeaderMap, Json};
+use detrix_config::constants::HEADER_CLIENT_ID;
 use detrix_core::connection_reference::ClientIdentity;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -222,9 +223,10 @@ pub async fn disconnect_all(
 
     // Global mode requires localhost — remote callers must provide X-Detrix-Client-Id
     if !addr.ip().is_loopback() {
-        return Err(HttpError::bad_request(
-            "X-Detrix-Client-Id header required for remote disconnect_all".to_string(),
-        ));
+        return Err(HttpError::bad_request(format!(
+            "{} header required for remote disconnect_all",
+            HEADER_CLIENT_ID
+        )));
     }
 
     info!("REST: disconnect_all (global, localhost)");

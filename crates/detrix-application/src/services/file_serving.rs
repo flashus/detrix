@@ -118,7 +118,7 @@ impl FileServingService {
         }
 
         // Standard disk serving
-        self.read_disk(file_path)
+        self.read_disk(file_path).await
     }
 
     /// Serve file from `git show commit:relative_path` with drift detection.
@@ -136,15 +136,16 @@ impl FileServingService {
                     file = file_path,
                     workspace_root, "File path not under workspace root, falling back to disk"
                 );
-                return self.read_disk(file_path);
+                return self.read_disk(file_path).await;
             }
         };
 
         // Try git show
         match git_show(workspace_root, commit, &relative_path).await {
             Ok(git_content) => {
-                // Drift detection: compare git content with disk
-                let differs_from_local = match std::fs::read_to_string(file_path) {
+                // Drift detection: compare git content with disk.
+                // Use tokio::fs to avoid blocking the async executor.
+                let differs_from_local = match tokio::fs::read_to_string(file_path).await {
                     Ok(disk_content) => Some(sha256_hex(&git_content) != sha256_hex(&disk_content)),
                     Err(_) => None, // No local file to compare
                 };
@@ -170,35 +171,32 @@ impl FileServingService {
                     error = %err,
                     "git show failed, falling back to disk"
                 );
-                self.read_disk(file_path)
+                self.read_disk(file_path).await
             }
         }
     }
 
     /// Standard disk file reading.
-    fn read_disk(&self, file_path: &str) -> Result<ReadFileResponse, FileServingError> {
-        let path = Path::new(file_path);
-
-        // Check file exists
-        let metadata = match std::fs::metadata(path) {
-            Ok(m) => m,
+    ///
+    /// Uses `tokio::fs` to avoid blocking the async executor thread.
+    async fn read_disk(&self, file_path: &str) -> Result<ReadFileResponse, FileServingError> {
+        // Check file exists and size via metadata
+        match tokio::fs::metadata(file_path).await {
+            Ok(m) => {
+                if m.len() > MAX_FILE_SIZE {
+                    warn!(
+                        path = file_path,
+                        size = m.len(),
+                        "File exceeds maximum size"
+                    );
+                    return Err(FileServingError::TooLarge { size: m.len() });
+                }
+            }
             Err(_) => return Err(FileServingError::NotFound),
-        };
-
-        // Check file size
-        if metadata.len() > MAX_FILE_SIZE {
-            warn!(
-                path = file_path,
-                size = metadata.len(),
-                "File exceeds maximum size"
-            );
-            return Err(FileServingError::TooLarge {
-                size: metadata.len(),
-            });
         }
 
         // Read file content
-        match std::fs::read_to_string(path) {
+        match tokio::fs::read_to_string(file_path).await {
             Ok(content) => Ok(ReadFileResponse {
                 content,
                 source: "disk".to_string(),

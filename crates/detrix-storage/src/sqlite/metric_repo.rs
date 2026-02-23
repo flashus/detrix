@@ -604,6 +604,29 @@ impl MetricRepository for SqliteStorage {
 
         Ok(deleted)
     }
+
+    async fn migrate_connection_id(&self, from: &ConnectionId, to: &ConnectionId) -> Result<u64> {
+        // UPDATE OR IGNORE skips rows that would violate the unique index on (location, connection_id),
+        // preserving any metric already present at the same location on the target connection.
+        let result =
+            sqlx::query("UPDATE OR IGNORE metrics SET connection_id = ? WHERE connection_id = ?")
+                .bind(&to.0)
+                .bind(&from.0)
+                .execute(self.pool())
+                .await?;
+
+        let migrated = result.rows_affected();
+        if migrated > 0 {
+            debug!(
+                from = %from.0,
+                to = %to.0,
+                migrated,
+                "Migrated metrics to new connection"
+            );
+        }
+
+        Ok(migrated)
+    }
 }
 
 /// Convert database row to Metric entity

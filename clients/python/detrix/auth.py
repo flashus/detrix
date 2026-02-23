@@ -90,7 +90,9 @@ def is_localhost(host: str) -> bool:
     """Check if host is localhost.
 
     Args:
-        host: Host string to check
+        host: Host string to check. Accepts bare hostnames ("localhost"),
+              IPv4 ("127.0.0.1"), IPv6 ("::1"), or host:port pairs
+              ("localhost:5678", "127.0.0.1:8090", "[::1]:8090").
 
     Returns:
         True if host is localhost
@@ -98,4 +100,14 @@ def is_localhost(host: str) -> bool:
     # Note: 0.0.0.0 is intentionally excluded - it's a bind address, not a client address.
     # A client connecting "from" 0.0.0.0 would indicate a spoofed or malformed request.
     localhost_names = {"localhost", "127.0.0.1", "::1"}
-    return host.lower() in localhost_names
+    # Strip port component when present, handling three cases:
+    # 1. Bracketed IPv6 with port: "[::1]:8090" → "::1"
+    # 2. IPv6 bare address: "::1" (multiple colons, no brackets) → use as-is
+    # 3. hostname:port or IPv4:port: "localhost:5678" → "localhost"
+    if host.startswith("["):
+        host_only = host[1:].split("]")[0]
+    elif host.count(":") > 1:
+        host_only = host  # bare IPv6, no port
+    else:
+        host_only = host.split(":")[0]
+    return host_only.lower() in localhost_names
