@@ -102,6 +102,8 @@ pub enum ErrorCode {
     NotAFile = 4307,
     /// Line not found (4308)
     LineNotFound = 4308,
+    /// Variable found only in non-executable locations (4309)
+    VariableNotInExecutableScope = 4309,
 
     // Infrastructure errors (5xxx)
     /// Database error (5001)
@@ -232,6 +234,7 @@ impl ErrorCode {
             ErrorCode::FileNotFound => ErrorCategory::Terminal,
             ErrorCode::NotAFile => ErrorCategory::Terminal,
             ErrorCode::LineNotFound => ErrorCategory::Terminal,
+            ErrorCode::VariableNotInExecutableScope => ErrorCategory::Terminal,
 
             // Security - authentication/authorization failures
             ErrorCode::Unauthorized => ErrorCategory::Security,
@@ -297,6 +300,7 @@ impl ErrorCode {
             ErrorCode::FileNotFound => "FILE_NOT_FOUND",
             ErrorCode::NotAFile => "NOT_A_FILE",
             ErrorCode::LineNotFound => "LINE_NOT_FOUND",
+            ErrorCode::VariableNotInExecutableScope => "VARIABLE_NOT_IN_EXECUTABLE_SCOPE",
 
             // Infrastructure errors (5xxx)
             ErrorCode::DatabaseError => "DATABASE_ERROR",

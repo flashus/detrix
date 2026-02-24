@@ -165,6 +165,10 @@ pub enum FileInspectionError {
         line: u32,
         total_lines: usize,
     },
+
+    /// Variable found only in non-executable locations (signatures, struct fields)
+    #[error("Variable '{variable}' found only in {location} — logpoints cannot be placed there")]
+    VariableNotInExecutableScope { variable: String, location: String },
 }
 
 impl FileInspectionError {
@@ -179,6 +183,9 @@ impl FileInspectionError {
             FileInspectionError::NotFound(_) => ErrorCode::FileNotFound,
             FileInspectionError::NotAFile(_) => ErrorCode::NotAFile,
             FileInspectionError::LineNotFound { .. } => ErrorCode::LineNotFound,
+            FileInspectionError::VariableNotInExecutableScope { .. } => {
+                ErrorCode::VariableNotInExecutableScope
+            }
         }
     }
 }

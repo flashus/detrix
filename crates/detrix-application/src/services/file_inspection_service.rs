@@ -528,13 +528,15 @@ impl FileInspectionService {
         let mut seen_lines = std::collections::HashSet::new();
         definitions.retain(|d| seen_lines.insert(d.line));
 
-        // Scope-based re-ordering: prefer lines inside function bodies over
-        // struct/type definitions and function signatures.
+        // Only keep definitions in executable locations.
         //
-        // Three tiers (best → worst for logpoint placement):
-        //   1. Function body usage — executable code inside a function
-        //   2. Function signature — parameter list / return type (useless for logpoints)
-        //   3. Out of scope — struct fields, package-level declarations
+        // Function signatures (parameter lists) and struct/type-level declarations
+        // cannot host DAP logpoints — returning them silently is misleading.
+        // Return a clear error instead so the caller can take corrective action.
+        //
+        // Exception: Python module-level code (containing_scope = None) IS
+        // executable — Python scripts run top-to-bottom without requiring a function
+        // wrapper, so those definitions are valid logpoint targets.
         if language.capabilities().has_ast_analysis && !definitions.is_empty() {
             let mut body_defs = Vec::new();
             let mut sig_defs = Vec::new();
@@ -551,9 +553,35 @@ impl FileInspectionService {
                 }
             }
 
+            // Python module-level code is executable; include it as valid.
+            // For Go/Rust, out_defs are struct fields/type declarations — not executable.
+            let python_module_level = language == SourceLanguage::Python && !out_defs.is_empty();
+
+            if body_defs.is_empty() && !python_module_level {
+                let location = if !sig_defs.is_empty() {
+                    let lines: Vec<String> = sig_defs.iter().map(|d| d.line.to_string()).collect();
+                    format!("function signature(s) (line {})", lines.join(", "))
+                } else {
+                    let lines: Vec<String> = out_defs.iter().map(|d| d.line.to_string()).collect();
+                    format!(
+                        "struct field(s) or type declaration(s) (line {})",
+                        lines.join(", ")
+                    )
+                };
+                return Err(
+                    crate::error::FileInspectionError::VariableNotInExecutableScope {
+                        variable: variable.to_string(),
+                        location,
+                    }
+                    .into(),
+                );
+            }
+
             definitions = body_defs;
-            definitions.extend(sig_defs);
-            definitions.extend(out_defs);
+            if python_module_level {
+                definitions.extend(out_defs);
+            }
+            // sig_defs always dropped; out_defs for Go/Rust dropped
         }
 
         let suggested_lines: Vec<u32> = definitions.iter().map(|d| d.line).collect();
@@ -1300,12 +1328,12 @@ mod tests {
     }
 
     #[test]
-    fn test_go_scope_aware_struct_and_func_header_deprioritized() {
+    fn test_go_scope_aware_struct_and_func_header_excluded() {
         // Go file with three places "symbol" appears:
-        //   1. Struct field definition (line 3)  — out of scope
-        //   2. Function signature/header (line 6) — useless for logpoints
-        //   3. Function body usage (line 11)      — best for logpoints
-        // The inspector should pick the function body usage first.
+        //   1. Struct field definition (line 3)  — not executable, must be excluded
+        //   2. Function signature/header (line 6) — not executable, must be excluded
+        //   3. Function body usage (line 12)      — only valid logpoint target
+        // The inspector should return ONLY the function body line.
         let mut file = NamedTempFile::with_suffix(".go").unwrap();
         writeln!(file, "package main").unwrap(); // 1
         writeln!(file, "type Order struct {{").unwrap(); // 2
@@ -1333,54 +1361,61 @@ mod tests {
         assert_eq!(lang, SourceLanguage::Go);
 
         if let FileInspectionResult::VariableSearch(search) = result {
+            // Only function body definitions are returned
             assert!(
-                search.definitions.len() >= 3,
-                "Expected at least 3 matches, got {}",
-                search.definitions.len()
+                !search.definitions.is_empty(),
+                "Expected at least one body match"
             );
+            for def in &search.definitions {
+                assert!(
+                    def.line >= 9,
+                    "All results must be inside main() (line >= 9), got line {} (code: {})",
+                    def.line,
+                    def.code
+                );
+            }
 
-            // First definition should be in main() body (line 12 = usage of symbol,
-            // or bumped line from assignment at line 11).
-            // It must NOT be the struct field (line 3) or func header (line 6).
-            let first = &search.definitions[0];
+            // Struct field (line 3) and func header (line 6) must NOT be in results
             assert!(
-                first.line >= 9,
-                "First match should be inside main() (line >= 9), got line {} (code: {})",
-                first.line,
-                first.code
-            );
-
-            // Struct field (line 3) and func header (line 6) should be after body matches
-            let struct_pos = search
-                .definitions
-                .iter()
-                .position(|d| d.line == 3)
-                .expect("struct field should be in results");
-            let header_pos = search
-                .definitions
-                .iter()
-                .position(|d| d.line == 6)
-                .expect("func header should be in results");
-            let body_pos = search
-                .definitions
-                .iter()
-                .position(|d| d.line >= 9)
-                .expect("body usage should be in results");
-
-            assert!(
-                body_pos < header_pos,
-                "body usage (pos {}) should come before func header (pos {})",
-                body_pos,
-                header_pos
+                search.definitions.iter().all(|d| d.line != 3),
+                "struct field (line 3) must be excluded"
             );
             assert!(
-                body_pos < struct_pos,
-                "body usage (pos {}) should come before struct field (pos {})",
-                body_pos,
-                struct_pos
+                search.definitions.iter().all(|d| d.line != 6),
+                "func header (line 6) must be excluded"
             );
         } else {
             panic!("Expected VariableSearch result");
         }
+    }
+
+    #[test]
+    fn test_go_only_struct_field_returns_error() {
+        // Variable only in a struct field — no executable location → error
+        let mut file = NamedTempFile::with_suffix(".go").unwrap();
+        writeln!(file, "package main").unwrap();
+        writeln!(file, "type Txn struct {{").unwrap();
+        writeln!(file, "    amount float64").unwrap();
+        writeln!(file, "}}").unwrap();
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("amount".to_string()),
+            workspace_root: None,
+        };
+
+        let result = service.inspect(request);
+        assert!(
+            result.is_err(),
+            "Expected error for struct-field-only variable"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("struct field"),
+            "Error should mention struct field, got: {}",
+            err
+        );
     }
 }
