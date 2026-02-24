@@ -6,7 +6,9 @@
 //!
 //! These tests verify the ConditionalRateLimitLayer behavior in production conditions.
 
-use detrix_testing::e2e::executor::{find_detrix_binary, TestDaemonSetup, TestPortCounter};
+use detrix_testing::e2e::executor::{
+    find_detrix_binary, wait_for_port, TestDaemonSetup, TestPortCounter,
+};
 use reqwest::StatusCode;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -159,32 +161,6 @@ impl Drop for LocalhostExemptTestExecutor {
     fn drop(&mut self) {
         self.stop();
     }
-}
-
-/// Wait for HTTP server to be ready
-async fn wait_for_port(port: u16, timeout_secs: u64) -> bool {
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(timeout_secs);
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .expect("Failed to create HTTP client");
-
-    let url = format!("http://127.0.0.1:{}/health", port);
-
-    while start.elapsed() < timeout {
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 429 => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                return true;
-            }
-            _ => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    }
-    false
 }
 
 // ============================================================================

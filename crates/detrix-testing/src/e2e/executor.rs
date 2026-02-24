@@ -31,8 +31,26 @@ use std::time::Duration;
 /// Directory for storing test process PID files
 const E2E_PID_DIR: &str = "/tmp/detrix_e2e_pids";
 
+/// Default startup timeout for Python/debugpy (Python interpreter + module loading is slow)
+pub const DEBUGPY_STARTUP_TIMEOUT_SECS: u64 = 60;
+
+/// Default startup timeout for native compiled debuggers (delve, lldb-dap, codelldb)
+pub const NATIVE_DEBUGGER_STARTUP_TIMEOUT_SECS: u64 = 15;
+
 /// Track if PID cleanup has been run this session
 static E2E_CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Track if stale orphan cleanup has been run this session.
+///
+/// `cleanup_stale_orphans()` is called from `TestExecutor::new()` for every test
+/// function. It must only run ONCE per binary execution — otherwise it kills
+/// active daemons from other parallel tests.
+///
+/// Background: daemons started with `--daemon` use double-fork, so their PPID
+/// becomes 1 (launchd/init). The PPID=1 heuristic in `kill_orphaned_test_daemons()`
+/// cannot distinguish orphaned stale daemons from active daemons owned by other
+/// parallel tests in the same binary.
+static E2E_STALE_CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
 
 /// Get the workspace root directory
 ///
@@ -691,7 +709,7 @@ pub async fn restart_delve(port: u16, binary_path: &str) -> Result<Child, String
             register_e2e_process("delve", process.id());
 
             // Wait for it to be ready
-            if wait_for_port(port, 15).await {
+            if wait_for_debugger_port(port, NATIVE_DEBUGGER_STARTUP_TIMEOUT_SECS).await {
                 Ok(process)
             } else {
                 Err(format!(
@@ -739,7 +757,7 @@ pub async fn restart_lldb(
             register_e2e_process("lldb", process.id());
 
             // Wait for it to be ready
-            if wait_for_port(port, 15).await {
+            if wait_for_debugger_port(port, NATIVE_DEBUGGER_STARTUP_TIMEOUT_SECS).await {
                 Ok(process)
             } else {
                 Err(format!(
@@ -752,22 +770,77 @@ pub async fn restart_lldb(
     }
 }
 
-/// Wait for TCP port using lsof (doesn't consume the connection)
+/// Wait for a daemon TCP port (HTTP/gRPC) to become active.
+///
+/// Uses `TcpStream::connect` so we never temporarily hold the port. HTTP/gRPC
+/// servers handle a bare connect→immediate-close gracefully.
+///
+/// Do NOT use this for DAP debugger ports (debugpy, delve, lldb-dap) — DAP
+/// servers may terminate when a client connects without completing the handshake.
+/// Use `wait_for_debugger_port` for those instead.
 #[cfg(unix)]
 pub async fn wait_for_port(port: u16, timeout_secs: u64) -> bool {
+    use std::net::TcpStream as StdTcpStream;
+    use std::time::Duration as StdDuration;
+
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
 
     while start.elapsed() < timeout {
-        let output = Command::new("lsof")
-            .args(["-i", &format!(":{}", port), "-sTCP:LISTEN"])
-            .output();
+        if StdTcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            StdDuration::from_millis(100),
+        )
+        .is_ok()
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    false
+}
 
-        if let Ok(out) = output {
-            if out.status.success() && !out.stdout.is_empty() {
-                return true;
+/// Wait for a DAP debugger port (debugpy, delve, lldb-dap) to become active.
+///
+/// Uses `TcpListener::bind` probe: if bind fails with EADDRINUSE, the debugger is
+/// listening. This avoids connecting to the debugger, which would consume debugpy's
+/// `--wait-for-client` client slot and corrupt its state.
+///
+/// The caller must pass an optional process handle so we can exit early if the
+/// debugger process dies (instead of waiting for the full timeout).
+///
+/// Under heavy concurrent load (8+ tests), Python+debugpy startup can exceed 10s,
+/// so callers should use generous timeouts (30-60s).
+pub async fn wait_for_debugger_port(port: u16, timeout_secs: u64) -> bool {
+    wait_for_debugger_port_with_process(port, timeout_secs, None).await
+}
+
+/// Like `wait_for_debugger_port` but with an optional process handle for early exit.
+pub async fn wait_for_debugger_port_with_process(
+    port: u16,
+    timeout_secs: u64,
+    mut process: Option<&mut Child>,
+) -> bool {
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(timeout_secs);
+
+    while start.elapsed() < timeout {
+        // Bind probe: fails (EADDRINUSE) when the debugger is listening — desired.
+        if TcpListener::bind(("127.0.0.1", port)).is_err() {
+            return true;
+        }
+
+        // Early exit: if the debugger process has died, stop waiting.
+        if let Some(ref mut proc) = process {
+            if let Ok(Some(_status)) = proc.try_wait() {
+                eprintln!(
+                    "wait_for_debugger_port: process died while waiting for port {}",
+                    port
+                );
+                return false;
             }
         }
+
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     false
@@ -830,7 +903,7 @@ pub fn start_debugpy_setsid(port: u16, script_path: &str) -> Result<Child, std::
         "-m",
         "debugpy",
         "--listen",
-        &port.to_string(),
+        &format!("127.0.0.1:{}", port),
         "--wait-for-client",
         script_path,
     ])
@@ -870,7 +943,7 @@ pub fn start_delve_dap(port: u16, binary_path: &str) -> Result<Child, std::io::E
         "exec",
         binary_path,
         "--headless",
-        &format!("--listen=:{}", port),
+        &format!("--listen=127.0.0.1:{}", port),
         "--api-version=2",
         "--accept-multiclient",
     ])
@@ -1176,6 +1249,8 @@ pub struct TestExecutor {
     pub daemon_log_path: Option<PathBuf>,
     /// Path to daemon PID file (for killing forked daemon)
     pub daemon_pid_path: Option<PathBuf>,
+    /// Path to daemon config file (for PID-reuse-safe kill in stop_all)
+    pub daemon_config_path: Option<PathBuf>,
     pub workspace_root: PathBuf,
     /// PIDs of child processes spawned by debuggers (detrix_example_app, etc.)
     /// These need to be explicitly killed during cleanup
@@ -1219,6 +1294,7 @@ impl TestExecutor {
             daemon_process: None,
             daemon_log_path: None,
             daemon_pid_path: None,
+            daemon_config_path: None,
             workspace_root,
             child_pids: Vec::new(),
             rust_binary_path: None,
@@ -1236,8 +1312,18 @@ impl TestExecutor {
     ///
     /// Only kills processes that are orphaned (PPID=1) to avoid
     /// interfering with currently running tests.
+    ///
+    /// IMPORTANT: This must only run ONCE per binary execution. Daemons started with
+    /// `--daemon` use double-fork → their PPID is always 1, indistinguishable from
+    /// truly orphaned stale daemons. Running this for every test would kill active
+    /// daemons from other parallel tests in the same binary.
     #[cfg(unix)]
     fn cleanup_stale_orphans() {
+        // Guard: only run once per binary execution
+        if E2E_STALE_CLEANUP_DONE.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
         // Immediate SIGKILL is fine for these — no ptrace involvement
         Self::kill_orphaned_by_name("detrix_example_app", false);
         Self::kill_orphaned_by_name("lldb-dap", false);
@@ -1580,31 +1666,58 @@ impl TestExecutor {
         if self.debugpy_port == 0 {
             self.debugpy_port = get_debugpy_port();
         }
-        // Kill any process on this port (more reliable than pattern matching)
-        self.kill_process_on_port(self.debugpy_port);
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        // Verify port is now available
+        // Only invoke the port-kill path if something unexpected is already using the port.
+        // The port registry guarantees uniqueness, so in the common case the port is free
+        // and we skip the slow lsof-based kill entirely (saves ~300ms + one lsof call per test).
         if !is_port_available(self.debugpy_port) {
-            return Err(format!(
-                "Port {} is still in use after cleanup",
-                self.debugpy_port
-            ));
+            self.kill_process_on_port(self.debugpy_port);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            if !is_port_available(self.debugpy_port) {
+                return Err(format!(
+                    "Port {} is still in use after cleanup",
+                    self.debugpy_port
+                ));
+            }
         }
 
         match start_debugpy_setsid(self.debugpy_port, script_path) {
-            Ok(process) => {
+            Ok(mut process) => {
+                let pid = process.id();
                 // Register process for cleanup tracking
-                register_e2e_process("debugpy", process.id());
+                register_e2e_process("debugpy", pid);
+
+                // Wait for port to be open, with early exit if process dies
+                let detected = wait_for_debugger_port_with_process(
+                    self.debugpy_port,
+                    DEBUGPY_STARTUP_TIMEOUT_SECS,
+                    Some(&mut process),
+                )
+                .await;
+
                 self.debugpy_process = Some(process);
 
-                // Wait for port to be open
-                if wait_for_port(self.debugpy_port, 10).await {
+                if detected {
                     Ok(())
                 } else {
+                    // Diagnose: is the process still alive?
+                    let alive = self
+                        .debugpy_process
+                        .as_mut()
+                        .map(|p| p.try_wait().ok().flatten().is_none())
+                        .unwrap_or(false);
+                    let exit_status = if !alive {
+                        self.debugpy_process
+                            .as_mut()
+                            .and_then(|p| p.try_wait().ok().flatten())
+                            .map(|s| format!("{}", s))
+                            .unwrap_or_else(|| "unknown".to_string())
+                    } else {
+                        "still running".to_string()
+                    };
                     Err(format!(
-                        "debugpy not listening on port {} after spawn",
-                        self.debugpy_port
+                        "debugpy not listening on port {} after spawn (pid={}, alive={}, status={})",
+                        self.debugpy_port, pid, alive, exit_status
                     ))
                 }
             }
@@ -1621,16 +1734,17 @@ impl TestExecutor {
         if self.delve_port == 0 {
             self.delve_port = get_delve_port();
         }
-        // Kill any process on this port (more reliable than pattern matching)
-        self.kill_process_on_port(self.delve_port);
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        // Verify port is now available
+        // Only invoke port-kill if something unexpected is already using the port
         if !is_port_available(self.delve_port) {
-            return Err(format!(
-                "Port {} is still in use after cleanup",
-                self.delve_port
-            ));
+            self.kill_process_on_port(self.delve_port);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            if !is_port_available(self.delve_port) {
+                return Err(format!(
+                    "Port {} is still in use after cleanup",
+                    self.delve_port
+                ));
+            }
         }
 
         // Build Go binary with debug symbols
@@ -1668,7 +1782,9 @@ impl TestExecutor {
                 self.delve_process = Some(process);
 
                 // Wait for port to be open
-                if wait_for_port(self.delve_port, 15).await {
+                if wait_for_debugger_port(self.delve_port, NATIVE_DEBUGGER_STARTUP_TIMEOUT_SECS)
+                    .await
+                {
                     // Note: child processes (detrix_example_app) are tracked at cleanup time
                     // because they're only spawned after DAP client connects
                     Ok(())
@@ -1702,16 +1818,17 @@ impl TestExecutor {
         if self.lldb_port == 0 {
             self.lldb_port = get_lldb_port();
         }
-        // Kill any process on this port (more reliable than pattern matching)
-        self.kill_process_on_port(self.lldb_port);
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        // Verify port is now available
+        // Only invoke port-kill if something unexpected is already using the port
         if !is_port_available(self.lldb_port) {
-            return Err(format!(
-                "Port {} is still in use after cleanup",
-                self.lldb_port
-            ));
+            self.kill_process_on_port(self.lldb_port);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            if !is_port_available(self.lldb_port) {
+                return Err(format!(
+                    "Port {} is still in use after cleanup",
+                    self.lldb_port
+                ));
+            }
         }
 
         // Build Rust binary once and reuse across all tests
@@ -1784,7 +1901,9 @@ impl TestExecutor {
                 self.lldb_process = Some(process);
 
                 // Wait for port to be open
-                if wait_for_port(self.lldb_port, 15).await {
+                if wait_for_debugger_port(self.lldb_port, NATIVE_DEBUGGER_STARTUP_TIMEOUT_SECS)
+                    .await
+                {
                     Ok(())
                 } else {
                     Err(format!(
@@ -1813,16 +1932,17 @@ impl TestExecutor {
         if self.codelldb_port == 0 {
             self.codelldb_port = get_codelldb_port();
         }
-        // Kill any process on this port (more reliable than pattern matching)
-        self.kill_process_on_port(self.codelldb_port);
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        // Verify port is now available
+        // Only invoke port-kill if something unexpected is already using the port
         if !is_port_available(self.codelldb_port) {
-            return Err(format!(
-                "Port {} is still in use after cleanup",
-                self.codelldb_port
-            ));
+            self.kill_process_on_port(self.codelldb_port);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            if !is_port_available(self.codelldb_port) {
+                return Err(format!(
+                    "Port {} is still in use after cleanup",
+                    self.codelldb_port
+                ));
+            }
         }
 
         // Build Rust binary once and reuse across all tests (shared with start_lldb)
@@ -1895,7 +2015,9 @@ impl TestExecutor {
                 self.codelldb_process = Some(process);
 
                 // Wait for port to be open
-                if wait_for_port(self.codelldb_port, 15).await {
+                if wait_for_debugger_port(self.codelldb_port, NATIVE_DEBUGGER_STARTUP_TIMEOUT_SECS)
+                    .await
+                {
                     Ok(())
                 } else {
                     Err(format!(
@@ -2008,12 +2130,17 @@ impl TestExecutor {
             p.to_string_lossy().to_string()
         }
 
+        let log_dir_path = self.temp_dir.path().join("log");
         let workspace_path_str = to_toml_path(&self.workspace_root);
         let db_path_str = to_toml_path(&db_path);
         let pid_path_str = to_toml_path(&pid_path);
+        let log_dir_str = to_toml_path(&log_dir_path);
 
         // port_fallback = false: the TestPortRegistry guarantees port availability,
-        // and fallback scanning can cause port stealing between concurrent tests
+        // and fallback scanning can cause port stealing between concurrent tests.
+        // dlq_storage backend = "sqlite_memory": avoids shared ~/detrix/dlq.db contention
+        //   across concurrent test daemons (same fix applied in mcp_bridge_e2e).
+        // log_dir: isolated per test to avoid shared ~/detrix/log/ race conditions.
         let config_content = format!(
             r#"
 [metadata]
@@ -2026,8 +2153,15 @@ base_path = "{}"
 storage_type = "sqlite"
 path = "{}"
 
+[storage.dlq_storage]
+backend = "sqlite_memory"
+
 [daemon]
 pid_file = "{}"
+
+[daemon.logging]
+log_dir = "{}"
+file_logging_enabled = false
 
 [api]
 port_fallback = false
@@ -2048,11 +2182,19 @@ port = {}
 [safety]
 enable_ast_analysis = false
 "#,
-            workspace_path_str, db_path_str, pid_path_str, self.http_port, self.grpc_port,
+            workspace_path_str,
+            db_path_str,
+            pid_path_str,
+            log_dir_str,
+            self.http_port,
+            self.grpc_port,
         );
 
         let config_path = self.temp_dir.path().join("detrix.toml");
         std::fs::write(&config_path, config_content).map_err(|e| e.to_string())?;
+
+        // Store config path for PID-reuse-safe daemon kill in stop_all()
+        self.daemon_config_path = Some(config_path.clone());
 
         // Find binary using standard search paths
         let binary_path = match find_detrix_binary(&self.workspace_root) {
@@ -2107,6 +2249,9 @@ enable_ast_analysis = false
                 "RUST_LOG",
                 "detrix_cli=debug,detrix_dap=debug,detrix_application=debug,detrix_api=debug,info",
             )
+            // Isolate DETRIX_HOME to the per-test temp dir so that any fallback paths
+            // (auth-token, credentials.toml, default DB) don't collide across parallel tests.
+            .env("DETRIX_HOME", self.temp_dir.path())
             .stdin(Stdio::null())
             .stdout(Stdio::from(daemon_log_file))
             .stderr(Stdio::from(daemon_log_stderr))
@@ -2214,12 +2359,32 @@ enable_ast_analysis = false
             let _ = p.wait(); // Wait to reap spawner zombie
         }
 
-        // Kill the actual forked daemon by reading PID from file
+        // Kill the actual forked daemon by reading PID from file.
+        // Uses config-path verification to guard against PID reuse: if this test's daemon
+        // died and its PID was recycled by another daemon, we must NOT kill the wrong process.
+        let daemon_config_path = self.daemon_config_path.take();
         if let Some(pid_path) = self.daemon_pid_path.take() {
             if let Ok(content) = std::fs::read_to_string(&pid_path) {
                 if let Ok(info) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(pid) = info.get("pid").and_then(|v| v.as_u64()) {
-                        Self::kill_daemon_pid(pid as u32);
+                        // Verify the PID still runs OUR daemon (config path check prevents
+                        // killing a different daemon that recycled this PID).
+                        let should_kill = if let Some(ref cfg) = daemon_config_path {
+                            let cfg_str = cfg.to_string_lossy();
+                            // safe_sigterm_for_config sends SIGTERM and returns whether it did so.
+                            // If it returns false the PID was reused — skip.
+                            safe_sigterm_for_config(pid, &cfg_str)
+                        } else {
+                            // No config path stored — fall back to unconditional kill
+                            Self::kill_daemon_pid(pid as u32);
+                            false // already killed
+                        };
+
+                        if should_kill {
+                            // SIGTERM was sent; wait briefly for graceful exit, then SIGKILL
+                            Self::wait_and_force_kill_daemon(pid as u32);
+                        }
+
                         // Unregister from E2E cleanup tracking
                         unregister_e2e_process("daemon", pid as u32);
                     }
@@ -2325,6 +2490,35 @@ enable_ast_analysis = false
 
     #[cfg(windows)]
     fn kill_daemon_pid(pid: u32) {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .output();
+    }
+
+    /// Wait for a daemon (PID) to exit after SIGTERM, then SIGKILL if still alive.
+    ///
+    /// Used by `stop_all()` after `safe_sigterm_for_config()` has sent SIGTERM.
+    /// Waits up to 200ms for graceful exit, then forces with SIGKILL.
+    #[cfg(unix)]
+    fn wait_and_force_kill_daemon(pid: u32) {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+
+        let nix_pid = Pid::from_raw(pid as i32);
+        for _ in 0..2 {
+            std::thread::sleep(std::time::Duration::from_millis(
+                DEFAULT_DAEMON_POLL_INTERVAL_MS,
+            ));
+            if kill(nix_pid, None).is_err() {
+                return; // Exited gracefully
+            }
+        }
+        let _ = kill(nix_pid, Signal::SIGKILL);
+    }
+
+    /// Windows stub for `wait_and_force_kill_daemon`.
+    #[cfg(windows)]
+    fn wait_and_force_kill_daemon(pid: u32) {
         let _ = Command::new("taskkill")
             .args(["/F", "/PID", &pid.to_string()])
             .output();

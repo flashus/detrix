@@ -152,18 +152,20 @@ impl ToolDependency {
     }
 }
 
-/// Require a tool for test execution
+/// Require a tool for test execution.
 ///
-/// Returns true if the tool is available, false if not.
-/// When unavailable:
-/// - Prints a warning message
-/// - Records the dependency as missing for end-of-suite summary
+/// **Default (strict) behavior**: panics with a clear error if the tool is missing.
+/// This ensures missing tools are never silently ignored in CI or dev environments.
+///
+/// **Permissive behavior**: set `SKIP_MISSING_TOOLS=1` to restore the old "skip
+/// gracefully" behavior — prints a warning and returns false so the test can return
+/// early instead of panicking.
 ///
 /// # Usage
 ///
 /// ```ignore
 /// if !require_tool(ToolDependency::Debugpy).await {
-///     return; // Test skipped
+///     return; // Only reached when SKIP_MISSING_TOOLS=1
 /// }
 /// ```
 pub async fn require_tool(tool: ToolDependency) -> bool {
@@ -174,10 +176,20 @@ pub async fn require_tool(tool: ToolDependency) -> bool {
     let name = tool.name();
     record_missing(name);
 
-    eprintln!("\n\x1b[33m⚠ SKIPPING TEST: {} not available\x1b[0m", name);
-    eprintln!("  Install with: {}\n", get_install_hint(name));
+    if std::env::var("SKIP_MISSING_TOOLS").is_ok() {
+        // Permissive mode: skip gracefully (caller returns early)
+        eprintln!("\n\x1b[33m⚠ SKIPPING TEST: {} not available\x1b[0m", name);
+        eprintln!("  Install with: {}\n", get_install_hint(name));
+        return false;
+    }
 
-    false
+    // Strict mode (default): panic so the missing tool is never silently ignored
+    panic!(
+        "\n\x1b[1;31m✗ REQUIRED TOOL MISSING: {}\x1b[0m\n  Install with: {}\n  \
+         To skip tests with missing tools instead of failing, set SKIP_MISSING_TOOLS=1\n",
+        name,
+        get_install_hint(name)
+    );
 }
 
 // ============================================================================
@@ -262,9 +274,13 @@ pub async fn is_lldb_available() -> bool {
     false
 }
 
-/// Check if pyright (Python LSP) is available
+/// Check if pyright (Python LSP) is available.
+///
+/// Uses the `pyright` CLI binary (not `pyright-langserver`) because the server
+/// binary doesn't accept `--version` — it expects an LSP connection handshake.
+/// Both binaries are always installed together by the same package.
 pub async fn is_pyright_available() -> bool {
-    let result = Command::new("pyright-langserver")
+    let result = Command::new("pyright")
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -422,7 +438,10 @@ pub async fn is_codelldb_available() -> bool {
     false
 }
 
-/// Macro to skip test if tool is not available (with tracking)
+/// Macro to require a tool, failing if not available (with tracking).
+///
+/// **Default (strict)**: panics if tool is missing.
+/// **Permissive**: set `SKIP_MISSING_TOOLS=1` to skip gracefully instead.
 ///
 /// Prefer using `require_tool(ToolDependency::X)` for new code.
 /// This macro is kept for backwards compatibility.
@@ -437,11 +456,18 @@ macro_rules! skip_if_unavailable {
     ($check_fn:expr, $tool_name:expr) => {
         if !$check_fn.await {
             $crate::e2e::availability::record_missing($tool_name);
-            eprintln!(
-                "\n\x1b[33m⚠ SKIPPING TEST: {} not available\x1b[0m\n",
+            if std::env::var("SKIP_MISSING_TOOLS").is_ok() {
+                eprintln!(
+                    "\n\x1b[33m⚠ SKIPPING TEST: {} not available\x1b[0m\n",
+                    $tool_name
+                );
+                return;
+            }
+            panic!(
+                "\n\x1b[1;31m✗ REQUIRED TOOL MISSING: {}\x1b[0m\n  \
+                 To skip tests with missing tools instead of failing, set SKIP_MISSING_TOOLS=1\n",
                 $tool_name
             );
-            return;
         }
     };
 }

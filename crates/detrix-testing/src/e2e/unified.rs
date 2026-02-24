@@ -2281,12 +2281,12 @@ macro_rules! unified_test {
             async fn [<test_ $backend _ $name>]() {
                 use $crate::e2e::unified::*;
                 use $crate::e2e::executor::TestExecutor;
-                use $crate::e2e::is_debugpy_available;
+                use $crate::e2e::availability::require_tool;
+                use $crate::e2e::availability::ToolDependency;
 
-                // Runtime availability check - skip if debugpy not installed
-                if !is_debugpy_available().await {
-                    eprintln!("Skipping test: debugpy not available");
-                    return;
+                // Require debugpy — panics if missing (set SKIP_MISSING_TOOLS=1 to skip instead)
+                if !require_tool(ToolDependency::Debugpy).await {
+                    return; // Only reached when SKIP_MISSING_TOOLS=1
                 }
 
                 let mut ctx = match [<create_ $backend _context>](stringify!($name)).await {

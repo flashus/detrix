@@ -479,15 +479,26 @@ pub async fn run(
         None
     };
 
-    // Restore connections from previous sessions in the BACKGROUND
-    // This allows the HTTP server to start immediately without blocking on
-    // reconnection attempts that may take a long time (especially if debuggers are not running)
+    // Snapshot connections from previous sessions BEFORE the HTTP server starts.
+    // This is critical: once the HTTP server is up, clients can create new connections.
+    // By taking the snapshot here (pre-HTTP), we guarantee that the background restore
+    // task only ever touches connections that existed at daemon launch time and never
+    // interferes with adapters started by the current session's client requests.
+    let startup_connections = app_context
+        .connection_service
+        .list_connections_for_startup_restore()
+        .await;
+
+    // Restore connections from previous sessions in the BACKGROUND.
+    // We pass the pre-captured snapshot so the task cannot race with incoming clients.
     // - If debugger is still running → reconnect
     // - If debugger is gone → delete the connection
     {
         let connection_service = Arc::clone(&app_context.connection_service);
         tokio::spawn(async move {
-            let (reconnected, deleted) = connection_service.restore_connections_on_startup().await;
+            let (reconnected, deleted) = connection_service
+                .restore_connections_on_startup(startup_connections)
+                .await;
             if reconnected > 0 || deleted > 0 {
                 info!(
                     "🔄 Connection restore: {} reconnected, {} removed (debuggers not running)",

@@ -519,8 +519,8 @@ async fn test_e2e_workspace_isolation() {
     use detrix_testing::e2e::{
         availability::{require_tool, ToolDependency},
         executor::{
-            get_debugpy_port, register_e2e_process, start_debugpy_setsid, wait_for_port,
-            TestExecutor,
+            get_debugpy_port, register_e2e_process, start_debugpy_setsid, wait_for_debugger_port,
+            TestExecutor, DEBUGPY_STARTUP_TIMEOUT_SECS,
         },
         reporter::TestReporter,
     };
@@ -564,7 +564,7 @@ async fn test_e2e_workspace_isolation() {
         .expect("Failed to spawn debugpy #2");
     register_e2e_process("debugpy", debugpy2.id());
 
-    if !wait_for_port(port2, 10).await {
+    if !wait_for_debugger_port(port2, DEBUGPY_STARTUP_TIMEOUT_SECS).await {
         let _ = debugpy2.kill();
         reporter.step_failed(step, &format!("debugpy #2 not listening on {}", port2));
         panic!("debugpy #2 timeout");

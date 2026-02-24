@@ -538,8 +538,11 @@ impl ApiClient for CliClient {
             args.push(group.clone());
         }
 
-        // Note: CLI doesn't support --disabled flag, metrics are enabled by default
-        // We'll disable after creation if needed
+        // Pass --enabled false directly to create as disabled (avoids needing adapter for disabled metrics)
+        if let Some(false) = request.enabled {
+            args.push("--enabled".to_string());
+            args.push("false".to_string());
+        }
 
         if let Some(capture_stack_trace) = request.capture_stack_trace {
             if capture_stack_trace {
@@ -555,14 +558,6 @@ impl ApiClient for CliClient {
 
         let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let _output = self.run_command(&args_refs).await?;
-
-        // If metric should be disabled, disable it now
-        if let Some(enabled) = request.enabled {
-            if !enabled {
-                self.run_command(&["metric", "disable", &request.name])
-                    .await?;
-            }
-        }
 
         // Return the metric name
         Ok(ApiResponse::new(request.name))

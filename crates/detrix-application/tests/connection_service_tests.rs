@@ -1325,3 +1325,104 @@ async fn test_mock_metric_repo_migrate_empty_source_is_noop() {
     assert_eq!(migrated, 0);
     assert_eq!(repo.count(), 0);
 }
+
+/// Regression test for the startup-restore race condition.
+///
+/// `restore_connections_on_startup` is spawned as a background task. Under heavy parallel
+/// load it may run AFTER the current session has already created and connected connections.
+/// The fix: the caller (serve.rs) captures a snapshot of connections BEFORE the HTTP
+/// server starts, and passes that snapshot to the restore task.  Connections created
+/// AFTER the server starts are therefore never in the snapshot and cannot be touched.
+///
+/// This test verifies BOTH halves of the fix:
+/// 1. An empty snapshot → restore does nothing even if active connections exist.
+/// 2. A snapshot with a Connected connection → restore still skips it (has_adapter guard).
+#[tokio::test]
+async fn test_restore_connections_skips_already_connected() {
+    // Arrange: set up service and create a connected connection
+    let (repo, metric_repo, reference_repo, lifecycle_manager, system_event_tx, vfs) =
+        create_test_fixtures();
+    let service = ConnectionService::new(
+        repo.clone(),
+        metric_repo,
+        reference_repo.clone(),
+        lifecycle_manager,
+        system_event_tx,
+        vfs,
+    );
+
+    let identity = ConnectionIdentity::new(
+        "race-test-app",
+        SourceLanguage::Python,
+        "/workspace",
+        "host1",
+    );
+
+    let connection_id = service
+        .create_connection(
+            "127.0.0.1".to_string(),
+            5678,
+            identity,
+            None,  // program
+            None,  // pid
+            false, // safe_mode
+        )
+        .await
+        .unwrap();
+
+    // Verify connection is Connected and adapter is running
+    let conn = repo.get_connection(&connection_id).await.unwrap();
+    assert_eq!(conn.status, ConnectionStatus::Connected);
+    assert!(service.has_running_adapter(&connection_id).await);
+
+    // Case 1: empty snapshot (simulate: server started → client created connection → restore runs
+    // with the pre-server snapshot that didn't include this connection yet).
+    // Even if the restore task runs after the connection is created, the empty snapshot means
+    // it will not process any connections → the active connection is untouched.
+    let (reconnected, deleted) = service.restore_connections_on_startup(vec![]).await;
+
+    assert_eq!(
+        reconnected, 0,
+        "empty snapshot: restore should not reconnect anything"
+    );
+    assert_eq!(
+        deleted, 0,
+        "empty snapshot: restore should not delete anything"
+    );
+
+    let conn_after = repo.get_connection(&connection_id).await.unwrap();
+    assert_eq!(
+        conn_after.status,
+        ConnectionStatus::Connected,
+        "empty snapshot: restore must not change status of an active connection"
+    );
+    assert!(
+        service.has_running_adapter(&connection_id).await,
+        "empty snapshot: restore must not stop the running adapter"
+    );
+
+    // Case 2: snapshot includes the connected connection (e.g. snapshot was taken late).
+    // The has_adapter guard ensures even a snapshotted Connected connection is skipped.
+    let snapshot = service.list_connections().await.unwrap();
+    let (reconnected2, deleted2) = service.restore_connections_on_startup(snapshot).await;
+
+    assert_eq!(
+        reconnected2, 0,
+        "late snapshot: Connected connection must be skipped"
+    );
+    assert_eq!(
+        deleted2, 0,
+        "late snapshot: Connected connection must not be deleted"
+    );
+
+    let conn_final = repo.get_connection(&connection_id).await.unwrap();
+    assert_eq!(
+        conn_final.status,
+        ConnectionStatus::Connected,
+        "late snapshot: restore must not change status of an active connection"
+    );
+    assert!(
+        service.has_running_adapter(&connection_id).await,
+        "late snapshot: restore must not stop the running adapter"
+    );
+}

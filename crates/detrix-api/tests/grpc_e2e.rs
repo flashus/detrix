@@ -44,7 +44,7 @@ use detrix_application::{
 };
 use detrix_dap::DapAdapterFactoryImpl;
 use detrix_storage::{SqliteConfig, SqliteStorage};
-use detrix_testing::e2e::{require_tool, ToolDependency};
+use detrix_testing::e2e::{executor::wait_for_debugger_port, require_tool, ToolDependency};
 use std::net::SocketAddr;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -80,26 +80,6 @@ async fn start_debugpy_server(port: u16, script_path: &str) -> Result<Child, std
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-}
-
-/// Wait for a port to be listening using lsof (doesn't consume the connection)
-async fn wait_for_port(port: u16, timeout_secs: u64) -> bool {
-    let start = std::time::Instant::now();
-    let timeout_duration = Duration::from_secs(timeout_secs);
-
-    while start.elapsed() < timeout_duration {
-        let output = std::process::Command::new("lsof")
-            .args(["-i", &format!(":{}", port), "-sTCP:LISTEN"])
-            .output();
-
-        if let Ok(out) = output {
-            if out.status.success() && !out.stdout.is_empty() {
-                return true;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    false
 }
 
 // ============================================================================
@@ -141,7 +121,7 @@ impl E2ETestServer {
             .expect("Failed to start debugpy");
 
         // Wait for debugpy to be ready
-        if !wait_for_port(debugpy_port, 10).await {
+        if !wait_for_debugger_port(debugpy_port, 60).await {
             panic!("debugpy did not start listening on port {}", debugpy_port);
         }
 

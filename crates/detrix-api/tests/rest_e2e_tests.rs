@@ -2,7 +2,7 @@
 
 use detrix_testing::e2e::client::ApiClient;
 use detrix_testing::e2e::executor::{
-    get_debugpy_port, register_e2e_process, start_debugpy_setsid, wait_for_port,
+    get_debugpy_port, register_e2e_process, start_debugpy_setsid, wait_for_debugger_port,
 };
 use detrix_testing::e2e::rest::RestClient;
 use detrix_testing::e2e::TestExecutor;
@@ -224,7 +224,7 @@ async fn test_touch_connections_batch() {
     let mut debugpy2 = start_debugpy_setsid(port2, script).expect("Failed to spawn debugpy #2");
     register_e2e_process("debugpy", debugpy2.id());
 
-    if !wait_for_port(port2, 10).await {
+    if !wait_for_debugger_port(port2, 60).await {
         let _ = debugpy2.kill();
         panic!("debugpy #2 not listening on port {}", port2);
     }

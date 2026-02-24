@@ -12,7 +12,9 @@
 //!
 //! Note: These tests must run serially as they use the daemon process.
 
-use detrix_testing::e2e::executor::{find_detrix_binary, TestDaemonSetup, TestPortCounter};
+use detrix_testing::e2e::executor::{
+    find_detrix_binary, wait_for_port, TestDaemonSetup, TestPortCounter,
+};
 use reqwest::StatusCode;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -169,36 +171,6 @@ impl Drop for RateLimitTestExecutor {
     fn drop(&mut self) {
         self.stop();
     }
-}
-
-/// Wait for HTTP server to be ready by making actual health check requests
-async fn wait_for_port(port: u16, timeout_secs: u64) -> bool {
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(timeout_secs);
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .expect("Failed to create HTTP client for health check");
-
-    let url = format!("http://127.0.0.1:{}/health", port);
-
-    while start.elapsed() < timeout {
-        // Try actual HTTP health check - this is more reliable than lsof
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 429 => {
-                // Server is responding (either 200 OK or 429 rate limited means it's up)
-                // Wait a moment for rate limiter to reset after health check requests
-                tokio::time::sleep(Duration::from_millis(600)).await;
-                return true;
-            }
-            _ => {
-                // Server not ready yet, wait and retry
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    }
-    false
 }
 
 /// Test that rate limiting correctly returns 429 when limit is exceeded for external IPs

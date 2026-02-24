@@ -530,31 +530,51 @@ impl ConnectionService {
         Ok(removed_count)
     }
 
-    /// Restore connections on daemon startup
+    /// Capture the connections that existed at daemon launch time.
+    ///
+    /// Call this **before** starting the HTTP server.  The resulting snapshot is then
+    /// passed to `restore_connections_on_startup`, which runs in a background task.
+    /// Taking the snapshot early guarantees that connections created by in-flight client
+    /// requests (after the server starts) are never included in the restore list.
+    pub async fn list_connections_for_startup_restore(&self) -> Vec<Connection> {
+        use detrix_logging::warn;
+        match self.connection_repo.list_all().await {
+            Ok(conns) => conns,
+            Err(e) => {
+                warn!(
+                    "Failed to query connections for startup restore snapshot: {}",
+                    e
+                );
+                vec![]
+            }
+        }
+    }
+
+    /// Restore connections on daemon startup.
+    ///
+    /// **IMPORTANT – call `list_connections_for_startup_restore` first** and pass the
+    /// resulting snapshot here.  The snapshot must be captured *before* the HTTP server
+    /// starts accepting client requests so that connections created by the current session
+    /// are never included in the restore list.  This eliminates the startup-restore race:
+    /// if the background task only ever touches connections that existed at daemon launch
+    /// time, it cannot interfere with adapters started by incoming client requests.
     ///
     /// This method:
-    /// 1. Lists ALL saved connections (regardless of status or auto_reconnect flag)
+    /// 1. Processes only the provided snapshot (Disconnected / Reconnecting / Failed)
     /// 2. Quick-checks if each debugger port is open (avoids long retry loops)
     /// 3. If port open → tries to reconnect
     /// 4. If port closed or reconnect fails → delete the connection from database
     ///
-    /// Call this on daemon startup to restore previous debugging sessions
-    /// and clean up stale connections.
-    ///
     /// # Returns
     /// A tuple of (reconnected_count, deleted_count)
-    #[instrument(skip(self))]
-    pub async fn restore_connections_on_startup(&self) -> (usize, usize) {
+    #[instrument(skip(self, startup_connections), fields(snapshot_size = startup_connections.len()))]
+    pub async fn restore_connections_on_startup(
+        &self,
+        startup_connections: Vec<Connection>,
+    ) -> (usize, usize) {
         use detrix_logging::{debug, info, warn};
 
-        // Get ALL connections from database
-        let connections = match self.connection_repo.list_all().await {
-            Ok(conns) => conns,
-            Err(e) => {
-                warn!("Failed to query connections for startup restore: {}", e);
-                return (0, 0);
-            }
-        };
+        let connections = startup_connections;
 
         if connections.is_empty() {
             debug!("No saved connections to restore");
@@ -572,6 +592,23 @@ impl ConnectionService {
         for conn in connections {
             let conn_id = conn.id.clone();
             let addr = format!("{}:{}", conn.host, conn.port);
+
+            // Skip connections that are already active — they were created during the current
+            // session (race with this background task) and must not be interrupted.
+            // This is the primary guard against the startup-restore race condition:
+            // under heavy parallel load the background task may run after tests have already
+            // connected, and stopping a running adapter would cause "No adapter found" errors.
+            if matches!(
+                conn.status,
+                ConnectionStatus::Connected | ConnectionStatus::Connecting
+            ) && self.adapter_lifecycle_manager.has_adapter(&conn_id).await
+            {
+                debug!(
+                    "Skipping {} at {} — already active (status: {})",
+                    conn_id.0, addr, conn.status
+                );
+                continue;
+            }
 
             info!(
                 "Attempting to reconnect to {} debugger at {}",

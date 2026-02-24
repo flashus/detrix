@@ -20,7 +20,7 @@ use detrix_api::generated::detrix::v1::{
 };
 use detrix_config::constants::{AUTHORIZATION_HEADER, AUTHORIZATION_METADATA_KEY, BEARER_PREFIX};
 use detrix_testing::e2e::executor::{
-    find_detrix_binary, get_grpc_port, get_http_port, TestDaemonSetup,
+    find_detrix_binary, get_grpc_port, get_http_port, wait_for_port, TestDaemonSetup,
 };
 use detrix_testing::e2e::jwt::{JwtBuilder, JwtKeyPair, MockJwksServer, TestClaims};
 use tonic::transport::Channel;
@@ -201,26 +201,6 @@ impl Drop for SimpleBearerTestExecutor {
     fn drop(&mut self) {
         self.stop();
     }
-}
-
-/// Wait for TCP port
-async fn wait_for_port(port: u16, timeout_secs: u64) -> bool {
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(timeout_secs);
-
-    while start.elapsed() < timeout {
-        let output = Command::new("lsof")
-            .args(["-i", &format!(":{}", port), "-sTCP:LISTEN"])
-            .output();
-
-        if let Ok(out) = output {
-            if out.status.success() && !out.stdout.is_empty() {
-                return true;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    false
 }
 
 // ==================== REST API TESTS ====================

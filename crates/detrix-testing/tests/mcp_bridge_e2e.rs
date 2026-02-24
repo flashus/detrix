@@ -14,9 +14,9 @@ use detrix_testing::e2e::{
     cleanup_orphaned_e2e_processes,
     executor::{
         find_detrix_binary, get_debugpy_port, get_workspace_root, start_debugpy_setsid,
-        wait_for_port,
+        wait_for_debugger_port, DEBUGPY_STARTUP_TIMEOUT_SECS,
     },
-    is_debugpy_available, kill_9, kill_check, register_e2e_process,
+    kill_9, kill_check, register_e2e_process,
     reporter::TestReporter,
     safe_kill, safe_sigterm_for_config, unregister_e2e_process,
 };
@@ -3182,11 +3182,9 @@ async fn test_mcp_bridge_active_debugger_prevents_shutdown() {
     reporter.section("MCP DEBUGGER PREVENTS SHUTDOWN TEST");
     reporter.info("Testing that active debugger connection keeps daemon alive");
 
-    // Check if debugpy is available
-    if !is_debugpy_available().await {
-        reporter.warn("Skipping test: debugpy not available");
-        reporter.info("Install debugpy with: pip install debugpy");
-        return;
+    // Require debugpy — panics if missing (set SKIP_MISSING_TOOLS=1 to skip instead)
+    if !detrix_testing::e2e::require_tool(detrix_testing::e2e::ToolDependency::Debugpy).await {
+        return; // Only reached when SKIP_MISSING_TOOLS=1
     }
 
     let workspace_root = get_workspace_root();
@@ -3330,8 +3328,8 @@ cleanup_interval_secs = 2
     };
 
     // Wait for debugpy to be ready
-    if !wait_for_port(debugpy_port, 10).await {
-        reporter.step_failed(step, "Debugpy not listening after 10s");
+    if !wait_for_debugger_port(debugpy_port, DEBUGPY_STARTUP_TIMEOUT_SECS).await {
+        reporter.step_failed(step, "Debugpy not listening after 60s");
         let _ = bridge_process.kill().await;
         kill_9(daemon_pid);
         kill_9(debugpy_process.id() as u64);
