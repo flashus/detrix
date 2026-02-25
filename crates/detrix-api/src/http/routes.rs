@@ -499,7 +499,11 @@ fn build_cors_layer(config: &CorsConfig) -> CorsLayer {
             let origins: Vec<HeaderValue> = config
                 .allowed_origins
                 .iter()
-                .filter_map(|o| o.parse().ok())
+                .filter_map(|o| {
+                    o.parse().map_err(|e| {
+                        tracing::warn!(origin = %o, error = %e, "Invalid CORS origin in config; skipping");
+                    }).ok()
+                })
                 .collect();
             cors = cors.allow_origin(origins);
         }

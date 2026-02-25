@@ -223,11 +223,20 @@ impl LspManager {
         let mut client_lock = self.client.write().await;
         if let Some(mut client) = client_lock.take() {
             // Send shutdown request
-            let _ = client.request("shutdown", None).await;
+            if let Err(e) = client.request("shutdown", None).await {
+                debug!(
+                    "LSP shutdown request failed (process may already be gone): {}",
+                    e
+                );
+            }
             // Send exit notification
-            let _ = client.notify("exit", None).await;
+            if let Err(e) = client.notify("exit", None).await {
+                debug!("LSP exit notification failed: {}", e);
+            }
             // Kill the process
-            let _ = client.kill();
+            if let Err(e) = client.kill() {
+                debug!("LSP process kill failed: {}", e);
+            }
         }
 
         let mut state = self.state.write().await;

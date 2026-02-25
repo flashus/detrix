@@ -159,7 +159,13 @@ impl MetricService {
                             .await
                         {
                             // Remove old, set new
-                            let _ = adapter.remove_metric(&metric).await;
+                            if let Err(e) = adapter.remove_metric(&metric).await {
+                                tracing::warn!(
+                                    metric = %metric.name,
+                                    error = %e,
+                                    "Failed to remove old logpoint from adapter during symbol relocation"
+                                );
+                            }
                             if let Err(e) = adapter.set_metric(&updated_metric).await {
                                 tracing::warn!(
                                     metric = %metric.name,
@@ -222,7 +228,13 @@ impl MetricService {
                             .get_adapter_for_connection(&updated_metric.connection_id)
                             .await
                         {
-                            let _ = adapter.remove_metric(&metric).await;
+                            if let Err(e) = adapter.remove_metric(&metric).await {
+                                tracing::warn!(
+                                    metric = %metric.name,
+                                    error = %e,
+                                    "Failed to remove old logpoint from adapter during context relocation"
+                                );
+                            }
                             if let Err(e) = adapter.set_metric(&updated_metric).await {
                                 tracing::warn!(
                                     metric = %metric.name,
@@ -278,7 +290,13 @@ impl MetricService {
                         if let Ok(adapter) =
                             self.get_adapter_for_connection(&metric.connection_id).await
                         {
-                            let _ = adapter.remove_metric(&metric).await;
+                            if let Err(e) = adapter.remove_metric(&metric).await {
+                                tracing::warn!(
+                                    metric = %metric.name,
+                                    error = %e,
+                                    "Failed to remove logpoint from adapter for orphaned metric"
+                                );
+                            }
                         }
                     }
 

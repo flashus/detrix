@@ -110,38 +110,47 @@ impl CredentialsFile {
 /// 3. `~/detrix/auth-token` file (only if `is_local_daemon`)
 /// 4. None
 pub fn resolve_token_for_target(host_port: &str, is_local_daemon: bool) -> Option<String> {
-    // 1. DETRIX_TOKEN env var
-    if let Ok(token) = std::env::var(ENV_DETRIX_TOKEN) {
-        let token = token.trim().to_string();
-        if !token.is_empty() {
-            debug!("Token resolved from DETRIX_TOKEN env var for {}", host_port);
-            return Some(token);
-        }
-    }
+    let token = resolve_token_from_env(host_port)
+        .or_else(|| resolve_token_from_credentials_file(host_port))
+        .or_else(|| resolve_token_from_auth_token_file(host_port, is_local_daemon));
 
-    // 2. credentials.toml per-host lookup
-    if let Ok(creds) = CredentialsFile::load() {
-        if let Some(token) = creds.lookup(host_port) {
-            debug!("Token resolved from credentials.toml for {}", host_port);
-            return Some(token.to_string());
-        }
+    if token.is_none() {
+        debug!("No token found for {}", host_port);
     }
+    token
+}
 
-    // 3. auth-token file (only for local daemon)
-    if is_local_daemon {
-        let token_path = paths::auth_token_path();
-        if let Ok(token) = std::fs::read_to_string(&token_path) {
-            let token = token.trim().to_string();
-            if !token.is_empty() {
-                debug!("Token resolved from auth-token file for {}", host_port);
-                return Some(token);
-            }
-        }
+/// Try to resolve a token from the `DETRIX_TOKEN` environment variable.
+fn resolve_token_from_env(host_port: &str) -> Option<String> {
+    let raw = std::env::var(ENV_DETRIX_TOKEN).ok()?;
+    let token = raw.trim().to_string();
+    if token.is_empty() {
+        return None;
     }
+    debug!("Token resolved from DETRIX_TOKEN env var for {}", host_port);
+    Some(token)
+}
 
-    // 4. None
-    debug!("No token found for {}", host_port);
-    None
+/// Try to resolve a token from the per-host credentials file (`~/detrix/credentials.toml`).
+fn resolve_token_from_credentials_file(host_port: &str) -> Option<String> {
+    let creds = CredentialsFile::load().ok()?;
+    let token = creds.lookup(host_port)?.to_string();
+    debug!("Token resolved from credentials.toml for {}", host_port);
+    Some(token)
+}
+
+/// Try to resolve a token from the `~/detrix/auth-token` file (local daemon only).
+fn resolve_token_from_auth_token_file(host_port: &str, is_local_daemon: bool) -> Option<String> {
+    if !is_local_daemon {
+        return None;
+    }
+    let raw = std::fs::read_to_string(paths::auth_token_path()).ok()?;
+    let token = raw.trim().to_string();
+    if token.is_empty() {
+        return None;
+    }
+    debug!("Token resolved from auth-token file for {}", host_port);
+    Some(token)
 }
 
 /// Write content to a file with secure permissions (0600 on Unix).
@@ -337,5 +346,44 @@ token = "prod-token"
         assert_eq!(loaded.lookup("unknown:8095"), None);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // === resolve_token_from_* helper tests ===
+
+    #[test]
+    fn test_resolve_token_from_auth_token_file_skips_non_local_daemon() {
+        // When is_local_daemon is false the auth-token file is never consulted,
+        // so this should return None immediately without any file I/O.
+        let result = resolve_token_from_auth_token_file("any-host:8095", false);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_resolve_token_from_env_returns_none_when_var_unset() {
+        // Guard: only run this assertion if DETRIX_TOKEN is not set in the environment,
+        // so the test stays deterministic in CI where the var might be absent.
+        if std::env::var(ENV_DETRIX_TOKEN).is_err() {
+            let result = resolve_token_from_env("check-host:8095");
+            assert_eq!(result, None);
+        }
+    }
+
+    #[test]
+    fn test_resolve_token_from_credentials_file_returns_none_for_unknown_host() {
+        // resolve_token_from_credentials_file loads the real credentials file.
+        // For a host that almost certainly has no entry, it must return None.
+        // (It's fine if credentials.toml doesn't exist — load() returns Default.)
+        let result = resolve_token_from_credentials_file("totally-unknown-host-xyz-99999:1");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_resolve_token_for_target_returns_none_when_nothing_configured() {
+        // With no DETRIX_TOKEN env var, no credentials entry for this synthetic host,
+        // and is_local_daemon=false (so auth-token file is skipped), result is None.
+        if std::env::var(ENV_DETRIX_TOKEN).is_err() {
+            let result = resolve_token_for_target("totally-unknown-host-xyz-99999:1", false);
+            assert_eq!(result, None);
+        }
     }
 }

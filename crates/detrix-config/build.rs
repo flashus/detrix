@@ -6,6 +6,10 @@
 //! 2. Clear error messages if files are missing
 //! 3. Works regardless of crate location in workspace
 
+// Build scripts are expected to panic on configuration errors — that IS the intended
+// error-handling strategy here (fail the build with a clear message).
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;

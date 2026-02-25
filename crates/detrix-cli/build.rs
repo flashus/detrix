@@ -1,3 +1,7 @@
+// Build scripts are expected to panic on configuration errors — that IS the intended
+// error-handling strategy here (fail the build with a clear message).
+#![allow(clippy::expect_used)]
+
 use std::env;
 use std::fs;
 use std::io::Write;
