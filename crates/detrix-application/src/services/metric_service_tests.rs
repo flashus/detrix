@@ -458,6 +458,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_add_metric_same_line_merges_expressions() {
+        // When a second add_metric targets the same (connection, file, line), the new
+        // expression should be merged into the existing metric rather than silently dropped.
+        let service = create_test_service().await;
+
+        // First add: creates the metric with expression "x.value"
+        let mut metric1 = create_test_metric_at_line("metric_first", 42);
+        metric1.expressions = vec!["x.value".to_string()];
+        let outcome1 = service.add_metric(metric1, false, None).await.unwrap();
+        let id1 = outcome1.value;
+        assert!(outcome1.is_clean(), "First add should have no warnings");
+
+        // Second add at the same line with a new expression — should merge, not replace
+        let mut metric2 = create_test_metric_at_line("metric_second", 42);
+        metric2.expressions = vec!["y.count".to_string()];
+        let outcome2 = service.add_metric(metric2, false, None).await.unwrap();
+
+        // Returns the FIRST metric's ID (same DAP logpoint)
+        assert_eq!(outcome2.value, id1, "Should return existing metric ID");
+
+        // Warns about the merge
+        assert!(
+            outcome2.has_warnings(),
+            "Should warn about expressions being merged"
+        );
+        let warning = &outcome2.warnings[0];
+        assert!(
+            matches!(warning, crate::OperationWarning::ExpressionsMerged { .. }),
+            "Warning should be ExpressionsMerged, got: {}",
+            warning
+        );
+
+        // The stored metric should now have both expressions
+        let stored = service.get_metric(id1).await.unwrap().unwrap();
+        assert_eq!(
+            stored.expressions,
+            vec!["x.value".to_string(), "y.count".to_string()],
+            "Both expressions should be present after merge"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_metric_same_line_identical_expression_is_idempotent() {
+        // Re-adding the exact same expression (daemon restart scenario) should be fully
+        // idempotent: no merge warning, no change to stored expressions.
+        let service = create_test_service().await;
+
+        let mut metric = create_test_metric_at_line("metric_restart", 55);
+        metric.expressions = vec!["x.value".to_string()];
+        let id = service
+            .add_metric(metric.clone(), false, None)
+            .await
+            .unwrap()
+            .value;
+
+        // Same location + same expression → idempotent
+        let outcome2 = service.add_metric(metric, false, None).await.unwrap();
+        assert_eq!(outcome2.value, id);
+        assert!(
+            outcome2.is_clean(),
+            "Identical re-add should produce no warnings"
+        );
+
+        let stored = service.get_metric(id).await.unwrap().unwrap();
+        assert_eq!(stored.expressions, vec!["x.value".to_string()]);
+    }
+
+    #[tokio::test]
     async fn test_get_metric_by_name() {
         let service = create_test_service().await;
         let metric = create_test_metric("unique_metric");

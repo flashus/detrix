@@ -509,6 +509,9 @@ pub struct MetricResponse {
     pub metadata: ::core::option::Option<ResponseMetadata>,
     #[prost(string, repeated, tag = "6")]
     pub expressions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Non-fatal warnings from the operation (e.g. expressions merged, breakpoint not verified)
+    #[prost(string, repeated, tag = "7")]
+    pub warnings: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

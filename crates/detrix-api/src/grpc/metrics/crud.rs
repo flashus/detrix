@@ -72,10 +72,11 @@ pub async fn handle_add_metric(
         .await
         .to_status()?;
 
-    // Log any warnings to tracing (presentation layer responsibility)
+    // Log warnings to tracing and collect them for the response
     for warning in &outcome.warnings {
         tracing::warn!("{}", warning);
     }
+    let warnings: Vec<String> = outcome.warnings.iter().map(|w| w.to_string()).collect();
 
     // Return proto DTO
     Ok(Response::new(MetricResponse {
@@ -85,6 +86,7 @@ pub async fn handle_add_metric(
         location: Some(core_to_proto_location(&metric.location)),
         metadata: None,
         expressions: metric.expressions,
+        warnings,
     }))
 }
 
@@ -172,10 +174,11 @@ pub async fn handle_update_metric(
         .await
         .to_status()?;
 
-    // Log any warnings to tracing (presentation layer responsibility)
+    // Log warnings and collect for response
     for warning in &outcome.warnings {
         tracing::warn!("{}", warning);
     }
+    let warnings: Vec<String> = outcome.warnings.iter().map(|w| w.to_string()).collect();
 
     // Metric from service should always have ID - error if missing (database integrity issue)
     let metric_id = metric
@@ -191,6 +194,7 @@ pub async fn handle_update_metric(
         location: Some(core_to_proto_location(&metric.location)),
         metadata: None,
         expressions: metric.expressions,
+        warnings,
     }))
 }
 
@@ -229,7 +233,7 @@ pub async fn handle_get_metric(
         .map(|id| id.0)
         .ok_or_else(|| Status::internal("Found metric missing ID - database integrity issue"))?;
 
-    // Return proto DTO
+    // Return proto DTO (get is a read — no warnings)
     Ok(Response::new(MetricResponse {
         metric_id,
         name: metric.name.clone(),
@@ -237,5 +241,6 @@ pub async fn handle_get_metric(
         location: Some(core_to_proto_location(&metric.location)),
         metadata: None,
         expressions: metric.expressions,
+        warnings: vec![],
     }))
 }

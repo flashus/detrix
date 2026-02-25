@@ -796,6 +796,22 @@ pub enum OperationWarning {
         error: String,
     },
 
+    /// New expressions were merged into an existing metric at the same location (non-fatal)
+    ///
+    /// Occurs when `add_metric` is called for a location that already has a metric and
+    /// `replace=false`. The new expressions are appended to the existing metric so the
+    /// single DAP logpoint captures all of them.
+    ExpressionsMerged {
+        /// Name of the metric that received the new expressions
+        metric_name: String,
+        /// ID of the metric
+        metric_id: u64,
+        /// The expressions that were added
+        added_expressions: Vec<String>,
+        /// Location where merge occurred (file:line)
+        location: String,
+    },
+
     /// Anchor capture failed for a metric (non-fatal, metric still works)
     AnchorCaptureFailed {
         /// Name of the metric
@@ -885,6 +901,22 @@ impl std::fmt::Display for OperationWarning {
             }
             Self::DeserializationFailed { field, error } => {
                 write!(f, "Failed to deserialize '{}': {}", field, error)
+            }
+            Self::ExpressionsMerged {
+                metric_name,
+                metric_id,
+                added_expressions,
+                location,
+            } => {
+                write!(
+                    f,
+                    "Merged {} expression(s) {:?} into metric '{}' (ID: {}) at {}",
+                    added_expressions.len(),
+                    added_expressions,
+                    metric_name,
+                    metric_id,
+                    location
+                )
             }
             Self::AnchorCaptureFailed {
                 metric_name,

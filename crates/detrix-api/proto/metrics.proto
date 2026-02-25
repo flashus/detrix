@@ -176,6 +176,8 @@ message MetricResponse {
   Location location = 4;
   ResponseMetadata metadata = 5;
   repeated string expressions = 6;
+  // Non-fatal warnings from the operation (e.g. expressions merged, breakpoint not verified)
+  repeated string warnings = 7;
 }
 
 message RemoveMetricRequest {
