@@ -16,10 +16,7 @@
 //! Delve DAP mode: `dlv dap --listen=127.0.0.1:38697`
 
 use crate::{
-    base::{
-        create_metric_event_from_logpoint, parse_logpoint_core, BaseAdapter, OutputParser,
-        ThreadExtractor, ThreadInfo,
-    },
+    base::{parse_logpoint_output, BaseAdapter, OutputParser, ThreadExtractor, ThreadInfo},
     error_detection::{parse_error_output_common, GO_ERROR_PATTERNS},
     AdapterConfig, OutputEventBody,
 };
@@ -29,7 +26,6 @@ use detrix_core::{Metric, MetricEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::trace;
 
 // ============================================================================
 // GoOutputParser - Go-specific output parsing
@@ -91,17 +87,11 @@ impl OutputParser for GoOutputParser {
         body: &OutputEventBody,
         active_metrics: &Arc<RwLock<HashMap<String, Metric>>>,
     ) -> Option<MetricEvent> {
-        let output = body.output.trim();
-
-        // Use shared parsing with Go-specific thread extraction
-        let extractor = GoThreadExtractor;
-        if let Some(parse_result) = parse_logpoint_core(output, &extractor) {
-            trace!(
-                "Parsing Delve DETRICS logpoint: {} (goroutine={:?})",
-                parse_result.metric_name,
-                parse_result.thread_info.thread_id
-            );
-            return create_metric_event_from_logpoint(&parse_result, active_metrics).await;
+        // Use shared logpoint parsing with Go-specific goroutine extraction
+        if let Some(event) =
+            parse_logpoint_output(body, active_metrics, &GoThreadExtractor, "Delve").await
+        {
+            return Some(event);
         }
 
         // Try error detection as fallback

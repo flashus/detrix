@@ -7,8 +7,7 @@
 //! - Import statements (prohibited)
 //! - Delete statements (prohibited)
 
-use super::cache::{global_cache, TreeSitterCache};
-use super::{node_kinds::python as nodes, node_text, traverse_tree, TreeSitterResult};
+use super::{node_kinds::python as nodes, node_text, TreeSitterResult};
 use detrix_core::SafetyLevel;
 use std::collections::HashSet;
 use tree_sitter::Parser;
@@ -27,62 +26,28 @@ pub fn analyze_python(
     safety_level: SafetyLevel,
     allowed_functions: &HashSet<String>,
 ) -> TreeSitterResult {
-    let cache = global_cache();
-    let key = TreeSitterCache::make_key(expression, "python", safety_level, allowed_functions);
-
-    cache.get_or_insert(&key, || {
-        analyze_python_uncached(expression, safety_level, allowed_functions)
-    })
-}
-
-/// Analyze a Python expression without caching (internal)
-fn analyze_python_uncached(
-    expression: &str,
-    safety_level: SafetyLevel,
-    allowed_functions: &HashSet<String>,
-) -> TreeSitterResult {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_python::LANGUAGE.into())
-        .expect("Failed to load Python grammar");
-
-    // Parse the expression
-    let tree = match parser.parse(expression, None) {
-        Some(tree) => tree,
-        None => {
-            return TreeSitterResult::unsafe_with_violations(vec![
-                "Failed to parse Python expression".to_string(),
-            ]);
-        }
-    };
-
-    let root = tree.root_node();
-    let source = expression.as_bytes();
-
-    // Check for syntax errors
-    if root.has_error() {
-        return TreeSitterResult::unsafe_with_violations(vec![
-            "Syntax error in Python expression".to_string()
-        ]);
-    }
-
-    let mut result = TreeSitterResult::safe();
-
-    // Traverse the AST and analyze nodes
-    traverse_tree(root, source, &mut |node, src| {
-        analyze_python_node(node, src, safety_level, allowed_functions, &mut result);
-    });
-
-    // In strict mode, check that all function calls are whitelisted
-    if safety_level == SafetyLevel::Strict {
-        super::check_strict_mode_violations(
-            &mut result,
-            allowed_functions,
-            super::extract_simple_base_name,
-        );
-    }
-
-    result
+    super::cached_analysis(
+        expression,
+        safety_level,
+        allowed_functions,
+        "python",
+        || {
+            let mut parser = Parser::new();
+            parser
+                .set_language(&tree_sitter_python::LANGUAGE.into())
+                .expect("Failed to load Python grammar");
+            super::parse_and_analyze(
+                expression,
+                "Failed to parse Python expression",
+                "Syntax error in Python expression",
+                safety_level,
+                allowed_functions,
+                analyze_python_node,
+                super::extract_simple_base_name,
+                &mut parser,
+            )
+        },
+    )
 }
 
 /// Analyze a single Python AST node

@@ -6,6 +6,7 @@
 use super::base_validator::BaseValidator;
 use super::treesitter::analyze_go;
 use super::validation_result::ValidationResult;
+use super::validator_data::ValidatorData;
 use super::ExpressionValidator;
 use crate::error::Result;
 use detrix_config::GoSafetyConfig;
@@ -18,23 +19,18 @@ use std::collections::HashSet;
 /// Detects prohibited constructs and classifies function calls.
 #[derive(Debug, Clone)]
 pub struct GoValidator {
-    /// Functions allowed in strict mode (whitelist)
-    allowed_functions: HashSet<String>,
-
-    /// Functions always prohibited (blacklist)
-    prohibited_functions: HashSet<String>,
-
-    /// Sensitive variable patterns to block
-    sensitive_patterns: Vec<String>,
+    data: ValidatorData,
 }
 
 impl GoValidator {
     /// Create a new Go validator from config
     pub fn new(config: &GoSafetyConfig) -> Self {
         Self {
-            allowed_functions: config.allowed_set(),
-            prohibited_functions: config.prohibited_set(),
-            sensitive_patterns: config.sensitive_patterns().clone(),
+            data: ValidatorData::new(
+                config.allowed_set(),
+                config.prohibited_set(),
+                config.sensitive_patterns().clone(),
+            ),
         }
     }
 
@@ -46,15 +42,15 @@ impl GoValidator {
 
 impl BaseValidator for GoValidator {
     fn allowed_functions(&self) -> &HashSet<String> {
-        &self.allowed_functions
+        &self.data.allowed_functions
     }
 
     fn prohibited_functions(&self) -> &HashSet<String> {
-        &self.prohibited_functions
+        &self.data.prohibited_functions
     }
 
     fn sensitive_patterns(&self) -> &[String] {
-        &self.sensitive_patterns
+        &self.data.sensitive_patterns
     }
 
     /// Go-specific sensitive pattern matching with camelCase support.
@@ -67,7 +63,7 @@ impl BaseValidator for GoValidator {
         }
         // Go-specific: Also check camelCase (e.g., "apiKey" matches pattern "api_key")
         let var_lower = var_name.to_lowercase();
-        self.sensitive_patterns.iter().find_map(|pattern| {
+        self.data.sensitive_patterns.iter().find_map(|pattern| {
             let pattern_camel = pattern.replace('_', "");
             if var_lower.contains(&pattern_camel.to_lowercase()) {
                 Some(pattern.as_str())
@@ -84,7 +80,7 @@ impl ExpressionValidator for GoValidator {
     }
 
     fn validate(&self, expression: &str, safety_level: SafetyLevel) -> Result<ValidationResult> {
-        let ast_result = analyze_go(expression, safety_level, &self.allowed_functions);
+        let ast_result = analyze_go(expression, safety_level, &self.data.allowed_functions);
         Ok(self.validate_ast_result(ast_result, safety_level, PurityLevel::Pure))
     }
 
@@ -106,10 +102,10 @@ mod tests {
         let config = GoSafetyConfig::default();
         let validator = GoValidator::new(&config);
 
-        assert!(validator.allowed_functions.contains("len"));
-        assert!(validator.allowed_functions.contains("fmt.Sprintf"));
-        assert!(validator.prohibited_functions.contains("os.Exit"));
-        assert!(validator.prohibited_functions.contains("exec.Command"));
+        assert!(validator.data.allowed_functions.contains("len"));
+        assert!(validator.data.allowed_functions.contains("fmt.Sprintf"));
+        assert!(validator.data.prohibited_functions.contains("os.Exit"));
+        assert!(validator.data.prohibited_functions.contains("exec.Command"));
     }
 
     #[test]

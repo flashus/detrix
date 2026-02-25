@@ -35,4 +35,6 @@ pub use traits::{
 };
 
 // Re-export for internal use within the module
-pub(crate) use parsing::{create_metric_event_from_logpoint, parse_logpoint_core};
+pub(crate) use parsing::{
+    create_metric_event_from_logpoint, parse_logpoint_core, parse_logpoint_output,
+};
