@@ -1336,6 +1336,54 @@ impl TestExecutor {
         Self::kill_orphaned_test_daemons();
     }
 
+    /// Returns true if `pid` is recorded in the E2E PID registry AND its owning
+    /// test binary is still alive.
+    ///
+    /// `register_e2e_process` writes `{pid}\n{owner_pid}` to a file in
+    /// `/tmp/detrix_e2e_pids/`. This allows cleanup routines from one test binary
+    /// to skip processes that are actively owned by a concurrently running binary,
+    /// preventing cross-binary interference when `cargo test --all` runs multiple
+    /// test binaries in parallel.
+    #[cfg(unix)]
+    fn is_pid_owned_by_live_binary(pid: u32) -> bool {
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        let pid_dir = PathBuf::from(E2E_PID_DIR);
+        if !pid_dir.exists() {
+            return false;
+        }
+
+        let entries = match std::fs::read_dir(&pid_dir) {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "pid") {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let mut lines = content.lines();
+                let stored_pid: u32 = match lines.next().unwrap_or("").trim().parse() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                if stored_pid != pid {
+                    continue;
+                }
+                // PID matches — check if the owning binary is still alive.
+                if let Ok(owner) = lines.next().unwrap_or("").trim().parse::<i32>() {
+                    if kill(Pid::from_raw(owner), None).is_ok() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Find orphaned processes matching `name` (via `pgrep -f`) with PPID=1 and kill them.
     ///
     /// If `sigterm_first` is true, sends SIGTERM and waits up to 1s before SIGKILL.
@@ -1372,6 +1420,15 @@ impl TestExecutor {
                 .unwrap_or(0);
 
             if ppid != 1 {
+                continue;
+            }
+
+            // Skip if actively owned by a concurrently running test binary.
+            // Prevents cross-binary cleanup races when `cargo test --all` runs
+            // multiple test binaries in parallel — each binary calls cleanup once
+            // (E2E_STALE_CLEANUP_DONE), but another binary's cleanup could still
+            // kill processes registered by this binary.
+            if Self::is_pid_owned_by_live_binary(pid) {
                 continue;
             }
 
@@ -1452,6 +1509,11 @@ impl TestExecutor {
 
             let args = String::from_utf8_lossy(&args_out.stdout);
             if !args.contains("/tmp/") && !args.contains("/var/") {
+                continue;
+            }
+
+            // Skip if actively owned by a concurrently running test binary.
+            if Self::is_pid_owned_by_live_binary(pid) {
                 continue;
             }
 

@@ -80,25 +80,37 @@ pub enum ConfigError {
 /// 2. For any other path: if it exists, use it as-is.
 /// 3. Otherwise return the path as-is (caller will error on missing file).
 pub fn resolve_config_path(path: &Path) -> PathBuf {
-    // When the default filename is used (no explicit --config), always resolve
-    // to ~/detrix/detrix.toml. A local detrix.toml in CWD is intentionally
-    // ignored here — pass an explicit path to use it (e.g. --config ./detrix.toml).
     if path == Path::new(DEFAULT_CONFIG_FILENAME) {
-        let home_config = default_config_path();
-        if home_config.exists() {
-            debug!(path = %home_config.display(), "Found config in detrix home");
-        } else {
-            debug!(path = %home_config.display(), "Config not found, will use detrix home path");
-        }
-        return home_config;
+        return resolve_home_config_path();
     }
+    resolve_explicit_config_path(path)
+}
 
-    // For explicit paths (absolute, relative with ./prefix, or non-default name):
-    // use as-is if it exists, otherwise return as-is (load_config will error).
-    if path.exists() {
-        debug!(path = %path.display(), "Config path exists, using as-is");
+/// Resolve the default "detrix.toml" filename to the canonical home directory location.
+///
+/// A local detrix.toml in CWD is intentionally ignored — pass an explicit path
+/// (e.g. --config ./detrix.toml) to use it instead.
+fn resolve_home_config_path() -> PathBuf {
+    let home_config = default_config_path();
+    if home_config.exists() {
+        debug!("Found config in detrix home: {}", home_config.display());
     } else {
-        debug!(path = %path.display(), "Using provided path as-is");
+        debug!(
+            "Config not found, will use detrix home path: {}",
+            home_config.display()
+        );
+    }
+    home_config
+}
+
+/// Resolve an explicitly provided config path (absolute, relative, or non-default name).
+///
+/// Returns the path as-is; `load_config` will error if the file is missing.
+fn resolve_explicit_config_path(path: &Path) -> PathBuf {
+    if path.exists() {
+        debug!("Config path exists, using as-is: {}", path.display());
+    } else {
+        debug!("Using provided config path as-is: {}", path.display());
     }
     path.to_path_buf()
 }
@@ -281,6 +293,47 @@ fn validate_config(config: &Config) -> Result<(), ConfigError> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // === resolve_config_path tests ===
+
+    #[test]
+    fn test_resolve_config_path_default_name_resolves_to_home() {
+        // The bare default filename "detrix.toml" must always resolve to ~/detrix/detrix.toml,
+        // never to a project-local detrix.toml that might be in the CWD.
+        let result = resolve_config_path(Path::new(DEFAULT_CONFIG_FILENAME));
+        assert_eq!(result, default_config_path());
+    }
+
+    #[test]
+    fn test_resolve_config_path_explicit_existing_path_unchanged() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("my_config.toml");
+        std::fs::write(&config_path, "# test").unwrap();
+
+        let result = resolve_config_path(&config_path);
+        assert_eq!(result, config_path);
+    }
+
+    #[test]
+    fn test_resolve_config_path_explicit_nonexistent_path_returned_as_is() {
+        // A missing explicit path is returned unchanged; load_config will error on it.
+        let nonexistent = Path::new("/nonexistent/path/custom_config.toml");
+        let result = resolve_config_path(nonexistent);
+        assert_eq!(result, nonexistent);
+    }
+
+    #[test]
+    fn test_resolve_config_path_non_default_name_not_redirected() {
+        // A filename other than "detrix.toml" is not redirected to the home dir.
+        let temp_dir = TempDir::new().unwrap();
+        let alt_config = temp_dir.path().join("alternate.toml");
+        std::fs::write(&alt_config, "# alt").unwrap();
+
+        let result = resolve_config_path(&alt_config);
+        assert_eq!(result, alt_config);
+        // Must NOT equal the home config path
+        assert_ne!(result, default_config_path());
+    }
 
     // === Strict load_config tests ===
 
