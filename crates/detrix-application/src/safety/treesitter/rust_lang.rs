@@ -21,6 +21,9 @@ use tree_sitter::Parser;
 ///
 /// # Returns
 /// A `TreeSitterResult` containing analysis results
+// The `set_language` call with a bundled grammar is infallible — the grammar is
+// compiled into the binary and validated at build time.
+#[allow(clippy::expect_used)]
 pub fn analyze_rust(
     expression: &str,
     safety_level: SafetyLevel,

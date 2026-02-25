@@ -386,9 +386,11 @@ impl DaemonEndpoints {
     fn is_port_open(addr: &str, timeout: Duration) -> bool {
         TcpStream::connect_timeout(
             &addr.parse().unwrap_or_else(|_| {
-                format!("127.0.0.1:{}", DEFAULT_GRPC_PORT)
+                #[allow(clippy::expect_used)] // static format string, structurally can't fail
+                let fallback = format!("127.0.0.1:{DEFAULT_GRPC_PORT}")
                     .parse()
-                    .expect("default address should parse")
+                    .expect("default address should parse");
+                fallback
             }),
             timeout,
         )

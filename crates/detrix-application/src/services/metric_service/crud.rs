@@ -111,6 +111,10 @@ impl MetricService {
     ///   DAP only supports one logpoint per line.
     ///
     /// Returns `OperationOutcome<MetricId>` containing the metric ID and any warnings.
+    // This function orchestrates multiple ordered phases (validate, store, set in adapter, restore on
+    // failure, emit event) that naturally result in high complexity and line count.
+    #[allow(clippy::cognitive_complexity)]
+    #[allow(clippy::too_many_lines)]
     pub async fn add_metric(
         &self,
         metric: Metric,
@@ -341,7 +345,9 @@ impl MetricService {
             metric_with_anchor.name.clone(),
             metric_with_anchor.connection_id.clone(),
         );
-        let _ = self.system_event_tx.send(event);
+        if let Err(e) = self.system_event_tx.send(event) {
+            tracing::warn!("No subscribers for metric_added event: {e}");
+        }
 
         Ok(OperationOutcome::with_warnings(metric_id, warnings))
     }
@@ -371,7 +377,9 @@ impl MetricService {
             metric.name.clone(),
             metric.connection_id.clone(),
         );
-        let _ = self.system_event_tx.send(event);
+        if let Err(e) = self.system_event_tx.send(event) {
+            tracing::warn!("No subscribers for metric_removed event: {e}");
+        }
 
         Ok(())
     }

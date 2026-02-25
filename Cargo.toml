@@ -125,6 +125,7 @@ unreadable_literal = "warn"
 # ── Restriction lints: warn-only (intentional — not blocking) ──────────────
 # Panic safety — forbid in prod, allowed in tests via clippy.toml
 unwrap_used = "warn"
+let_underscore_must_use = "warn"
 
 [workspace.lints.rust]
 # Rustc compiler warnings are errors. Enumerated explicitly because

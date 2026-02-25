@@ -45,6 +45,10 @@ impl MetricService {
     /// 5. Emits warning events for relocated/orphaned metrics
     ///
     /// Returns a summary of the relocation results.
+    // This function processes multiple metrics through multiple relocation strategies
+    // (symbol, context, orphan) with per-metric error handling — high complexity is inherent.
+    #[allow(clippy::cognitive_complexity)]
+    #[allow(clippy::too_many_lines)]
     pub async fn handle_file_change(&self, file_path: &str) -> Result<FileChangeResult> {
         let mut result = FileChangeResult::default();
 
@@ -185,7 +189,9 @@ impl MetricService {
                         Some(symbol_name),
                         metric.connection_id.clone(),
                     );
-                    let _ = self.system_event_tx.send(event);
+                    if let Err(e) = self.system_event_tx.send(event) {
+                        tracing::warn!("No subscribers for metric_relocated event: {e}");
+                    }
 
                     tracing::info!(
                         metric = %metric.name,
@@ -253,7 +259,9 @@ impl MetricService {
                         None, // No symbol name for context-based relocation
                         metric.connection_id.clone(),
                     );
-                    let _ = self.system_event_tx.send(event);
+                    if let Err(e) = self.system_event_tx.send(event) {
+                        tracing::warn!("No subscribers for metric_relocated (context) event: {e}");
+                    }
 
                     tracing::info!(
                         metric = %metric.name,
@@ -308,7 +316,9 @@ impl MetricService {
                         reason.clone(),
                         metric.connection_id.clone(),
                     );
-                    let _ = self.system_event_tx.send(event);
+                    if let Err(e) = self.system_event_tx.send(event) {
+                        tracing::warn!("No subscribers for metric_orphaned event: {e}");
+                    }
 
                     tracing::warn!(
                         metric = %metric.name,

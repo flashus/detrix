@@ -137,11 +137,14 @@ pub async fn observe_impl(
     let file = resolve_file_path(&file, workspace_root);
 
     // Pre-fetch file into VFS cache (transparent remote file fetching)
-    let _ = state
+    if let Err(e) = state
         .context
         .file_source_chain
         .ensure_available(&connection, &file)
-        .await;
+        .await
+    {
+        tracing::debug!("Pre-fetch skipped for '{file}': {e}");
+    }
 
     // Use first expression for line-finding and name generation
     let first_expr = expressions[0].clone();
@@ -345,11 +348,14 @@ pub async fn add_metric_impl(
     let parsed_file = resolve_file_path(&parsed_file, workspace_root);
 
     // Pre-fetch file into VFS cache (transparent remote file fetching for cloud mode)
-    let _ = state
+    if let Err(e) = state
         .context
         .file_source_chain
         .ensure_available(&connection, &parsed_file)
-        .await;
+        .await
+    {
+        tracing::debug!("Pre-fetch skipped for '{parsed_file}': {e}");
+    }
 
     // Get default safety level from config
     let config = state.config_service.get_config().await;
@@ -579,11 +585,14 @@ pub async fn enable_from_diff_impl(
         let resolved_file = resolve_file_path(&parsed.file, workspace_root);
 
         // Pre-fetch file into VFS cache (transparent remote file fetching)
-        let _ = state
+        if let Err(e) = state
             .context
             .file_source_chain
             .ensure_available(&connection, &resolved_file)
-            .await;
+            .await
+        {
+            tracing::debug!("Pre-fetch skipped for '{resolved_file}': {e}");
+        }
 
         let metric_name =
             helpers::metrics::generate_metric_name(&parsed.expression, &resolved_file, parsed.line);

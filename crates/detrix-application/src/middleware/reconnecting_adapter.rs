@@ -142,9 +142,7 @@ impl ReconnectingAdapter {
         // Add jitter to prevent thundering herd
         let jitter_range = delay * self.config.jitter;
         let jitter = if jitter_range > 0.0 {
-            // Simple deterministic jitter based on attempt number
-            // In production, use rand crate for true randomness
-            ((attempt as f64 * 0.618033988749895) % 1.0) * jitter_range
+            rand::random::<f64>() * jitter_range
         } else {
             0.0
         };

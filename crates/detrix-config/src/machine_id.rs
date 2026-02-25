@@ -24,8 +24,13 @@ pub fn ensure_machine_id() -> String {
                 }
             }
             let id = uuid::Uuid::new_v4().to_string();
-            let _ = std::fs::create_dir_all(crate::paths::detrix_home());
-            let _ = std::fs::write(&path, &id);
+            let home = crate::paths::detrix_home();
+            if let Err(e) = std::fs::create_dir_all(&home) {
+                tracing::warn!("Failed to create detrix home dir {home:?}: {e}");
+            }
+            if let Err(e) = std::fs::write(&path, &id) {
+                tracing::warn!("Failed to persist machine ID to {path:?}: {e} — a new ID will be generated on next restart");
+            }
             id
         })
         .clone()

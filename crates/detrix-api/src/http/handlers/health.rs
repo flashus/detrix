@@ -66,8 +66,6 @@ pub async fn prometheus_metrics(
     ),
     StatusCode,
 > {
-    use std::fmt::Write;
-
     let mut output = String::with_capacity(4096);
 
     // Get uptime
@@ -100,87 +98,66 @@ pub async fn prometheus_metrics(
 
     // Build Prometheus exposition format output
     // See: https://prometheus.io/docs/instrumenting/exposition_formats/
+    // Note: push_str used instead of writeln! to avoid a must_use Result —
+    // fmt::Write on String is infallible by definition.
 
     // Runtime info
-    let _ = writeln!(output, "# HELP detrix_info Detrix server information");
-    let _ = writeln!(output, "# TYPE detrix_info gauge");
-    let _ = writeln!(
-        output,
-        "detrix_info{{version=\"{}\"}} 1",
+    output.push_str("# HELP detrix_info Detrix server information\n");
+    output.push_str("# TYPE detrix_info gauge\n");
+    output.push_str(&format!(
+        "detrix_info{{version=\"{}\"}} 1\n",
         env!("CARGO_PKG_VERSION")
-    );
+    ));
 
     // Uptime
-    let _ = writeln!(
-        output,
-        "# HELP detrix_uptime_seconds Time since server start"
-    );
-    let _ = writeln!(output, "# TYPE detrix_uptime_seconds counter");
-    let _ = writeln!(output, "detrix_uptime_seconds {}", uptime_seconds);
+    output.push_str("# HELP detrix_uptime_seconds Time since server start\n");
+    output.push_str("# TYPE detrix_uptime_seconds counter\n");
+    output.push_str(&format!("detrix_uptime_seconds {uptime_seconds}\n"));
 
     // Active metrics
-    let _ = writeln!(
-        output,
-        "# HELP detrix_active_metrics_total Number of currently enabled metrics"
-    );
-    let _ = writeln!(output, "# TYPE detrix_active_metrics_total gauge");
-    let _ = writeln!(
-        output,
-        "detrix_active_metrics_total {}",
-        active_metrics_count
-    );
+    output.push_str("# HELP detrix_active_metrics_total Number of currently enabled metrics\n");
+    output.push_str("# TYPE detrix_active_metrics_total gauge\n");
+    output.push_str(&format!(
+        "detrix_active_metrics_total {active_metrics_count}\n"
+    ));
 
     // Total metrics
-    let _ = writeln!(
-        output,
-        "# HELP detrix_metrics_total Total number of configured metrics"
-    );
-    let _ = writeln!(output, "# TYPE detrix_metrics_total gauge");
-    let _ = writeln!(output, "detrix_metrics_total {}", total_metrics_count);
+    output.push_str("# HELP detrix_metrics_total Total number of configured metrics\n");
+    output.push_str("# TYPE detrix_metrics_total gauge\n");
+    output.push_str(&format!("detrix_metrics_total {total_metrics_count}\n"));
 
     // Adapter connection status
-    let _ = writeln!(
-        output,
-        "# HELP detrix_adapter_connected Whether the DAP adapter is connected"
-    );
-    let _ = writeln!(output, "# TYPE detrix_adapter_connected gauge");
-    let _ = writeln!(
-        output,
-        "detrix_adapter_connected {}",
+    output.push_str("# HELP detrix_adapter_connected Whether the DAP adapter is connected\n");
+    output.push_str("# TYPE detrix_adapter_connected gauge\n");
+    output.push_str(&format!(
+        "detrix_adapter_connected {}\n",
         if adapter_connected { 1 } else { 0 }
-    );
+    ));
 
     // Process CPU usage
-    let _ = writeln!(
-        output,
-        "# HELP detrix_process_cpu_percent Current CPU usage percentage"
-    );
-    let _ = writeln!(output, "# TYPE detrix_process_cpu_percent gauge");
-    let _ = writeln!(
-        output,
-        "detrix_process_cpu_percent {:.2}",
+    output.push_str("# HELP detrix_process_cpu_percent Current CPU usage percentage\n");
+    output.push_str("# TYPE detrix_process_cpu_percent gauge\n");
+    output.push_str(&format!(
+        "detrix_process_cpu_percent {:.2}\n",
         process_metrics.cpu_usage_percent
-    );
+    ));
 
     // Process memory usage
-    let _ = writeln!(
-        output,
-        "# HELP detrix_process_memory_bytes Current memory usage in bytes"
-    );
-    let _ = writeln!(output, "# TYPE detrix_process_memory_bytes gauge");
-    let _ = writeln!(
-        output,
-        "detrix_process_memory_bytes {}",
+    output.push_str("# HELP detrix_process_memory_bytes Current memory usage in bytes\n");
+    output.push_str("# TYPE detrix_process_memory_bytes gauge\n");
+    output.push_str(&format!(
+        "detrix_process_memory_bytes {}\n",
         process_metrics.memory_usage_bytes
-    );
+    ));
 
     // Degraded components count (0 = healthy)
-    let _ = writeln!(
-        output,
-        "# HELP detrix_degraded_components Number of components that failed to report status"
+    output.push_str(
+        "# HELP detrix_degraded_components Number of components that failed to report status\n",
     );
-    let _ = writeln!(output, "# TYPE detrix_degraded_components gauge");
-    let _ = writeln!(output, "detrix_degraded_components {}", degraded_components);
+    output.push_str("# TYPE detrix_degraded_components gauge\n");
+    output.push_str(&format!(
+        "detrix_degraded_components {degraded_components}\n"
+    ));
 
     // Return with Prometheus content type
     Ok((

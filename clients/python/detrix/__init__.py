@@ -153,10 +153,14 @@ def _init_inner(
     # Get environment config as fallbacks
     env_config = get_env_config()
 
+    def _env_str(key: str) -> str | None:
+        v = env_config.get(key)
+        return v if isinstance(v, str) else None
+
     # Resolve configuration with environment fallbacks
-    resolved_name = name or env_config.get("name") or ""
-    resolved_control_host = control_host or env_config.get("control_host") or "127.0.0.1"
-    resolved_daemon_url = daemon_url or env_config.get("daemon_url") or "http://127.0.0.1:8090"
+    resolved_name = name or _env_str("name") or ""
+    resolved_control_host = control_host or _env_str("control_host") or "127.0.0.1"
+    resolved_daemon_url = daemon_url or _env_str("daemon_url") or "http://127.0.0.1:8090"
 
     def resolve_port(param_value: int, env_key: str, env_name: str) -> int:
         """Resolve port value from parameter or environment variable.
@@ -236,7 +240,7 @@ def _init_inner(
     )
 
     # Resolve advertise host from parameter or environment
-    resolved_advertise_host = advertise_host or env_config.get("advertise_host") or None
+    resolved_advertise_host = advertise_host or _env_str("advertise_host") or None
 
     # Generate connection name
     connection_name = generate_connection_name(resolved_name)
@@ -246,7 +250,7 @@ def _init_inner(
     with state.lock:
         state.name = connection_name
         state.control_host = resolved_control_host
-        state.advertise_host = resolved_advertise_host  # type: ignore[assignment]
+        state.advertise_host = resolved_advertise_host
         state.control_port = resolved_control_port
         state.debug_port = resolved_debug_port
         state.daemon_url = resolved_daemon_url

@@ -9,7 +9,6 @@ use crate::entities::SourceLanguage;
 use crate::Error;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fmt::Write;
 
 /// Connection identity components for stable UUID generation
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,11 +68,10 @@ impl ConnectionIdentity {
             self.hostname
         );
         let hash = Sha256::digest(input.as_bytes());
-        let mut hex_str = String::with_capacity(32);
-        for byte in &hash[0..16] {
-            let _ = write!(hex_str, "{:02x}", byte);
-        }
-        hex_str
+        hash[0..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 
     /// Validate identity components

@@ -109,18 +109,21 @@ pub async fn ensure_file_cached(
             .await
             .unwrap_or_default();
         if connections.len() == 1 {
-            Some(connections.into_iter().next().unwrap())
+            connections.into_iter().next()
         } else {
             None
         }
     };
 
     if let Some(conn) = connection {
-        let _ = state
+        if let Err(e) = state
             .context
             .file_source_chain
             .ensure_available(&conn, file_path)
-            .await;
+            .await
+        {
+            tracing::debug!("Pre-fetch skipped for '{file_path}': {e}");
+        }
     }
 }
 

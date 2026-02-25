@@ -127,7 +127,9 @@ impl LspClient {
                         runtime.spawn(async move {
                             let mut pending = pending_clone.lock().await;
                             if let Some(sender) = pending.remove(&id) {
-                                let _ = sender.send(Ok(response));
+                                if sender.send(Ok(response)).is_err() {
+                                    warn!("Response receiver dropped for request ID: {:?}", id);
+                                }
                             } else {
                                 warn!("Received response for unknown request ID: {:?}", id);
                             }
@@ -199,8 +201,10 @@ impl LspClient {
 
 impl Drop for LspClient {
     fn drop(&mut self) {
-        // Try to gracefully kill the process
-        let _ = self.kill();
+        // Try to gracefully kill the process; ignore error in Drop (best-effort cleanup).
+        if let Err(e) = self.kill() {
+            warn!("Failed to kill LSP process on drop: {e}");
+        }
     }
 }
 

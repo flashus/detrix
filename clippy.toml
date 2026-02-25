@@ -3,11 +3,6 @@
 # This file configures workspace-wide Clippy lints.
 # Run: cargo clippy --all -- -D warnings
 
-# Lints explicitly enabled across the workspace
-warns = [
-    "clippy::let_underscore_must_use",
-]
-
 # Allow large error types in Result (common with thiserror enums)
 avoid-breaking-exported-api = false
 

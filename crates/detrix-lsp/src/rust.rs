@@ -49,6 +49,9 @@ static RUST_METHOD_PATTERN: OnceLock<Regex> = OnceLock::new();
 /// Pattern to match dereference mutations: *var = ... or *var op= ...
 static RUST_DEREF_PATTERN: OnceLock<Regex> = OnceLock::new();
 
+// These static regex initializers use `expect` with a literal pattern — the regex is
+// validated at compile time and can never fail in practice.
+#[allow(clippy::expect_used)]
 fn get_rust_call_pattern() -> &'static Regex {
     RUST_CALL_PATTERN.get_or_init(|| {
         Regex::new(r"([a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*)\s*[(<]")
@@ -56,6 +59,7 @@ fn get_rust_call_pattern() -> &'static Regex {
     })
 }
 
+#[allow(clippy::expect_used)]
 fn get_rust_method_pattern() -> &'static Regex {
     RUST_METHOD_PATTERN.get_or_init(|| {
         Regex::new(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*\.\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
@@ -63,6 +67,7 @@ fn get_rust_method_pattern() -> &'static Regex {
     })
 }
 
+#[allow(clippy::expect_used)]
 fn get_rust_deref_pattern() -> &'static Regex {
     RUST_DEREF_PATTERN.get_or_init(|| {
         Regex::new(r"\*([a-zA-Z_][a-zA-Z0-9_]*)\s*[\+\-\*/%&\|]?=").expect("Static regex is valid")

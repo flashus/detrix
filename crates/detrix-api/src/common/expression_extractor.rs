@@ -72,18 +72,21 @@ pub struct PythonExtractor;
 // Regex patterns for Python
 // NOTE: These are static patterns validated at development time.
 // Using .expect() is acceptable per CLAUDE.md guidelines for static regex compilation.
+#[allow(clippy::expect_used)]
 static PYTHON_FSTRING_EXPR: LazyLock<Regex> = LazyLock::new(|| {
     // Match {expression} in f-strings, but not format specs like {x:.2f}
     Regex::new(r"\{([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*(?:\(\))?)\}")
         .expect("Static regex pattern is valid")
 });
 
+#[allow(clippy::expect_used)]
 static PYTHON_PRINT_DIRECT: LazyLock<Regex> = LazyLock::new(|| {
     // Match print(variable) where variable is a simple expression
     Regex::new(r"print\(\s*([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)\s*\)")
         .expect("Static regex pattern is valid")
 });
 
+#[allow(clippy::expect_used)]
 static PYTHON_DEBUG_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:print|logger\.(?:debug|info|warning|error)|logging\.(?:debug|info|warning|error))\s*\(")
         .expect("Static regex pattern is valid")
@@ -134,6 +137,7 @@ impl ExpressionExtractor for PythonExtractor {
 /// Extracts expressions from Go fmt/log statements
 pub struct GoExtractor;
 
+#[allow(clippy::expect_used)]
 static GO_PRINTF_ARGS: LazyLock<Regex> = LazyLock::new(|| {
     // Match fmt.Printf("...", expr) or log.Printf("...", expr)
     // Capture the argument after the format string
@@ -141,6 +145,7 @@ static GO_PRINTF_ARGS: LazyLock<Regex> = LazyLock::new(|| {
         .expect("Static regex pattern is valid")
 });
 
+#[allow(clippy::expect_used)]
 static GO_DEBUG_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:fmt|log)\.(?:Print|Printf|Println)\s*\(")
         .expect("Static regex pattern is valid")
@@ -176,18 +181,21 @@ impl ExpressionExtractor for GoExtractor {
 /// Extracts expressions from Rust println!/dbg! statements
 pub struct RustExtractor;
 
+#[allow(clippy::expect_used)]
 static RUST_DBG_MACRO: LazyLock<Regex> = LazyLock::new(|| {
     // Match dbg!(expr)
     Regex::new(r"dbg!\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)\s*\)")
         .expect("Static regex pattern is valid")
 });
 
+#[allow(clippy::expect_used)]
 static RUST_PRINTLN_ARG: LazyLock<Regex> = LazyLock::new(|| {
     // Match println!("{:?}", expr) or println!("{}", expr)
     Regex::new(r"println!\s*\([^,]+,\s*([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)\s*\)")
         .expect("Static regex pattern is valid")
 });
 
+#[allow(clippy::expect_used)]
 static RUST_DEBUG_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:println!|eprintln!|dbg!|print!|eprint!)\s*\(")
         .expect("Static regex pattern is valid")

@@ -71,7 +71,9 @@ impl MetricService {
             enabled,
             metric.connection_id.clone(),
         );
-        let _ = self.system_event_tx.send(event);
+        if let Err(e) = self.system_event_tx.send(event) {
+            tracing::warn!("No subscribers for metric_toggled event: {e}");
+        }
 
         Ok(toggle_result?)
     }
@@ -340,7 +342,13 @@ impl MetricService {
         for metric in all_metrics {
             if metric.created_by.as_deref() == Some(client_identity) && metric.enabled {
                 if let Some(metric_id) = metric.id {
-                    let _ = self.toggle_metric(metric_id, false).await;
+                    if let Err(e) = self.toggle_metric(metric_id, false).await {
+                        tracing::warn!(
+                            "Failed to disable metric {} for client {}: {e}",
+                            metric_id,
+                            client_identity
+                        );
+                    }
                     disabled += 1;
                 }
             }
