@@ -1,13 +1,29 @@
 # Rust Test App Docker Image
-# Multi-stage: build fixture with debug symbols, runtime with lldb-dap
+# Multi-stage: build fixture with debug symbols (musl), runtime with Alpine lldb
+#
+# Why Alpine instead of Debian + lldb-21:
+#   - Debian's lldb-21 (from apt.llvm.org) weighs ~450 MB: libLLVM-21.so and
+#     libclang-cpp21.so alone are ~300 MB; the full install is unavoidable.
+#   - Alpine's lldb package is ~5-8x smaller (musl, stripped, no Python bindings).
+#   - detrix-rs uses rustls-tls (pure-Rust TLS, no OpenSSL) → the fixture
+#     compiles to a fully static musl binary with zero OS runtime deps.
+#
+# lldb version: Alpine 3.21 ships lldb-17.0.6.  The --connection listen://
+# server mode (used by the Detrix Rust client to start lldb-dap) was introduced
+# in LLVM 17, so this is the minimum viable version.
+#
+# Caching: shares /usr/local/cargo/registry and /usr/local/cargo/git cache
+# mounts with Dockerfile.server (same rust:alpine builder image).
 
 # ---- Build Stage ----
-# Pin to bookworm so the binary links against glibc 2.36 (matching the runtime stage).
-FROM rust:1-bookworm AS builder
+FROM rust:1.93-alpine3.21 AS builder
+
+# build-base: gcc + musl-dev for C FFI transitive deps
+RUN apk add --no-cache build-base
 
 WORKDIR /src
 
-# Override target dir (the repo's .cargo/config.toml points elsewhere)
+# Override target dir (the fixture's .cargo/config.toml points to a local path)
 ENV CARGO_TARGET_DIR=/build/target
 
 # Copy the Rust client
@@ -18,9 +34,9 @@ COPY fixtures/rust /src/fixtures/rust
 
 WORKDIR /src/fixtures/rust
 
-# Build with debug symbols (NOT --release) and client feature enabled.
-# The binary must be copied out of the cache mount in the same RUN step,
-# because --mount=type=cache contents are not persisted to the image layer.
+# Debug build (with debug symbols, NOT --release) + client feature.
+# rust:alpine targets musl by default → fully static binary.
+# Binary must be extracted from the cache mount in the same RUN step.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
@@ -28,27 +44,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp /build/target/debug/detrix_example_app /src/fixtures/rust/detrix_example_app
 
 # ---- Runtime Stage ----
-FROM debian:bookworm-slim
+FROM alpine:3.21
 
-# Install lldb-21 from apt.llvm.org (LLVM 21+ has the --connection flag for lldb-dap).
-# Full package installation is required — minimal binary extraction (via ldd) doesn't save
-# space because libclang-cpp.so and libLLVM-21.so alone are ~300MB, and splitting them into
-# a separate layer + adding libpython3.11 actually increases the total image size.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates gnupg wget \
-    && wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
-    && echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-21 main" \
-       > /etc/apt/sources.list.d/llvm.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends lldb-21 \
-    && apt-get purge -y --auto-remove gnupg wget \
-    && rm -rf /var/lib/apt/lists/*
+# lldb: provides lldb-dap + lldb-server for Detrix to attach to the process.
+# Alpine 3.21 ships lldb 17.0.6 which supports `--connection listen://host:port`
+# (TCP server mode introduced in LLVM 17).
+# Both binaries land in /usr/bin/ (in PATH) — no symlinks needed.
+RUN apk add --no-cache lldb
 
-# Symlink lldb-dap and lldb-server to PATH so Detrix finds them
-RUN ln -s /usr/lib/llvm-21/bin/lldb-dap /usr/local/bin/lldb-dap \
-    && ln -s /usr/lib/llvm-21/bin/lldb-server /usr/local/bin/lldb-server
-
-# Copy binary from build stage (extracted from cache mount during build)
+# Copy static musl binary from build stage
 COPY --from=builder /src/fixtures/rust/detrix_example_app /usr/local/bin/detrix_example_app
 
 CMD ["detrix_example_app"]
