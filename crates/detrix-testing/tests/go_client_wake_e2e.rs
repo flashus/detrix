@@ -152,13 +152,13 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         "Add Logpoint #1",
         &format!(
             "order_symbol: 'symbol' at line {}",
-            go_lines::line(go_lines::OFFSET_QUANTITY)
+            go_lines::CODEMAP.find_decl("quantity")
         ),
     );
     let location1 = format!(
         "@{}#{}",
         fixture_file.display(),
-        go_lines::line(go_lines::OFFSET_QUANTITY)
+        go_lines::CODEMAP.find_decl("quantity")
     );
     let req1 = serde_json::json!({
         "name": "order_symbol",
@@ -189,13 +189,13 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         "Add Logpoint #2",
         &format!(
             "pnl_value: 'pnl' at line {}",
-            go_lines::line(go_lines::OFFSET_TOTAL_PNL)
+            go_lines::CODEMAP.find_decl("totalPnl")
         ),
     );
     let location2 = format!(
         "@{}#{}",
         fixture_file.display(),
-        go_lines::line(go_lines::OFFSET_TOTAL_PNL)
+        go_lines::CODEMAP.find_decl("totalPnl")
     );
     let req2 = serde_json::json!({
         "name": "pnl_value",
@@ -226,13 +226,13 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         "Add Breakpoint #1",
         &format!(
             "symbol_length: 'len(symbol)' at line {}",
-            go_lines::line(go_lines::OFFSET_ORDER_ID)
+            go_lines::CODEMAP.find_decl("orderID")
         ),
     );
     let location3 = format!(
         "@{}#{}",
         fixture_file.display(),
-        go_lines::line(go_lines::OFFSET_ORDER_ID)
+        go_lines::CODEMAP.find_decl("orderID")
     );
     let req3 = serde_json::json!({
         "name": "symbol_length",
@@ -263,13 +263,13 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         "Add Breakpoint #2",
         &format!(
             "entry_price_with_stack: 'entryPrice' at line {}",
-            go_lines::line(go_lines::OFFSET_CURRENT_PRICE)
+            go_lines::CODEMAP.find_decl("currentPrice")
         ),
     );
     let location4 = format!(
         "@{}#{}",
         fixture_file.display(),
-        go_lines::line(go_lines::OFFSET_CURRENT_PRICE)
+        go_lines::CODEMAP.find_decl("currentPrice")
     );
     let req4 = serde_json::json!({
         "name": "entry_price_with_stack",

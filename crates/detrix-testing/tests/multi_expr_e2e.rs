@@ -381,7 +381,7 @@ async fn test_multi_expr_go() {
         language: "go",
         tool: ToolDependency::Delve,
         fixture_path: "fixtures/go/detrix_example_app.go",
-        line: go_lines::line(go_lines::OFFSET_ORDER_ID),
+        line: go_lines::CODEMAP.find_decl("orderID"),
         wait_secs: 12,
     })
     .await;

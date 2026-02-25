@@ -833,7 +833,9 @@ async fn test_cloud_e2e() {
     bridge
         .add_metric(
             "cloud-go-basic",
-            &format!("{}#{}", GO_FILE, go_lines::line(go_lines::OFFSET_SYMBOL)),
+            // find_logpoint("symbol"): symbol is declared at +26 but NOT yet in scope there;
+            // first safe line is +27 (quantity declaration), where symbol IS in scope.
+            &format!("{}#{}", GO_FILE, go_lines::CODEMAP.find_logpoint("symbol")),
             "symbol",
             &go_conn,
         )

@@ -1698,7 +1698,35 @@ impl TestExecutor {
                 self.debugpy_process = Some(process);
 
                 if detected {
-                    Ok(())
+                    // Stabilization: give debugpy 300ms to fully enter LISTEN state
+                    // and survive initial initialization. Under concurrent test load, debugpy
+                    // can bind the port but crash within milliseconds (resource contention,
+                    // import errors under load). If we return Ok() immediately and the daemon
+                    // then tries to connect, it gets ECONNREFUSED and enters a 120s backoff loop.
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+
+                    // Verify the process is still alive after stabilization.
+                    let still_alive = self
+                        .debugpy_process
+                        .as_mut()
+                        .map(|p| p.try_wait().ok().flatten().is_none())
+                        .unwrap_or(false);
+
+                    if still_alive {
+                        Ok(())
+                    } else {
+                        let exit_status = self
+                            .debugpy_process
+                            .as_mut()
+                            .and_then(|p| p.try_wait().ok().flatten())
+                            .map(|s| format!("{}", s))
+                            .unwrap_or_else(|| "unknown".to_string());
+                        Err(format!(
+                            "debugpy (pid={}) crashed immediately after binding port {} (exit: {}). \
+                             Check /tmp/debugpy_e2e_{}.log",
+                            pid, self.debugpy_port, exit_status, self.debugpy_port
+                        ))
+                    }
                 } else {
                     // Diagnose: is the process still alive?
                     let alive = self

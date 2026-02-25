@@ -386,17 +386,17 @@ mod dap_workflow_tests {
 
         // Metric 1: Simple variable (logpoint mode) - line 117 where 'symbol' is assigned
         // This will use logpoint (setBreakpoints with logMessage)
-        // Use OFFSET_ORDER_ID (orderID := placeOrder) where symbol is in scope
+        // Use the orderID declaration slot — symbol is already in scope at that line
         let location1 = format!(
             "@{}#{}",
             script_path.display(),
-            go_lines::line(go_lines::OFFSET_ORDER_ID)
+            go_lines::CODEMAP.find_decl("orderID")
         );
         let step = reporter.step_start(
             "Add Logpoint Metric",
             &format!(
                 "Add simple variable 'symbol' at line {} (logpoint mode)",
-                go_lines::line(go_lines::OFFSET_ORDER_ID)
+                go_lines::CODEMAP.find_decl("orderID")
             ),
         );
 
@@ -417,17 +417,17 @@ mod dap_workflow_tests {
         // Metric 2: Function call (breakpoint mode) - line 127 where pnl is calculated
         // This will use breakpoint (pauses execution) because it's a function call
         // Using len() which is a non-variadic function that Delve supports
-        // Use OFFSET_PNL (pnl := calculatePnl) which is a function call
+        // Use the pnl declaration slot (pnl := calculatePnl) which is a function call
         let location2 = format!(
             "@{}#{}",
             script_path.display(),
-            go_lines::line(go_lines::OFFSET_PNL)
+            go_lines::CODEMAP.find_decl("pnl")
         );
         let step = reporter.step_start(
             "Add Breakpoint Metric",
             &format!(
                 "Add function 'len(symbol)' at line {} (breakpoint mode)",
-                go_lines::line(go_lines::OFFSET_PNL)
+                go_lines::CODEMAP.find_decl("pnl")
             ),
         );
 
@@ -608,18 +608,18 @@ mod dap_workflow_tests {
         // ====================================================================
         reporter.section("PHASE 2: ADD METRICS (2 LOGPOINTS + 2 BREAKPOINTS)");
 
-        // Metric 1: LOGPOINT — simple variable 'symbol' at OFFSET_QUANTITY
-        // symbol is assigned on line 117, in scope from OFFSET_QUANTITY
+        // Metric 1: LOGPOINT — simple variable 'symbol' at the quantity declaration slot
+        // symbol is assigned earlier and is in scope at the quantity declaration line
         let location1 = format!(
             "@{}#{}",
             script_path.display(),
-            go_lines::line(go_lines::OFFSET_QUANTITY)
+            go_lines::CODEMAP.find_decl("quantity")
         );
         let step = reporter.step_start(
             "Add Logpoint #1",
             &format!(
                 "order_symbol: simple variable 'symbol' at line {} (LOGPOINT)",
-                go_lines::line(go_lines::OFFSET_QUANTITY)
+                go_lines::CODEMAP.find_decl("quantity")
             ),
         );
         let mut req1 = AddMetricRequest::new("order_symbol", &location1, "symbol", &connection_id);
@@ -632,18 +632,18 @@ mod dap_workflow_tests {
             }
         }
 
-        // Metric 2: LOGPOINT — simple variable 'pnl' at OFFSET_TOTAL_PNL
-        // pnl is assigned at OFFSET_PNL, in scope from there
+        // Metric 2: LOGPOINT — simple variable 'pnl' at the totalPnl slot
+        // pnl is assigned earlier and is in scope at the totalPnl declaration line
         let location2 = format!(
             "@{}#{}",
             script_path.display(),
-            go_lines::line(go_lines::OFFSET_TOTAL_PNL)
+            go_lines::CODEMAP.find_decl("totalPnl")
         );
         let step = reporter.step_start(
             "Add Logpoint #2",
             &format!(
                 "pnl_value: simple variable 'pnl' at line {} (LOGPOINT)",
-                go_lines::line(go_lines::OFFSET_TOTAL_PNL)
+                go_lines::CODEMAP.find_decl("totalPnl")
             ),
         );
         let mut req2 = AddMetricRequest::new("pnl_value", &location2, "pnl", &connection_id);
@@ -656,18 +656,18 @@ mod dap_workflow_tests {
             }
         }
 
-        // Metric 3: BREAKPOINT — Go function call len(symbol) at OFFSET_ORDER_ID
+        // Metric 3: BREAKPOINT — Go function call len(symbol) at the orderID declaration slot
         // symbol is in scope; len() is a non-variadic function Delve supports via "call" prefix
         let location3 = format!(
             "@{}#{}",
             script_path.display(),
-            go_lines::line(go_lines::OFFSET_ORDER_ID)
+            go_lines::CODEMAP.find_decl("orderID")
         );
         let step = reporter.step_start(
             "Add Breakpoint #1",
             &format!(
                 "symbol_length: function call 'len(symbol)' at line {} (BREAKPOINT)",
-                go_lines::line(go_lines::OFFSET_ORDER_ID)
+                go_lines::CODEMAP.find_decl("orderID")
             ),
         );
         let mut req3 =
@@ -681,16 +681,16 @@ mod dap_workflow_tests {
             }
         }
 
-        // Metric 4: BREAKPOINT — simple variable with stack trace at OFFSET_CURRENT_PRICE
-        // entryPrice assigned at OFFSET_ENTRY_PRICE, in scope from OFFSET_CURRENT_PRICE
+        // Metric 4: BREAKPOINT — simple variable with stack trace at the currentPrice declaration slot
+        // entryPrice is assigned earlier and is in scope at the currentPrice declaration line
         let location4 = format!(
             "@{}#{}",
             script_path.display(),
-            go_lines::line(go_lines::OFFSET_CURRENT_PRICE)
+            go_lines::CODEMAP.find_decl("currentPrice")
         );
         let step = reporter.step_start(
             "Add Breakpoint #2",
-            &format!("entry_price_with_stack: 'entryPrice' with captureStackTrace at line {} (BREAKPOINT)", go_lines::line(go_lines::OFFSET_CURRENT_PRICE)),
+            &format!("entry_price_with_stack: 'entryPrice' with captureStackTrace at line {} (BREAKPOINT)", go_lines::CODEMAP.find_decl("currentPrice")),
         );
         let mut req4 = AddMetricRequest::new(
             "entry_price_with_stack",
@@ -1008,7 +1008,7 @@ mod dap_workflow_tests {
         let location1 = format!(
             "@{}#{}",
             script_path.display(),
-            go_lines::line(go_lines::OFFSET_ORDER_ID)
+            go_lines::CODEMAP.find_decl("orderID")
         );
         let mut req1 = AddMetricRequest::new("lp_symbol", &location1, "symbol", &connection_id);
         req1.language = Some("go".to_string());
@@ -1021,7 +1021,7 @@ mod dap_workflow_tests {
         let location2 = format!(
             "@{}#{}",
             script_path.display(),
-            go_lines::line(go_lines::OFFSET_TOTAL_PNL)
+            go_lines::CODEMAP.find_decl("totalPnl")
         );
         let mut req2 = AddMetricRequest::new("bp_order", &location2, "orderID", &connection_id);
         req2.language = Some("go".to_string());
@@ -1122,15 +1122,18 @@ mod dap_workflow_tests {
         // =====================================================================
         reporter.section("PART B: REMOVE LOGPOINT, VERIFY BREAKPOINT SURVIVES");
 
-        // Add logpoint metric
+        // Add logpoint metric.
+        // Use pnl declaration slot (find_decl("pnl")), but measure "currentPrice" —
+        // pnl is NOT in scope at its own declaration line (Delve fires before the RHS
+        // executes), while currentPrice was assigned one statement earlier and IS in scope.
         let mut req3 = AddMetricRequest::new(
-            "lp_pnl",
+            "lp_current_price",
             &format!(
                 "@{}#{}",
                 script_path.display(),
-                go_lines::line(go_lines::OFFSET_PNL)
+                go_lines::CODEMAP.find_decl("pnl")
             ),
-            "pnl",
+            "currentPrice",
             &connection_id,
         );
         req3.language = Some("go".to_string());
@@ -1145,7 +1148,7 @@ mod dap_workflow_tests {
             &format!(
                 "@{}#{}",
                 script_path.display(),
-                go_lines::line(go_lines::OFFSET_TOTAL_PNL)
+                go_lines::CODEMAP.find_decl("totalPnl")
             ),
             "entryPrice",
             &connection_id,
@@ -1163,7 +1166,7 @@ mod dap_workflow_tests {
         let mut bp_count = 0;
         for _ in 0..15 {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            if let Ok(r) = client.query_events("lp_pnl", 10).await {
+            if let Ok(r) = client.query_events("lp_current_price", 10).await {
                 lp_count = r.data.len();
             }
             if let Ok(r) = client.query_events("bp_entry_price", 10).await {
@@ -1192,10 +1195,10 @@ mod dap_workflow_tests {
         // Remove the logpoint metric
         let step = reporter.step_start("Remove Logpoint", "Remove logpoint metric");
         client
-            .remove_metric("lp_pnl")
+            .remove_metric("lp_current_price")
             .await
             .expect("Failed to remove logpoint metric");
-        reporter.step_success(step, Some("Removed lp_pnl"));
+        reporter.step_success(step, Some("Removed lp_current_price"));
 
         // Record baseline for breakpoint
         let baseline = if let Ok(r) = client.query_events("bp_entry_price", 100).await {
@@ -1313,11 +1316,11 @@ mod dap_workflow_tests {
         // Step 2: Add metric with variadic function (should fail)
         reporter.section("PHASE 2: ADD VARIADIC FUNCTION METRIC");
 
-        // Use a line where 'symbol' is in scope (OFFSET_ORDER_ID, after it's assigned at OFFSET_SYMBOL)
+        // Use the orderID declaration slot — symbol is already in scope at that line
         let location = format!(
             "@{}#{}",
             script_path.display(),
-            go_lines::line(go_lines::OFFSET_ORDER_ID)
+            go_lines::CODEMAP.find_decl("orderID")
         );
 
         let step = reporter.step_start(
@@ -4637,16 +4640,16 @@ mod observe_workflow_tests {
             "Observe (Go)",
             &format!(
                 "Using observe tool on line {} (all variables in scope)",
-                go_lines::line(go_lines::OFFSET_PNL)
+                go_lines::CODEMAP.find_decl("pnl")
             ),
         );
         reporter.info(&format!("  File: {}", source_path.display()));
         reporter.info("  Expression: orderID");
-        reporter.info(&format!("  Line: {}", go_lines::line(go_lines::OFFSET_PNL)));
+        reporter.info(&format!("  Line: {}", go_lines::CODEMAP.find_decl("pnl")));
 
-        // OFFSET_PNL is `pnl := calculatePnl(...)` where all variables are in scope
+        // find_decl("pnl") is `pnl := calculatePnl(...)` where all variables are in scope
         let observe_request = ObserveRequest::new(source_path.to_str().unwrap(), "orderID")
-            .with_line(go_lines::line(go_lines::OFFSET_PNL))
+            .with_line(go_lines::CODEMAP.find_decl("pnl"))
             .with_connection_id(&connection_id)
             .with_name("observe_go_orderid");
 
