@@ -228,7 +228,10 @@ impl SystemEvent {
 
     /// Set additional details (will be serialized to JSON)
     pub fn with_details<T: Serialize>(mut self, details: &T) -> Self {
-        self.details_json = serde_json::to_string(details).ok();
+        match serde_json::to_string(details) {
+            Ok(json) => self.details_json = Some(json),
+            Err(e) => eprintln!("[detrix-core] Failed to serialize system event details: {e}"),
+        }
         self
     }
 

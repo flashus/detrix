@@ -1390,9 +1390,12 @@ impl McpBridge {
                     // control_plane_url is present → daemon is inside Docker.
                     // Advertise host.docker.internal so the Docker daemon can reach
                     // our file server, and open the IP restriction.
-                    let _ = self
+                    if let Err(e) = self
                         .switch_daemon(daemon_url.clone(), Some(DOCKER_INTERNAL_HOST.to_string()))
-                        .await;
+                        .await
+                    {
+                        warn!("Failed to switch to Docker daemon {}: {}", daemon_url, e);
+                    }
                 }
             }
             // Rewrite app_url with the daemon-visible URL (it lives in params.arguments.app_url)
@@ -1444,7 +1447,9 @@ impl McpBridge {
                     "Post-wake: {} registered with {}, switching from {}",
                     app_name, daemon_url, current
                 );
-                let _ = self.switch_daemon(daemon_url.to_string(), None).await;
+                if let Err(e) = self.switch_daemon(daemon_url.to_string(), None).await {
+                    warn!("Failed to switch to post-wake daemon {}: {}", daemon_url, e);
+                }
             }
         } else {
             debug!(

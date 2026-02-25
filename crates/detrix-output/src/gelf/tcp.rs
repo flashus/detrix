@@ -143,7 +143,9 @@ impl GelfTcpOutput {
             .output_context(&format!("Failed to connect to {}", addr))?;
 
         // Disable Nagle's algorithm for lower latency
-        stream.set_nodelay(true).ok();
+        if let Err(e) = stream.set_nodelay(true) {
+            tracing::warn!(error = %e, "Failed to set TCP_NODELAY on GELF socket; output may have higher latency");
+        }
 
         let mut guard = self.stream.lock().await;
         *guard = Some(stream);

@@ -157,7 +157,13 @@ impl MetricService {
                     if let Ok(adapter) =
                         self.get_adapter_for_connection(&metric.connection_id).await
                     {
-                        let _ = adapter.remove_metric(&existing).await;
+                        if let Err(e) = adapter.remove_metric(&existing).await {
+                            tracing::warn!(
+                                metric = %existing.name,
+                                error = %e,
+                                "Failed to remove logpoint from adapter during metric replacement"
+                            );
+                        }
                     }
                 }
 
@@ -202,8 +208,20 @@ impl MetricService {
                         if let Ok(adapter) =
                             self.get_adapter_for_connection(&metric.connection_id).await
                         {
-                            let _ = adapter.remove_metric(&existing).await;
-                            let _ = adapter.set_metric(&merged).await;
+                            if let Err(e) = adapter.remove_metric(&existing).await {
+                                tracing::warn!(
+                                    metric = %existing.name,
+                                    error = %e,
+                                    "Failed to remove old logpoint from adapter during expression merge"
+                                );
+                            }
+                            if let Err(e) = adapter.set_metric(&merged).await {
+                                tracing::warn!(
+                                    metric = %merged.name,
+                                    error = %e,
+                                    "Failed to re-set logpoint in adapter after expression merge"
+                                );
+                            }
                         }
                     }
 

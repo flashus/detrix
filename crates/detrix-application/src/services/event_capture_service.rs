@@ -77,9 +77,13 @@ impl EventCaptureService {
         let dlq_entries: Vec<(String, String)> = events
             .iter()
             .filter_map(|event| {
-                serde_json::to_string(event)
-                    .ok()
-                    .map(|json| (json, error_message.to_string()))
+                match serde_json::to_string(event) {
+                    Ok(json) => Some((json, error_message.to_string())),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to serialize event for DLQ; event will be lost");
+                        None
+                    }
+                }
             })
             .collect();
 
