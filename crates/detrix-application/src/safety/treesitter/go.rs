@@ -8,8 +8,9 @@
 //! - Defer statements (prohibited)
 //! - Channel operations (prohibited)
 
-use super::cache::{global_cache, TreeSitterCache};
-use super::{node_kinds::go as nodes, node_text, traverse_tree, TreeSitterResult};
+#[cfg(test)]
+use super::traverse_tree;
+use super::{node_kinds::go as nodes, node_text, TreeSitterResult};
 use detrix_core::SafetyLevel;
 use std::collections::HashSet;
 use tree_sitter::Parser;
@@ -28,65 +29,24 @@ pub fn analyze_go(
     safety_level: SafetyLevel,
     allowed_functions: &HashSet<String>,
 ) -> TreeSitterResult {
-    let cache = global_cache();
-    let key = TreeSitterCache::make_key(expression, "go", safety_level, allowed_functions);
-
-    cache.get_or_insert(&key, || {
-        analyze_go_uncached(expression, safety_level, allowed_functions)
-    })
-}
-
-/// Analyze a Go expression without caching (internal)
-fn analyze_go_uncached(
-    expression: &str,
-    safety_level: SafetyLevel,
-    allowed_functions: &HashSet<String>,
-) -> TreeSitterResult {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_go::LANGUAGE.into())
-        .expect("Failed to load Go grammar");
-
-    // Go expressions need to be wrapped in a valid Go context for parsing
-    // We wrap in a minimal function body
-    let wrapped = format!("package main\nfunc main() {{ _ = {} }}", expression);
-
-    let tree = match parser.parse(&wrapped, None) {
-        Some(tree) => tree,
-        None => {
-            return TreeSitterResult::unsafe_with_violations(vec![
-                "Failed to parse Go expression".to_string()
-            ]);
-        }
-    };
-
-    let root = tree.root_node();
-    let source = wrapped.as_bytes();
-
-    // Check for syntax errors
-    if root.has_error() {
-        return TreeSitterResult::unsafe_with_violations(vec![
-            "Syntax error in Go expression".to_string()
-        ]);
-    }
-
-    let mut result = TreeSitterResult::safe();
-
-    // Traverse the AST and analyze nodes
-    traverse_tree(root, source, &mut |node, src| {
-        analyze_go_node(node, src, safety_level, allowed_functions, &mut result);
-    });
-
-    // In strict mode, check that all function calls are whitelisted
-    if safety_level == SafetyLevel::Strict {
-        super::check_strict_mode_violations(
-            &mut result,
+    super::cached_analysis(expression, safety_level, allowed_functions, "go", || {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .expect("Failed to load Go grammar");
+        // Go expressions need to be wrapped in a valid Go context for parsing
+        let wrapped = format!("package main\nfunc main() {{ _ = {} }}", expression);
+        super::parse_and_analyze(
+            &wrapped,
+            "Failed to parse Go expression",
+            "Syntax error in Go expression",
+            safety_level,
             allowed_functions,
+            analyze_go_node,
             super::extract_simple_base_name,
-        );
-    }
-
-    result
+            &mut parser,
+        )
+    })
 }
 
 /// Analyze a single Go AST node

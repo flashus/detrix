@@ -148,7 +148,7 @@ impl PythonPurityAnalyzer {
         // First check acceptable impure (logging) - these don't affect purity
         if PYTHON_ACCEPTABLE_IMPURE
             .iter()
-            .any(|&f| name.ends_with(f) || name == f)
+            .any(|&f| name == f || name.ends_with(&format!(".{}", f)))
         {
             trace!("Acceptable impure function (logging): {}", name);
             return PurityLevel::Pure; // Treat as pure for purity analysis
@@ -157,15 +157,15 @@ impl PythonPurityAnalyzer {
         // Check truly impure list (always impure regardless of context)
         if PYTHON_IMPURE_FUNCTIONS
             .iter()
-            .any(|&f| name.ends_with(f) || name == f)
+            .any(|&f| name == f || name.ends_with(&format!(".{}", f)))
         {
             return PurityLevel::Impure;
         }
 
-        // Check pure functions (exact match or ends_with for qualified names)
+        // Check pure functions (exact match or qualified suffix like "builtins.int")
         if PYTHON_PURE_FUNCTIONS
             .iter()
-            .any(|&p| name == p || name.ends_with(p))
+            .any(|&p| name == p || name.ends_with(&format!(".{}", p)))
         {
             return PurityLevel::Pure;
         }
@@ -606,7 +606,7 @@ impl PythonPurityAnalyzer {
                     // Skip known pure functions
                     if PYTHON_PURE_FUNCTIONS
                         .iter()
-                        .any(|p| name == *p || name.ends_with(p))
+                        .any(|p| name == *p || name.ends_with(&format!(".{}", p)))
                     {
                         i += 1;
                         continue;

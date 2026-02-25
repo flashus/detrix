@@ -76,6 +76,16 @@ func signalHandler(sigChan chan os.Signal) {
 	running = false
 }
 
+// Order represents a trading order (unexported fields for testing).
+// NOTE: Fields like symbol, price, quantity exist to test scope-aware variable finding.
+// When searching for "symbol", the struct field definition should be deprioritized
+// vs the function body usage where the variable is actually in scope.
+type Order struct {
+	symbol   string
+	quantity int
+	price    float64
+}
+
 func placeOrder(symbol string, quantity int, price float64) int {
 	orderID := rand.Intn(9000) + 1000 // 1000-9999
 	total := float64(quantity) * price
@@ -112,25 +122,25 @@ func main() {
 
 	for running {
 		iteration++
-		// LINE NUMBERS BELOW ARE CRITICAL FOR E2E TESTS
-		// Do not modify without updating dap_scenarios.rs
-		symbol := symbols[rand.Intn(len(symbols))] // Line 117: symbol
-		quantity := rand.Intn(50) + 1              // Line 118: quantity
-		price := rand.Float64()*900 + 100          // Line 119: price
+		// LINE NUMBERS: single source of truth is dap_scenarios.rs::go_lines
+		// If you add/remove lines before func main(), update go_lines::MAIN_LINE only.
+		symbol := symbols[rand.Intn(len(symbols))] // OFFSET_SYMBOL
+		quantity := rand.Intn(50) + 1              // OFFSET_QUANTITY
+		price := rand.Float64()*900 + 100          // OFFSET_PRICE
 
-		// Line 122 - place_order call (symbol, quantity, price in scope)
-		orderID := placeOrder(symbol, quantity, price) // Line 122: orderID
+		// OFFSET_ORDER_ID - place_order call (symbol, quantity, price in scope)
+		orderID := placeOrder(symbol, quantity, price) // OFFSET_ORDER_ID
 
 		// Calculate pnl
-		entryPrice := price                                     // Line 125: entryPrice
-		currentPrice := price * (0.95 + rand.Float64()*0.1)     // Line 126: currentPrice
-		pnl := calculatePnl(entryPrice, currentPrice, quantity) // Line 127: pnl (all vars in scope)
+		entryPrice := price                                     // OFFSET_ENTRY_PRICE
+		currentPrice := price * (0.95 + rand.Float64()*0.1)     // OFFSET_CURRENT_PRICE
+		pnl := calculatePnl(entryPrice, currentPrice, quantity) // OFFSET_PNL (all vars in scope)
 
 		// Introspection breakpoint targets (must be real statements, not `_ = x`)
-		totalPnl = totalPnl + pnl                                 // Line 130: real assignment (all vars in scope)
-		lastOrderID := orderID                                    // Line 131: real assignment (all vars in scope)
-		_ = lastOrderID                                           // suppress unused (line 132)
-		log("  -> P&L: $%.2f (iteration %d)", pnl, iteration)    // Line 133: print (all vars in scope)
+		totalPnl = totalPnl + pnl                                 // OFFSET_TOTAL_PNL (all vars in scope)
+		lastOrderID := orderID                                    // OFFSET_LAST_ORDER_ID (all vars in scope)
+		_ = lastOrderID                                           // suppress unused
+		log("  -> P&L: $%.2f (iteration %d)", pnl, iteration)    // OFFSET_LOG (all vars in scope)
 
 		time.Sleep(3 * time.Second) // Same as Python - 3 seconds
 	}

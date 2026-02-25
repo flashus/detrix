@@ -1,0 +1,9 @@
+services:
+  pricing-api:
+    build: .
+    networks:
+      - demo
+
+networks:
+  demo:
+    name: docker-demo

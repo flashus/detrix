@@ -30,8 +30,8 @@
 
 use crate::{
     base::{
-        create_metric_event_from_logpoint, parse_logpoint_core, BaseAdapter, OutputParser,
-        ThreadExtractor, ThreadInfo, DETRICS_PREFIX,
+        parse_logpoint_output, BaseAdapter, OutputParser, ThreadExtractor, ThreadInfo,
+        DETRICS_PREFIX,
     },
     error_detection::{parse_error_output_common, RUST_ERROR_PATTERNS},
     AdapterConfig, OutputEventBody,
@@ -42,7 +42,6 @@ use detrix_core::{Metric, MetricEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::trace;
 
 // ============================================================================
 // RustOutputParser - Rust/CodeLLDB-specific output parsing
@@ -166,17 +165,11 @@ impl OutputParser for RustOutputParser {
         body: &OutputEventBody,
         active_metrics: &Arc<RwLock<HashMap<String, Metric>>>,
     ) -> Option<MetricEvent> {
-        let output = body.output.trim();
-
-        // Use shared parsing with Rust-specific thread extraction
-        let extractor = RustThreadExtractor;
-        if let Some(parse_result) = parse_logpoint_core(output, &extractor) {
-            trace!(
-                "Parsing CodeLLDB DETRICS logpoint: {} (thread_id={:?})",
-                parse_result.metric_name,
-                parse_result.thread_info.thread_id
-            );
-            return create_metric_event_from_logpoint(&parse_result, active_metrics).await;
+        // Use shared logpoint parsing with Rust-specific thread extraction
+        if let Some(event) =
+            parse_logpoint_output(body, active_metrics, &RustThreadExtractor, "CodeLLDB").await
+        {
+            return Some(event);
         }
 
         // Try error detection as fallback

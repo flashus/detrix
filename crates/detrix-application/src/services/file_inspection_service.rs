@@ -8,7 +8,7 @@
 //! The service is protocol-agnostic - it returns domain types that can be
 //! converted to any presentation format (MCP, gRPC, REST, etc.)
 
-use crate::error::{FileInspectionError, IoErrorWithContext};
+use crate::error::{FileInspectionError, PathCanonicalizeExt, VfsReadResultExt};
 use crate::safety::treesitter::analyze_scope;
 use crate::services::file_inspection_types::{
     CodeContext, CodeLine, FileInspectionRequest, FileInspectionResult, FileOverview,
@@ -19,8 +19,77 @@ use crate::Result;
 use detrix_config::constants::{
     DEFAULT_CONTEXT_LINES, DEFAULT_PREVIEW_LINES, MAX_PATH_COMPONENT_LENGTH, MAX_PATH_LENGTH,
 };
+use detrix_logging::{debug, warn};
+use detrix_ports::VfsRef;
 use std::path::{Path, PathBuf};
-use tracing::{debug, warn};
+
+/// Resolve a file path against an optional workspace root.
+///
+/// Resolution logic:
+/// 1. If the path is absolute → use as-is
+/// 2. If relative and `workspace_root` is provided → join with workspace_root
+/// 3. Fallback: return the raw path (covers daemon-CWD-relative paths)
+///
+/// Note: Does NOT check file existence on disk. In cloud mode, the file lives
+/// inside a remote container and won't exist on the daemon's filesystem.
+///
+/// Returns the resolved path as a string for subsequent validation.
+pub fn resolve_file_path(file_path: &str, workspace_root: Option<&str>) -> String {
+    let path = Path::new(file_path);
+
+    // Absolute paths need no resolution
+    if path.is_absolute() {
+        return file_path.to_string();
+    }
+
+    // Resolve against workspace_root (always join when workspace_root is set)
+    if let Some(root) = workspace_root {
+        let resolved = Path::new(root).join(path);
+        debug!(
+            original = file_path,
+            workspace_root = root,
+            resolved = %resolved.display(),
+            "Resolved relative path against workspace root"
+        );
+        return resolved.to_string_lossy().into_owned();
+    }
+
+    // Fallback: return as-is (validate_file_path will produce the appropriate error)
+    file_path.to_string()
+}
+
+/// Lightweight path syntax validation (no disk access).
+///
+/// Checks length limits and null bytes only. Used for VFS-cached files
+/// where disk-based canonicalization is not needed.
+fn validate_path_syntax(file_path: &str) -> Result<()> {
+    if file_path.len() > MAX_PATH_LENGTH {
+        return Err(FileInspectionError::InvalidPath(format!(
+            "Path too long: {} chars (max {})",
+            file_path.len(),
+            MAX_PATH_LENGTH
+        ))
+        .into());
+    }
+    if file_path.contains('\0') {
+        warn!(path = file_path, "Rejected file path containing null byte");
+        return Err(FileInspectionError::InvalidPath(
+            "Invalid path: contains null byte".to_string(),
+        )
+        .into());
+    }
+    for component in file_path.split(['/', '\\']) {
+        if component.len() > MAX_PATH_COMPONENT_LENGTH {
+            return Err(FileInspectionError::InvalidPath(format!(
+                "Path component too long: {} chars (max {})",
+                component.len(),
+                MAX_PATH_COMPONENT_LENGTH
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
 
 /// Validate and canonicalize a file path for inspection
 ///
@@ -73,9 +142,7 @@ fn validate_file_path(file_path: &str) -> Result<PathBuf> {
 
     // Canonicalize to get absolute path and resolve symlinks/..
     // This is the key security step - it resolves path traversal attempts
-    let canonical = path.canonicalize().map_err(|e| {
-        FileInspectionError::InvalidPath(format!("Cannot resolve path '{}': {}", file_path, e))
-    })?;
+    let canonical = path.canonicalize().path_canonicalize(file_path)?;
 
     // Verify it's a file (not a directory)
     if !canonical.is_file() {
@@ -91,85 +158,227 @@ fn validate_file_path(file_path: &str) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+/// Check if a line is an assignment line for the given variable.
+///
+/// Detects patterns like:
+/// - Python: `var = ...`, `var: Type = ...`
+/// - Go: `var := ...`, `var = ...`, `var raw = ...`
+/// - Rust: `let var = ...`, `let mut var = ...`
+///
+/// Returns false for comparison operators (`==`, `!=`, `<=`, `>=`)
+/// and compound assignments (`+=`, `-=`, `*=`, `/=`).
+fn is_assignment_line(line: &str, variable: &str) -> bool {
+    let trimmed = line.trim();
+
+    // Find variable in the line
+    let Some(var_pos) = trimmed.find(variable) else {
+        return false;
+    };
+
+    // Check character boundaries - variable must not be part of a larger identifier
+    let before_ok = var_pos == 0
+        || !trimmed.as_bytes()[var_pos - 1].is_ascii_alphanumeric()
+            && trimmed.as_bytes()[var_pos - 1] != b'_';
+    let after_pos = var_pos + variable.len();
+    let after_ok = after_pos >= trimmed.len()
+        || !trimmed.as_bytes()[after_pos].is_ascii_alphanumeric()
+            && trimmed.as_bytes()[after_pos] != b'_';
+
+    if !before_ok || !after_ok {
+        return false;
+    }
+
+    // Look for `=` after the variable (with possible type annotation between)
+    let rest = &trimmed[after_pos..];
+
+    // Find first `=` in rest
+    let Some(eq_pos) = rest.find('=') else {
+        return false;
+    };
+
+    // Check it's not `==`, `!=`, `<=`, `>=`
+    let eq_abs = after_pos + eq_pos;
+    if eq_abs > 0 {
+        let before_eq = trimmed.as_bytes()[eq_abs - 1];
+        if before_eq == b'!' || before_eq == b'<' || before_eq == b'>' || before_eq == b'=' {
+            return false;
+        }
+    }
+    // Check the character after `=` is not `=` (rules out `==`)
+    let after_eq = eq_abs + 1;
+    if after_eq < trimmed.len() && trimmed.as_bytes()[after_eq] == b'=' {
+        return false;
+    }
+
+    // Check it's not a compound assignment (`+=`, `-=`, `*=`, `/=`)
+    if eq_abs > 0 {
+        let before_eq = trimmed.as_bytes()[eq_abs - 1];
+        if before_eq == b'+' || before_eq == b'-' || before_eq == b'*' || before_eq == b'/' {
+            return false;
+        }
+    }
+
+    // Go `:=` is also assignment
+    // At this point we know there's a `=` after the variable, which means assignment
+    true
+}
+
+/// Check if a line can host a logpoint (is "stoppable").
+///
+/// A line is NOT stoppable if it's:
+/// - Empty or whitespace only
+/// - Comment only (`#`, `//`, `///`, `/* ... */`)
+/// - Closing delimiter only (`}`, `)`, `]` with optional whitespace/semicolons)
+fn is_stoppable_line(line: &str) -> bool {
+    let trimmed = line.trim();
+
+    // Empty or whitespace only
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Comment only
+    if trimmed.starts_with('#')
+        || trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+    {
+        return false;
+    }
+
+    // Closing delimiter only (with optional trailing semicolons/commas)
+    let stripped = trimmed.trim_end_matches([';', ',', ' ']);
+    if stripped == "}" || stripped == ")" || stripped == "]" || stripped == "})" {
+        return false;
+    }
+
+    true
+}
+
+/// Find the next stoppable line after `from_line` (1-indexed).
+///
+/// Scans up to 5 lines forward. Returns the original line if no stoppable line is found.
+fn next_stoppable_line(lines: &[&str], from_line: u32) -> u32 {
+    let from_idx = from_line as usize; // from_line is 1-indexed, so from_idx points to NEXT line (0-indexed)
+    let max_scan = 5;
+    let end = (from_idx + max_scan).min(lines.len());
+
+    for (idx, line) in lines.iter().enumerate().take(end).skip(from_idx) {
+        if is_stoppable_line(line) {
+            return (idx + 1) as u32; // Convert back to 1-indexed
+        }
+    }
+
+    // No stoppable line found, return original
+    from_line
+}
+
 /// Service for inspecting source files
 ///
 /// Provides text-based analysis capabilities for finding correct metric placement.
 /// All languages use the generic text-based inspection.
-#[derive(Debug, Clone)]
+///
+/// File content is resolved via the Virtual File System (VFS):
+/// - VFS cache hit → use cached content (cloud mode)
+/// - VFS cache miss → disk fallback (local daemon mode)
+#[derive(Clone)]
 pub struct FileInspectionService {
     /// Number of lines to include as context around target line
     context_lines: usize,
     /// Number of preview lines for file overview
     preview_lines: usize,
+    /// Virtual File System for reading source files
+    vfs: VfsRef,
 }
 
-impl Default for FileInspectionService {
-    fn default() -> Self {
-        Self {
-            context_lines: DEFAULT_CONTEXT_LINES,
-            preview_lines: DEFAULT_PREVIEW_LINES,
-        }
+impl std::fmt::Debug for FileInspectionService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileInspectionService")
+            .field("context_lines", &self.context_lines)
+            .field("preview_lines", &self.preview_lines)
+            .field("vfs", &"<VFS>")
+            .finish()
     }
 }
 
 impl FileInspectionService {
-    /// Create a new file inspection service with default config
-    pub fn new() -> Self {
-        Self::default()
+    /// Create a new file inspection service with a VFS and default config
+    pub fn new(vfs: VfsRef) -> Self {
+        Self {
+            context_lines: DEFAULT_CONTEXT_LINES,
+            preview_lines: DEFAULT_PREVIEW_LINES,
+            vfs,
+        }
     }
 
-    /// Create a file inspection service from API config
-    pub fn from_config(context_lines: usize, preview_lines: usize) -> Self {
+    /// Create a file inspection service from API config with VFS
+    pub fn from_config(context_lines: usize, preview_lines: usize, vfs: VfsRef) -> Self {
         Self {
             context_lines,
             preview_lines,
+            vfs,
         }
     }
-}
 
-impl From<&detrix_config::ApiConfig> for FileInspectionService {
-    fn from(config: &detrix_config::ApiConfig) -> Self {
-        Self::from_config(config.context_lines, config.preview_lines)
+    /// Get a reference to the underlying VFS
+    pub fn vfs(&self) -> &dyn detrix_ports::VirtualFileSystem {
+        &*self.vfs
     }
 }
 
 impl FileInspectionService {
     /// Inspect a source file
     ///
-    /// Uses text-based context extraction for all file types.
+    /// File content is resolved via VFS (cache → disk fallback).
     ///
     /// # Security
     ///
-    /// The file path is validated and canonicalized before any file access:
+    /// For disk-backed files, the path is validated and canonicalized:
     /// - Path length limits enforced
     /// - Null bytes rejected
     /// - Path traversal (`..`) resolved via canonicalization
     /// - Symlinks resolved to their target
+    ///
+    /// For VFS-cached files (cloud mode), path validation is lighter since
+    /// the content was already provided by the agent.
     pub fn inspect(
         &self,
         request: FileInspectionRequest,
     ) -> Result<(SourceLanguage, FileInspectionResult)> {
-        // Validate and canonicalize path before any file access
-        let canonical_path = validate_file_path(&request.file_path)?;
+        // Resolve relative paths against workspace_root before validation
+        let resolved_path =
+            resolve_file_path(&request.file_path, request.workspace_root.as_deref());
 
-        let extension = canonical_path
+        // Determine language from extension
+        let extension = Path::new(&resolved_path)
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-
         let language = SourceLanguage::from_extension(&extension);
 
-        // Create a modified request with the canonical path
-        let validated_request = FileInspectionRequest {
-            file_path: canonical_path.to_string_lossy().into_owned(),
-            line: request.line,
-            find_variable: request.find_variable,
+        // Try reading from VFS first (handles cache + disk fallback)
+        // If VFS returns content, skip heavy disk validation (canonicalize etc.)
+        // since the content is already available.
+        let file_path = if self.vfs.exists(&resolved_path)? {
+            // VFS has it (cached or on disk) — use resolved path directly
+            // Still do lightweight validation (length, null bytes)
+            validate_path_syntax(&resolved_path)?;
+            resolved_path
+        } else {
+            // Not in VFS, try disk with full security validation
+            let canonical = validate_file_path(&resolved_path)?;
+            canonical.to_string_lossy().into_owned()
         };
 
-        // All languages use generic text-based inspection
-        let result = self.inspect_generic(&validated_request, language)?;
+        let validated_request = FileInspectionRequest {
+            file_path,
+            line: request.line,
+            find_variable: request.find_variable,
+            workspace_root: None,
+        };
 
+        let result = self.inspect_generic(&validated_request, language)?;
         Ok((language, result))
     }
 
@@ -179,12 +388,11 @@ impl FileInspectionService {
         request: &FileInspectionRequest,
         language: SourceLanguage,
     ) -> Result<FileInspectionResult> {
-        // Read the file
-        let contents =
-            std::fs::read_to_string(&request.file_path).map_err(|e| IoErrorWithContext {
-                error: e,
-                path: request.file_path.clone(),
-            })?;
+        // Read the file via VFS (cache → disk fallback)
+        let contents = self
+            .vfs
+            .read_to_string(&request.file_path)
+            .vfs_read_context(&request.file_path)?;
 
         let lines: Vec<&str> = contents.lines().collect();
         let total_lines = lines.len();
@@ -198,7 +406,7 @@ impl FileInspectionService {
                 language,
             )
         } else if let Some(ref var) = request.find_variable {
-            self.inspect_generic_variable(&lines, var, total_lines)
+            self.inspect_generic_variable(&lines, var, total_lines, &contents, language)
         } else {
             self.inspect_generic_overview(&lines, total_lines)
         }
@@ -260,11 +468,17 @@ impl FileInspectionService {
     }
 
     /// Search for a variable in a generic file (text-based)
+    ///
+    /// Prefers usage lines over assignment lines for logpoint placement,
+    /// since logpoints fire BEFORE the line executes (so a variable isn't
+    /// defined yet on its assignment line).
     fn inspect_generic_variable(
         &self,
         lines: &[&str],
         variable: &str,
         _total_lines: usize,
+        contents: &str,
+        language: SourceLanguage,
     ) -> Result<FileInspectionResult> {
         let matches: Vec<TextSearchMatch> = lines
             .iter()
@@ -276,22 +490,105 @@ impl FileInspectionService {
             })
             .collect();
 
-        // Convert text matches to variable definitions (approximate)
-        let definitions: Vec<VariableDefinition> = matches
-            .iter()
-            .take(10) // Limit to first 10
-            .map(|m| VariableDefinition {
-                line: m.line_number,
-                scope: "unknown".to_string(), // No scope info without AST
-                code: m.code.clone(),
-            })
-            .collect();
+        // Partition matches into usage and assignment lines
+        let mut usage_defs = Vec::new();
+        let mut assignment_defs = Vec::new();
+
+        for m in matches.iter().take(10) {
+            if is_assignment_line(&m.code, variable) {
+                // For assignment lines, bump to the next stoppable line
+                let bumped_line = next_stoppable_line(lines, m.line_number);
+                let bumped_code = if bumped_line != m.line_number {
+                    lines
+                        .get((bumped_line - 1) as usize)
+                        .unwrap_or(&"")
+                        .to_string()
+                } else {
+                    m.code.clone()
+                };
+                assignment_defs.push(VariableDefinition {
+                    line: bumped_line,
+                    scope: "assignment".to_string(),
+                    code: bumped_code,
+                });
+            } else {
+                usage_defs.push(VariableDefinition {
+                    line: m.line_number,
+                    scope: "usage".to_string(),
+                    code: m.code.clone(),
+                });
+            }
+        }
+
+        // Usage lines first, then bumped assignment lines
+        let mut definitions = usage_defs;
+        definitions.extend(assignment_defs);
+
+        // Deduplicate by line number (keep first occurrence)
+        let mut seen_lines = std::collections::HashSet::new();
+        definitions.retain(|d| seen_lines.insert(d.line));
+
+        // Only keep definitions in executable locations.
+        //
+        // Function signatures (parameter lists) and struct/type-level declarations
+        // cannot host DAP logpoints — returning them silently is misleading.
+        // Return a clear error instead so the caller can take corrective action.
+        //
+        // Exception: Python module-level code (containing_scope = None) IS
+        // executable — Python scripts run top-to-bottom without requiring a function
+        // wrapper, so those definitions are valid logpoint targets.
+        if language.capabilities().has_ast_analysis && !definitions.is_empty() {
+            let mut body_defs = Vec::new();
+            let mut sig_defs = Vec::new();
+            let mut out_defs = Vec::new();
+
+            for def in definitions {
+                let scope_result = analyze_scope(contents, def.line, language);
+                if scope_result.containing_scope.is_some() && !scope_result.is_function_signature {
+                    body_defs.push(def);
+                } else if scope_result.is_function_signature {
+                    sig_defs.push(def);
+                } else {
+                    out_defs.push(def);
+                }
+            }
+
+            // Python module-level code is executable; include it as valid.
+            // For Go/Rust, out_defs are struct fields/type declarations — not executable.
+            let python_module_level = language == SourceLanguage::Python && !out_defs.is_empty();
+
+            if body_defs.is_empty() && !python_module_level {
+                let location = if !sig_defs.is_empty() {
+                    let lines: Vec<String> = sig_defs.iter().map(|d| d.line.to_string()).collect();
+                    format!("function signature(s) (line {})", lines.join(", "))
+                } else {
+                    let lines: Vec<String> = out_defs.iter().map(|d| d.line.to_string()).collect();
+                    format!(
+                        "struct field(s) or type declaration(s) (line {})",
+                        lines.join(", ")
+                    )
+                };
+                return Err(
+                    crate::error::FileInspectionError::VariableNotInExecutableScope {
+                        variable: variable.to_string(),
+                        location,
+                    }
+                    .into(),
+                );
+            }
+
+            definitions = body_defs;
+            if python_module_level {
+                definitions.extend(out_defs);
+            }
+            // sig_defs always dropped; out_defs for Go/Rust dropped
+        }
 
         let suggested_lines: Vec<u32> = definitions.iter().map(|d| d.line).collect();
 
-        // Build context around first match if any
-        let context = if let Some(first) = matches.first() {
-            let target_idx = (first.line_number - 1) as usize;
+        // Build context around first definition if any
+        let context = if let Some(first) = definitions.first() {
+            let target_idx = (first.line - 1) as usize;
             let start = target_idx.saturating_sub(2);
             let end = (target_idx + 5).min(lines.len());
 
@@ -352,7 +649,36 @@ mod tests {
     use super::*;
     use crate::services::file_inspection_types::SourceLanguageExt;
     use std::io::Write;
+    use std::sync::Arc;
     use tempfile::NamedTempFile;
+
+    use detrix_ports::VirtualFileSystem;
+
+    /// Simple disk-only VFS for tests (no caching, just std::fs)
+    struct TestDiskVfs;
+
+    impl VirtualFileSystem for TestDiskVfs {
+        fn read_to_string(&self, path: &str) -> detrix_core::Result<String> {
+            std::fs::read_to_string(path)
+                .map_err(|e| detrix_core::Error::FileNotFound(format!("{}: {}", path, e)))
+        }
+        fn exists(&self, path: &str) -> detrix_core::Result<bool> {
+            Ok(std::path::Path::new(path).exists())
+        }
+        fn store(&self, _: &str, _: &str, _: String) {}
+        fn cached_hashes(&self, _: &str) -> Vec<(String, String)> {
+            vec![]
+        }
+        fn validate_hashes(&self, _: &str, _: &[(String, String)]) -> Vec<String> {
+            vec![]
+        }
+        fn mark_stale(&self, _: &str) {}
+        fn clear_connection(&self, _: &str) {}
+    }
+
+    fn test_service() -> FileInspectionService {
+        FileInspectionService::new(Arc::new(TestDiskVfs))
+    }
 
     #[test]
     fn test_source_language_from_extension() {
@@ -384,11 +710,12 @@ mod tests {
         writeln!(file, "    println!(\"{{:?}}\", x);").unwrap();
         writeln!(file, "}}").unwrap();
 
-        let service = FileInspectionService::new();
+        let service = test_service();
         let request = FileInspectionRequest {
             file_path: file.path().to_string_lossy().to_string(),
             line: Some(2),
             find_variable: None,
+            workspace_root: None,
         };
 
         let (lang, result) = service.inspect(request).unwrap();
@@ -414,11 +741,12 @@ mod tests {
         writeln!(file, "    }}").unwrap();
         writeln!(file, "}}").unwrap();
 
-        let service = FileInspectionService::new();
+        let service = test_service();
         let request = FileInspectionRequest {
             file_path: file.path().to_string_lossy().to_string(),
             line: None,
             find_variable: Some("userID".to_string()),
+            workspace_root: None,
         };
 
         let (lang, result) = service.inspect(request).unwrap();
@@ -440,11 +768,12 @@ mod tests {
             writeln!(file, "// Line {}", i).unwrap();
         }
 
-        let service = FileInspectionService::new();
+        let service = test_service();
         let request = FileInspectionRequest {
             file_path: file.path().to_string_lossy().to_string(),
             line: None,
             find_variable: None,
+            workspace_root: None,
         };
 
         let (lang, result) = service.inspect(request).unwrap();
@@ -464,11 +793,12 @@ mod tests {
         let mut file = NamedTempFile::with_suffix(".rs").unwrap();
         writeln!(file, "fn main() {{}}").unwrap();
 
-        let service = FileInspectionService::new();
+        let service = test_service();
         let request = FileInspectionRequest {
             file_path: file.path().to_string_lossy().to_string(),
             line: Some(100),
             find_variable: None,
+            workspace_root: None,
         };
 
         let result = service.inspect(request);
@@ -559,5 +889,533 @@ mod tests {
         // Should resolve to the same canonical path
         let expected = std::path::Path::new(&file_path).canonicalize().unwrap();
         assert_eq!(canonical, expected);
+    }
+
+    // ========================================================================
+    // Assignment Detection Tests
+    // ========================================================================
+
+    #[test]
+    fn test_assignment_detection_python() {
+        assert!(is_assignment_line("    raw = json.loads(resp)", "raw"));
+        assert!(is_assignment_line(
+            "    raw: dict = json.loads(resp)",
+            "raw"
+        ));
+        assert!(is_assignment_line("x = 42", "x"));
+        // Not assignments
+        assert!(!is_assignment_line("    print(raw)", "raw"));
+        assert!(!is_assignment_line("    if raw == expected:", "raw"));
+        assert!(!is_assignment_line("    if raw != None:", "raw"));
+    }
+
+    #[test]
+    fn test_assignment_detection_go() {
+        assert!(is_assignment_line("    raw := json.Unmarshal(data)", "raw"));
+        assert!(is_assignment_line("    raw = getData()", "raw"));
+        assert!(is_assignment_line("    var raw = getData()", "raw"));
+        // Not assignments
+        assert!(!is_assignment_line("    fmt.Println(raw)", "raw"));
+        assert!(!is_assignment_line("    if raw == nil {", "raw"));
+    }
+
+    #[test]
+    fn test_assignment_detection_rust() {
+        assert!(is_assignment_line(
+            "    let raw = serde_json::from_str(&s);",
+            "raw"
+        ));
+        assert!(is_assignment_line("    let mut raw = Vec::new();", "raw"));
+        // Not assignments
+        assert!(!is_assignment_line("    process(raw);", "raw"));
+        assert!(!is_assignment_line("    if raw == expected {", "raw"));
+    }
+
+    #[test]
+    fn test_assignment_detection_compound_operators() {
+        assert!(!is_assignment_line("    count += 1", "count"));
+        assert!(!is_assignment_line("    total -= amount", "total"));
+        assert!(!is_assignment_line("    result *= factor", "result"));
+        assert!(!is_assignment_line("    value /= divisor", "value"));
+    }
+
+    #[test]
+    fn test_assignment_detection_comparison() {
+        assert!(!is_assignment_line("    if x == 5:", "x"));
+        assert!(!is_assignment_line("    if x != 5:", "x"));
+        assert!(!is_assignment_line("    if x <= 5:", "x"));
+        assert!(!is_assignment_line("    if x >= 5:", "x"));
+    }
+
+    #[test]
+    fn test_assignment_no_partial_match() {
+        // "raw" should not match "raw_data"
+        assert!(!is_assignment_line("    raw_data = 42", "raw"));
+        // "x" should not match "extra"
+        assert!(!is_assignment_line("    extra = 42", "x"));
+    }
+
+    // ========================================================================
+    // Stoppable Line Detection Tests
+    // ========================================================================
+
+    #[test]
+    fn test_stoppable_line_detection() {
+        // Stoppable lines
+        assert!(is_stoppable_line("    x = 42"));
+        assert!(is_stoppable_line("    return normalize(raw)"));
+        assert!(is_stoppable_line("    print(result)"));
+        assert!(is_stoppable_line("    if x > 0:"));
+
+        // NOT stoppable
+        assert!(!is_stoppable_line(""));
+        assert!(!is_stoppable_line("   "));
+        assert!(!is_stoppable_line("# comment"));
+        assert!(!is_stoppable_line("// comment"));
+        assert!(!is_stoppable_line("/// doc comment"));
+        assert!(!is_stoppable_line("/* block comment */"));
+        assert!(!is_stoppable_line("}"));
+        assert!(!is_stoppable_line("    }"));
+        assert!(!is_stoppable_line("    )"));
+        assert!(!is_stoppable_line("    ]"));
+        assert!(!is_stoppable_line("    };"));
+        assert!(!is_stoppable_line("    })"));
+    }
+
+    // ========================================================================
+    // Variable Search Smart Line Suggestion Tests
+    // ========================================================================
+
+    #[test]
+    fn test_variable_search_prefers_usage() {
+        // File where variable appears in both assignment and usage
+        let mut file = NamedTempFile::with_suffix(".py").unwrap();
+        writeln!(file, "def process():").unwrap();
+        writeln!(file, "    raw = json.loads(resp)").unwrap();
+        writeln!(file, "    return normalize(raw)").unwrap();
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("raw".to_string()),
+            workspace_root: None,
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(!search.definitions.is_empty());
+            // First definition should be usage line (line 3), not assignment line (line 2)
+            assert_eq!(search.definitions[0].line, 3);
+            assert_eq!(search.definitions[0].scope, "usage");
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_variable_search_bumps_assignment() {
+        // File where variable only appears in assignment
+        let mut file = NamedTempFile::with_suffix(".py").unwrap();
+        writeln!(file, "def process():").unwrap();
+        writeln!(file, "    raw = json.loads(resp)").unwrap();
+        writeln!(file, "    return normalize(data)").unwrap();
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("raw".to_string()),
+            workspace_root: None,
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(!search.definitions.is_empty());
+            // Assignment at line 2 should be bumped to line 3 (next stoppable line)
+            assert_eq!(search.definitions[0].line, 3);
+            assert_eq!(search.definitions[0].scope, "assignment");
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_variable_search_skips_blanks_and_braces() {
+        // Assignment followed by blank line, then closing brace, then real code
+        let mut file = NamedTempFile::with_suffix(".py").unwrap();
+        writeln!(file, "def process():").unwrap();
+        writeln!(file, "    raw = json.loads(resp)").unwrap();
+        writeln!(file, "").unwrap();
+        writeln!(file, "    # comment line").unwrap();
+        writeln!(file, "    return normalize(data)").unwrap();
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("raw".to_string()),
+            workspace_root: None,
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(!search.definitions.is_empty());
+            // Assignment at line 2, blank at 3, comment at 4, stoppable at 5
+            assert_eq!(search.definitions[0].line, 5);
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    // ========================================================================
+    // Path Resolution Tests
+    // ========================================================================
+
+    #[test]
+    fn test_resolve_file_path_absolute() {
+        let result = resolve_file_path("/absolute/path/file.py", Some("/workspace"));
+        assert_eq!(result, "/absolute/path/file.py");
+    }
+
+    #[test]
+    fn test_resolve_file_path_relative_with_workspace() {
+        // Create a temp file to resolve against
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.py");
+        std::fs::write(&file_path, "x = 1").unwrap();
+
+        let result = resolve_file_path("test.py", Some(&dir.path().to_string_lossy()));
+        assert_eq!(result, file_path.to_string_lossy());
+    }
+
+    #[test]
+    fn test_resolve_file_path_relative_no_workspace() {
+        let result = resolve_file_path("test.py", None);
+        assert_eq!(result, "test.py");
+    }
+
+    #[test]
+    fn test_resolve_file_path_relative_not_found_in_workspace() {
+        let result = resolve_file_path("nonexistent.py", Some("/tmp"));
+        // Always resolves against workspace_root (file may be in remote container)
+        assert_eq!(result, "/tmp/nonexistent.py");
+    }
+
+    #[test]
+    fn test_resolve_file_path_subdirectory() {
+        // Create nested directory structure
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file_path = sub.join("app.py");
+        std::fs::write(&file_path, "x = 1").unwrap();
+
+        let result = resolve_file_path("sub/app.py", Some(&dir.path().to_string_lossy()));
+        assert_eq!(result, file_path.to_string_lossy());
+    }
+
+    // ========================================================================
+    // Full inspect() integration with workspace_root
+    // ========================================================================
+
+    #[test]
+    fn test_inspect_with_workspace_root_relative_path() {
+        // Create a temp file in a temp directory
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.py");
+        std::fs::write(&file_path, "x = 42\nprint(x)\n").unwrap();
+
+        let service = test_service();
+        // Use relative filename with workspace_root
+        let request = FileInspectionRequest {
+            file_path: "test.py".to_string(),
+            line: Some(1),
+            find_variable: None,
+            workspace_root: Some(dir.path().to_string_lossy().to_string()),
+        };
+
+        let (lang, result) = service.inspect(request).unwrap();
+        assert_eq!(lang, SourceLanguage::Python);
+        if let FileInspectionResult::LineInspection(inspection) = result {
+            assert_eq!(inspection.target_line, 1);
+            assert!(inspection.code_at_line.contains("x = 42"));
+        } else {
+            panic!("Expected LineInspection result");
+        }
+    }
+
+    #[test]
+    fn test_inspect_with_workspace_root_variable_search() {
+        // Create a file with a variable
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("weather.py");
+        std::fs::write(
+            &file_path,
+            "raw = json.loads(resp)\nreturn normalize(raw)\n",
+        )
+        .unwrap();
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: "weather.py".to_string(),
+            line: None,
+            find_variable: Some("raw".to_string()),
+            workspace_root: Some(dir.path().to_string_lossy().to_string()),
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert_eq!(search.variable_name, "raw");
+            assert!(!search.definitions.is_empty());
+            // Usage line should be preferred
+            assert_eq!(search.definitions[0].line, 2);
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_inspect_relative_path_without_workspace_fails() {
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: "nonexistent_relative.py".to_string(),
+            line: Some(1),
+            find_variable: None,
+            workspace_root: None,
+        };
+
+        let result = service.inspect(request);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Scope-aware Variable Search Tests
+    // ========================================================================
+
+    #[test]
+    fn test_variable_search_go_struct_field_deprioritized() {
+        // Go file where `Amount` appears as struct field (line 3) and in function body (line 8)
+        // The struct field is NOT in scope — it's a type definition, not a variable.
+        let mut file = NamedTempFile::with_suffix(".go").unwrap();
+        writeln!(file, "package main").unwrap();
+        writeln!(file, "").unwrap();
+        writeln!(file, "type Transaction struct {{").unwrap();
+        writeln!(file, "	Amount float64").unwrap();
+        writeln!(file, "}}").unwrap();
+        writeln!(file, "").unwrap();
+        writeln!(file, "func process(txn Transaction) {{").unwrap();
+        writeln!(file, "	fmt.Println(txn.Amount)").unwrap();
+        writeln!(file, "}}").unwrap();
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("Amount".to_string()),
+            workspace_root: None,
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(!search.definitions.is_empty());
+            // The function body line (8) should come first because `txn` is in scope there
+            // The struct field line (4) should be deprioritized (no variables in scope)
+            assert_eq!(
+                search.definitions[0].line, 8,
+                "Expected function body line first, got line {} (scope: {})",
+                search.definitions[0].line, search.definitions[0].scope
+            );
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_variable_search_rust_struct_field_deprioritized() {
+        // Rust file where `amount` appears as struct field and in function body
+        let mut file = NamedTempFile::with_suffix(".rs").unwrap();
+        writeln!(file, "struct Transaction {{").unwrap();
+        writeln!(file, "    amount: f64,").unwrap();
+        writeln!(file, "}}").unwrap();
+        writeln!(file, "").unwrap();
+        writeln!(file, "fn process(txn: Transaction) {{").unwrap();
+        writeln!(file, "    println!(\"{{:?}}\", txn.amount);").unwrap();
+        writeln!(file, "}}").unwrap();
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("amount".to_string()),
+            workspace_root: None,
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(!search.definitions.is_empty());
+            // Function body line (6) should come first — `txn` is in scope
+            // Struct field line (2) should be deprioritized
+            assert_eq!(
+                search.definitions[0].line, 6,
+                "Expected function body line first, got line {} (scope: {})",
+                search.definitions[0].line, search.definitions[0].scope
+            );
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_variable_search_python_scope_aware() {
+        // Python file where variable appears inside a function — should stay in scope
+        let mut file = NamedTempFile::with_suffix(".py").unwrap();
+        writeln!(file, "# module level comment about amount").unwrap();
+        writeln!(file, "def process(txn):").unwrap();
+        writeln!(file, "    amount = txn.amount").unwrap();
+        writeln!(file, "    print(amount)").unwrap();
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("amount".to_string()),
+            workspace_root: None,
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(!search.definitions.is_empty());
+            // Usage line (4) should come first, assignment bumped line next
+            // Comment line (1) should be deprioritized (not in scope)
+            assert_eq!(
+                search.definitions[0].line, 4,
+                "Expected usage line first, got line {} (scope: {})",
+                search.definitions[0].line, search.definitions[0].scope
+            );
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_variable_search_no_ast_language_unchanged() {
+        // Java (no AST analysis) — behavior should be unchanged (usage-first ordering)
+        let mut file = NamedTempFile::with_suffix(".java").unwrap();
+        writeln!(file, "class Txn {{").unwrap();
+        writeln!(file, "    double amount;").unwrap();
+        writeln!(file, "    void process() {{").unwrap();
+        writeln!(file, "        System.out.println(amount);").unwrap();
+        writeln!(file, "    }}").unwrap();
+        writeln!(file, "}}").unwrap();
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("amount".to_string()),
+            workspace_root: None,
+        };
+
+        let (_lang, result) = service.inspect(request).unwrap();
+        if let FileInspectionResult::VariableSearch(search) = result {
+            assert!(!search.definitions.is_empty());
+            // Both lines are "usage" (no `=`), so order should be original order
+            assert_eq!(search.definitions[0].line, 2);
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_go_scope_aware_struct_and_func_header_excluded() {
+        // Go file with three places "symbol" appears:
+        //   1. Struct field definition (line 3)  — not executable, must be excluded
+        //   2. Function signature/header (line 6) — not executable, must be excluded
+        //   3. Function body usage (line 12)      — only valid logpoint target
+        // The inspector should return ONLY the function body line.
+        let mut file = NamedTempFile::with_suffix(".go").unwrap();
+        writeln!(file, "package main").unwrap(); // 1
+        writeln!(file, "type Order struct {{").unwrap(); // 2
+        writeln!(file, "    symbol string").unwrap(); // 3
+        writeln!(file, "    price  float64").unwrap(); // 4
+        writeln!(file, "}}").unwrap(); // 5
+        writeln!(file, "func placeOrder(symbol string) int {{").unwrap(); // 6
+        writeln!(file, "    return 42").unwrap(); // 7
+        writeln!(file, "}}").unwrap(); // 8
+        writeln!(file, "func main() {{").unwrap(); // 9
+        writeln!(file, "    symbols := []string{{\"BTC\"}}").unwrap(); // 10
+        writeln!(file, "    symbol := symbols[0]").unwrap(); // 11
+        writeln!(file, "    _ = symbol").unwrap(); // 12
+        writeln!(file, "}}").unwrap(); // 13
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("symbol".to_string()),
+            workspace_root: None,
+        };
+
+        let (lang, result) = service.inspect(request).unwrap();
+        assert_eq!(lang, SourceLanguage::Go);
+
+        if let FileInspectionResult::VariableSearch(search) = result {
+            // Only function body definitions are returned
+            assert!(
+                !search.definitions.is_empty(),
+                "Expected at least one body match"
+            );
+            for def in &search.definitions {
+                assert!(
+                    def.line >= 9,
+                    "All results must be inside main() (line >= 9), got line {} (code: {})",
+                    def.line,
+                    def.code
+                );
+            }
+
+            // Struct field (line 3) and func header (line 6) must NOT be in results
+            assert!(
+                search.definitions.iter().all(|d| d.line != 3),
+                "struct field (line 3) must be excluded"
+            );
+            assert!(
+                search.definitions.iter().all(|d| d.line != 6),
+                "func header (line 6) must be excluded"
+            );
+        } else {
+            panic!("Expected VariableSearch result");
+        }
+    }
+
+    #[test]
+    fn test_go_only_struct_field_returns_error() {
+        // Variable only in a struct field — no executable location → error
+        let mut file = NamedTempFile::with_suffix(".go").unwrap();
+        writeln!(file, "package main").unwrap();
+        writeln!(file, "type Txn struct {{").unwrap();
+        writeln!(file, "    amount float64").unwrap();
+        writeln!(file, "}}").unwrap();
+
+        let service = test_service();
+        let request = FileInspectionRequest {
+            file_path: file.path().to_string_lossy().to_string(),
+            line: None,
+            find_variable: Some("amount".to_string()),
+            workspace_root: None,
+        };
+
+        let result = service.inspect(request);
+        assert!(
+            result.is_err(),
+            "Expected error for struct-field-only variable"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("struct field"),
+            "Error should mention struct field, got: {}",
+            err
+        );
     }
 }

@@ -9,10 +9,8 @@ use crate::{Capabilities, DapBroker, Error, Result};
 use detrix_config::DEFAULT_TCP_KEEPALIVE_RETRIES;
 use detrix_config::{
     AdapterConnectionConfig, DEFAULT_TCP_KEEPALIVE_INTERVAL_SECS, DEFAULT_TCP_KEEPALIVE_TIME_SECS,
-    LOCALHOST_IPV4,
 };
 use socket2::{SockRef, TcpKeepalive};
-use std::net::Ipv4Addr;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -110,25 +108,15 @@ pub async fn connect_tcp(
         debugpy_host, debugpy_port
     );
 
-    // Connect to the debugpy server via TCP (with retry)
-    // Normalize localhost to IPv4 to avoid IPv6 resolution issues on Windows
-    let host: Ipv4Addr = if debugpy_host == "localhost" {
-        // "localhost" may resolve to IPv6 (::1) on Windows, causing connection issues
-        // Force IPv4 for consistent cross-platform behavior
-        LOCALHOST_IPV4
+    // Normalize "localhost" to IPv4 to avoid IPv6 resolution issues on Windows.
+    // All other hostnames (including Docker service names) are passed through
+    // for DNS resolution by TcpStream::connect.
+    let resolved_host: &str = if debugpy_host == "localhost" {
+        "127.0.0.1"
     } else {
-        match debugpy_host.parse() {
-            Ok(addr) => addr,
-            Err(e) => {
-                warn!(
-                    "Invalid host '{}': {}. Falling back to 127.0.0.1",
-                    debugpy_host, e
-                );
-                LOCALHOST_IPV4
-            }
-        }
+        debugpy_host
     };
-    let stream = connect_with_retry(host, debugpy_port, connection_config).await?;
+    let stream = connect_with_retry(resolved_host, debugpy_port, connection_config).await?;
 
     // Configure TCP keep-alive to prevent Windows from closing idle connections
     configure_tcp_keepalive(&stream);
@@ -168,7 +156,7 @@ pub async fn connect_tcp(
 /// - If we get "connection refused" N times in a row, fail immediately
 ///   (nothing is listening on that port)
 async fn connect_with_retry(
-    host: Ipv4Addr,
+    host: &str,
     port: u16,
     config: &AdapterConnectionConfig,
 ) -> Result<TcpStream> {

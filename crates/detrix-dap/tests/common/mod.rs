@@ -51,9 +51,29 @@ pub use detrix_testing::e2e::{
     unregister_e2e_process as unregister_test_process,
 };
 
-// Use atomic counter to avoid port conflicts between tests
-// DAP tests use port range 15000+ to avoid conflicts with E2E tests
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(15000);
+// Use atomic counter to avoid port conflicts between tests.
+// Each test binary gets a random offset to avoid collisions when
+// multiple test binaries (go_tests, python_tests, rust_tests) run in parallel.
+static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+/// Initialize port counter with a random offset based on PID and time.
+/// This avoids port collisions between different test binaries running in parallel
+/// (each binary has its own static PORT_COUNTER).
+fn init_port_counter() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let seed = (std::process::id() as u64).wrapping_mul(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(12345),
+        );
+        // Port range 15000-49999, in steps of 100 to give each binary room
+        let offset = ((seed % 350) as u16) * 100;
+        PORT_COUNTER.store(15000 + offset, Ordering::SeqCst);
+    });
+}
 
 /// Check if a port is available for binding
 fn is_port_available(port: u16) -> bool {
@@ -64,6 +84,9 @@ fn is_port_available(port: u16) -> bool {
 /// Skips ports that are in use (e.g., from orphaned debugger processes).
 /// Also triggers cleanup of orphaned processes on first call.
 pub fn get_test_port() -> u16 {
+    // Initialize port counter with random offset (once per binary)
+    init_port_counter();
+
     // Ensure orphaned processes are cleaned up
     cleanup_orphaned_processes();
 
@@ -158,6 +181,7 @@ pub trait DapTestFixture: Send + Sync + 'static {
             condition: None,
             safety_level: SafetyLevel::Strict,
             created_at: None,
+            created_by: None,
             capture_stack_trace: false,
             stack_trace_ttl: None,
             stack_trace_slice: None,

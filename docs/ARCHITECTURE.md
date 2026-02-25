@@ -78,7 +78,7 @@ Detrix follows **Clean Architecture** principles with strict dependency rules:
 
 ```
 detrix-cli        → ALL crates (composition root)
-detrix-api        → detrix-application, detrix-ports, detrix-core
+detrix-api        → detrix-application, detrix-core, detrix-config
 detrix-application→ detrix-ports, detrix-core, detrix-config ONLY (NO infrastructure!)
 detrix-ports      → detrix-core, detrix-config ONLY (port definitions)
 detrix-storage    → detrix-ports, detrix-core, detrix-application* (implements traits)
@@ -141,6 +141,7 @@ detrix-testing    → detrix-ports, detrix-core, detrix-application (test mocks)
 - **Output Ports:**
   - `EventOutput` - Event output routing port (GELF, etc.)
   - `FileWatcher` - File system monitoring port
+  - `RemoteAppControl` - Remote application wake/sleep control port
 
 ### Application Layer
 
@@ -159,6 +160,7 @@ detrix-testing    → detrix-ports, detrix-core, detrix-application (test mocks)
   - `EnvironmentService` - Environment detection (debuggers, LSP servers)
   - `DlqRecoveryService` - Dead-letter queue recovery for failed events
   - `FileWatcherService` - File system monitoring for auto-relocation
+  - `RemoteAppService` - Remote application wake/sleep orchestration
   - `JwksValidator` - JWT validation for external auth mode
 
 - **Safety:**
@@ -202,7 +204,7 @@ detrix-testing    → detrix-ports, detrix-core, detrix-application (test mocks)
 - gRPC server (port 50061) - High-performance RPC
 - REST server (port 8090) - HTTP/JSON API with 30+ handlers
 - WebSocket server (port 8090) - Real-time event streaming
-- MCP server (stdio) - LLM integration with 28 tools
+- MCP server (stdio) - LLM integration with 29 tools
 - Controllers do DTO mapping ONLY, delegate to services
 
 **detrix-cli** - CLI and composition root
@@ -221,6 +223,7 @@ detrix-testing    → detrix-ports, detrix-core, detrix-application (test mocks)
 - Mock implementations of all port traits (organized in `mocks/` module)
   - `mocks/adapters.rs` - MockDapAdapter, StatefulMockDapAdapter, MockDapAdapterFactory
   - `mocks/repositories.rs` - MockMetricRepository, MockEventRepository, MockConnectionRepository, MockDlqRepository, MockSystemEventRepository
+  - `mocks/adapters.rs` also contains `MockRemoteAppControl`
 - Test fixtures
 - E2E testing framework (ApiClient, McpClient, GrpcClient, RestClient)
 
@@ -336,7 +339,7 @@ Three-layer validation before expressions are evaluated:
 
 ### MCP Tools (for AI Agents)
 
-**28 tools** for Claude Code and other LLM agents, organized by category:
+**29 tools** for Claude Code and other LLM agents, organized by category:
 
 **Workflow (3):** `observe`, `enable_from_diff`, `add_metric`
 **Metrics (5):** `list_metrics`, `get_metric`, `update_metric`, `remove_metric`, `toggle_metric`
@@ -345,7 +348,8 @@ Three-layer validation before expressions are evaluated:
 **Connections (4):** `create_connection`, `list_connections`, `get_connection`, `close_connection`
 **Diagnostics (2):** `validate_expression`, `inspect_file`
 **Configuration (4):** `get_config`, `update_config`, `validate_config`, `reload_config`
-**System (4):** `wake`, `sleep`, `get_status`, `get_mcp_usage`
+**System (3):** `get_status`, `get_mcp_usage`, `disconnect_all`
+**Remote (2):** `wake`, `sleep`
 
 ### REST API Endpoints (Complete)
 
@@ -374,6 +378,7 @@ Three-layer validation before expressions are evaluated:
 - `POST /api/v1/connections` - Create connection
 - `GET /api/v1/connections/:id` - Get connection details
 - `DELETE /api/v1/connections/:id` - Close connection
+- `POST /api/v1/connections/cleanup` - Remove stale connections
 
 **Configuration:**
 - `GET /api/v1/config` - Get current configuration
@@ -389,9 +394,17 @@ Three-layer validation before expressions are evaluated:
 **System:**
 - `GET /health` - Health check
 - `GET /metrics` - Prometheus metrics
-- `POST /api/v1/wake` - Wake from sleep mode
-- `POST /api/v1/sleep` - Enter sleep mode
 - `GET /api/v1/status` - Get system status
+- `POST /api/v1/disconnect_all` - Disconnect all adapters and flush state
+
+**Remote:**
+- `POST /api/v1/wake` - Wake remote app (requires `app_url` in body)
+- `POST /api/v1/sleep` - Sleep remote app (requires `app_url` in body)
+
+**MCP Bridge:**
+- `POST /mcp` - MCP-over-HTTP bridge (JSON-RPC)
+- `POST /mcp/heartbeat` - MCP client heartbeat
+- `POST /mcp/disconnect` - MCP client disconnect
 
 ### WebSocket Streaming (Complete)
 
@@ -453,12 +466,14 @@ detrix/
 │   ├── python/                # Python client (detrix-py on PyPI)
 │   ├── go/                    # Go client (github.com/flashus/detrix/clients/go)
 │   └── rust/                  # Rust client (detrix-rs on crates.io)
+├── docker/                    # Docker E2E infrastructure
 ├── fixtures/                  # Example apps for testing
 ├── skills/                    # Claude Code skill
 └── docs/
     ├── ARCHITECTURE.md        # This file
     ├── ADD_LANGUAGE.md        # Guide for adding languages
     ├── INSTALL.md             # Installation guide
+    ├── PUBLISHING.md          # Client publishing guide
     └── CONTRIBUTING.md        # Contributing guide
 ```
 
@@ -514,6 +529,7 @@ When contributing to Detrix:
 
 - [Installation Guide](INSTALL.md)
 - [CLI Reference](CLI.md)
+- [Publishing Guide](PUBLISHING.md)
 - [Adding Languages](ADD_LANGUAGE.md)
 - [GitHub Repository](https://github.com/flashus/detrix)
 - [GitHub Issues](https://github.com/flashus/detrix/issues)

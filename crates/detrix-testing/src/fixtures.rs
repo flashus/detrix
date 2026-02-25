@@ -71,6 +71,7 @@ pub fn sample_metric(name: &str) -> Metric {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
+        created_by: None,
         // Default values for introspection fields
         capture_stack_trace: false,
         stack_trace_ttl: None,

@@ -10,8 +10,8 @@
 
 use detrix_api::ApiState;
 use detrix_application::{
-    AppContext, ConnectionRepositoryRef, DapAdapterFactoryRef, EventRepositoryRef,
-    MetricRepositoryRef,
+    AppContext, ConnectionReferenceRepositoryRef, ConnectionRepositoryRef, DapAdapterFactoryRef,
+    EventRepositoryRef, MetricRepositoryRef,
 };
 use detrix_config::ApiConfig;
 use detrix_core::{
@@ -46,6 +46,12 @@ impl McpTestFixture {
         // Use MockDapAdapterFactory instead of PythonAdapter
         let mock_factory = Arc::new(MockDapAdapterFactory::new());
 
+        let vfs = Arc::new(detrix_storage::DiskVfs::new()) as detrix_application::VfsRef;
+        let file_source_chain = Arc::new(detrix_application::FileSourceChain::new(
+            Arc::clone(&vfs),
+            vec![],
+            &[],
+        ));
         let context = AppContext::new(
             Arc::clone(&storage) as MetricRepositoryRef,
             Arc::clone(&storage) as EventRepositoryRef,
@@ -60,6 +66,11 @@ impl McpTestFixture {
             &detrix_config::LimitsConfig::default(),
             None,
             None, // No separate DLQ storage in tests
+            None,
+            None, // No auth token in tests
+            vfs,
+            file_source_chain,
+            Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
         );
 
         let state = Arc::new(
@@ -98,6 +109,7 @@ async fn test_add_metric_with_stack_trace() {
         condition: None,
         safety_level: detrix_core::SafetyLevel::Strict,
         created_at: None,
+        created_by: None,
         // Stack trace options
         capture_stack_trace: true,
         stack_trace_ttl: Some(10), // 10 seconds
@@ -169,6 +181,7 @@ async fn test_add_metric_with_memory_snapshot() {
         condition: None,
         safety_level: detrix_core::SafetyLevel::Strict,
         created_at: None,
+        created_by: None,
         // Stack trace options
         capture_stack_trace: false,
         stack_trace_ttl: None,
@@ -229,6 +242,7 @@ async fn test_add_metric_with_time_based_sampling() {
         condition: None,
         safety_level: detrix_core::SafetyLevel::Strict,
         created_at: None,
+        created_by: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -290,6 +304,7 @@ async fn test_add_metric_with_all_features() {
         condition: None,
         safety_level: detrix_core::SafetyLevel::Strict,
         created_at: None,
+        created_by: None,
         // Stack trace + memory snapshot + TTL
         capture_stack_trace: true,
         stack_trace_ttl: Some(10),
@@ -363,6 +378,7 @@ async fn test_stack_trace_slice_full() {
         condition: None,
         safety_level: detrix_core::SafetyLevel::Strict,
         created_at: None,
+        created_by: None,
         capture_stack_trace: true,
         stack_trace_ttl: None, // Continuous
         stack_trace_slice: Some(StackTraceSlice {
@@ -474,6 +490,7 @@ async fn test_snapshot_scope_global() {
         condition: None,
         safety_level: detrix_core::SafetyLevel::Trusted, // Allow special functions
         created_at: None,
+        created_by: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -532,6 +549,7 @@ async fn test_list_metrics_includes_new_fields() {
             condition: None,
             safety_level: detrix_core::SafetyLevel::Strict,
             created_at: None,
+            created_by: None,
             capture_stack_trace: true,
             stack_trace_ttl: Some(10),
             stack_trace_slice: None,
@@ -557,6 +575,7 @@ async fn test_list_metrics_includes_new_fields() {
             condition: None,
             safety_level: detrix_core::SafetyLevel::Strict,
             created_at: None,
+            created_by: None,
             capture_stack_trace: false,
             stack_trace_ttl: None,
             stack_trace_slice: None,
@@ -626,6 +645,7 @@ async fn test_metric_serialization_with_new_fields() {
         condition: None,
         safety_level: detrix_core::SafetyLevel::Strict,
         created_at: None,
+        created_by: None,
         capture_stack_trace: true,
         stack_trace_ttl: Some(20),
         stack_trace_slice: Some(StackTraceSlice {

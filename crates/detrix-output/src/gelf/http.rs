@@ -17,6 +17,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
+use detrix_config::constants::{AUTHORIZATION_HEADER, BEARER_PREFIX};
+
 /// Configuration for GELF HTTP output
 #[derive(Debug, Clone)]
 pub struct GelfHttpConfig {
@@ -178,7 +180,8 @@ impl GelfHttpOutput {
 
             // Add auth token if configured
             if let Some(ref token) = self.config.auth_token {
-                request = request.header("Authorization", format!("Bearer {}", token));
+                request =
+                    request.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, token));
             }
 
             let response = request.send().await.output_context("HTTP request failed")?;

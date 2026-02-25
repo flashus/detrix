@@ -54,32 +54,45 @@ pub async fn handle_validate_expression(
 
 /// Handle inspect_file request
 pub async fn handle_inspect_file(
-    _state: &Arc<ApiState>,
+    state: &Arc<ApiState>,
     request: Request<InspectFileRequest>,
 ) -> Result<Response<InspectFileResponse>, Status> {
-    use detrix_application::{FileInspectionRequest, FileInspectionService};
+    use detrix_application::{resolve_file_path, FileInspectionRequest};
 
     let req = request.into_inner();
 
-    // Validate file exists
-    let path = std::path::Path::new(&req.file_path);
-    if !path.exists() {
+    // Resolve workspace_root from connection (or auto-select single connection)
+    let workspace_root =
+        crate::common::resolve_workspace_root(state, req.connection_id.as_deref()).await;
+
+    // Resolve relative file path against workspace_root
+    let resolved_file = resolve_file_path(&req.file_path, workspace_root.as_deref());
+
+    // Pre-fetch file into VFS cache (transparent remote file fetching)
+    crate::common::ensure_file_cached(state, req.connection_id.as_deref(), &resolved_file).await;
+
+    // Validate resolved file exists (check VFS cache first, then disk)
+    let exists_in_vfs = state.context.vfs.exists(&resolved_file).unwrap_or(false);
+    let path = std::path::Path::new(&resolved_file);
+    if !exists_in_vfs && !path.exists() {
         return Err(Status::not_found(format!(
             "File not found: {}",
-            req.file_path
+            resolved_file
         )));
     }
 
     // Create inspection request
     let inspection_request = FileInspectionRequest {
-        file_path: req.file_path.clone(),
+        file_path: resolved_file,
         line: req.line,
         find_variable: req.find_variable,
+        workspace_root,
     };
 
-    // Use FileInspectionService from application layer
-    let file_inspection = FileInspectionService::new();
-    let (_detected_language, result) = file_inspection
+    // Use FileInspectionService from application layer (shared VFS)
+    let (_detected_language, result) = state
+        .context
+        .file_inspection
         .inspect(inspection_request)
         .map_err(|e| Status::internal(format!("File inspection failed: {}", e)))?;
 

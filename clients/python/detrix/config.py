@@ -4,6 +4,8 @@ import os
 import socket
 from pathlib import Path
 
+AUTH_TOKEN_FILENAME = "auth-token"
+
 
 def get_detrix_home(override: str | None = None) -> Path:
     """Get the Detrix home directory.
@@ -25,16 +27,16 @@ def get_detrix_home(override: str | None = None) -> Path:
 
 
 def get_token_file_path(detrix_home: Path | None = None) -> Path:
-    """Get the path to the MCP token file.
+    """Get the path to the auth token file.
 
     Args:
         detrix_home: Optional Detrix home directory
 
     Returns:
-        Path to mcp-token file
+        Path to auth-token file
     """
     home = detrix_home or get_detrix_home()
-    return home / "mcp-token"
+    return home / AUTH_TOKEN_FILENAME
 
 
 def get_free_port() -> int:
@@ -51,17 +53,20 @@ def get_free_port() -> int:
 
 
 def generate_connection_name(name: str) -> str:
-    """Generate a connection name with PID suffix.
+    """Generate a connection name.
+
+    If a name is provided, uses it as-is (consistent with Go and Rust clients).
+    If empty, generates a default name as "detrix-client-{pid}".
 
     Args:
-        name: Base name for the connection
+        name: Connection name. If empty, auto-generates with PID.
 
     Returns:
-        Connection name in format "{name}-{pid}"
+        Connection name string
     """
-    pid = os.getpid()
-    base_name = name or "detrix-client"
-    return f"{base_name}-{pid}"
+    if name:
+        return name
+    return f"detrix-client-{os.getpid()}"
 
 
 def get_env_config() -> dict[str, str | bool | None]:
@@ -77,6 +82,7 @@ def get_env_config() -> dict[str, str | bool | None]:
         DETRIX_HEALTH_CHECK_TIMEOUT: Timeout for daemon health checks (seconds)
         DETRIX_REGISTER_TIMEOUT: Timeout for connection registration (seconds)
         DETRIX_UNREGISTER_TIMEOUT: Timeout for connection unregistration (seconds)
+        DETRIX_WORKSPACE_ROOT: Override workspace root (default: cwd)
         DETRIX_VERIFY_SSL: Whether to verify SSL certificates (default: true)
         DETRIX_CA_BUNDLE: Path to CA bundle file for SSL verification
 
@@ -92,10 +98,12 @@ def get_env_config() -> dict[str, str | bool | None]:
 
     return {
         "name": os.environ.get("DETRIX_NAME"),
+        "advertise_host": os.environ.get("DETRIX_HOST"),
         "control_host": os.environ.get("DETRIX_CONTROL_HOST"),
         "control_port": os.environ.get("DETRIX_CONTROL_PORT"),
         "debug_port": os.environ.get("DETRIX_DEBUG_PORT"),
         "daemon_url": os.environ.get("DETRIX_DAEMON_URL"),
+        "workspace_root": os.environ.get("DETRIX_WORKSPACE_ROOT"),
         "token": os.environ.get("DETRIX_TOKEN"),
         "health_check_timeout": os.environ.get("DETRIX_HEALTH_CHECK_TIMEOUT"),
         "register_timeout": os.environ.get("DETRIX_REGISTER_TIMEOUT"),

@@ -15,7 +15,8 @@ use tracing::{debug, error, info};
 use crate::error::{Result, ResultExt};
 
 use super::handlers::{
-    handle_request, HandlerContext, SleepCallback, StatusCallback, WakeCallback,
+    handle_request, DiscoverCallback, HandlerContext, SharedAuthToken, SleepCallback,
+    StatusCallback, WakeCallback,
 };
 
 /// HTTP control plane server.
@@ -28,6 +29,9 @@ pub struct ControlServer {
 
     /// Server thread handle.
     thread_handle: Option<thread::JoinHandle<()>>,
+
+    /// Shared auth token (also held by HandlerContext).
+    auth_token: SharedAuthToken,
 }
 
 impl ControlServer {
@@ -36,9 +40,11 @@ impl ControlServer {
         host: &str,
         port: u16,
         auth_token: Option<String>,
+        workspace_root: String,
         status_callback: StatusCallback,
         wake_callback: WakeCallback,
         sleep_callback: SleepCallback,
+        discover_callback: DiscoverCallback,
     ) -> Result<Self> {
         let addr: SocketAddr = format!("{}:{}", host, port)
             .parse()
@@ -46,11 +52,14 @@ impl ControlServer {
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
+        let auth_token = Arc::new(std::sync::RwLock::new(auth_token));
         let ctx = Arc::new(HandlerContext {
-            auth_token,
+            auth_token: Arc::clone(&auth_token),
+            workspace_root,
             status_callback,
             wake_callback,
             sleep_callback,
+            discover_callback,
         });
 
         // Bind on main thread to get the actual port before spawning
@@ -77,12 +86,22 @@ impl ControlServer {
             actual_port,
             shutdown_tx: Some(shutdown_tx),
             thread_handle: Some(thread_handle),
+            auth_token,
         })
     }
 
     /// Get the actual port the server is listening on.
     pub fn port(&self) -> u16 {
         self.actual_port
+    }
+
+    /// Update the auth token used for validating incoming requests.
+    ///
+    /// This should be called when the daemon restarts with a new token, so the
+    /// control server accepts requests authenticated with the fresh token.
+    pub fn update_token(&self, token: Option<String>) {
+        let mut guard = self.auth_token.write().unwrap_or_else(|e| e.into_inner());
+        *guard = token;
     }
 
     /// Stop the server gracefully.
@@ -198,8 +217,8 @@ async fn serve_connection(
 mod tests {
     use super::*;
     use crate::generated::{
-        ClientState, SleepResponse, SleepResponseStatus, StatusResponse, WakeResponse,
-        WakeResponseStatus,
+        ClientState, DiscoverResponse, SleepResponse, SleepResponseStatus, StatusResponse,
+        WakeResponse, WakeResponseStatus,
     };
 
     fn mock_status() -> StatusResponse {
@@ -220,6 +239,7 @@ mod tests {
             status: WakeResponseStatus::Awake,
             debug_port: 5678,
             connection_id: "conn-123".to_string(),
+            daemon_url: None,
         })
     }
 
@@ -229,19 +249,66 @@ mod tests {
         })
     }
 
+    fn mock_discover() -> DiscoverResponse {
+        DiscoverResponse {
+            daemon_url: "http://127.0.0.1:8090".to_string(),
+            name: "test-client".to_string(),
+            control_plane_url: None,
+        }
+    }
+
     #[test]
     fn test_server_start_stop() {
         let server = ControlServer::start(
             "127.0.0.1",
             0,
             None,
+            String::new(),
             Arc::new(mock_status),
             Arc::new(mock_wake),
             Arc::new(mock_sleep),
+            Arc::new(mock_discover),
         )
         .unwrap();
 
         assert!(server.port() > 0);
+    }
+
+    #[test]
+    fn test_update_token() {
+        let server = ControlServer::start(
+            "127.0.0.1",
+            0,
+            Some("initial-token".to_string()),
+            String::new(),
+            Arc::new(mock_status),
+            Arc::new(mock_wake),
+            Arc::new(mock_sleep),
+            Arc::new(mock_discover),
+        )
+        .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let client = reqwest::blocking::Client::new();
+        let base = format!("http://127.0.0.1:{}", server.port());
+
+        // Remote request with initial token should succeed
+        let resp = client
+            .get(format!("{}/detrix/status", base))
+            .header("Authorization", "Bearer initial-token")
+            .send()
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Update token
+        server.update_token(Some("new-token".to_string()));
+
+        // Old token should now fail from remote
+        // Note: localhost always succeeds (auth bypass), so we can only test
+        // that the new token works by checking the internal state
+        let guard = server.auth_token.read().unwrap();
+        assert_eq!(guard.as_deref(), Some("new-token"));
     }
 
     #[test]
@@ -250,9 +317,11 @@ mod tests {
             "127.0.0.1",
             0,
             None,
+            String::new(),
             Arc::new(mock_status),
             Arc::new(mock_wake),
             Arc::new(mock_sleep),
+            Arc::new(mock_discover),
         )
         .unwrap();
 

@@ -40,6 +40,7 @@
 #![cfg_attr(not(test), deny(clippy::panic))]
 
 mod auth;
+mod build_info;
 mod config;
 mod control;
 mod daemon;
@@ -56,11 +57,14 @@ use tracing::{debug, info, warn};
 pub use config::{Config, TlsConfig};
 pub use error::{Error, Result};
 pub use generated::{
-    ClientState, SleepResponse, SleepResponseStatus, StatusResponse, WakeResponse,
-    WakeResponseStatus,
+    ClientState, DiscoverResponse, SleepResponse, SleepResponseStatus, StatusResponse,
+    WakeResponse, WakeResponseStatus,
 };
 
 use control::ControlServer;
+
+/// Fallback workspace root used when the current directory cannot be determined.
+const UNKNOWN_WORKSPACE_ROOT: &str = "/unknown";
 use daemon::{DaemonClient, RegisterRequest};
 use lldb::LldbManager;
 use state::{get, is_initialized, set_initialized};
@@ -72,11 +76,13 @@ static INIT_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLoc
 static CONTROL_SERVER: std::sync::OnceLock<std::sync::Mutex<Option<ControlServer>>> =
     std::sync::OnceLock::new();
 
-/// Global daemon client instance.
-static DAEMON_CLIENT: std::sync::OnceLock<DaemonClient> = std::sync::OnceLock::new();
+/// Global daemon client instance (resettable on shutdown for re-initialization).
+static DAEMON_CLIENT: std::sync::OnceLock<std::sync::Mutex<Option<DaemonClient>>> =
+    std::sync::OnceLock::new();
 
-/// Global LLDB manager instance.
-static LLDB_MANAGER: std::sync::OnceLock<LldbManager> = std::sync::OnceLock::new();
+/// Global LLDB manager instance (resettable on shutdown for re-initialization).
+static LLDB_MANAGER: std::sync::OnceLock<std::sync::Mutex<Option<LldbManager>>> =
+    std::sync::OnceLock::new();
 
 /// Initialize the Detrix client.
 ///
@@ -139,6 +145,7 @@ pub fn init(config: Config) -> Result<()> {
 
         guard.name = config.connection_name();
         guard.control_host = config.control_host.clone();
+        guard.advertise_host = config.advertise_host.clone();
         guard.control_port = config.control_port;
         guard.debug_port = config.debug_port;
         guard.daemon_url = config.daemon_url.clone();
@@ -146,7 +153,10 @@ pub fn init(config: Config) -> Result<()> {
         guard.detrix_home = config
             .detrix_home_path()
             .map(|p| p.to_string_lossy().to_string());
+        guard.workspace_root = config.workspace_root.clone();
         guard.safe_mode = config.safe_mode;
+        guard.build_commit = config.build_commit.clone();
+        guard.build_tag = config.build_tag.clone();
         guard.health_check_timeout_ms = config
             .health_check_timeout
             .as_millis()
@@ -170,31 +180,55 @@ pub fn init(config: Config) -> Result<()> {
         guard.state = ClientState::Sleeping;
     }
 
-    // Initialize daemon client
-    let daemon_client = DaemonClient::new(None)?;
-    let _ = DAEMON_CLIENT.set(daemon_client);
-
-    // Initialize LLDB manager
-    let _ = LLDB_MANAGER
-        .get_or_init(|| LldbManager::new(lldb_dap_path.clone(), config.lldb_start_timeout));
-
-    // Discover auth token
+    // Discover auth token before creating daemon client
     let auth_token = auth::discover_token(config.detrix_home_path().as_deref());
+
+    // Initialize daemon client (resettable via Mutex<Option<T>>)
+    let daemon_client = DaemonClient::new(None, auth_token.clone())?;
+    let dc_holder = DAEMON_CLIENT.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = dc_holder.lock() {
+        *guard = Some(daemon_client);
+    }
+
+    // Best-effort: fetch advertise_url from daemon (daemon may not be up yet)
+    if let Ok(dc_guard) = dc_holder.lock() {
+        if let Some(ref dc) = *dc_guard {
+            if let Some(adv_url) =
+                dc.fetch_advertise_url(&config.daemon_url, Duration::from_secs(2))
+            {
+                debug!("Fetched daemon advertise URL at init: {}", adv_url);
+                let state = get();
+                if let Ok(mut guard) = state.write() {
+                    guard.daemon_advertise_url = Some(adv_url);
+                }
+            }
+        }
+    }
+
+    // Initialize LLDB manager (resettable via Mutex<Option<T>>)
+    let lldb_manager = LldbManager::new(lldb_dap_path.clone(), config.lldb_start_timeout);
+    let lm_holder = LLDB_MANAGER.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = lm_holder.lock() {
+        *guard = Some(lldb_manager);
+    }
 
     // Create callbacks for control server
     let status_callback = Arc::new(status_provider);
     let wake_callback =
         Arc::new(|daemon_url: Option<String>| wake_handler(daemon_url).map_err(|e| e.to_string()));
     let sleep_callback = Arc::new(|| sleep_handler().map_err(|e| e.to_string()));
+    let discover_callback = Arc::new(discover_provider);
 
     // Start control server
     let server = ControlServer::start(
         &config.control_host,
         config.control_port,
         auth_token,
+        config.workspace_root.clone().unwrap_or_default(),
         status_callback,
         wake_callback,
         sleep_callback,
+        discover_callback,
     )?;
 
     let actual_port = server.port();
@@ -341,6 +375,18 @@ pub fn shutdown() -> Result<()> {
         }
     }
 
+    // Clear daemon client and lldb manager for re-initialization
+    if let Some(holder) = DAEMON_CLIENT.get() {
+        if let Ok(mut guard) = holder.lock() {
+            *guard = None;
+        }
+    }
+    if let Some(holder) = LLDB_MANAGER.get() {
+        if let Ok(mut guard) = holder.lock() {
+            *guard = None;
+        }
+    }
+
     // Reset state
     state::reset();
 
@@ -356,6 +402,60 @@ fn status_provider() -> StatusResponse {
     status()
 }
 
+fn discover_provider() -> DiscoverResponse {
+    let state = get();
+    let guard = state.read().unwrap_or_else(|e| e.into_inner());
+    let mut daemon_url = guard.daemon_advertise_url.clone();
+    let daemon_base_url = guard.daemon_url.clone();
+    let name = guard.name.clone();
+    let control_host = guard.control_host.clone();
+    let advertise_host = guard.advertise_host.clone();
+    let actual_control_port = guard.actual_control_port;
+    drop(guard);
+
+    // Lazy-fetch: if advertise URL unknown, ask daemon now
+    if daemon_url.is_none() {
+        let fetched = DAEMON_CLIENT
+            .get()
+            .and_then(|dc_holder| dc_holder.lock().ok())
+            .and_then(|dc_guard| {
+                dc_guard
+                    .as_ref()
+                    .map(|dc| dc.fetch_advertise_url(&daemon_base_url, Duration::from_secs(2)))
+            })
+            .flatten();
+        if let Some(adv_url) = fetched {
+            debug!("Fetched daemon advertise URL on discover: {}", adv_url);
+            if let Ok(mut guard) = state.write() {
+                guard.daemon_advertise_url = Some(adv_url.clone());
+            }
+            daemon_url = Some(adv_url);
+        }
+    }
+
+    // Build control_plane_url: the daemon-visible URL of this app's control plane.
+    // Use advertise_host (DETRIX_HOST) if set; otherwise use control_host unless
+    // it's a bind-all address. This lets the MCP bridge route wake requests
+    // correctly in Docker/cloud where localhost:PORT != container:PORT.
+    const BIND_ALL: &[&str] = &["0.0.0.0", "::", ""];
+    let cp_host = advertise_host.as_deref().or_else(|| {
+        if !BIND_ALL.contains(&control_host.as_str()) {
+            Some(control_host.as_str())
+        } else {
+            None
+        }
+    });
+    let control_plane_url = cp_host
+        .filter(|_| actual_control_port > 0)
+        .map(|h| format!("http://{}:{}", h, actual_control_port));
+
+    DiscoverResponse {
+        daemon_url: daemon_url.unwrap_or(daemon_base_url),
+        name,
+        control_plane_url,
+    }
+}
+
 fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
     if !is_initialized() {
         return Err(Error::NotInitialized);
@@ -369,10 +469,14 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
         current_state,
         target_daemon_url,
         debug_host,
+        advertise_host,
         debug_port,
         name,
         detrix_home,
+        workspace_root_override,
         safe_mode,
+        build_commit_override,
+        build_tag_override,
         health_timeout,
         register_timeout,
     ) = {
@@ -384,10 +488,14 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
             guard.state,
             target_url,
             guard.control_host.clone(),
+            guard.advertise_host.clone(),
             guard.debug_port,
             guard.name.clone(),
             guard.detrix_home.clone(),
+            guard.workspace_root.clone(),
             guard.safe_mode,
+            guard.build_commit.clone(),
+            guard.build_tag.clone(),
             Duration::from_millis(guard.health_check_timeout_ms),
             Duration::from_millis(guard.register_timeout_ms),
         )
@@ -401,6 +509,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
             status: WakeResponseStatus::AlreadyAwake,
             debug_port: i32::from(guard.actual_debug_port),
             connection_id: guard.connection_id.clone().unwrap_or_default(),
+            daemon_url: guard.daemon_advertise_url.clone(),
         });
     }
 
@@ -424,15 +533,42 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
         }
     };
 
+    // Acquire daemon client and lldb manager locks for the operation.
+    // Safe to hold for the duration because wake_lock already serializes access.
+    let dc_holder = DAEMON_CLIENT.get().ok_or(Error::NotInitialized)?;
+    let mut dc_guard = dc_holder
+        .lock()
+        .map_err(|_| Error::ControlPlaneError("daemon client lock poisoned".to_string()))?;
+
+    // Re-discover token (daemon may have restarted with a new one)
+    let fresh_token = auth::discover_token(detrix_home.as_ref().map(std::path::Path::new));
+    if let Some(ref mut dc) = *dc_guard {
+        dc.update_auth_token(fresh_token.clone());
+    }
+
+    // Update control server token too (so it accepts requests with the new token)
+    if let Some(cs_holder) = CONTROL_SERVER.get() {
+        if let Ok(cs_guard) = cs_holder.lock() {
+            if let Some(ref cs) = *cs_guard {
+                cs.update_token(fresh_token);
+            }
+        }
+    }
+    let daemon_client = dc_guard.as_ref().ok_or(Error::NotInitialized)?;
+
+    let lm_holder = LLDB_MANAGER.get().ok_or(Error::NotInitialized)?;
+    let lm_guard = lm_holder
+        .lock()
+        .map_err(|_| Error::ControlPlaneError("lldb manager lock poisoned".to_string()))?;
+    let lldb_manager = lm_guard.as_ref().ok_or(Error::NotInitialized)?;
+
     // Check daemon health
-    let daemon_client = DAEMON_CLIENT.get().ok_or(Error::NotInitialized)?;
     if let Err(e) = daemon_client.health_check(&target_daemon_url, health_timeout) {
         revert_state();
         return Err(e);
     }
 
     // Spawn lldb-dap and attach
-    let lldb_manager = LLDB_MANAGER.get().ok_or(Error::NotInitialized)?;
     let lldb_process = match lldb_manager.spawn_and_attach(&debug_host, debug_port) {
         Ok(p) => p,
         Err(e) => {
@@ -446,17 +582,16 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
     // Store lldb process
     state::set_lldb_process(lldb_process);
 
-    // Discover auth token
-    let token = auth::discover_token(detrix_home.as_ref().map(std::path::Path::new));
-
     // Get workspace root and hostname for identity
-    let workspace_root = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.to_str().map(String::from))
-        .unwrap_or_else(|| {
-            warn!("Failed to get current directory, using /unknown");
-            "/unknown".to_string()
-        });
+    let workspace_root = workspace_root_override.unwrap_or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_else(|| {
+                warn!("Failed to get current directory, using /unknown");
+                UNKNOWN_WORKSPACE_ROOT.to_string()
+            })
+    });
 
     let hostname = hostname::get()
         .ok()
@@ -466,24 +601,31 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
             "unknown".to_string()
         });
 
+    // Detect build information
+    let build_commit = build_info::detect_build_commit(build_commit_override);
+    let build_tag = build_info::detect_build_tag(build_tag_override);
+
     // Register with daemon
+    // Use advertise_host if set (for Docker/cloud), otherwise use control_host
     // Pass our PID so the daemon can use AttachPid mode with lldb-dap
-    let connection_id = match daemon_client.register(
+    let registration_host = advertise_host.unwrap_or(debug_host);
+    let (connection_id, advertise_url) = match daemon_client.register(
         &target_daemon_url,
         RegisterRequest {
-            host: debug_host,
+            host: registration_host,
             port: actual_debug_port,
             language: "rust".to_string(),
             name: name.clone(),
             workspace_root,
             hostname,
             pid: Some(std::process::id()),
-            token,
             safe_mode,
+            build_commit,
+            build_tag,
         },
         register_timeout,
     ) {
-        Ok(id) => id,
+        Ok(result) => result,
         Err(e) => {
             // Kill lldb and revert state
             if let Some(mut process) = state::take_lldb_process() {
@@ -502,6 +644,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
         guard.actual_debug_port = actual_debug_port;
         guard.debug_port_active = true;
         guard.connection_id = Some(connection_id.clone());
+        guard.daemon_advertise_url = advertise_url.clone();
     }
 
     info!(
@@ -513,6 +656,7 @@ fn wake_handler(daemon_url: Option<String>) -> Result<WakeResponse> {
         status: WakeResponseStatus::Awake,
         debug_port: i32::from(actual_debug_port),
         connection_id,
+        daemon_url: advertise_url,
     })
 }
 
@@ -557,16 +701,24 @@ fn sleep_handler() -> Result<SleepResponse> {
 
     // Unregister from daemon (best effort)
     if let Some(conn_id) = connection_id {
-        if let Some(daemon_client) = DAEMON_CLIENT.get() {
-            daemon_client.unregister(&daemon_url, &conn_id, unregister_timeout);
+        if let Some(holder) = DAEMON_CLIENT.get() {
+            if let Ok(guard) = holder.lock() {
+                if let Some(daemon_client) = guard.as_ref() {
+                    daemon_client.unregister(&daemon_url, &conn_id, unregister_timeout);
+                }
+            }
         }
     }
 
     // Kill lldb-dap process
     if let Some(mut process) = state::take_lldb_process() {
-        if let Some(lldb_manager) = LLDB_MANAGER.get() {
-            if let Err(e) = lldb_manager.kill(&mut process) {
-                warn!("Failed to kill lldb-dap: {}", e);
+        if let Some(holder) = LLDB_MANAGER.get() {
+            if let Ok(guard) = holder.lock() {
+                if let Some(lldb_manager) = guard.as_ref() {
+                    if let Err(e) = lldb_manager.kill(&mut process) {
+                        warn!("Failed to kill lldb-dap: {}", e);
+                    }
+                }
             }
         }
     }

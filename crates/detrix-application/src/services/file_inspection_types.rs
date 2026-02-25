@@ -41,6 +41,7 @@ impl SourceLanguageExt for SourceLanguage {
                 has_lsp_purity: true,
                 has_dap_adapter: true,
                 has_introspection: true,
+                supports_hot_reload: false,
                 dap_adapter_name: Some("debugpy"),
                 lsp_server_name: Some("pylsp"),
             },
@@ -51,6 +52,7 @@ impl SourceLanguageExt for SourceLanguage {
                 has_lsp_purity: true,
                 has_dap_adapter: true,
                 has_introspection: true,
+                supports_hot_reload: false,
                 dap_adapter_name: Some("dlv"),
                 lsp_server_name: Some("gopls"),
             },
@@ -61,6 +63,7 @@ impl SourceLanguageExt for SourceLanguage {
                 has_lsp_purity: true,
                 has_dap_adapter: true,
                 has_introspection: true,
+                supports_hot_reload: false,
                 dap_adapter_name: Some("lldb-dap"),
                 lsp_server_name: Some("rust-analyzer"),
             },
@@ -91,6 +94,12 @@ pub struct LanguageCapabilities {
     pub has_dap_adapter: bool,
     /// Whether introspection (variable inspection) is supported
     pub has_introspection: bool,
+    /// Whether the language supports hot code reloading at runtime.
+    ///
+    /// When true, cached files become stale after a TTL (since source
+    /// can change without a restart). When false, files are immutable
+    /// for the connection's lifetime.
+    pub supports_hot_reload: bool,
     /// Name of the DAP adapter binary (e.g., "debugpy", "dlv")
     pub dap_adapter_name: Option<&'static str>,
     /// Name of the LSP server (e.g., "pylsp", "gopls")
@@ -206,4 +215,6 @@ pub struct FileInspectionRequest {
     pub line: Option<u32>,
     /// Optional variable to find
     pub find_variable: Option<String>,
+    /// Optional workspace root for resolving relative paths
+    pub workspace_root: Option<String>,
 }

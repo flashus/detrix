@@ -53,7 +53,6 @@ async fn test_port_cleanup_after_debugpy_kill() {
     reporter.info("Testing that port is released after debugpy is killed and connection closed");
 
     let mut executor = TestExecutor::new();
-    let debugpy_port = executor.debugpy_port;
 
     // ========================================================================
     // PHASE 1: Start debugpy
@@ -68,16 +67,18 @@ async fn test_port_cleanup_after_debugpy_kill() {
         panic!("Missing Python test fixture");
     }
 
-    let step = reporter.step_start(
-        "Start debugpy",
-        &format!("Launch debugpy on port {}", debugpy_port),
-    );
+    let step = reporter.step_start("Start debugpy", "Launch debugpy");
     if let Err(e) = executor.start_debugpy(script_path.to_str().unwrap()).await {
         reporter.step_failed(step, &e);
         executor.print_debugpy_logs(50);
         panic!("Failed to start debugpy: {}", e);
     }
-    reporter.step_success(step, Some("debugpy started"));
+    // Read port AFTER lazy allocation inside start_debugpy()
+    let debugpy_port = executor.debugpy_port;
+    reporter.step_success(
+        step,
+        Some(&format!("debugpy started on port {}", debugpy_port)),
+    );
 
     // Verify port is in use
     assert!(
@@ -322,7 +323,6 @@ async fn test_port_cleanup_normal_disconnect() {
     reporter.info("Testing that detrix cleanly disconnects while debugpy is running");
 
     let mut executor = TestExecutor::new();
-    let debugpy_port = executor.debugpy_port;
 
     // Start debugpy
     let script_path = executor
@@ -337,6 +337,8 @@ async fn test_port_cleanup_normal_disconnect() {
         reporter.error(&format!("Failed to start debugpy: {}", e));
         return;
     }
+    // Read port AFTER lazy allocation inside start_debugpy()
+    let debugpy_port = executor.debugpy_port;
 
     // Start daemon
     if let Err(e) = executor.start_daemon().await {
@@ -436,7 +438,6 @@ async fn test_port_cleanup_multiple_cycles() {
     reporter.info("Testing that multiple connect/kill/restart cycles don't leak ports");
 
     let mut executor = TestExecutor::new();
-    let debugpy_port = executor.debugpy_port;
 
     let script_path = executor
         .workspace_root
@@ -480,17 +481,19 @@ async fn test_port_cleanup_multiple_cycles() {
         }
 
         // Start debugpy
-        let step = reporter.step_start(
-            "Start debugpy",
-            &format!("Cycle {}: Start debugpy on port {}", cycle, debugpy_port),
-        );
+        let step = reporter.step_start("Start debugpy", &format!("Cycle {}: Start debugpy", cycle));
 
         if let Err(e) = executor.start_debugpy(script_path.to_str().unwrap()).await {
             reporter.step_failed(step, &e);
             executor.print_daemon_logs(100);
             panic!("Cycle {}: Failed to start debugpy: {}", cycle, e);
         }
-        reporter.step_success(step, Some("debugpy started"));
+        // Read port AFTER lazy allocation inside start_debugpy()
+        let debugpy_port = executor.debugpy_port;
+        reporter.step_success(
+            step,
+            Some(&format!("debugpy started on port {}", debugpy_port)),
+        );
 
         // Connect
         let step = reporter.step_start("Connect", &format!("Cycle {}: Connect to debugpy", cycle));

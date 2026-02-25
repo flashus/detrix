@@ -107,14 +107,53 @@ async fn test_daemon_restart_auto_reconnect_python() {
     // ========================================================================
     reporter.section("PHASE 3: CONNECT TO DEBUGPY");
 
+    // Verify debugpy is still alive before attempting create_connection.
+    // If debugpy crashed (e.g., under concurrent test suite load), the daemon's
+    // adapter would enter a 120s exponential-backoff loop, causing the HTTP client
+    // to time out. This pre-check turns a 120s hang into an immediate clear failure.
+    let debugpy_alive = executor
+        .debugpy_process
+        .as_mut()
+        .map(|p| p.try_wait().ok().flatten().is_none())
+        .unwrap_or(false);
+    if !debugpy_alive {
+        reporter
+            .error("debugpy process died before create_connection! Check /tmp/debugpy_e2e_*.log");
+        executor.print_daemon_logs(100);
+        panic!("debugpy crashed before create_connection could be issued");
+    }
+
     let step = reporter.step_start(
         "Create connection",
         &format!("Connect to debugpy on port {}", executor.debugpy_port),
     );
 
-    let connection_result = client
-        .create_connection("127.0.0.1", executor.debugpy_port, "python")
-        .await;
+    // Use a 30s timeout: the daemon's adapter connect+backoff can take 120s when
+    // debugpy is unreachable, hitting the HTTP client's 120s default timeout.
+    let connection_result = tokio::time::timeout(
+        Duration::from_secs(30),
+        client.create_connection("127.0.0.1", executor.debugpy_port, "python"),
+    )
+    .await;
+
+    let connection_result = match connection_result {
+        Err(_timeout) => {
+            reporter.step_failed(
+                step,
+                "create_connection timed out after 30s (debugpy unreachable?)",
+            );
+            // Diagnose: is debugpy still alive?
+            let alive = executor
+                .debugpy_process
+                .as_mut()
+                .map(|p| p.try_wait().ok().flatten().is_none())
+                .unwrap_or(false);
+            reporter.error(&format!("debugpy alive at timeout: {}", alive));
+            executor.print_daemon_logs(100);
+            panic!("create_connection timed out (debugpy alive={})", alive);
+        }
+        Ok(result) => result,
+    };
 
     let connection_id = match connection_result {
         Ok(r) => {

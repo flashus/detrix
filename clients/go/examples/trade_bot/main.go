@@ -6,16 +6,16 @@
 //
 // Usage:
 //
-//	1. Run this bot:
-//	   $ go run ./examples/trade_bot
+//  1. Run this bot:
+//     $ go run ./examples/trade_bot
 //
-//	Or with custom daemon URL:
-//	   $ go run ./examples/trade_bot --daemon-url http://127.0.0.1:9999
+//     Or with custom daemon URL:
+//     $ go run ./examples/trade_bot --daemon-url http://127.0.0.1:9999
 //
-//	2. The bot will print its control plane URL.
-//	   An agent can then POST to /detrix/wake to enable observability.
+//  2. The bot will print its control plane URL.
+//     An agent can then POST to /detrix/wake to enable observability.
 //
-//	3. Press Ctrl+C to stop.
+//  3. Press Ctrl+C to stop.
 package main
 
 import (

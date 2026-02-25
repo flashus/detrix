@@ -7,6 +7,8 @@ use detrix_config::constants::DEFAULT_MCP_USAGE_HISTORY;
 pub use detrix_core::{McpErrorCode, McpUsageEvent};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
+// Uses std::sync::RwLock intentionally — lock held only for fast sync operations,
+// never across .await points, so tokio::sync::RwLock is unnecessary.
 use std::sync::RwLock;
 use std::time::Instant;
 

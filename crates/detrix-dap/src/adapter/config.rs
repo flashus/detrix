@@ -194,6 +194,23 @@ impl AdapterConfig {
         self
     }
 
+    /// Override the host in the connection mode.
+    ///
+    /// This is useful when the adapter config was created with a default host
+    /// (e.g., 127.0.0.1) but needs to connect to a different host (e.g., a
+    /// Docker container hostname).
+    pub fn with_host(mut self, host: impl Into<String>) -> Self {
+        let host = host.into();
+        match &mut self.connection_mode {
+            ConnectionMode::Launch => {} // no host to override
+            ConnectionMode::Attach { host: h, .. } => *h = host,
+            ConnectionMode::AttachRemote { host: h, .. } => *h = host,
+            ConnectionMode::LaunchProgram { host: h, .. } => *h = host,
+            ConnectionMode::AttachPid { host: h, .. } => *h = host,
+        }
+        self
+    }
+
     /// Set connection mode to Attach
     pub fn attach(mut self, host: impl Into<String>, port: u16) -> Self {
         self.connection_mode = ConnectionMode::Attach {

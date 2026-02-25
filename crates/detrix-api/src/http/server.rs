@@ -2,6 +2,7 @@
 
 use super::routes::{create_router_with_config, create_router_with_jwt_validator};
 use crate::state::ApiState;
+use anyhow::Context;
 use detrix_application::JwksValidator;
 // IntoMakeServiceWithConnectInfo is used via the Router::into_make_service_with_connect_info method
 #[allow(unused_imports)]
@@ -18,6 +19,8 @@ pub struct HttpServer {
     state: Arc<ApiState>,
     /// JWT validator for external auth mode (optional)
     jwt_validator: Option<JwksValidator>,
+    /// Pre-bound TCP listener (eliminates TOCTOU race between port check and bind)
+    listener: Option<TcpListener>,
 }
 
 impl HttpServer {
@@ -27,6 +30,7 @@ impl HttpServer {
             addr,
             state,
             jwt_validator: None,
+            listener: None,
         }
     }
 
@@ -40,7 +44,19 @@ impl HttpServer {
             addr,
             state,
             jwt_validator: Some(jwt_validator),
+            listener: None,
         }
+    }
+
+    /// Supply a pre-bound TCP listener (builder method).
+    ///
+    /// When set, `start` / `start_with_shutdown` will use this listener instead of
+    /// binding a new one. This eliminates the TOCTOU race between port availability
+    /// check and actual bind, which is important when multiple daemons start in
+    /// parallel (e.g., during E2E tests).
+    pub fn with_listener(mut self, listener: TcpListener) -> Self {
+        self.listener = Some(listener);
+        self
     }
 
     /// Start the HTTP server
@@ -66,16 +82,20 @@ impl HttpServer {
             None => create_router_with_config(Arc::clone(&self.state), rate_limit, auth, cors)?,
         };
 
-        // Bind TCP listener
-        let listener = TcpListener::bind(self.addr)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to bind HTTP server: {}", e))?;
+        // Use pre-bound listener if provided, otherwise bind now
+        let listener = match self.listener {
+            Some(l) => l,
+            None => TcpListener::bind(self.addr)
+                .await
+                .context("Failed to bind HTTP server")?,
+        };
+        let local_addr = listener.local_addr().unwrap_or(self.addr);
 
-        info!("✓ HTTP server listening on {}", self.addr);
-        info!("   REST API: http://{}/api/v1/metrics", self.addr);
-        info!("   WebSocket: ws://{}/ws", self.addr);
-        info!("   MCP HTTP: http://{}/mcp", self.addr);
-        info!("   Health: http://{}/health", self.addr);
+        info!("✓ HTTP server listening on {}", local_addr);
+        info!("   REST API: http://{}/api/v1/metrics", local_addr);
+        info!("   WebSocket: ws://{}/ws", local_addr);
+        info!("   MCP HTTP: http://{}/mcp", local_addr);
+        info!("   Health: http://{}/health", local_addr);
 
         // Spawn server task
         // NOTE: Must use into_make_service_with_connect_info for rate limiting to work
@@ -123,16 +143,20 @@ impl HttpServer {
 
         info!("📍 Router created, binding TCP listener...");
 
-        // Bind TCP listener
-        let listener = TcpListener::bind(self.addr)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to bind HTTP server: {}", e))?;
+        // Use pre-bound listener if provided, otherwise bind now
+        let listener = match self.listener {
+            Some(l) => l,
+            None => TcpListener::bind(self.addr)
+                .await
+                .context("Failed to bind HTTP server")?,
+        };
+        let local_addr = listener.local_addr().unwrap_or(self.addr);
 
-        info!("✓ HTTP server listening on {}", self.addr);
-        info!("   REST API: http://{}/api/v1/metrics", self.addr);
-        info!("   WebSocket: ws://{}/ws", self.addr);
-        info!("   MCP HTTP: http://{}/mcp", self.addr);
-        info!("   Health: http://{}/health", self.addr);
+        info!("✓ HTTP server listening on {}", local_addr);
+        info!("   REST API: http://{}/api/v1/metrics", local_addr);
+        info!("   WebSocket: ws://{}/ws", local_addr);
+        info!("   MCP HTTP: http://{}/mcp", local_addr);
+        info!("   Health: http://{}/health", local_addr);
 
         // Spawn server task with graceful shutdown
         let handle = tokio::spawn(async move {

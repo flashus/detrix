@@ -48,15 +48,21 @@ pub mod ports;
 // PID file data structures (PidInfo)
 pub mod pid;
 
+// Persistent machine-scoped client identity
+pub mod machine_id;
+
 // Config modules - organized by domain
 mod adapter;
 mod anchor;
 mod api;
+pub mod credentials;
 mod daemon;
+pub mod daemons;
 mod output;
 mod safety;
 mod storage;
 mod tui;
+mod vfs;
 
 // Core types module that re-exports from submodules
 mod types;

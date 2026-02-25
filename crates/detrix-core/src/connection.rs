@@ -14,6 +14,12 @@ use std::fmt;
 /// Minimum unreserved port number (ports 0-1023 are reserved for system services)
 pub const MIN_UNRESERVED_PORT: u16 = 1024;
 
+/// Placeholder workspace root used when the actual workspace is unknown.
+///
+/// Clients send this value when they cannot determine their working directory.
+/// Use `Connection::valid_workspace_root()` to filter this out before path resolution.
+pub const UNKNOWN_WORKSPACE_ROOT: &str = "/unknown";
+
 /// Unique identifier for a debugger connection
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConnectionId(pub String);
@@ -165,6 +171,26 @@ pub struct Connection {
     #[serde(default)]
     pub safe_mode: bool,
 
+    /// Control plane URL for the application (e.g., "http://app:8091").
+    /// Used by the file source chain to fetch source files from the application.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_plane_url: Option<String>,
+
+    /// Git commit SHA at build time (e.g., "abc123def").
+    /// Used for file content verification and future git-based file sourcing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_commit: Option<String>,
+
+    /// Build tag / version (e.g., "v1.2.3").
+    /// Informational metadata for connection identification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_tag: Option<String>,
+
+    /// Client identity of the creator (from X-Detrix-Client-Id header).
+    /// Used for multi-user reference counting in cloud mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+
     /// When the connection was created (microseconds since epoch)
     pub created_at: i64,
 
@@ -181,6 +207,15 @@ fn default_auto_reconnect() -> bool {
 }
 
 impl Connection {
+    /// Returns the workspace root if it's a valid, usable path.
+    ///
+    /// Filters out placeholder values ("/unknown") and empty strings.
+    /// Use this instead of accessing `workspace_root` directly when
+    /// resolving relative file paths.
+    pub fn valid_workspace_root(&self) -> Option<&str> {
+        Some(self.workspace_root.as_str()).filter(|r| *r != UNKNOWN_WORKSPACE_ROOT && !r.is_empty())
+    }
+
     /// Get current timestamp in microseconds
     fn now_micros() -> i64 {
         Utc::now().timestamp_micros()
@@ -227,6 +262,10 @@ impl Connection {
             status: ConnectionStatus::Disconnected,
             auto_reconnect: true,
             safe_mode: false,
+            control_plane_url: None,
+            build_commit: None,
+            build_tag: None,
+            created_by: None,
             created_at: now,
             last_connected_at: None,
             last_active: now,
@@ -268,7 +307,7 @@ impl Connection {
         Ok(Self {
             id,
             name: None,
-            workspace_root: "/unknown".to_string(),
+            workspace_root: UNKNOWN_WORKSPACE_ROOT.to_string(),
             hostname: "unknown".to_string(),
             host,
             port,
@@ -276,6 +315,10 @@ impl Connection {
             status: ConnectionStatus::Disconnected,
             auto_reconnect: true,
             safe_mode: false,
+            control_plane_url: None,
+            build_commit: None,
+            build_tag: None,
+            created_by: None,
             created_at: now,
             last_connected_at: None,
             last_active: now,
@@ -325,6 +368,29 @@ impl Connection {
     /// Update last active timestamp
     pub fn touch(&mut self) {
         self.last_active = Self::now_micros();
+    }
+
+    /// Check if connection has been inactive for more than N days
+    ///
+    /// Uses elapsed-time comparison consistent with `ConnectionReference::inactive_for_days`.
+    ///
+    /// # Arguments
+    /// * `days` - Number of days to check against. If negative, returns false (indefinite TTL).
+    ///   If 0, returns true (remove all).
+    /// * `now_micros` - Current timestamp in microseconds since epoch
+    ///
+    /// # Returns
+    /// `true` if the connection has been inactive for at least `days` elapsed days.
+    pub fn inactive_for_days(&self, days: i64, now_micros: i64) -> bool {
+        if days < 0 {
+            return false; // -1 = indefinite, never cleanup
+        }
+        if days == 0 {
+            return true; // 0 = remove all
+        }
+        let micros_per_day: i64 = 86_400 * 1_000_000;
+        let elapsed = now_micros - self.last_active;
+        elapsed >= days * micros_per_day
     }
 }
 
@@ -709,5 +775,79 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Connection name cannot be empty"));
+    }
+
+    #[test]
+    fn test_inactive_for_days_elapsed_time() {
+        let micros_per_day: i64 = 86_400 * 1_000_000;
+        let now = chrono::Utc::now().timestamp_micros();
+
+        let identity = ConnectionIdentity::new("app", SourceLanguage::Python, "/ws", "host");
+        let mut conn =
+            Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5678).unwrap();
+
+        // Set last_active to 10 days ago
+        conn.last_active = now - 10 * micros_per_day;
+
+        assert!(conn.inactive_for_days(7, now)); // 10 days >= 7 days
+        assert!(conn.inactive_for_days(10, now)); // 10 days >= 10 days (exactly)
+        assert!(!conn.inactive_for_days(14, now)); // 10 days < 14 days
+        assert!(!conn.inactive_for_days(-1, now)); // indefinite = never expire
+        assert!(conn.inactive_for_days(0, now)); // 0 = remove all
+    }
+
+    #[test]
+    fn test_inactive_for_days_recent_activity() {
+        let identity = ConnectionIdentity::new("app", SourceLanguage::Python, "/ws", "host");
+        let mut conn =
+            Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5678).unwrap();
+
+        let now = chrono::Utc::now().timestamp_micros();
+        // Set last_active to 1 hour ago (well under 1 day)
+        conn.last_active = now - 3_600 * 1_000_000;
+
+        // Should NOT be inactive for 1 day
+        assert!(!conn.inactive_for_days(1, now));
+        // But days=0 always returns true
+        assert!(conn.inactive_for_days(0, now));
+    }
+
+    #[test]
+    fn test_ttl_indefinite_never_expires() {
+        let identity = ConnectionIdentity::new("app", SourceLanguage::Python, "/ws", "host");
+        let mut conn =
+            Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5678).unwrap();
+
+        // Set last_active to 100 days ago
+        let long_ago = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::days(100))
+            .unwrap()
+            .timestamp_micros();
+        conn.last_active = long_ago;
+
+        let now = chrono::Utc::now().timestamp_micros();
+
+        // With ttl_days = -1 (indefinite), should never be considered inactive
+        assert!(!conn.inactive_for_days(-1, now));
+        assert!(!conn.inactive_for_days(-999, now));
+    }
+
+    #[test]
+    fn test_ttl_zero_days_removes_all() {
+        let identity = ConnectionIdentity::new("app", SourceLanguage::Python, "/ws", "host");
+        let mut conn =
+            Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5678).unwrap();
+
+        // Set last_active to yesterday
+        let yesterday = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::days(1))
+            .unwrap()
+            .timestamp_micros();
+        conn.last_active = yesterday;
+
+        let now = chrono::Utc::now().timestamp_micros();
+
+        // With ttl_days = 0, anything older than today should be inactive
+        assert!(conn.inactive_for_days(0, now));
     }
 }

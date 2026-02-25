@@ -27,6 +27,7 @@ pub mod treesitter;
 #[cfg(test)]
 pub mod unified_tests;
 mod validation_result;
+mod validator_data;
 
 pub use base_validator::{BaseValidator, FunctionClassification};
 pub use detrix_core::PurityLevel;

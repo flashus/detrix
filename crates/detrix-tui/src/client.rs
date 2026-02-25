@@ -247,9 +247,10 @@ impl DetrixClient {
             connection_id: connection_id.to_string(),
             metadata: None,
         };
+        let tonic_request = detrix_api::grpc::request_with_machine_client_id(request);
         let response = self
             .connections_client
-            .close_connection(request)
+            .close_connection(tonic_request)
             .await
             .context("Failed to close connection")?;
         Ok(response.into_inner().success)

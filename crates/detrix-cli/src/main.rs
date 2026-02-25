@@ -112,11 +112,23 @@ enum Commands {
         verbose: bool,
     },
 
-    /// Wake the system (start observing)
-    Wake,
+    /// Wake a remote app's Detrix client
+    Wake {
+        /// URL of the app's control plane (e.g., 'http://my-app:8091')
+        app_url: String,
+        /// Optional daemon URL to pass to the app
+        #[arg(long)]
+        daemon_url: Option<String>,
+    },
 
-    /// Sleep the system (pause observing)
-    Sleep,
+    /// Sleep a remote app's Detrix client
+    Sleep {
+        /// URL of the app's control plane (e.g., 'http://my-app:8091')
+        app_url: String,
+    },
+
+    /// Disconnect all local debugger adapters
+    DisconnectAll,
 
     /// Manage configuration
     Config {
@@ -179,6 +191,16 @@ enum Commands {
         /// Daemon HTTP port for bridge mode
         #[arg(long, default_value_t = DEFAULT_REST_PORT)]
         daemon_port: u16,
+
+        /// Daemon URL to connect to (overrides config; e.g., http://192.168.1.10:8090)
+        /// If specified, ignores daemon_port and uses this URL directly
+        #[arg(long)]
+        daemon_url: Option<String>,
+
+        /// File server host to advertise (default: 127.0.0.1)
+        /// Used when switching daemons to tell the new daemon where to fetch files
+        #[arg(long)]
+        file_server_host: Option<String>,
     },
 
     /// Manage Detrix daemon lifecycle
@@ -236,6 +258,12 @@ enum Commands {
 
     /// Show MCP tool usage statistics
     Usage,
+
+    /// Manage daemon authentication credentials
+    Auth {
+        #[command(subcommand)]
+        action: commands::auth::AuthAction,
+    },
 
     /// Initialize Detrix configuration
     ///
@@ -369,11 +397,26 @@ async fn main() -> Result<()> {
             transport,
             no_daemon,
             daemon_port,
-        } => commands::mcp::run(&cli.config, &transport, no_daemon, daemon_port).await,
+            daemon_url,
+            file_server_host,
+        } => {
+            commands::mcp::run(
+                &cli.config,
+                &transport,
+                no_daemon,
+                daemon_port,
+                daemon_url,
+                file_server_host,
+            )
+            .await
+        }
         Commands::Daemon { action, pid_file } => {
             let pid_path = pid_file.map(std::path::PathBuf::from);
             commands::daemon::run(require_ctx()?, action, pid_path).await
         }
+
+        // Auth commands (don't need context)
+        Commands::Auth { action } => commands::auth::run(action).await,
 
         // Utility commands (don't need context)
         Commands::Ps => commands::ps::run().await,
@@ -391,11 +434,33 @@ async fn main() -> Result<()> {
             commands::status::run(require_ctx()?, cli.format, cli.quiet, cli.no_color, verbose)
                 .await
         }
-        Commands::Wake => {
-            commands::status::wake(require_ctx()?, cli.format, cli.quiet, cli.no_color).await
+        Commands::Wake {
+            app_url,
+            daemon_url,
+        } => {
+            commands::status::wake(
+                require_ctx()?,
+                &app_url,
+                daemon_url.as_deref(),
+                cli.format,
+                cli.quiet,
+                cli.no_color,
+            )
+            .await
         }
-        Commands::Sleep => {
-            commands::status::sleep(require_ctx()?, cli.format, cli.quiet, cli.no_color).await
+        Commands::Sleep { app_url } => {
+            commands::status::sleep(
+                require_ctx()?,
+                &app_url,
+                cli.format,
+                cli.quiet,
+                cli.no_color,
+            )
+            .await
+        }
+        Commands::DisconnectAll => {
+            commands::status::disconnect_all(require_ctx()?, cli.format, cli.quiet, cli.no_color)
+                .await
         }
         Commands::Config { action } => {
             commands::config::run(require_ctx()?, action, cli.format, cli.quiet, cli.no_color).await

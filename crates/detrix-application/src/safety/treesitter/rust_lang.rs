@@ -7,8 +7,7 @@
 //! - Unsafe blocks (flagged)
 //! - Macro invocations
 
-use super::cache::{global_cache, TreeSitterCache};
-use super::{node_kinds::rust as nodes, node_text, traverse_tree, TreeSitterResult};
+use super::{node_kinds::rust as nodes, node_text, TreeSitterResult};
 use detrix_core::SafetyLevel;
 use std::collections::HashSet;
 use tree_sitter::Parser;
@@ -27,65 +26,24 @@ pub fn analyze_rust(
     safety_level: SafetyLevel,
     allowed_functions: &HashSet<String>,
 ) -> TreeSitterResult {
-    let cache = global_cache();
-    let key = TreeSitterCache::make_key(expression, "rust", safety_level, allowed_functions);
-
-    cache.get_or_insert(&key, || {
-        analyze_rust_uncached(expression, safety_level, allowed_functions)
-    })
-}
-
-/// Analyze a Rust expression without caching (internal)
-fn analyze_rust_uncached(
-    expression: &str,
-    safety_level: SafetyLevel,
-    allowed_functions: &HashSet<String>,
-) -> TreeSitterResult {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_rust::LANGUAGE.into())
-        .expect("Failed to load Rust grammar");
-
-    // Rust expressions need to be wrapped in a valid Rust context for parsing
-    // We wrap in a minimal function body
-    let wrapped = format!("fn main() {{ let _ = {}; }}", expression);
-
-    let tree = match parser.parse(&wrapped, None) {
-        Some(tree) => tree,
-        None => {
-            return TreeSitterResult::unsafe_with_violations(vec![
-                "Failed to parse Rust expression".to_string(),
-            ]);
-        }
-    };
-
-    let root = tree.root_node();
-    let source = wrapped.as_bytes();
-
-    // Check for syntax errors
-    if root.has_error() {
-        return TreeSitterResult::unsafe_with_violations(vec![
-            "Syntax error in Rust expression".to_string()
-        ]);
-    }
-
-    let mut result = TreeSitterResult::safe();
-
-    // Traverse the AST and analyze nodes
-    traverse_tree(root, source, &mut |node, src| {
-        analyze_rust_node(node, src, safety_level, allowed_functions, &mut result);
-    });
-
-    // In strict mode, check that all function calls are whitelisted
-    if safety_level == SafetyLevel::Strict {
-        super::check_strict_mode_violations(
-            &mut result,
+    super::cached_analysis(expression, safety_level, allowed_functions, "rust", || {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .expect("Failed to load Rust grammar");
+        // Rust expressions need to be wrapped in a valid Rust context for parsing
+        let wrapped = format!("fn main() {{ let _ = {}; }}", expression);
+        super::parse_and_analyze(
+            &wrapped,
+            "Failed to parse Rust expression",
+            "Syntax error in Rust expression",
+            safety_level,
             allowed_functions,
+            analyze_rust_node,
             super::extract_rust_base_name,
-        );
-    }
-
-    result
+            &mut parser,
+        )
+    })
 }
 
 /// Analyze a single Rust AST node

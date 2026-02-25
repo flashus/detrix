@@ -76,7 +76,7 @@ impl HttpError {
         Self {
             status: StatusCode::FORBIDDEN,
             message: message.into(),
-            error_code: ErrorCode::Unauthorized,
+            error_code: ErrorCode::Forbidden,
         }
     }
 

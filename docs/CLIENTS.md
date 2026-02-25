@@ -169,9 +169,9 @@ All clients accept the same set of environment variables:
 
 **`DETRIX_DEBUG_PORT`** -- Port the debugger listens on (default: `0` = OS auto-assigns). This is the port the Detrix server connects to via DAP to set logpoints. Use `0` unless you have a specific reason to fix the port.
 
-**`DETRIX_TOKEN`** -- Bearer token for authenticating remote requests to the control plane. Localhost requests (127.0.0.1, ::1) always bypass authentication. If not set, the client reads `~/detrix/mcp-token` file as fallback. If neither is configured, remote requests are denied.
+**`DETRIX_TOKEN`** -- Bearer token for authenticating remote requests to the control plane. Localhost requests (127.0.0.1, ::1) always bypass authentication. If not set, the client reads `~/detrix/auth-token` file as fallback. If neither is configured, remote requests are denied.
 
-**`DETRIX_HOME`** -- Path to the Detrix home directory (default: `~/detrix`). Used to locate the `mcp-token` file and other configuration.
+**`DETRIX_HOME`** -- Path to the Detrix home directory (default: `~/detrix`). Used to locate the `auth-token` file and other configuration.
 
 **`DETRIX_HEALTH_CHECK_TIMEOUT`** -- Timeout in seconds for the health check call to the Detrix server during wake (default: `2.0`). See [Timeout Workflow](#timeout-workflow) below.
 
@@ -274,11 +274,11 @@ All clients expose the same HTTP endpoints on the control plane:
 
 ### Configuring a Token
 
-Set `DETRIX_TOKEN` environment variable, **or** place the token in `~/detrix/mcp-token`:
+Set `DETRIX_TOKEN` environment variable, **or** place the token in `~/detrix/auth-token`:
 
 ```bash
-echo "my-secret-token" > ~/detrix/mcp-token
-chmod 600 ~/detrix/mcp-token
+echo "my-secret-token" > ~/detrix/auth-token
+chmod 600 ~/detrix/auth-token
 ```
 
 If no token is configured, remote requests are denied by default.

@@ -72,18 +72,19 @@ impl TestScenarios {
         }
     }
 
-    /// Test wake/sleep cycle
+    /// Test wake/sleep cycle (requires mock app URL)
     pub async fn wake_sleep_cycle<C: ApiClient>(
         client: &C,
         reporter: &Arc<TestReporter>,
+        app_url: &str,
     ) -> Result<(), ApiError> {
         // Wake
-        let step = reporter.step_start("Wake", "Wake Detrix from sleep");
-        reporter.step_request("wake", None);
-        match client.wake().await {
+        let step = reporter.step_start("Wake", "Wake remote app");
+        reporter.step_request("wake", Some(app_url));
+        match client.wake(app_url, None).await {
             Ok(response) => {
                 reporter.step_response("OK", Some(&response.data));
-                reporter.step_success(step, Some("Woke successfully"));
+                reporter.step_success(step, Some("Wake sent"));
             }
             Err(e) => {
                 reporter.step_failed(step, &e.to_string());
@@ -92,12 +93,32 @@ impl TestScenarios {
         }
 
         // Sleep
-        let step = reporter.step_start("Sleep", "Put Detrix to sleep");
-        reporter.step_request("sleep", None);
-        match client.sleep().await {
+        let step = reporter.step_start("Sleep", "Sleep remote app");
+        reporter.step_request("sleep", Some(app_url));
+        match client.sleep(app_url).await {
             Ok(response) => {
                 reporter.step_response("OK", Some(&response.data));
-                reporter.step_success(step, Some("Sleeping"));
+                reporter.step_success(step, Some("Sleep sent"));
+                Ok(())
+            }
+            Err(e) => {
+                reporter.step_failed(step, &e.to_string());
+                Err(e)
+            }
+        }
+    }
+
+    /// Test disconnect_all operation
+    pub async fn disconnect_all<C: ApiClient>(
+        client: &C,
+        reporter: &Arc<TestReporter>,
+    ) -> Result<(), ApiError> {
+        let step = reporter.step_start("DisconnectAll", "Disconnect all adapters");
+        reporter.step_request("disconnect_all", None);
+        match client.disconnect_all().await {
+            Ok(response) => {
+                reporter.step_response("OK", Some(&response.data));
+                reporter.step_success(step, Some("All adapters disconnected"));
                 Ok(())
             }
             Err(e) => {
@@ -620,7 +641,10 @@ impl TestScenarios {
         reporter.section("HEALTH & STATUS");
         Self::health_check(client, reporter).await?;
         Self::get_status(client, reporter).await?;
-        Self::wake_sleep_cycle(client, reporter).await?;
+        // disconnect_all is a server-side operation, always works
+        Self::disconnect_all(client, reporter).await?;
+        // wake/sleep require a remote app URL — skipped in basic tests
+        reporter.info("Skipping wake/sleep (requires remote app URL)");
 
         reporter.section("VALIDATION (Python)");
         Self::validate_expression(client, reporter, "user.id", "python", true).await?;

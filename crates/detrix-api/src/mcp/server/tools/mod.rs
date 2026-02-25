@@ -15,7 +15,7 @@
 //! - `groups` - enable, disable, list groups
 //! - `config` - get, update, validate, reload config
 //! - `system` - query events, acknowledge, usage, validate, inspect
-//! - `status` - wake, sleep
+//! - `remote` - wake, sleep (proxy to app control plane), disconnect_all (stop local adapters)
 
 pub mod common;
 pub mod config;
@@ -23,7 +23,7 @@ pub mod connections;
 pub mod groups;
 pub mod metric_ops;
 pub mod metrics;
-pub mod status;
+pub mod remote;
 pub mod system;
 
 // Re-export what server.rs needs
@@ -37,7 +37,7 @@ pub use metric_ops::{
     update_metric_impl,
 };
 pub use metrics::{add_metric_impl, enable_from_diff_impl, observe_impl, NoDebugStatementsFound};
-pub use status::{sleep_impl, wake_impl};
+pub use remote::{disconnect_all_impl, sleep_impl, wake_impl};
 pub use system::{
     acknowledge_events_impl, get_mcp_usage_impl, inspect_file_impl, query_system_events_impl,
     validate_expression_impl,

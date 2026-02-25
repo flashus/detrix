@@ -19,6 +19,10 @@ pub struct HealthResponse {
     pub status: String,
     pub uptime_seconds: u64,
     pub adapter_connected: bool,
+    /// Daemon's external advertise URL (if configured).
+    /// Used by clients to discover how to reach this daemon externally.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advertise_url: Option<String>,
 }
 
 /// Health check endpoint for monitoring and load balancer probes.
@@ -44,6 +48,7 @@ pub async fn health_check(State(state): State<Arc<ApiState>>) -> Json<HealthResp
         status: status::OK.to_string(),
         uptime_seconds: uptime,
         adapter_connected,
+        advertise_url: state.advertise_url.clone(),
     })
 }
 

@@ -45,10 +45,11 @@ pub use format::{format_response, ResponseFormat};
 // Re-export params for convenience
 pub use params::{
     AcknowledgeEventsParams, AddMetricParams, CloseConnectionParams, CreateConnectionParams,
-    EnableFromDiffParams, GetConfigParams, GetConnectionParams, GetMetricParams, GroupParams,
-    InspectFileParams, ListConnectionsParams, ListGroupsParams, ListMetricsParams, ObserveParams,
-    QueryMetricsParams, QuerySystemEventsParams, RemoveMetricParams, ToggleMetricParams,
-    UpdateConfigParams, UpdateMetricParams, ValidateConfigParams, ValidateExpressionParams,
+    DisconnectAllParams, EnableFromDiffParams, GetConfigParams, GetConnectionParams,
+    GetMetricParams, GroupParams, InspectFileParams, ListConnectionsParams, ListGroupsParams,
+    ListMetricsParams, ObserveParams, QueryMetricsParams, QuerySystemEventsParams,
+    RemoveMetricParams, SleepParams, ToggleMetricParams, UpdateConfigParams, UpdateMetricParams,
+    ValidateConfigParams, ValidateExpressionParams, WakeParams,
 };
 
 pub use server::DetrixServer;

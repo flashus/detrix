@@ -40,6 +40,9 @@ mod storage_mod {
 mod tui_mod {
     pub use crate::tui::*;
 }
+mod vfs_mod {
+    pub use crate::vfs::*;
+}
 
 // Re-export all types from submodules
 pub use adapter_mod::*;
@@ -50,6 +53,7 @@ pub use output_mod::*;
 pub use safety_mod::*;
 pub use storage_mod::*;
 pub use tui_mod::*;
+pub use vfs_mod::*;
 
 use crate::constants::{
     DEFAULT_AUDIT_RETENTION_DAYS, DEFAULT_AUTO_SLEEP_SECONDS, DEFAULT_MAX_EVAL_TIME_MS,
@@ -100,7 +104,16 @@ pub struct Config {
     #[serde(default)]
     pub audit: AuditConfig,
     #[serde(default)]
+    pub vfs: VfsConfig,
+    #[serde(default)]
     pub metric: Vec<MetricDefinition>,
+    /// Connection TTL in calendar days. Default 7. Set to -1 for indefinite.
+    #[serde(default = "default_connection_ttl_days")]
+    pub connection_ttl_days: i64,
+}
+
+fn default_connection_ttl_days() -> i64 {
+    crate::constants::DEFAULT_CONNECTION_TTL_DAYS
 }
 
 impl Config {

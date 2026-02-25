@@ -93,9 +93,11 @@ async fn print_verbose_details(_formatter: &Formatter, endpoints: &DaemonEndpoin
     Ok(())
 }
 
-/// Wake the system (start observing)
+/// Wake a remote app via its control plane
 pub async fn wake(
     ctx: &ClientContext,
+    app_url: &str,
+    daemon_url: Option<&str>,
     format: OutputFormat,
     quiet: bool,
     no_color: bool,
@@ -106,18 +108,44 @@ pub async fn wake(
         .await
         .context("Failed to connect to daemon")?;
 
-    let info = client.wake().await.context("Failed to wake system")?;
+    let info = client
+        .wake(app_url, daemon_url)
+        .await
+        .context("Failed to wake app")?;
 
     formatter.print_success(&format!(
-        "System active. Status: {}, Metrics loaded: {}",
-        info.status, info.metrics_loaded
+        "Wake sent to {}. Status: {}, Connection: {}",
+        info.app_url,
+        info.status,
+        info.connection_id.as_deref().unwrap_or("none")
     ));
 
     Ok(())
 }
 
-/// Sleep the system (pause observing)
+/// Sleep a remote app via its control plane
 pub async fn sleep(
+    ctx: &ClientContext,
+    app_url: &str,
+    format: OutputFormat,
+    quiet: bool,
+    no_color: bool,
+) -> Result<()> {
+    let formatter = Formatter::new(format, quiet, no_color);
+
+    let mut client = MetricsClient::with_endpoints(&ctx.endpoints)
+        .await
+        .context("Failed to connect to daemon")?;
+
+    client.sleep(app_url).await.context("Failed to sleep app")?;
+
+    formatter.print_success(&format!("Sleep sent to {}", app_url));
+
+    Ok(())
+}
+
+/// Disconnect all local debugger adapters
+pub async fn disconnect_all(
     ctx: &ClientContext,
     format: OutputFormat,
     quiet: bool,
@@ -129,9 +157,15 @@ pub async fn sleep(
         .await
         .context("Failed to connect to daemon")?;
 
-    client.sleep().await.context("Failed to sleep system")?;
+    let result = client
+        .disconnect_all()
+        .await
+        .context("Failed to disconnect all")?;
 
-    formatter.print_success("System sleeping. Metrics paused.");
+    formatter.print_success(&format!(
+        "Disconnected. {} adapter(s) stopped.",
+        result.adapters_stopped
+    ));
 
     Ok(())
 }

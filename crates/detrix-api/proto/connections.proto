@@ -26,6 +26,9 @@ service ConnectionService {
 
   // Cleanup stale (disconnected/failed) connections
   rpc CleanupConnections(CleanupConnectionsRequest) returns (CleanupConnectionsResponse);
+
+  // Touch connections to update last_active timestamp
+  rpc TouchConnections(TouchConnectionsRequest) returns (TouchConnectionsResponse);
 }
 
 // ============================================================
@@ -45,6 +48,14 @@ message CreateConnectionRequest {
   string name = 8;                   // User-friendly name (e.g., "trade-bot")
   string workspace_root = 9;         // Workspace directory for isolation
   string hostname = 10;              // Machine hostname for multi-host support
+
+  // Cloud metadata for transparent file fetching
+  optional string control_plane_url = 11;  // App control plane URL (e.g., "http://app:8091")
+  optional string build_commit = 12;       // Git commit SHA at build time
+  optional string build_tag = 13;          // Build version tag (e.g., "v1.2.3")
+
+  // User identity tracking (for multi-user reference counting)
+  optional string created_by = 14;         // Client identity of the creator (from X-Detrix-Client-Id header)
 }
 
 message CreateConnectionResponse {
@@ -52,6 +63,7 @@ message CreateConnectionResponse {
   string status = 2;                // "created", "connected", etc.
   ConnectionInfo connection = 3;    // Full connection info
   ResponseMetadata metadata = 4;
+  optional string advertise_url = 5; // Daemon's external URL (from advertise_url config)
 }
 
 message CloseConnectionRequest {
@@ -93,6 +105,16 @@ message CleanupConnectionsRequest {
 
 message CleanupConnectionsResponse {
   uint64 deleted = 1;                // Number of connections deleted
+  ResponseMetadata metadata = 2;
+}
+
+message TouchConnectionsRequest {
+  repeated string connection_ids = 1;
+  RequestMetadata metadata = 2;
+}
+
+message TouchConnectionsResponse {
+  uint32 updated = 1;                // Number of connections updated
   ResponseMetadata metadata = 2;
 }
 

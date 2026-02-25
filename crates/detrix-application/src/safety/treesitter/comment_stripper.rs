@@ -15,6 +15,17 @@ use super::node_kinds as nodes;
 use detrix_core::{Error, Result, SourceLanguage};
 use tree_sitter::Parser;
 
+/// Extension trait for tree-sitter grammar loading errors
+trait TreeSitterGrammarExt<T> {
+    fn grammar_context(self, language: &str) -> Result<T>;
+}
+
+impl<T> TreeSitterGrammarExt<T> for std::result::Result<T, tree_sitter::LanguageError> {
+    fn grammar_context(self, language: &str) -> Result<T> {
+        self.map_err(|_| Error::AstAnalysisFailed(format!("Failed to load {} grammar", language)))
+    }
+}
+
 /// Strip comments from source code using tree-sitter
 ///
 /// Returns the source with all comments removed.
@@ -62,7 +73,7 @@ fn strip_python_comments(source: &str) -> Result<String> {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_python::LANGUAGE.into())
-        .map_err(|_| Error::AstAnalysisFailed("Failed to load Python grammar".into()))?;
+        .grammar_context("Python")?;
 
     let tree = parser
         .parse(source, None)
@@ -119,7 +130,7 @@ fn strip_go_comments(source: &str) -> Result<String> {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_go::LANGUAGE.into())
-        .map_err(|_| Error::AstAnalysisFailed("Failed to load Go grammar".into()))?;
+        .grammar_context("Go")?;
 
     // Go uses "comment" node kind for BOTH // line comments AND /* */ block comments
     strip_with_parser(source, &mut parser, |kind| kind == nodes::go::COMMENT)
@@ -129,7 +140,7 @@ fn strip_rust_comments(source: &str) -> Result<String> {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_rust::LANGUAGE.into())
-        .map_err(|_| Error::AstAnalysisFailed("Failed to load Rust grammar".into()))?;
+        .grammar_context("Rust")?;
 
     // Rust uses separate node kinds:
     // - "line_comment" for // comments (including /// and //!)

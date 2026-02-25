@@ -38,6 +38,9 @@ tonic.workspace = true
 # Directory utilities (home dir expansion)
 dirs = "6"
 
+# Hashing (for MockVfs)
+sha2.workspace = true
+
 # Logging
 tracing.workspace = true
 
@@ -57,12 +60,16 @@ rand = "0.8"
 axum.workspace = true
 base64 = "0.22"
 
+# Cross-platform file locking (for cross-process port registry)
+fs2.workspace = true
+
 # Unix-specific dependencies (must be last section)
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
 
 [dev-dependencies]
 regex.workspace = true
+serial_test = "3"
 
 [lints]
 workspace = true

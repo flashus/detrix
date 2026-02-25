@@ -33,7 +33,9 @@ pub use python::analyze_python;
 pub use rust_lang::analyze_rust;
 pub use scope::{analyze_scope, ScopeResult};
 
+use detrix_core::SafetyLevel;
 use std::collections::HashSet;
+use tree_sitter::Parser;
 
 /// Result from tree-sitter AST analysis
 ///
@@ -183,6 +185,69 @@ pub(crate) fn extract_rust_base_name(func: &str) -> Vec<&str> {
     } else {
         vec![base_name]
     }
+}
+
+/// Shared cache-wrapper for all language analyzers.
+///
+/// Looks up the cache key and returns the cached result if available,
+/// otherwise calls `uncached` to compute and store the result.
+pub(super) fn cached_analysis(
+    expression: &str,
+    safety_level: SafetyLevel,
+    allowed_functions: &HashSet<String>,
+    lang_key: &'static str,
+    uncached: impl FnOnce() -> TreeSitterResult,
+) -> TreeSitterResult {
+    let cache_ref = global_cache();
+    let key = TreeSitterCache::make_key(expression, lang_key, safety_level, allowed_functions);
+    cache_ref.get_or_insert(&key, uncached)
+}
+
+/// Shared parse-and-analyze flow for all language analyzers.
+///
+/// Handles: parse → syntax check → AST traversal → strict-mode violations.
+/// The caller provides a pre-configured `Parser` and the source text to parse
+/// (Go/Rust wrap the expression; Python parses it directly).
+pub(super) fn parse_and_analyze(
+    source_text: &str,
+    parse_fail_msg: &'static str,
+    syntax_err_msg: &'static str,
+    safety_level: SafetyLevel,
+    allowed_functions: &HashSet<String>,
+    analyze_node: fn(
+        tree_sitter::Node,
+        &[u8],
+        SafetyLevel,
+        &HashSet<String>,
+        &mut TreeSitterResult,
+    ),
+    extract_base: fn(&str) -> Vec<&str>,
+    parser: &mut Parser,
+) -> TreeSitterResult {
+    let tree = match parser.parse(source_text, None) {
+        Some(tree) => tree,
+        None => {
+            return TreeSitterResult::unsafe_with_violations(vec![parse_fail_msg.to_string()]);
+        }
+    };
+
+    let root = tree.root_node();
+    let source = source_text.as_bytes();
+
+    if root.has_error() {
+        return TreeSitterResult::unsafe_with_violations(vec![syntax_err_msg.to_string()]);
+    }
+
+    let mut result = TreeSitterResult::safe();
+    traverse_tree(root, source, &mut |node, src| {
+        analyze_node(node, src, safety_level, allowed_functions, &mut result);
+    });
+
+    if safety_level == SafetyLevel::Strict {
+        check_strict_mode_violations(&mut result, allowed_functions, extract_base);
+    }
+
+    result
 }
 
 #[cfg(test)]

@@ -750,3 +750,108 @@ fn test_build_source_breakpoint_mixed_mode_consistency() {
     );
     assert!(bp4.log_message.is_some(), "pnl_value should be logpoint");
 }
+
+// ============================================================================
+// parse_logpoint_output tests
+// ============================================================================
+
+use super::parsing::parse_logpoint_output;
+use super::traits::{NoThreadExtractor, ThreadExtractor, ThreadInfo};
+
+/// Minimal thread extractor that prefixes a goroutine-style ID
+struct PrefixedExtractor;
+impl ThreadExtractor for PrefixedExtractor {
+    fn extract_thread_info(&self, output: &str) -> ThreadInfo {
+        // Strips "> [X]: " prefix like Delve does
+        if let Some(rest) = output.strip_prefix("> [X]: ") {
+            return ThreadInfo::without_thread(rest);
+        }
+        ThreadInfo::without_thread(output)
+    }
+}
+
+async fn make_metrics_map(name: &str) -> Arc<RwLock<HashMap<String, Metric>>> {
+    let map = Arc::new(RwLock::new(HashMap::new()));
+    let mut metric = sample_metric_for_language(name, SourceLanguage::Go);
+    metric.id = Some(MetricId(1));
+    metric.location = Location {
+        file: "main.go".to_string(),
+        line: 42,
+    };
+    map.write().await.insert("main.go#42".to_string(), metric);
+    map
+}
+
+#[tokio::test]
+async fn test_parse_logpoint_output_valid_detrics() {
+    let active_metrics = make_metrics_map("test_metric").await;
+    let body = OutputEventBody {
+        category: Some(crate::OutputCategory::Console),
+        output: "DETRICS:test_metric=42".to_string(),
+        source: None,
+        line: None,
+        column: None,
+        variables_reference: None,
+    };
+
+    let result = parse_logpoint_output(&body, &active_metrics, &NoThreadExtractor, "Test").await;
+    assert!(result.is_some());
+    let event = result.unwrap();
+    assert_eq!(event.metric_name, "test_metric");
+    assert_eq!(event.value_json(), "42");
+}
+
+#[tokio::test]
+async fn test_parse_logpoint_output_with_prefix_extractor() {
+    let active_metrics = make_metrics_map("test_metric").await;
+    let body = OutputEventBody {
+        category: Some(crate::OutputCategory::Console),
+        output: "> [X]: DETRICS:test_metric=99".to_string(),
+        source: None,
+        line: None,
+        column: None,
+        variables_reference: None,
+    };
+
+    let result =
+        parse_logpoint_output(&body, &active_metrics, &PrefixedExtractor, "PrefixTest").await;
+    assert!(result.is_some());
+    let event = result.unwrap();
+    assert_eq!(event.metric_name, "test_metric");
+    assert_eq!(event.value_json(), "99");
+}
+
+#[tokio::test]
+async fn test_parse_logpoint_output_non_detrics_returns_none() {
+    let active_metrics = make_metrics_map("test_metric").await;
+    let body = OutputEventBody {
+        category: Some(crate::OutputCategory::Console),
+        output: "some regular log output".to_string(),
+        source: None,
+        line: None,
+        column: None,
+        variables_reference: None,
+    };
+
+    let result = parse_logpoint_output(&body, &active_metrics, &NoThreadExtractor, "Test").await;
+    assert!(result.is_none(), "Non-DETRICS output should return None");
+}
+
+#[tokio::test]
+async fn test_parse_logpoint_output_unknown_metric_returns_none() {
+    let active_metrics = make_metrics_map("test_metric").await;
+    let body = OutputEventBody {
+        category: Some(crate::OutputCategory::Console),
+        output: "DETRICS:unknown_metric=42".to_string(),
+        source: None,
+        line: None,
+        column: None,
+        variables_reference: None,
+    };
+
+    let result = parse_logpoint_output(&body, &active_metrics, &NoThreadExtractor, "Test").await;
+    assert!(
+        result.is_none(),
+        "Unknown metric should return None (not tracked)"
+    );
+}

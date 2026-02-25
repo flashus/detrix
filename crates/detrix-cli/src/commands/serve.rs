@@ -29,6 +29,7 @@ use detrix_logging::{debug, error, info, warn};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::net::TcpListener;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -41,6 +42,14 @@ pub async fn run(
     pid_file: Option<String>,
     mcp_spawned: bool,
 ) -> Result<()> {
+    // Install SIGTERM handler with SA_SIGINFO as early as possible to capture sender PID.
+    // Must be done before PID file acquisition — otherwise the default SIGTERM action
+    // (terminate) can kill the daemon during the startup window, leaving a zombie that
+    // appears alive to kill(pid, 0) but doesn't hold the flock.
+    #[cfg(unix)]
+    let sigterm_pipe_fd =
+        sigterm_info::install().context("Failed to install early SIGTERM info handler")?;
+
     // Log executable path for debugging (helps identify which binary is running)
     if let Ok(exe_path) = std::env::current_exe() {
         info!("Detrix daemon starting (exe: {})", exe_path.display());
@@ -100,30 +109,48 @@ pub async fn run(
         );
     }
 
-    // Auto-generate auth token for MCP-spawned daemons (transparent local auth)
-    // This ensures local MCP clients can authenticate without manual config
-    if mcp_spawned && !config.api.auth.is_enabled() {
-        let auto_token = generate_secure_token();
-        let token_path = detrix_config::paths::mcp_token_path();
+    // Auto-generate auth token for all daemons when auth is not explicitly configured.
+    // This ensures daemons are secure by default — clients discover the token via
+    // DETRIX_TOKEN env var or ~/detrix/auth-token file.
+    // `our_written_token` holds the token we wrote to auth-token, if any.
+    // Kept until shutdown so we can verify the file still contains our token
+    // before deleting — concurrent test daemons overwrite the same file.
+    let mut our_written_token: Option<String> = None;
+    if config.api.auth.mode.is_none() {
+        // Use DETRIX_TOKEN env var if set, otherwise generate a new one
+        let (auto_token, from_env) = match std::env::var("DETRIX_TOKEN")
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+        {
+            Some(t) => (t, true),
+            None => (generate_secure_token(), false),
+        };
 
-        // Ensure parent directory exists
+        // Write token file for both auto-generated and env-supplied tokens so that
+        // other bridge instances running in different processes can discover it.
+        // Note: Single token file means one daemon per machine for auto-auth.
+        // For concurrent daemons, use explicit [api.auth] config.
+        let token_path = detrix_config::paths::auth_token_path();
         if let Err(e) = detrix_config::paths::ensure_parent_dir(&token_path) {
             warn!("Failed to create token directory: {}", e);
+        } else if let Err(e) = write_token_securely(&token_path, &auto_token) {
+            warn!("Failed to write auth token file: {}", e);
         } else {
-            // Write token to file with restricted permissions (atomically where possible)
-            if let Err(e) = write_token_securely(&token_path, &auto_token) {
-                warn!("Failed to write MCP token file: {}", e);
-            } else {
-                // Enable auth with auto-generated token (simple mode)
-                config.api.auth.mode = detrix_config::AuthMode::Simple;
-                config.api.auth.bearer_token = Some(auto_token);
-
+            if from_env {
                 info!(
-                    "🔐 MCP auto-auth enabled, token saved to {}",
+                    "🔐 Auth token (from DETRIX_TOKEN) saved to {}",
                     token_path.display()
                 );
+            } else {
+                info!("🔐 Auth token saved to {}", token_path.display());
             }
+            our_written_token = Some(auto_token.clone());
         }
+
+        // Enable auth with the token
+        config.api.auth.mode = Some(detrix_config::AuthMode::Simple);
+        config.api.auth.bearer_token = Some(auto_token);
     }
 
     // Determine if gRPC should be enabled (CLI flag OR config setting)
@@ -144,18 +171,65 @@ pub async fn run(
     };
     port_registry.register(ServiceType::Grpc, preferred_grpc_port, fallback_enabled);
 
-    // Allocate HTTP port
-    let http_port = port_registry
-        .allocate(ServiceType::Http)
-        .context("Failed to allocate HTTP port")?;
+    // Allocate HTTP port and immediately bind to hold it.
+    //
+    // Binding before writing to the PID file eliminates a TOCTOU race that occurs when
+    // multiple daemons start in parallel (e.g., during E2E tests): without early binding
+    // another process can grab the port between our availability check and the actual bind
+    // inside HttpServer::start_with_shutdown, causing "address already in use" failures.
+    let (http_port, http_listener) = if http_enabled {
+        let preferred = port_registry
+            .allocate(ServiceType::Http)
+            .context("Failed to allocate HTTP port")?;
 
-    if http_port != config.api.rest.port {
-        warn!(
-            "⚠️  Port {} is unavailable (in use by another process), using port {} instead. \
-             Set 'api.port_fallback = false' in config to fail instead of auto-selecting a port.",
-            config.api.rest.port, http_port
-        );
-    }
+        // Actually bind the socket now to hold the port.
+        // If the preferred port was taken (TOCTOU), try fallback ports.
+        let http_addr_str = format!("{}:{}", config.api.rest.host, preferred);
+        let listener = match TcpListener::bind(&http_addr_str).await {
+            Ok(l) => l,
+            Err(_) if fallback_enabled => {
+                // preferred was taken between check and bind; scan for a free port
+                let fallback = detrix_config::ports::find_available_port(
+                    preferred.saturating_add(1),
+                    preferred.saturating_add(100),
+                )
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Failed to bind HTTP port {} and no fallback found in range {}–{}",
+                        preferred,
+                        preferred + 1,
+                        preferred + 100
+                    )
+                })?;
+                let fallback_addr = format!("{}:{}", config.api.rest.host, fallback);
+                TcpListener::bind(&fallback_addr)
+                    .await
+                    .with_context(|| format!("Failed to bind fallback HTTP port {}", fallback))?
+            }
+            Err(e) => {
+                return Err(e).context(format!("Failed to bind HTTP port {}", preferred));
+            }
+        };
+        let actual_port = listener.local_addr()?.port();
+        if actual_port != config.api.rest.port {
+            warn!(
+                "⚠️  Port {} is unavailable (in use by another process), using port {} instead. \
+                 Set 'api.port_fallback = false' in config to fail instead of auto-selecting a port.",
+                config.api.rest.port, actual_port
+            );
+        }
+        (actual_port, Some(listener))
+    } else {
+        let preferred = port_registry
+            .allocate(ServiceType::Http)
+            .context("Failed to allocate HTTP port")?;
+        (preferred, None)
+    };
+
+    // Ensure the registry reflects the actual bound port so the PID file is correct.
+    // In the normal case these are the same; in the rare TOCTOU fallback the actual
+    // bound port differs from what allocate() returned.
+    port_registry.set_actual(ServiceType::Http, http_port);
 
     // Allocate gRPC port (if gRPC is enabled)
     let grpc_port = if grpc_enabled {
@@ -191,6 +265,37 @@ pub async fn run(
             );
         }
     }
+
+    // Move the PID file guard into a dedicated sentinel task.
+    //
+    // Problem: in release builds the MIR optimizer may drop `pid_file_guard`
+    // early (right after the last *syntactic* reference at set_ports_with_host)
+    // because it is not referenced again until the explicit `drop()` at the end
+    // of the shutdown sequence. Dropping it early releases the exclusive flock,
+    // allowing a second daemon to start while the first is still running.
+    //
+    // Fix: move the guard into a separate Tokio task that holds it until it
+    // receives an explicit "drop now" signal via a oneshot channel. The guard
+    // never enters the `serve()` async state machine again, so the optimizer
+    // cannot touch it.
+    let pid_guard_sentinel_tx = if let Some(guard) = pid_file_guard.take() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let my_pid = std::process::id();
+        tokio::spawn(async move {
+            let guard = guard; // holds the flock for the daemon's lifetime
+            info!("PID {} sentinel task started — holding flock", my_pid);
+            let result = rx.await; // blocks until sender signals or is dropped
+            info!(
+                "PID {} sentinel task received shutdown signal (result={:?}) — releasing flock",
+                my_pid, result
+            );
+            drop(guard); // explicit drop AFTER await - ensures compiler keeps guard in state machine
+            info!("PID {} sentinel task — flock released", my_pid);
+        });
+        Some(tx)
+    } else {
+        None
+    };
     info!("🚀 Starting Detrix server...");
     info!("✓ Configuration loaded from {}", config_path);
     info!("📁 Database path: {:?}", config.storage.path);
@@ -214,10 +319,30 @@ pub async fn run(
         &config.adapter,
         &config.anchor,
         &config.limits,
+        &config.vfs,
         gelf_output.clone(),
     );
     let app_context = ctx.app_context;
     let storage = ctx.storage;
+    let bridge_file_source = ctx.bridge_file_source;
+
+    // Cleanup stale connections based on TTL
+    let ttl_days = config.connection_ttl_days;
+    let cleanup_result = app_context
+        .connection_service
+        .cleanup_stale_connections(ttl_days)
+        .await;
+
+    match cleanup_result {
+        Ok(count) => {
+            if count > 0 {
+                info!(removed = count, ttl_days, "Cleaned up stale connections");
+            }
+        }
+        Err(e) => {
+            warn!(error = ?e, "Failed to cleanup stale connections");
+        }
+    }
 
     // Load metrics from config into database if needed (via MetricService)
     let metrics = app_context
@@ -250,6 +375,7 @@ pub async fn run(
                 condition: metric_def.condition.clone(),
                 safety_level: metric_def.safety_level,
                 created_at: Some(chrono::Utc::now().timestamp_micros()),
+                created_by: None,
                 // Default values for introspection fields (loaded from config later if needed)
                 capture_stack_trace: false,
                 stack_trace_ttl: None,
@@ -298,6 +424,17 @@ pub async fn run(
     info!("   2. Use: detrix connect localhost:{}", port);
     info!("");
 
+    // Apply DETRIX_ADVERTISE_URL env var override (takes precedence over config file)
+    if let Ok(env_url) = std::env::var("DETRIX_ADVERTISE_URL") {
+        let env_url = env_url.trim().to_string();
+        if !env_url.is_empty() {
+            config.daemon.advertise_url = Some(env_url);
+        }
+    }
+    if let Some(ref url) = config.daemon.advertise_url {
+        info!("📢 Advertise URL: {}", url);
+    }
+
     // Create API state from the pre-configured AppContext
     // This ensures the connection_service is available in the API layer
     // Pass mcp_spawned flag to enable auto-shutdown when all MCP clients disconnect
@@ -311,6 +448,8 @@ pub async fn run(
         .mcp_spawned(mcp_spawned)
         .system_event_repository(Arc::clone(&storage) as SystemEventRepositoryRef)
         .mcp_usage_repository(Arc::clone(&storage) as McpUsageRepositoryRef)
+        .bridge_file_source(bridge_file_source)
+        .advertise_url(config.daemon.advertise_url.clone())
         .build(),
     );
 
@@ -318,7 +457,7 @@ pub async fn run(
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Create JWT validator for external auth mode (if configured)
-    let jwt_validator = if config.api.auth.mode == detrix_config::AuthMode::External {
+    let jwt_validator = if config.api.auth.mode == Some(detrix_config::AuthMode::External) {
         info!("🔑 Creating JWT validator for external auth mode...");
         match JwksValidator::new(&config.api.auth.jwt) {
             Ok(validator) => {
@@ -340,15 +479,26 @@ pub async fn run(
         None
     };
 
-    // Restore connections from previous sessions in the BACKGROUND
-    // This allows the HTTP server to start immediately without blocking on
-    // reconnection attempts that may take a long time (especially if debuggers are not running)
+    // Snapshot connections from previous sessions BEFORE the HTTP server starts.
+    // This is critical: once the HTTP server is up, clients can create new connections.
+    // By taking the snapshot here (pre-HTTP), we guarantee that the background restore
+    // task only ever touches connections that existed at daemon launch time and never
+    // interferes with adapters started by the current session's client requests.
+    let startup_connections = app_context
+        .connection_service
+        .list_connections_for_startup_restore()
+        .await;
+
+    // Restore connections from previous sessions in the BACKGROUND.
+    // We pass the pre-captured snapshot so the task cannot race with incoming clients.
     // - If debugger is still running → reconnect
     // - If debugger is gone → delete the connection
     {
         let connection_service = Arc::clone(&app_context.connection_service);
         tokio::spawn(async move {
-            let (reconnected, deleted) = connection_service.restore_connections_on_startup().await;
+            let (reconnected, deleted) = connection_service
+                .restore_connections_on_startup(startup_connections)
+                .await;
             if reconnected > 0 || deleted > 0 {
                 info!(
                     "🔄 Connection restore: {} reconnected, {} removed (debuggers not running)",
@@ -375,6 +525,13 @@ pub async fn run(
                 HttpServer::with_jwt_validator(http_addr, Arc::clone(&api_state), http_validator)
             }
             None => HttpServer::new(http_addr, Arc::clone(&api_state)),
+        };
+
+        // Pass the pre-bound listener so axum uses the socket we already hold.
+        // This eliminates the TOCTOU window between port allocation and server bind.
+        let http_server = match http_listener {
+            Some(listener) => http_server.with_listener(listener),
+            None => http_server,
         };
 
         let handle = http_server
@@ -559,23 +716,46 @@ pub async fn run(
     // Wait for shutdown signal (Ctrl+C, SIGTERM, or MCP auto-shutdown)
     #[cfg(unix)]
     {
+        use std::os::unix::io::FromRawFd;
+        use tokio::io::unix::AsyncFd;
         use tokio::signal::unix::{signal, SignalKind};
 
-        let mut sigterm =
-            signal(SignalKind::terminate()).context("Failed to install SIGTERM handler")?;
+        // Wrap the SIGTERM self-pipe (installed at top of run()) for async notification.
+        // SAFETY: sigterm_pipe_fd is a valid pipe fd from sigterm_info::install().
+        let sigterm_file: std::fs::File = unsafe { FromRawFd::from_raw_fd(sigterm_pipe_fd) };
+        let sigterm_async =
+            AsyncFd::new(sigterm_file).context("Failed to create async SIGTERM notifier")?;
+
+        // SIGINT still uses tokio's handler (no need for sender PID on Ctrl+C)
         let mut sigint =
             signal(SignalKind::interrupt()).context("Failed to install SIGINT handler")?;
 
-        tokio::select! {
-            _ = sigterm.recv() => {
-                info!("Received SIGTERM");
-            }
-            _ = sigint.recv() => {
-                info!("Received SIGINT (Ctrl+C)");
-            }
-            _ = mcp_shutdown_rx.changed() => {
-                if *mcp_shutdown_rx.borrow() {
-                    info!("All MCP clients disconnected - auto-shutdown triggered");
+        loop {
+            tokio::select! {
+                _ = sigterm_async.readable() => {
+                    let sender = sigterm_info::sender_pid();
+                    let my_pid = std::process::id();
+                    info!("Received SIGTERM (my PID: {}, sender PID: {})", my_pid, sender);
+                    break;
+                }
+                _ = sigint.recv() => {
+                    info!("Received SIGINT (Ctrl+C)");
+                    break;
+                }
+                result = mcp_shutdown_rx.changed() => {
+                    match result {
+                        Ok(()) => {
+                            if *mcp_shutdown_rx.borrow() {
+                                info!("All MCP clients disconnected - auto-shutdown triggered");
+                                break;
+                            }
+                            // Value changed to false or spurious wake — continue waiting
+                        }
+                        Err(_) => {
+                            // Sender dropped — shut down
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -592,16 +772,30 @@ pub async fn run(
         let mut ctrl_break =
             windows::ctrl_break().context("Failed to install Ctrl+Break handler")?;
 
-        tokio::select! {
-            _ = ctrl_c.recv() => {
-                info!("Received Ctrl+C");
-            }
-            _ = ctrl_break.recv() => {
-                info!("Received Ctrl+Break");
-            }
-            _ = mcp_shutdown_rx.changed() => {
-                if *mcp_shutdown_rx.borrow() {
-                    info!("All MCP clients disconnected - auto-shutdown triggered");
+        loop {
+            tokio::select! {
+                _ = ctrl_c.recv() => {
+                    info!("Received Ctrl+C");
+                    break;
+                }
+                _ = ctrl_break.recv() => {
+                    info!("Received Ctrl+Break");
+                    break;
+                }
+                result = mcp_shutdown_rx.changed() => {
+                    match result {
+                        Ok(()) => {
+                            if *mcp_shutdown_rx.borrow() {
+                                info!("All MCP clients disconnected - auto-shutdown triggered");
+                                break;
+                            }
+                            // Value changed to false or spurious wake — continue waiting
+                        }
+                        Err(_) => {
+                            // Sender dropped — shut down
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -610,13 +804,26 @@ pub async fn run(
     // Fallback for other non-unix platforms (unlikely but handles edge cases)
     #[cfg(all(not(unix), not(windows)))]
     {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("Received Ctrl+C");
-            }
-            _ = mcp_shutdown_rx.changed() => {
-                if *mcp_shutdown_rx.borrow() {
-                    info!("All MCP clients disconnected - auto-shutdown triggered");
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received Ctrl+C");
+                    break;
+                }
+                result = mcp_shutdown_rx.changed() => {
+                    match result {
+                        Ok(()) => {
+                            if *mcp_shutdown_rx.borrow() {
+                                info!("All MCP clients disconnected - auto-shutdown triggered");
+                                break;
+                            }
+                            // Value changed to false or spurious wake — continue waiting
+                        }
+                        Err(_) => {
+                            // Sender dropped — shut down
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -648,30 +855,98 @@ pub async fn run(
     }
     info!("✓ All adapters stopped");
 
-    // Clean up token file if daemon was MCP-spawned
-    // This prevents stale tokens from being used after restart
-    if mcp_spawned {
-        let token_path = detrix_config::paths::mcp_token_path();
-        match std::fs::remove_file(&token_path) {
-            Ok(()) => {
-                debug!("✓ Removed MCP token file: {}", token_path.display());
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Token file already gone, that's fine
-            }
-            Err(e) => {
-                warn!("Could not remove MCP token file: {}", e);
-            }
-        }
-    }
+    // NOTE: We intentionally do NOT delete the auth-token file on shutdown.
+    //
+    // The file is always overwritten when a new daemon starts, so there is no
+    // stale-token problem. Deleting it causes a worse failure mode: if a
+    // concurrent daemon (e.g. an integration test) overwrites the file and then
+    // shuts down, the production daemon's clients suddenly get 401 instead of
+    // a clean "connection refused". Leaving a stale file on disk is harmless —
+    // bridges will get a connection error (daemon is down), not a spurious 401.
+    let _ = our_written_token; // suppress unused warning
 
-    // PID file will be automatically released when pid_file_guard is dropped
+    // Signal the PID file sentinel task to drop the guard (releases the flock).
+    // Dropping the sender causes the sentinel's rx.await to resolve, which drops
+    // the PidFile and releases the exclusive flock.
+    drop(pid_guard_sentinel_tx);
     if daemon {
         info!("✓ PID file released");
     }
 
     info!("✓ Detrix server stopped");
     Ok(())
+}
+
+/// SIGTERM handler that captures the sender PID via SA_SIGINFO.
+///
+/// Uses a self-pipe to notify the tokio event loop (instead of tokio's built-in
+/// signal handler) so we can inspect `siginfo_t.si_pid` to identify which process
+/// sent the signal — critical for debugging cross-test PID interference.
+#[cfg(unix)]
+mod sigterm_info {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    /// PID of the process that sent SIGTERM (0 if not yet received).
+    static SENDER_PID: AtomicI32 = AtomicI32::new(0);
+
+    /// Write end of the self-pipe for notifying the event loop.
+    static PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+
+    /// SA_SIGINFO handler: stores sender PID and writes to self-pipe.
+    /// Only uses async-signal-safe operations (atomic store + write).
+    extern "C" fn handler(
+        _sig: nix::libc::c_int,
+        info: *mut nix::libc::siginfo_t,
+        _ctx: *mut nix::libc::c_void,
+    ) {
+        // SAFETY: Atomic store and libc::write are async-signal-safe.
+        unsafe {
+            if !info.is_null() {
+                SENDER_PID.store((*info).si_pid(), Ordering::SeqCst);
+            }
+            let fd = PIPE_WRITE_FD.load(Ordering::SeqCst);
+            if fd >= 0 {
+                let byte: u8 = 1;
+                nix::libc::write(fd, &byte as *const u8 as *const nix::libc::c_void, 1);
+            }
+        }
+    }
+
+    /// Install SIGTERM handler with SA_SIGINFO and return the read-end fd
+    /// of a self-pipe that gets a byte when SIGTERM arrives.
+    pub fn install() -> anyhow::Result<std::os::unix::io::RawFd> {
+        use anyhow::Context;
+
+        let mut fds = [0i32; 2];
+        if unsafe { nix::libc::pipe(fds.as_mut_ptr()) } != 0 {
+            anyhow::bail!("pipe() failed: {}", std::io::Error::last_os_error());
+        }
+        unsafe {
+            nix::libc::fcntl(fds[0], nix::libc::F_SETFL, nix::libc::O_NONBLOCK);
+            nix::libc::fcntl(fds[1], nix::libc::F_SETFL, nix::libc::O_NONBLOCK);
+            nix::libc::fcntl(fds[0], nix::libc::F_SETFD, nix::libc::FD_CLOEXEC);
+            nix::libc::fcntl(fds[1], nix::libc::F_SETFD, nix::libc::FD_CLOEXEC);
+        }
+
+        PIPE_WRITE_FD.store(fds[1], Ordering::SeqCst);
+
+        let action = nix::sys::signal::SigAction::new(
+            nix::sys::signal::SigHandler::SigAction(handler),
+            nix::sys::signal::SaFlags::SA_SIGINFO | nix::sys::signal::SaFlags::SA_RESTART,
+            nix::sys::signal::SigSet::empty(),
+        );
+        unsafe {
+            nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGTERM, &action)
+                .context("sigaction(SIGTERM) failed")?;
+        }
+
+        Ok(fds[0])
+    }
+
+    /// PID of the process that sent SIGTERM (0 if not yet received).
+    pub fn sender_pid() -> i32 {
+        SENDER_PID.load(Ordering::SeqCst)
+    }
 }
 
 /// Generate a cryptographically secure random token for MCP auto-auth.
@@ -689,84 +964,7 @@ fn generate_secure_token() -> String {
 
 /// Write token to file securely with platform-specific permissions.
 ///
-/// On Unix: Creates file with mode 0600 (owner read/write only) atomically.
-/// On Windows: Creates file then applies restrictive ACL (owner-only access).
+/// Delegates to `detrix_config::credentials::write_file_securely`.
 fn write_token_securely(token_path: &std::path::Path, token: &str) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        // Create file with restricted permissions atomically (avoids race condition)
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600) // Owner read/write only - set at creation time
-            .open(token_path)?;
-        file.write_all(token.as_bytes())?;
-        file.sync_all()?;
-        Ok(())
-    }
-
-    #[cfg(windows)]
-    {
-        use std::io::Write;
-
-        // Write the file first
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(token_path)?;
-        file.write_all(token.as_bytes())?;
-        file.sync_all()?;
-        drop(file); // Release file handle before ACL change
-
-        // Apply Windows ACL using icacls (equivalent to Unix 0600)
-        // This removes inherited permissions and grants full control only to current user
-        let path_str = token_path.to_string_lossy();
-
-        // Get current username for ACL
-        let username = std::env::var("USERNAME").unwrap_or_else(|_| "CURRENT_USER".to_string());
-
-        // Apply restrictive ACL:
-        // /inheritance:r = Remove inherited permissions
-        // /grant:r = Reset and grant specified permissions
-        // :F = Full control
-        let output = std::process::Command::new("icacls")
-            .args([
-                path_str.as_ref(),
-                "/inheritance:r",           // Remove inherited ACLs
-                "/grant:r",                 // Reset permissions
-                &format!("{}:F", username), // Grant full control to current user
-            ])
-            .output();
-
-        match output {
-            Ok(result) if result.status.success() => {
-                debug!("Token file ACL hardened successfully");
-            }
-            Ok(result) => {
-                // Log warning but don't fail - file was still created
-                warn!(
-                    "icacls command failed (exit code {:?}): {}",
-                    result.status.code(),
-                    String::from_utf8_lossy(&result.stderr)
-                );
-            }
-            Err(e) => {
-                // icacls might not be available, log but don't fail
-                warn!("Failed to harden token file ACL: {}", e);
-            }
-        }
-
-        Ok(())
-    }
-
-    #[cfg(all(not(unix), not(windows)))]
-    {
-        // Fallback for other platforms - just write the file
-        std::fs::write(token_path, token)
-    }
+    detrix_config::credentials::write_file_securely(token_path, token)
 }

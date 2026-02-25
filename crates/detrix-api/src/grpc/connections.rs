@@ -4,6 +4,7 @@
 //! ALL business logic is in services::ConnectionService.
 
 use crate::constants::status;
+use crate::error::ToStatusResult;
 use crate::generated::detrix::v1::{connection_service_server::ConnectionService, *};
 use crate::grpc::conversions::connection_to_info;
 use crate::state::ApiState;
@@ -27,23 +28,15 @@ impl ConnectionServiceImpl {
     }
 }
 
-/// Extension trait for converting core Results to gRPC Status Results
-trait CoreToStatus<T> {
-    fn to_status(self) -> std::result::Result<T, Status>;
-}
-
-impl<T> CoreToStatus<T> for std::result::Result<T, detrix_core::Error> {
-    fn to_status(self) -> std::result::Result<T, Status> {
-        self.map_err(|err| Status::internal(err.to_string()))
-    }
-}
-
 #[tonic::async_trait]
 impl ConnectionService for ConnectionServiceImpl {
     async fn create_connection(
         &self,
         request: Request<CreateConnectionRequest>,
     ) -> Result<Response<CreateConnectionResponse>, Status> {
+        // Extract client identity from gRPC metadata before consuming the request
+        let created_by = crate::grpc::extract_client_id(&request)?;
+
         let req = request.into_inner();
         let connection_service = self.get_connection_service();
 
@@ -61,13 +54,17 @@ impl ConnectionService for ConnectionServiceImpl {
         // Call service (ALL business logic happens here)
         // ConnectionService.create_connection now handles adapter lifecycle internally
         let connection_id = connection_service
-            .create_connection(
+            .create_connection_with_metadata(
                 req.host,
                 port,
                 identity,
                 req.program,   // Optional program path for Rust direct lldb-dap
                 req.pid,       // Optional PID for Rust client AttachPid mode
                 req.safe_mode, // SafeMode: only allow logpoints
+                req.control_plane_url,
+                req.build_commit,
+                req.build_tag,
+                created_by, // Client identity from x-detrix-client-id metadata
             )
             .await
             .to_status()?;
@@ -84,6 +81,7 @@ impl ConnectionService for ConnectionServiceImpl {
             status: status::CREATED.to_string(),
             connection: Some(connection_to_info(&connection)),
             metadata: None,
+            advertise_url: self.state.advertise_url.clone(),
         }))
     }
 
@@ -91,10 +89,13 @@ impl ConnectionService for ConnectionServiceImpl {
         &self,
         request: Request<CloseConnectionRequest>,
     ) -> Result<Response<CloseConnectionResponse>, Status> {
+        let client_id = crate::grpc::extract_client_id(&request)?;
         let req = request.into_inner();
         let connection_service = self.get_connection_service();
 
         let connection_id = ConnectionId::new(&req.connection_id);
+
+        tracing::info!(connection_id = %req.connection_id, ?client_id, "gRPC: close_connection");
 
         // Call service
         connection_service
@@ -168,17 +169,47 @@ impl ConnectionService for ConnectionServiceImpl {
 
     async fn cleanup_connections(
         &self,
-        _request: Request<CleanupConnectionsRequest>,
+        request: Request<CleanupConnectionsRequest>,
     ) -> Result<Response<CleanupConnectionsResponse>, Status> {
+        let client_id = crate::grpc::extract_client_id(&request)?;
+        let _req = request.into_inner();
+        tracing::info!(?client_id, "gRPC: cleanup_connections");
+
         let connection_service = self.get_connection_service();
 
+        // API cleanup: remove all inactive connections (ttl_days=0)
         let deleted = connection_service
-            .cleanup_stale_connections()
+            .cleanup_stale_connections(0)
             .await
             .to_status()?;
 
         Ok(Response::new(CleanupConnectionsResponse {
             deleted,
+            metadata: None,
+        }))
+    }
+
+    async fn touch_connections(
+        &self,
+        request: Request<TouchConnectionsRequest>,
+    ) -> Result<Response<TouchConnectionsResponse>, Status> {
+        let req = request.into_inner();
+        let connection_service = self.get_connection_service();
+        let mut updated = 0;
+
+        for connection_id_str in &req.connection_ids {
+            let connection_id = ConnectionId::new(connection_id_str);
+            if connection_service
+                .touch_connection(&connection_id)
+                .await
+                .is_ok()
+            {
+                updated += 1;
+            }
+        }
+
+        Ok(Response::new(TouchConnectionsResponse {
+            updated,
             metadata: None,
         }))
     }

@@ -38,14 +38,18 @@ type ClientState struct {
 	sync.RWMutex
 
 	// Configuration (set once in Init)
-	Name        string
-	ControlHost string
-	ControlPort int
-	DebugPort   int
-	DaemonURL   string
-	DelvePath   string
-	DetrixHome  string
-	SafeMode    bool // SafeMode: only logpoints allowed, no breakpoint operations
+	Name          string
+	ControlHost   string
+	AdvertiseHost string // Host sent to daemon for registration (if different from ControlHost)
+	ControlPort   int
+	DebugPort     int
+	DaemonURL     string
+	DelvePath     string
+	DetrixHome    string
+	SafeMode      bool   // SafeMode: only logpoints allowed, no breakpoint operations
+	WorkspaceRoot string // Override workspace root (default: os.Getwd at wake time)
+	BuildCommit   string // Optional build commit SHA override
+	BuildTag      string // Optional build tag/version override
 
 	// Timeouts (in milliseconds for simplicity)
 	HealthCheckTimeoutMs int
@@ -59,6 +63,9 @@ type ClientState struct {
 	ActualDebugPort   int
 	DebugPortActive   bool
 	ConnectionID      *string
+
+	// Daemon's advertise URL from registration response
+	DaemonAdvertiseURL string
 
 	// Process management
 	DelveProcess *DelveProcess

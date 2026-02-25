@@ -10,10 +10,11 @@ use super::DetrixServer;
 use crate::mcp::error::HttpBridgeResultExt;
 use crate::mcp::params::{
     AcknowledgeEventsParams, AddMetricParams, CloseConnectionParams, CreateConnectionParams,
-    EnableFromDiffParams, GetConfigParams, GetConnectionParams, GetMetricParams, GroupParams,
-    InspectFileParams, ListConnectionsParams, ListGroupsParams, ListMetricsParams, ObserveParams,
-    QueryMetricsParams, QuerySystemEventsParams, RemoveMetricParams, ToggleMetricParams,
-    UpdateConfigParams, UpdateMetricParams, ValidateConfigParams, ValidateExpressionParams,
+    DisconnectAllParams, EnableFromDiffParams, GetConfigParams, GetConnectionParams,
+    GetMetricParams, GroupParams, InspectFileParams, ListConnectionsParams, ListGroupsParams,
+    ListMetricsParams, ObserveParams, QueryMetricsParams, QuerySystemEventsParams,
+    RemoveMetricParams, SleepParams, ToggleMetricParams, UpdateConfigParams, UpdateMetricParams,
+    ValidateConfigParams, ValidateExpressionParams, WakeParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -27,13 +28,21 @@ impl DetrixServer {
     }
 
     /// Call wake tool via HTTP bridge
-    pub async fn call_wake(&self) -> Result<CallToolResult, String> {
-        self.wake().await.http_bridge()
+    pub async fn call_wake(&self, params: WakeParams) -> Result<CallToolResult, String> {
+        self.wake(Parameters(params)).await.http_bridge()
     }
 
     /// Call sleep tool via HTTP bridge
-    pub async fn call_sleep(&self) -> Result<CallToolResult, String> {
-        self.sleep().await.http_bridge()
+    pub async fn call_sleep(&self, params: SleepParams) -> Result<CallToolResult, String> {
+        self.sleep(Parameters(params)).await.http_bridge()
+    }
+
+    /// Call disconnect_all tool via HTTP bridge
+    pub async fn call_disconnect_all(
+        &self,
+        params: DisconnectAllParams,
+    ) -> Result<CallToolResult, String> {
+        self.disconnect_all(Parameters(params)).await.http_bridge()
     }
 
     /// Call add_metric tool via HTTP bridge

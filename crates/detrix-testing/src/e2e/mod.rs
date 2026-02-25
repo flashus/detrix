@@ -47,6 +47,7 @@ pub mod daemon_discovery;
 pub mod dap_scenarios;
 pub mod executor;
 pub mod jwt;
+pub mod port_registry;
 pub mod reporter;
 pub mod scenarios;
 pub mod unified;
@@ -78,8 +79,10 @@ pub use dap_scenarios::{
 };
 pub use executor::{
     cleanup_orphaned_e2e_processes, find_detrix_binary, get_target_candidates, get_workspace_root,
-    kill_and_unregister_process, kill_and_unregister_process_async, register_e2e_process,
-    restart_delve, restart_lldb, unregister_e2e_process, DebuggerLanguage, TestExecutor,
+    kill_9, kill_and_unregister_pid, kill_and_unregister_process,
+    kill_and_unregister_process_async, kill_check, register_e2e_process, restart_delve,
+    restart_lldb, safe_kill, safe_sigterm_for_config, unregister_e2e_process, DebuggerLanguage,
+    TestExecutor,
 };
 pub use reporter::{TestReporter, TestStep};
 pub use scenarios::TestScenarios;
@@ -89,6 +92,7 @@ pub mod cli;
 pub mod grpc;
 pub mod mcp;
 pub mod rest;
+pub mod test_file_server;
 pub mod websocket;
 
 pub use cli::CliClient;

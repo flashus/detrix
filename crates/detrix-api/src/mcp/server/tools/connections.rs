@@ -9,9 +9,10 @@ use crate::mcp::params::{
     CloseConnectionParams, CreateConnectionParams, GetConnectionParams, ListConnectionsParams,
 };
 use crate::state::ApiState;
-use detrix_core::ConnectionId;
+use detrix_core::{ConnectionId, UNKNOWN_WORKSPACE_ROOT};
 use rmcp::ErrorData as McpError;
 use std::sync::Arc;
+use tracing::info;
 
 // ============================================================================
 // create_connection Implementation
@@ -51,6 +52,7 @@ impl CreateConnectionResult {
 pub async fn create_connection_impl(
     state: &Arc<ApiState>,
     params: CreateConnectionParams,
+    created_by: Option<String>,
 ) -> Result<CreateConnectionResult, McpError> {
     let connection_service = &state.context.connection_service;
 
@@ -60,26 +62,29 @@ pub async fn create_connection_impl(
         .unwrap_or_else(|| format!("mcp-{}-{}:{}", params.language, params.host, params.port));
     let workspace_root = params
         .workspace_root
-        .unwrap_or_else(|| "/unknown".to_string());
+        .unwrap_or_else(|| UNKNOWN_WORKSPACE_ROOT.to_string());
     let hostname = params
         .hostname
         .unwrap_or_else(crate::common::resolve_hostname);
 
-    let language = crate::common::parse_language(&params.language)
-        .map_err(|e| McpError::invalid_params(e, None))?;
+    let language =
+        crate::common::parse_language(&params.language).mcp_invalid_params("Invalid language")?;
     let identity = detrix_core::ConnectionIdentity::new(name, language, workspace_root, hostname);
 
-    let port =
-        crate::common::validate_port(params.port).map_err(|e| McpError::invalid_params(e, None))?;
+    let port = crate::common::validate_port(params.port).mcp_invalid_params("Invalid port")?;
 
     match connection_service
-        .create_connection(
+        .create_connection_with_metadata(
             params.host.clone(),
             port,
             identity,
             params.program,   // Optional program path for Rust direct lldb-dap
             None,             // MCP doesn't use PID-based attach (client library feature)
             params.safe_mode, // SafeMode: only allow logpoints
+            params.control_plane_url,
+            params.build_commit,
+            params.build_tag,
+            created_by, // Client identity from MCP session
         )
         .await
     {
@@ -134,9 +139,16 @@ impl CloseConnectionResult {
 pub async fn close_connection_impl(
     state: &Arc<ApiState>,
     params: CloseConnectionParams,
+    client_id: Option<&str>,
 ) -> Result<CloseConnectionResult, McpError> {
     let connection_service = &state.context.connection_service;
     let connection_id = ConnectionId::new(&params.connection_id);
+
+    info!(
+        connection_id = %params.connection_id,
+        client_id = ?client_id,
+        "MCP: close_connection"
+    );
 
     match connection_service.disconnect(&connection_id).await {
         Ok(_) => Ok(CloseConnectionResult {

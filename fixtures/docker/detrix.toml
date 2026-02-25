@@ -1,0 +1,19 @@
+# Detrix server configuration for Docker deployment
+
+[api.rest]
+host = "0.0.0.0"
+port = 8090
+
+[api.rest.rate_limit]
+enabled = false
+
+[api.grpc]
+host = "0.0.0.0"
+port = 50061
+
+[storage]
+path = "/data/detrix/data.db"
+
+[vfs]
+source_priority = ["bridge", "control_plane", "disk"]
+fetch_timeout_seconds = 10

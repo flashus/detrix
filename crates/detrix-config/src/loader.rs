@@ -73,31 +73,33 @@ pub enum ConfigError {
 /// Resolve config path to the actual file location.
 ///
 /// Resolution order:
-/// 1. If the path exists, use it as-is
-/// 2. If the path is relative "detrix.toml" (CLI default), check ~/detrix/detrix.toml
-/// 3. If ~/detrix/detrix.toml exists, use it
-/// 4. Otherwise, return ~/detrix/detrix.toml as the canonical default path
+/// 1. If the path is the default relative name "detrix.toml", always resolve to
+///    ~/detrix/detrix.toml (regardless of whether a local detrix.toml exists).
+///    This prevents project-local configs (e.g. Docker demo's detrix.toml) from
+///    being picked up accidentally when `detrix mcp` is run from that directory.
+/// 2. For any other path: if it exists, use it as-is.
+/// 3. Otherwise return the path as-is (caller will error on missing file).
 pub fn resolve_config_path(path: &Path) -> PathBuf {
-    // If the exact path exists, use it
-    if path.exists() {
-        debug!(path = %path.display(), "Config path exists, using as-is");
-        return path.to_path_buf();
-    }
-
-    // If it's the default relative filename, prefer ~/detrix/detrix.toml
+    // When the default filename is used (no explicit --config), always resolve
+    // to ~/detrix/detrix.toml. A local detrix.toml in CWD is intentionally
+    // ignored here — pass an explicit path to use it (e.g. --config ./detrix.toml).
     if path == Path::new(DEFAULT_CONFIG_FILENAME) {
         let home_config = default_config_path();
         if home_config.exists() {
             debug!(path = %home_config.display(), "Found config in detrix home");
-            return home_config;
+        } else {
+            debug!(path = %home_config.display(), "Config not found, will use detrix home path");
         }
-        // Return home path for creation (not CWD)
-        debug!(path = %home_config.display(), "Config not found, will use detrix home path");
         return home_config;
     }
 
-    // For other paths, return as-is (will be created there or error)
-    debug!(path = %path.display(), "Using provided path as-is");
+    // For explicit paths (absolute, relative with ./prefix, or non-default name):
+    // use as-is if it exists, otherwise return as-is (load_config will error).
+    if path.exists() {
+        debug!(path = %path.display(), "Config path exists, using as-is");
+    } else {
+        debug!(path = %path.display(), "Using provided path as-is");
+    }
     path.to_path_buf()
 }
 

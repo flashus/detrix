@@ -5,8 +5,8 @@ use crate::constants::{
     DEFAULT_LOG_RETENTION_DAYS, DEFAULT_MCP_BRIDGE_HEARTBEAT_INTERVAL_SECS,
     DEFAULT_MCP_BRIDGE_TIMEOUT_MS, DEFAULT_MCP_CLEANUP_INTERVAL_SECS,
     DEFAULT_MCP_HEARTBEAT_MAX_FAILURES, DEFAULT_MCP_HEARTBEAT_TIMEOUT_SECS,
-    DEFAULT_MCP_TOOL_TIMEOUT_MS, DEFAULT_MCP_USAGE_HISTORY, DEFAULT_RESTART_DELAY_MS,
-    DEFAULT_SHUTDOWN_GRACE_PERIOD_SECS,
+    DEFAULT_MCP_TOOL_TIMEOUT_MS, DEFAULT_MCP_USAGE_HISTORY, DEFAULT_REMOTE_APP_TIMEOUT_MS,
+    DEFAULT_RESTART_DELAY_MS, DEFAULT_SHUTDOWN_GRACE_PERIOD_SECS,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -133,6 +133,16 @@ pub struct DaemonConfig {
     /// Default: 100ms
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
+    /// HTTP timeout for remote app control (wake/sleep proxy) in milliseconds.
+    /// Default: 30000ms (30 seconds)
+    #[serde(default = "default_remote_app_timeout_ms")]
+    pub remote_app_timeout_ms: u64,
+    /// External URL for this daemon, advertised to clients during registration.
+    /// Like Kafka's advertised.listeners or Consul's advertise_addr.
+    /// Env: DETRIX_ADVERTISE_URL (takes precedence over config file).
+    /// Example: "http://localhost:8095" when port-mapped in Docker.
+    #[serde(default)]
+    pub advertise_url: Option<String>,
     /// Logging configuration
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -158,6 +168,10 @@ fn default_poll_interval_ms() -> u64 {
     DEFAULT_DAEMON_POLL_INTERVAL_MS
 }
 
+fn default_remote_app_timeout_ms() -> u64 {
+    DEFAULT_REMOTE_APP_TIMEOUT_MS
+}
+
 impl Default for DaemonConfig {
     fn default() -> Self {
         DaemonConfig {
@@ -166,6 +180,8 @@ impl Default for DaemonConfig {
             health_check_interval_ms: DEFAULT_HEALTH_CHECK_INTERVAL_MS,
             restart_delay_ms: DEFAULT_RESTART_DELAY_MS,
             poll_interval_ms: DEFAULT_DAEMON_POLL_INTERVAL_MS,
+            remote_app_timeout_ms: DEFAULT_REMOTE_APP_TIMEOUT_MS,
+            advertise_url: None,
             logging: LoggingConfig::default(),
         }
     }

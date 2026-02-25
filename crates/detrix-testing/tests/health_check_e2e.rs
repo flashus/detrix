@@ -162,6 +162,9 @@ port_fallback = false
 [api.rest]
 port = {}
 
+[api.auth]
+mode = "disabled"
+
 [api.grpc]
 port = {}
 "#,
@@ -338,6 +341,9 @@ port_fallback = false
 
 [api.rest]
 port = {}
+
+[api.auth]
+mode = "disabled"
 
 [api.grpc]
 port = {}

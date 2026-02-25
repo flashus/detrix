@@ -188,6 +188,41 @@ detrix::shutdown()?;
 | `DETRIX_REGISTER_TIMEOUT` | Registration timeout (seconds) | `5.0` |
 | `DETRIX_UNREGISTER_TIMEOUT` | Unregistration timeout (seconds) | `2.0` |
 
+## Build Information
+
+The client automatically detects build metadata from:
+
+1. **Explicit parameters** (via `Config::builder().build_commit()/.build_tag()`)
+2. **Environment variables at runtime**:
+   - `DETRIX_BUILD_COMMIT` / `DETRIX_BUILD_TAG`
+   - `GIT_COMMIT`, `CI_COMMIT_SHA`, `GITHUB_SHA`
+   - `GIT_TAG`, `CI_COMMIT_TAG`, `GITHUB_REF_NAME`
+3. **Compile-time injection** (via environment variables during `cargo build`):
+   ```bash
+   GIT_COMMIT=$(git rev-parse HEAD) cargo build --release
+   ```
+4. **Runtime git detection** (local dev only)
+
+### Docker Example
+
+```dockerfile
+FROM rust:1.75 AS builder
+ARG GIT_COMMIT=unknown
+ARG GIT_TAG=unknown
+
+# Set at build time - captured by build.rs
+ENV GIT_COMMIT=${GIT_COMMIT}
+ENV GIT_TAG=${GIT_TAG}
+
+RUN cargo build --release
+```
+
+Build with:
+```bash
+docker build --build-arg GIT_COMMIT=$(git rev-parse HEAD) \
+             --build-arg GIT_TAG=$(git describe --tags) .
+```
+
 ## Requirements
 
 ### lldb-dap

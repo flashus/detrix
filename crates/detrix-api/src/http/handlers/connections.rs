@@ -109,11 +109,15 @@ pub async fn get_connection(
 /// # Errors
 /// - 400 Bad Request: Invalid language or connection parameters
 /// - 409 Conflict: Connection with same ID already exists
-#[instrument(skip(state, payload), fields(host = %payload.host, port = payload.port, language = %payload.language))]
+#[instrument(skip(state, headers, payload), fields(host = %payload.host, port = payload.port, language = %payload.language))]
 pub async fn create_connection(
     State(state): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<CreateConnectionRequest>,
 ) -> Result<(StatusCode, Json<CreateConnectionResponse>), HttpError> {
+    // Use X-Detrix-Client-Id header for ownership tracking (client UUID).
+    // Falls back to None if header not provided (backwards compat for local CLI callers).
+    let created_by = super::extract_client_id(&headers)?;
     info!(
         "REST: create_connection (host={}, port={}, language={}, program={:?}, pid={:?})",
         payload.host, payload.port, payload.language, payload.program, payload.pid
@@ -123,9 +127,8 @@ pub async fn create_connection(
 
     // Build connection identity from request
     // Note: name, workspace_root, hostname are required fields
-    let port = crate::common::validate_port(payload.port).map_err(HttpError::bad_request)?;
-    let language =
-        crate::common::parse_language(&payload.language).map_err(HttpError::bad_request)?;
+    let port = crate::common::validate_port(payload.port).http_bad_request()?;
+    let language = crate::common::parse_language(&payload.language).http_bad_request()?;
     let identity = detrix_core::ConnectionIdentity::new(
         payload.name,
         language,
@@ -134,13 +137,17 @@ pub async fn create_connection(
     );
 
     let connection_id = connection_service
-        .create_connection(
+        .create_connection_with_metadata(
             payload.host,
             port,
             identity,
             payload.program,   // Optional program path for Rust direct lldb-dap
             payload.pid,       // Optional PID for Rust client AttachPid mode
             payload.safe_mode, // SafeMode: only allow logpoints
+            payload.control_plane_url,
+            payload.build_commit,
+            payload.build_tag,
+            created_by, // Client identity from X-Detrix-Client-Id header
         )
         .await
         .http_context("Failed to create connection")?;
@@ -161,6 +168,7 @@ pub async fn create_connection(
             status: status::CREATED.to_string(),
             connection: Some(connection_to_rest_response(&connection)),
             metadata: None,
+            advertise_url: state.advertise_url.clone(),
         }),
     ))
 }
@@ -181,9 +189,14 @@ pub async fn create_connection(
 #[instrument(skip(state), fields(connection_id = %id))]
 pub async fn close_connection(
     State(state): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, HttpError> {
-    info!("REST: close_connection (id={})", id);
+    let client_id = super::extract_client_id(&headers)?;
+    info!(
+        "REST: close_connection (id={}, client_id={:?})",
+        id, client_id
+    );
 
     let connection_service = &state.context.connection_service;
 
@@ -213,15 +226,77 @@ pub struct CleanupResponse {
 #[instrument(skip(state))]
 pub async fn cleanup_connections(
     State(state): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<CleanupResponse>, HttpError> {
-    info!("REST: cleanup_connections");
+    let client_id = super::extract_client_id(&headers)?;
+    info!("REST: cleanup_connections (client_id={:?})", client_id);
 
     let connection_service = &state.context.connection_service;
 
+    // API cleanup: remove all inactive connections (ttl_days=0)
     let deleted = connection_service
-        .cleanup_stale_connections()
+        .cleanup_stale_connections(0)
         .await
         .http_context("Failed to cleanup connections")?;
 
     Ok(Json(CleanupResponse { deleted }))
+}
+
+/// Touch connections request
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TouchConnectionsRequest {
+    /// List of connection IDs to touch
+    pub connection_ids: Vec<String>,
+}
+
+/// Touch connections response
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TouchConnectionsResponse {
+    /// Number of connections updated
+    pub updated: u32,
+}
+
+/// Update last_active timestamp for multiple connections.
+///
+/// This endpoint is used by MCP bridge and clients to mark connections as active,
+/// preventing them from being cleaned up by TTL logic.
+///
+/// # Request Body
+/// - `connectionIds`: Array of connection ID strings to touch
+///
+/// # Response
+/// Returns JSON with the count of successfully updated connections.
+///
+/// # Security
+/// No IP-based access control - connections are scoped to the daemon instance.
+/// In single-user deployments, this is sufficient. For multi-user scenarios,
+/// add authentication middleware (JWT, OAuth) at the HTTP layer.
+#[instrument(skip(state))]
+pub async fn touch_connections(
+    State(state): State<Arc<ApiState>>,
+    Json(payload): Json<TouchConnectionsRequest>,
+) -> Result<Json<TouchConnectionsResponse>, HttpError> {
+    info!(
+        "REST: touch_connections (count={})",
+        payload.connection_ids.len()
+    );
+
+    let connection_service = &state.context.connection_service;
+    let mut updated = 0;
+
+    for connection_id_str in &payload.connection_ids {
+        let connection_id = ConnectionId::new(connection_id_str);
+        let result = connection_service.touch_connection(&connection_id).await;
+
+        match result {
+            Ok(_) => updated += 1,
+            Err(_) => {
+                tracing::debug!(connection_id = %connection_id_str, "Failed to touch connection (may not exist)");
+            }
+        }
+    }
+
+    Ok(Json(TouchConnectionsResponse { updated }))
 }

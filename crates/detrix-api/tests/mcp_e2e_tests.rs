@@ -13,8 +13,8 @@
 use detrix_api::mcp::DetrixServer;
 use detrix_api::ApiState;
 use detrix_application::{
-    AppContext, ConnectionRepositoryRef, DapAdapterFactoryRef, EventRepositoryRef,
-    MetricRepositoryRef,
+    AppContext, ConnectionReferenceRepositoryRef, ConnectionRepositoryRef, DapAdapterFactoryRef,
+    EventRepositoryRef, MetricRepositoryRef,
 };
 use detrix_config::ApiConfig;
 use detrix_core::{
@@ -53,6 +53,12 @@ impl McpE2eFixture {
         let storage = Arc::new(SqliteStorage::new(&sqlite_config).await.unwrap());
         let mock_factory = Arc::new(MockDapAdapterFactory::new());
 
+        let vfs = Arc::new(detrix_storage::DiskVfs::new()) as detrix_application::VfsRef;
+        let file_source_chain = Arc::new(detrix_application::FileSourceChain::new(
+            Arc::clone(&vfs),
+            vec![],
+            &[],
+        ));
         let context = AppContext::new(
             Arc::clone(&storage) as MetricRepositoryRef,
             Arc::clone(&storage) as EventRepositoryRef,
@@ -67,6 +73,11 @@ impl McpE2eFixture {
             &detrix_config::LimitsConfig::default(),
             None,
             None, // No separate DLQ storage in tests
+            None,
+            None, // No auth token in tests
+            vfs,
+            file_source_chain,
+            Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
         );
 
         let state = Arc::new(ApiState::builder(context, storage).build());
@@ -133,6 +144,7 @@ impl McpE2eFixture {
             condition: None,
             safety_level: SafetyLevel::Strict,
             created_at: None,
+            created_by: None,
             capture_stack_trace: false,
             stack_trace_ttl: None,
             stack_trace_slice: None,
@@ -183,7 +195,7 @@ async fn test_e2e_add_and_list_metric() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .expect("Should add metric")
         .value;
@@ -213,7 +225,7 @@ async fn test_e2e_toggle_metric() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .unwrap()
         .value;
@@ -268,7 +280,7 @@ async fn test_e2e_query_events() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .unwrap()
         .value;
@@ -331,6 +343,7 @@ async fn test_e2e_full_metric_lifecycle() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
+        created_by: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -345,7 +358,7 @@ async fn test_e2e_full_metric_lifecycle() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .unwrap()
         .value;
@@ -425,6 +438,7 @@ async fn test_e2e_multi_expression_metric() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
+        created_by: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -439,7 +453,7 @@ async fn test_e2e_multi_expression_metric() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .expect("Should add multi-expression metric")
         .value;
@@ -489,7 +503,7 @@ async fn test_e2e_multiple_metrics_in_group() {
             .state
             .context
             .metric_service
-            .add_metric(metric, false)
+            .add_metric(metric, false, None)
             .await
             .unwrap();
     }
@@ -543,6 +557,7 @@ async fn test_concurrent_tool_calls_no_deadlock() {
                 condition: None,
                 safety_level: SafetyLevel::Strict,
                 created_at: None,
+                created_by: None,
                 capture_stack_trace: false,
                 stack_trace_ttl: None,
                 stack_trace_slice: None,
@@ -552,7 +567,11 @@ async fn test_concurrent_tool_calls_no_deadlock() {
                 anchor: None,
                 anchor_status: AnchorStatus::Unanchored,
             };
-            state.context.metric_service.add_metric(metric, false).await
+            state
+                .context
+                .metric_service
+                .add_metric(metric, false, None)
+                .await
         });
         add_handles.push(handle);
     }
@@ -622,7 +641,7 @@ async fn test_graceful_degradation_list_metrics_when_disconnected() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .unwrap();
 
@@ -654,7 +673,7 @@ async fn test_graceful_degradation_query_events_when_disconnected() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .unwrap()
         .value;
@@ -728,6 +747,7 @@ async fn test_e2e_observe_workflow_with_introspection() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
+        created_by: None,
         capture_stack_trace: true,
         stack_trace_ttl: Some(600), // TTL like observe would set
         stack_trace_slice: None,
@@ -742,7 +762,7 @@ async fn test_e2e_observe_workflow_with_introspection() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await;
 
     assert!(
@@ -790,6 +810,7 @@ async fn test_e2e_observe_workflow_connection_binding() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
+        created_by: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -804,7 +825,7 @@ async fn test_e2e_observe_workflow_connection_binding() {
         .state
         .context
         .metric_service
-        .add_metric(metric, false)
+        .add_metric(metric, false, None)
         .await
         .unwrap();
 
@@ -849,6 +870,7 @@ async fn test_e2e_observe_workflow_with_group() {
             condition: None,
             safety_level: SafetyLevel::Strict,
             created_at: None,
+            created_by: None,
             capture_stack_trace: false,
             stack_trace_ttl: None,
             stack_trace_slice: None,
@@ -863,7 +885,7 @@ async fn test_e2e_observe_workflow_with_group() {
             .state
             .context
             .metric_service
-            .add_metric(metric, false)
+            .add_metric(metric, false, None)
             .await
             .unwrap();
     }

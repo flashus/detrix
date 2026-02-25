@@ -10,13 +10,16 @@
 //! Run with: cargo test --package detrix-application --test adapter_lifecycle_e2e_tests
 
 use detrix_application::{
-    AdapterLifecycleManager, ConnectionRepositoryRef, ConnectionService, DapAdapterFactoryRef,
-    EventCaptureService, EventRepository, ManagedAdapterStatus, MetricRepositoryRef,
+    AdapterLifecycleManager, ConnectionReferenceRepositoryRef, ConnectionRepositoryRef,
+    ConnectionService, DapAdapterFactoryRef, EventCaptureService, EventRepository,
+    ManagedAdapterStatus, MetricRepositoryRef,
 };
 use detrix_config::constants::DEFAULT_EVENT_FLUSH_INTERVAL_MS;
 use detrix_core::{
     ConnectionId, ConnectionStatus, MetricEvent, MetricId, SourceLanguage, SystemEvent,
 };
+use detrix_ports::VfsRef;
+use detrix_testing::{MockConnectionReferenceRepository, MockVfs};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -80,6 +83,7 @@ impl E2eTestFixture {
         let (broadcast_tx, broadcast_rx) = broadcast::channel::<MetricEvent>(1024);
         let adapter_factory = Arc::new(StatefulMockAdapterFactory::new());
         let metric_repo = Arc::new(MockMetricRepository::new());
+        let vfs: VfsRef = Arc::new(MockVfs::new());
 
         let (system_event_tx, _) = broadcast::channel::<SystemEvent>(100);
         let lifecycle_manager = Arc::new(AdapterLifecycleManager::new(
@@ -89,16 +93,21 @@ impl E2eTestFixture {
             Arc::clone(&adapter_factory) as DapAdapterFactoryRef,
             metric_repo as MetricRepositoryRef,
             Arc::clone(&connection_repo) as ConnectionRepositoryRef,
+            vfs.clone(),
         ));
 
         // Create a new metric_repo for ConnectionService since the first one was moved
         let metric_repo_for_conn_service: MetricRepositoryRef =
             Arc::new(MockMetricRepository::new());
+        let reference_repo: ConnectionReferenceRepositoryRef =
+            Arc::new(MockConnectionReferenceRepository::new());
         let connection_service = Arc::new(ConnectionService::new(
             Arc::clone(&connection_repo) as ConnectionRepositoryRef,
             metric_repo_for_conn_service,
+            reference_repo,
             Arc::clone(&lifecycle_manager),
             system_event_tx,
+            vfs,
         ));
 
         Self {
@@ -399,6 +408,7 @@ async fn test_e2e_event_broadcast_for_streaming() {
     let (broadcast_tx, mut broadcast_rx) = broadcast::channel::<MetricEvent>(1024);
     let adapter_factory = Arc::new(StatefulMockAdapterFactory::new());
     let metric_repo = Arc::new(MockMetricRepository::new());
+    let vfs: VfsRef = Arc::new(MockVfs::new());
 
     let (system_event_tx, _) = broadcast::channel::<SystemEvent>(100);
     let lifecycle_manager = Arc::new(AdapterLifecycleManager::new(
@@ -408,15 +418,20 @@ async fn test_e2e_event_broadcast_for_streaming() {
         Arc::clone(&adapter_factory) as DapAdapterFactoryRef,
         metric_repo as MetricRepositoryRef,
         Arc::clone(&connection_repo) as ConnectionRepositoryRef,
+        vfs.clone(),
     ));
 
     // Create a new metric_repo for ConnectionService since the first one was moved
     let metric_repo_for_conn: MetricRepositoryRef = Arc::new(MockMetricRepository::new());
+    let reference_repo: ConnectionReferenceRepositoryRef =
+        Arc::new(MockConnectionReferenceRepository::new());
     let connection_service = Arc::new(ConnectionService::new(
         Arc::clone(&connection_repo) as ConnectionRepositoryRef,
         metric_repo_for_conn,
+        reference_repo,
         Arc::clone(&lifecycle_manager),
         system_event_tx,
+        vfs,
     ));
 
     // Create connection

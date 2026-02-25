@@ -174,34 +174,48 @@ impl From<VariableDefinition> for VariableDefinitionDto {
 /// Use this endpoint before adding metrics to find the correct line number
 /// and available variables. For Python files, provides full AST analysis.
 pub async fn inspect_file(
-    State(_state): State<Arc<ApiState>>,
+    State(state): State<Arc<ApiState>>,
     Json(req): Json<ProtoInspectFileRequest>,
 ) -> Result<Json<InspectFileResponse>, HttpError> {
-    use detrix_application::{FileInspectionRequest, FileInspectionService};
+    use detrix_application::{resolve_file_path, FileInspectionRequest};
 
     info!(
         "REST: inspect_file (file='{}', line={:?}, find_variable={:?})",
         req.file_path, req.line, req.find_variable
     );
 
+    // Resolve workspace_root from connection (or auto-select single connection)
+    let workspace_root =
+        crate::common::resolve_workspace_root(&state, req.connection_id.as_deref()).await;
+
+    // Resolve relative file path against workspace_root
+    let resolved_file = resolve_file_path(&req.file_path, workspace_root.as_deref());
+
+    // Pre-fetch file into VFS cache (transparent remote file fetching)
+    crate::common::ensure_file_cached(&state, req.connection_id.as_deref(), &resolved_file).await;
+
     // Create inspection request - path validation is done in the service layer
     let inspection_request = FileInspectionRequest {
-        file_path: req.file_path.clone(),
+        file_path: resolved_file.clone(),
         line: req.line,
         find_variable: req.find_variable.clone(),
+        workspace_root,
     };
 
-    // Use FileInspectionService from application layer
-    // Service validates path (length, null bytes, existence, traversal)
-    let file_inspection = FileInspectionService::new();
-    let (language, result) = file_inspection
-        .inspect(inspection_request)
-        .http_context("File inspection failed")?;
+    // Use FileInspectionService from application layer (shared VFS).
+    // `inspect()` is synchronous and may call std::fs::read_to_string; offload to
+    // a blocking thread pool so we don't block the async executor.
+    let file_inspection = state.context.file_inspection.clone();
+    let (language, result) =
+        tokio::task::spawn_blocking(move || file_inspection.inspect(inspection_request))
+            .await
+            .map_err(|e| HttpError::internal(format!("File inspection task panicked: {e}")))?
+            .http_context("File inspection failed")?;
 
     // Convert domain result to DTO using From implementations
     let language_name = language.display_name().to_string();
     Ok(Json(InspectFileResponse::from_result(
-        req.file_path,
+        resolved_file,
         language_name,
         result,
     )))

@@ -26,6 +26,14 @@ CREATE TABLE IF NOT EXISTS connections (
     workspace_root TEXT NOT NULL DEFAULT '',     -- Workspace directory (absolute path)
     hostname TEXT NOT NULL DEFAULT '',           -- Machine hostname for multi-host isolation
 
+    -- Cloud/remote metadata for transparent file fetching
+    control_plane_url TEXT DEFAULT NULL,         -- App control plane URL for file fetching (e.g., "http://app:8091")
+    build_commit TEXT DEFAULT NULL,              -- Git commit SHA at build time (for verification + future git source)
+    build_tag TEXT DEFAULT NULL,                 -- Build version tag (e.g., "v1.2.3")
+
+    -- User identity tracking (for multi-user reference counting)
+    created_by TEXT DEFAULT NULL,                -- Client identity of the creator (from X-Detrix-Client-Id header)
+
     CHECK(port >= 1024),                -- Enforce port >= 1024 (not in reserved range)
     CHECK(host != '')                   -- Host cannot be empty
 );
@@ -285,3 +293,26 @@ CREATE INDEX IF NOT EXISTS idx_mcp_usage_error ON mcp_usage_events(error_code)
 
 -- Index for error rate queries
 CREATE INDEX IF NOT EXISTS idx_mcp_usage_status ON mcp_usage_events(status);
+
+-- ============================================================
+-- CONNECTION REFERENCES (Multi-User Safety)
+-- ============================================================
+-- Reference counting on connections. Each bridge session ("client") holds
+-- references on connections it uses. Operations only affect the caller's
+-- references. Connections are disconnected only when their last reference
+-- is removed.
+
+CREATE TABLE IF NOT EXISTS connection_references (
+    connection_id TEXT NOT NULL,
+    client_id TEXT NOT NULL,               -- Bridge UUID or "__daemon__"
+    kind TEXT NOT NULL DEFAULT 'client',   -- 'client' or 'daemon'
+    created_at INTEGER NOT NULL,
+    last_active INTEGER NOT NULL,
+    PRIMARY KEY (connection_id, client_id),
+    FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE,
+    CHECK(kind IN ('client', 'daemon'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_conn_refs_connection ON connection_references(connection_id);
+CREATE INDEX IF NOT EXISTS idx_conn_refs_client ON connection_references(client_id);
+CREATE INDEX IF NOT EXISTS idx_conn_refs_last_active ON connection_references(last_active);

@@ -15,6 +15,42 @@ pub use parsing::{
     ParsedLocationWithExpression,
 };
 
+/// HTTP header / gRPC metadata key for client identity.
+///
+/// Used across REST, gRPC, and MCP to identify the originator of mutations.
+/// HTTP headers are case-insensitive; gRPC metadata keys must be lowercase.
+pub const CLIENT_ID_HEADER: &str = "x-detrix-client-id";
+
+/// Validate a client ID string.
+///
+/// Rejects empty strings and the reserved `DAEMON_IDENTITY` value.
+/// Returns the validated string on success, or a static error message.
+pub fn validate_client_id(value: &str) -> Result<String, &'static str> {
+    if value.is_empty() {
+        return Err("client ID must not be empty");
+    }
+    if value == detrix_core::DAEMON_IDENTITY {
+        return Err("reserved '__daemon__' cannot be used via API");
+    }
+    Ok(value.to_string())
+}
+
+/// Extract and validate client_id from HTTP headers.
+///
+/// Returns `Ok(None)` if the header is absent (backwards compatible).
+/// Returns `Ok(Some(id))` if the header is present and valid.
+/// Returns `Err` for present-but-invalid values (empty, reserved).
+///
+/// This is a lower-level helper usable by any HTTP-based handler (REST, MCP).
+pub fn extract_client_id_from_headers(
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<String>, String> {
+    match headers.get(CLIENT_ID_HEADER).and_then(|v| v.to_str().ok()) {
+        Some(value) => Ok(Some(validate_client_id(value)?)),
+        None => Ok(None),
+    }
+}
+
 /// Validate that a u32 port value fits in u16 range.
 ///
 /// Proto/MCP use u32 for port numbers but the domain uses u16.
@@ -41,4 +77,86 @@ pub fn resolve_hostname() -> String {
         .ok()
         .and_then(|h| h.into_string().ok())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Pre-fetch a file into the VFS cache using the file source chain.
+///
+/// Resolves the connection from `connection_id` (or auto-selects single connection)
+/// and calls `ensure_available()` to transparently fetch the file if not cached.
+///
+/// Failures are silently ignored — if the file can't be fetched, downstream code
+/// will handle the "file not found" error naturally.
+pub async fn ensure_file_cached(
+    state: &crate::state::ApiState,
+    connection_id: Option<&str>,
+    file_path: &str,
+) {
+    let connection = if let Some(conn_id_str) = connection_id {
+        let conn_id = detrix_core::ConnectionId::new(conn_id_str);
+        state
+            .context
+            .connection_service
+            .get_connection(&conn_id)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        // Auto-select if only one connection exists
+        let connections = state
+            .context
+            .connection_service
+            .list_connections()
+            .await
+            .unwrap_or_default();
+        if connections.len() == 1 {
+            Some(connections.into_iter().next().unwrap())
+        } else {
+            None
+        }
+    };
+
+    if let Some(conn) = connection {
+        let _ = state
+            .context
+            .file_source_chain
+            .ensure_available(&conn, file_path)
+            .await;
+    }
+}
+
+/// Resolve workspace_root from an optional connection_id, with auto-select fallback.
+///
+/// If `connection_id` is provided, looks up that connection's workspace_root.
+/// If not provided, auto-selects the workspace_root from the single active connection.
+/// Returns `None` if no connection is found, multiple connections exist, or workspace is invalid.
+///
+/// Used by inspect_file handlers across MCP, REST, and gRPC to resolve relative file paths.
+pub async fn resolve_workspace_root(
+    state: &crate::state::ApiState,
+    connection_id: Option<&str>,
+) -> Option<String> {
+    if let Some(conn_id_str) = connection_id {
+        let conn_id = detrix_core::ConnectionId::new(conn_id_str);
+        let connection = state
+            .context
+            .connection_service
+            .get_connection(&conn_id)
+            .await
+            .ok()
+            .flatten()?;
+        connection.valid_workspace_root().map(|s| s.to_string())
+    } else {
+        // Auto-select if only one connection exists
+        let connections = state
+            .context
+            .connection_service
+            .list_connections()
+            .await
+            .unwrap_or_default();
+        if connections.len() == 1 {
+            connections[0].valid_workspace_root().map(|s| s.to_string())
+        } else {
+            None
+        }
+    }
 }

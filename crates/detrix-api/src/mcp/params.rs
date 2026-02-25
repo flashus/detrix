@@ -21,7 +21,7 @@ pub struct AddMetricParams {
     #[schemars(description = "Unique metric name (letters, numbers, underscore, dash)")]
     pub name: String,
     #[schemars(
-        description = "File path with optional line number. Formats: 'file.py#123', '@file.py#123', '\"expr\"@file.py#123', or 'file.py' with separate line parameter"
+        description = "File path with optional line number. Formats: 'file.py#123', '@file.py#123', or 'file.py' with separate line parameter."
     )]
     pub location: String,
     #[schemars(
@@ -164,7 +164,9 @@ pub struct UpdateMetricParams {
     description = "Observe a value in code. Simplest way to add metrics - auto-finds line if not specified."
 )]
 pub struct ObserveParams {
-    #[schemars(description = "File path to observe (relative or absolute)")]
+    #[schemars(
+        description = "File path to observe (e.g., '/home/user/project/app.py' or 'app.py')."
+    )]
     pub file: String,
 
     #[schemars(
@@ -172,7 +174,9 @@ pub struct ObserveParams {
     )]
     pub expressions: Vec<String>,
 
-    #[schemars(description = "Line number (optional - auto-finds best line if not specified)")]
+    #[schemars(
+        description = "Line number (optional - auto-finds best line if not specified). Auto-detection prefers usage lines over assignment lines for correct logpoint placement."
+    )]
     pub line: Option<u32>,
 
     #[schemars(
@@ -239,6 +243,40 @@ pub struct EnableFromDiffParams {
 }
 
 // ============================================================================
+// Wake Parameter Types
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "Wake an app's Detrix client via its control plane. The app starts its debugger and registers with this Detrix server."
+)]
+pub struct WakeParams {
+    #[schemars(
+        description = "URL of the app's control plane (e.g., 'http://my-app:8091'). The wake request is sent to {app_url}/detrix/wake."
+    )]
+    pub app_url: String,
+    #[schemars(
+        description = "Daemon URL to pass to the app (optional). If not provided, the app uses its configured daemon URL. In Docker, typically 'http://detrix:8090'."
+    )]
+    pub daemon_url: Option<String>,
+}
+
+// ============================================================================
+// Sleep Parameter Types
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "Sleep an app's Detrix client via its control plane. The app stops its debugger and unregisters from this Detrix server."
+)]
+pub struct SleepParams {
+    #[schemars(
+        description = "URL of the app's control plane (e.g., 'http://my-app:8091'). The sleep request is sent to {app_url}/detrix/sleep."
+    )]
+    pub app_url: String,
+}
+
+// ============================================================================
 // Connection Management Parameter Types
 // ============================================================================
 
@@ -279,6 +317,15 @@ pub struct CreateConnectionParams {
         description = "SafeMode: Only allow logpoints (non-blocking), disable breakpoint-based operations like function calls, stack traces, memory snapshots. Recommended for production environments."
     )]
     pub safe_mode: bool,
+
+    #[schemars(
+        description = "Control plane URL for the application (e.g., 'http://my-app:8091'). Used for transparent file fetching in cloud/Docker deployments."
+    )]
+    pub control_plane_url: Option<String>,
+    #[schemars(description = "Git commit SHA at build time. Used for file content verification.")]
+    pub build_commit: Option<String>,
+    #[schemars(description = "Build version tag (e.g., 'v1.2.3'). Informational metadata.")]
+    pub build_tag: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -326,7 +373,7 @@ pub struct ValidateExpressionParams {
     description = "Parameters for inspecting a file to find correct metric placement. Use BEFORE add_metric to find the right line for your expression."
 )]
 pub struct InspectFileParams {
-    #[schemars(description = "Path to the Python file to inspect")]
+    #[schemars(description = "Path to the source file to inspect (Python, Go, or Rust).")]
     pub file_path: String,
     #[schemars(
         description = "Show variables available at this line number (use to verify metric placement)"
@@ -336,6 +383,10 @@ pub struct InspectFileParams {
         description = "Find where this variable is defined/assigned (e.g., 'pnl', 'user', 'response')"
     )]
     pub find_variable: Option<String>,
+    #[schemars(
+        description = "Connection ID for resolving relative file paths against the connection's workspace root (optional - auto-selects if only one connection exists)"
+    )]
+    pub connection_id: Option<String>,
 }
 
 // ============================================================================
@@ -419,4 +470,62 @@ pub struct QuerySystemEventsParams {
 pub struct AcknowledgeEventsParams {
     #[schemars(description = "Event IDs to acknowledge")]
     pub event_ids: Vec<i64>,
+}
+
+// ============================================================================
+// Disconnect All Parameter Types
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "Disconnect all local debugger adapters. Stops all active debug sessions. Metrics remain configured and will be re-enabled when connections are re-established."
+)]
+pub struct DisconnectAllParams {}
+
+// ============================================================================
+// VFS (Virtual File System) Parameter Types
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "Parameters for providing file content to cache in the Virtual File System. Use in cloud/Docker deployments where the server has no direct access to source files."
+)]
+pub struct ProvideFileParams {
+    #[schemars(description = "Connection ID (UUID) for scoping the cached file")]
+    pub connection_id: String,
+
+    #[schemars(description = "File path (absolute or relative to workspace root)")]
+    pub path: String,
+
+    #[schemars(description = "File content to cache (plain text)")]
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "File hash entry for cache validation")]
+pub struct FileHash {
+    #[schemars(description = "File path")]
+    pub path: String,
+
+    #[schemars(description = "SHA-256 hash of file content")]
+    pub hash: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "Parameters for validating cache hashes. Server compares client hashes with cached content and evicts mismatched files."
+)]
+pub struct ValidateCacheParams {
+    #[schemars(description = "Connection ID to validate cache for")]
+    pub connection_id: String,
+
+    #[schemars(description = "List of file hashes from the client")]
+    pub files: Vec<FileHash>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "Parameters for getting all cached file hashes for a connection")]
+pub struct GetCachedFilesParams {
+    #[schemars(description = "Connection ID to get cached files for")]
+    pub connection_id: String,
 }

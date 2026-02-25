@@ -1,91 +1,145 @@
-//! System state handlers: wake, sleep, get_status
+//! System state handlers: wake, sleep, disconnect_all, get_status
 
 use crate::constants::status;
 use crate::error::ToStatusResult;
 use crate::generated::detrix::v1::{
-    DaemonInfo, McpClientInfo, ParentProcessInfo, SleepRequest, SleepResponse, StatusRequest,
-    StatusResponse, WakeRequest, WakeResponse,
+    DaemonInfo, DisconnectAllRequest, DisconnectAllResponse, McpClientInfo, ParentProcessInfo,
+    SleepRequest, SleepResponse, StatusRequest, StatusResponse, WakeRequest, WakeResponse,
 };
 use crate::state::ApiState;
-use detrix_core::format_uptime;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
-/// Handle wake request
+/// Handle wake request — proxy to remote app's control plane
 pub async fn handle_wake(
     state: &Arc<ApiState>,
-    _request: Request<WakeRequest>,
+    request: Request<WakeRequest>,
 ) -> Result<Response<WakeResponse>, Status> {
-    // With connection-based approach, wake is a no-op at the global level.
-    // Metrics are synced when connections are created via ConnectionService.
-    // This endpoint returns current status for backwards compatibility.
-    let adapter_count = state
-        .context
-        .adapter_lifecycle_manager
-        .adapter_count()
-        .await;
+    let client_id = crate::grpc::extract_client_id(&request)?;
+    let req = request.into_inner();
+    tracing::info!(app_url = %req.app_url, ?client_id, "gRPC: wake");
+    let app_url = req.app_url;
+    let daemon_url = if req.daemon_url.is_empty() {
+        None
+    } else {
+        Some(req.daemon_url.as_str())
+    };
 
-    let metrics = state
+    let remote_app_service = state
         .context
-        .metric_service
-        .list_metrics()
+        .remote_app_service
+        .as_ref()
+        .ok_or_else(|| Status::unavailable("Remote app control not configured"))?;
+
+    let result = remote_app_service
+        .wake_app(&app_url, daemon_url)
         .await
         .to_status()?;
 
-    let enabled_count = metrics.iter().filter(|m| m.enabled).count();
-
     Ok(Response::new(WakeResponse {
-        status: if adapter_count > 0 {
-            "active"
-        } else {
-            "no_connections"
-        }
-        .to_string(),
-        metrics_loaded: enabled_count as u32,
+        status: result.status,
+        app_url: result.app_url,
+        connection_id: result.connection_id.unwrap_or_default(),
+        debug_port: result.debug_port.unwrap_or(0),
+        message: format!("Wake request sent to {}", app_url),
+        metadata: None,
+        daemon_url: state.advertise_url.clone(),
+    }))
+}
+
+/// Handle sleep request — proxy to remote app's control plane
+pub async fn handle_sleep(
+    state: &Arc<ApiState>,
+    request: Request<SleepRequest>,
+) -> Result<Response<SleepResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
+    let req = request.into_inner();
+    tracing::info!(app_url = %req.app_url, ?client_id, "gRPC: sleep");
+    let app_url = req.app_url;
+
+    let remote_app_service = state
+        .context
+        .remote_app_service
+        .as_ref()
+        .ok_or_else(|| Status::unavailable("Remote app control not configured"))?;
+
+    let result = remote_app_service.sleep_app(&app_url).await.to_status()?;
+
+    Ok(Response::new(SleepResponse {
+        status: result.status,
+        app_url: result.app_url,
+        message: format!("Sleep request sent to {}", app_url),
         metadata: None,
     }))
 }
 
-/// Handle sleep request
-pub async fn handle_sleep(
+/// Handle disconnect_all request — stop all local adapters
+///
+/// Dual-mode behavior (mirrors REST handler):
+/// - **User-scoped**: if `x-detrix-client-id` metadata is present, only release
+///   that client's connection references. Safe for multi-user/cloud environments.
+/// - **Global**: if no client ID is provided, disconnect ALL adapters — but only
+///   from loopback callers. Remote callers without a client ID are rejected.
+pub async fn handle_disconnect_all(
     state: &Arc<ApiState>,
-    _request: Request<SleepRequest>,
-) -> Result<Response<SleepResponse>, Status> {
-    // With connection-based approach, sleep stops all adapters via lifecycle manager.
-    // This provides a way to cleanly disconnect all debugger connections.
-    let adapter_count = state
+    request: Request<DisconnectAllRequest>,
+) -> Result<Response<DisconnectAllResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
+    let peer_addr = request.remote_addr();
+    let _req = request.into_inner();
+
+    // User-scoped mode: client_id provided → release only caller's refs
+    if let Some(ref cid) = client_id {
+        let client_identity = detrix_core::connection_reference::ClientIdentity::bridge(cid);
+        tracing::info!(?client_identity, "gRPC: disconnect_all (user-scoped)");
+        let (released, disconnected) = state
+            .context
+            .connection_service
+            .disconnect_all_connections(&client_identity)
+            .await
+            .to_status()?;
+
+        return Ok(Response::new(DisconnectAllResponse {
+            status: status::DISCONNECTED.to_string(),
+            adapters_stopped: disconnected as u32,
+            message: format!(
+                "Released {} references, disconnected {} connections",
+                released, disconnected
+            ),
+            metadata: None,
+        }));
+    }
+
+    // Global mode: only loopback callers allowed
+    let is_loopback = peer_addr.map(|a| a.ip().is_loopback()).unwrap_or(false);
+    if !is_loopback {
+        return Err(Status::permission_denied(
+            "x-detrix-client-id metadata required for remote disconnect_all",
+        ));
+    }
+
+    tracing::info!("gRPC: disconnect_all (global, localhost)");
+    let result = state
         .context
         .adapter_lifecycle_manager
-        .adapter_count()
+        .disconnect_all()
         .await;
 
-    // Stop all adapters - track partial failure for status
-    let partial_failure = match state.context.adapter_lifecycle_manager.stop_all().await {
-        Ok(_) => false,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to stop all adapters during sleep");
-            true
+    Ok(Response::new(DisconnectAllResponse {
+        status: if result.partial_failure {
+            status::PARTIAL_FAILURE
+        } else {
+            status::DISCONNECTED
         }
-    };
-
-    // Indicate partial failure in status if some adapters failed to stop
-    let status_str = if partial_failure {
-        "sleeping_partial_failure".to_string()
-    } else {
-        "sleeping".to_string()
-    };
-
-    let message = if partial_failure {
-        "Some adapters failed to stop".to_string()
-    } else {
-        "All adapters stopped".to_string()
-    };
-
-    Ok(Response::new(SleepResponse {
-        status: status_str,
-        metrics_saved: adapter_count as u32,
+        .to_string(),
+        adapters_stopped: result.adapters_stopped as u32,
+        message: if result.partial_failure {
+            "Some adapters failed to stop"
+        } else {
+            "All adapters stopped"
+        }
+        .to_string(),
         metadata: None,
-        message,
     }))
 }
 
@@ -94,80 +148,11 @@ pub async fn handle_get_status(
     state: &Arc<ApiState>,
     _request: Request<StatusRequest>,
 ) -> Result<Response<StatusResponse>, Status> {
-    let mut degraded = Vec::new();
+    let s = crate::system_status::gather_system_status(state).await;
 
-    // Query all metrics to count active/total
-    let (enabled_metrics, total_metrics) = match state.context.metric_service.list_metrics().await {
-        Ok(metrics) => {
-            let enabled = metrics.iter().filter(|m| m.enabled).count() as u32;
-            (enabled, metrics.len() as u32)
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to list metrics for status endpoint");
-            degraded.push("metrics".to_string());
-            (0, 0)
-        }
-    };
-
-    // Query total events count from event repository
-    let total_events = match state.event_repository.count_all().await {
-        Ok(count) => count as u64,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to count events for status endpoint");
-            degraded.push("events".to_string());
-            0
-        }
-    };
-
-    // Get connection counts
-    let total_connections = match state.context.connection_service.list_connections().await {
-        Ok(connections) => connections.len() as u32,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to list connections for status endpoint");
-            degraded.push("connections".to_string());
-            0
-        }
-    };
-
-    let active_connections = match state
-        .context
-        .connection_service
-        .list_active_connections()
-        .await
-    {
-        Ok(connections) => connections.len() as u32,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to list active connections for status endpoint");
-            if !degraded.contains(&"connections".to_string()) {
-                degraded.push("connections".to_string());
-            }
-            0
-        }
-    };
-
-    // Get uptime
-    let uptime_seconds = state.uptime_seconds() as i64;
-    let uptime_formatted = format_uptime(uptime_seconds as u64);
-
-    // Determine mode based on whether any adapters are connected
-    let adapter_connected = state
-        .context
-        .adapter_lifecycle_manager
-        .has_connected_adapters()
-        .await;
-    let mode = if adapter_connected {
-        status::ACTIVE.to_string()
-    } else {
-        "idle".to_string()
-    };
-
-    // Get system metrics (CPU and memory for current process)
-    let process_metrics = crate::system_metrics::get_process_metrics();
-
-    // Get MCP clients
-    let mcp_clients: Vec<McpClientInfo> = state
-        .get_mcp_clients()
-        .await
+    // Map shared McpClientSummary → proto McpClientInfo
+    let mcp_clients: Vec<McpClientInfo> = s
+        .mcp_clients
         .into_iter()
         .map(|c| McpClientInfo {
             id: c.id,
@@ -183,13 +168,6 @@ pub async fn handle_get_status(
         })
         .collect();
 
-    // Get daemon info
-    let daemon_info = state.get_daemon_info();
-
-    // Get started timestamp
-    let started_at = state.started_at();
-
-    // Get config path
     let config_path = state
         .config_service
         .config_path()
@@ -197,26 +175,25 @@ pub async fn handle_get_status(
         .unwrap_or_default();
 
     Ok(Response::new(StatusResponse {
-        mode,
-        enabled_metrics,
-        uptime_seconds: uptime_seconds as u64,
-        total_events,
-        cpu_usage_percent: process_metrics.cpu_usage_percent as f64,
-        memory_usage_bytes: process_metrics.memory_usage_bytes,
+        mode: s.mode.to_string(),
+        enabled_metrics: s.active_metrics as u32,
+        uptime_seconds: s.uptime_seconds,
+        total_events: s.total_events as u64,
+        cpu_usage_percent: s.process_metrics.cpu_usage_percent as f64,
+        memory_usage_bytes: s.process_metrics.memory_usage_bytes,
         metadata: None,
-        // Extended fields
-        uptime_formatted,
-        started_at,
-        total_metrics,
-        active_connections,
-        total_connections,
-        adapter_connected,
+        uptime_formatted: s.uptime_formatted,
+        started_at: s.started_at,
+        total_metrics: s.total_metrics as u32,
+        active_connections: s.active_connections as u32,
+        total_connections: s.total_connections as u32,
+        adapter_connected: s.adapter_connected,
         daemon: Some(DaemonInfo {
-            pid: daemon_info.pid,
-            ppid: daemon_info.ppid,
+            pid: s.daemon.pid,
+            ppid: s.daemon.ppid,
         }),
         mcp_clients,
-        degraded,
+        degraded: s.degraded,
         config_path,
     }))
 }

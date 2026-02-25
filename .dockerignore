@@ -1,0 +1,12 @@
+**/.venv
+**/__pycache__
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
+**/*.egg-info
+**/target/
+.git
+**/.DS_Store
+**/.idea
+**/.vscode
+docs/

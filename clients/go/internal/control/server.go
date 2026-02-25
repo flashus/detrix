@@ -5,16 +5,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/flashus/detrix/clients/go/internal/auth"
 )
+
+// maxFileSize is the maximum file size (bytes) served by /detrix/files/read.
+const maxFileSize = 10 * 1024 * 1024 // 10 MB
 
 // StatusProvider is a function that returns the current status.
 type StatusProvider func() map[string]any
@@ -25,17 +31,23 @@ type WakeHandler func(daemonURL string) (map[string]any, error)
 // SleepHandler is a function that handles sleep requests.
 type SleepHandler func() (map[string]any, error)
 
+// DiscoverProvider is a function that returns daemon discovery information.
+type DiscoverProvider func() map[string]any
+
 // Server is the HTTP control plane server.
 type Server struct {
-	httpServer     *http.Server
-	listener       net.Listener
-	actualPort     int
-	statusProvider StatusProvider
-	wakeHandler    WakeHandler
-	sleepHandler   SleepHandler
-	authToken      string
-	mu             sync.Mutex
-	running        bool
+	httpServer       *http.Server
+	listener         net.Listener
+	actualPort       int
+	statusProvider   StatusProvider
+	wakeHandler      WakeHandler
+	sleepHandler     SleepHandler
+	discoverProvider DiscoverProvider
+	authToken        string
+	workspaceRoot    string
+	tokenMu          sync.RWMutex // protects authToken
+	mu               sync.Mutex   // protects running, listener, httpServer, actualPort
+	running          bool
 }
 
 // NewServer creates a new control plane server.
@@ -43,15 +55,19 @@ func NewServer(
 	host string,
 	port int,
 	authToken string,
+	workspaceRoot string,
 	statusProvider StatusProvider,
 	wakeHandler WakeHandler,
 	sleepHandler SleepHandler,
+	discoverProvider DiscoverProvider,
 ) *Server {
 	return &Server{
-		statusProvider: statusProvider,
-		wakeHandler:    wakeHandler,
-		sleepHandler:   sleepHandler,
-		authToken:      authToken,
+		statusProvider:   statusProvider,
+		wakeHandler:      wakeHandler,
+		sleepHandler:     sleepHandler,
+		discoverProvider: discoverProvider,
+		authToken:        authToken,
+		workspaceRoot:    workspaceRoot,
 	}
 }
 
@@ -75,7 +91,7 @@ func (s *Server) Start(host string, port int) (int, error) {
 	s.listener = listener
 	tcpAddr, ok := listener.Addr().(*net.TCPAddr)
 	if !ok {
-		listener.Close()
+		_ = listener.Close()
 		return 0, fmt.Errorf("listener address is not *net.TCPAddr: %T", listener.Addr())
 	}
 	s.actualPort = tcpAddr.Port
@@ -86,11 +102,15 @@ func (s *Server) Start(host string, port int) (int, error) {
 	// Health endpoint (no auth required)
 	mux.HandleFunc("/detrix/health", s.handleHealth)
 
+	// Discover endpoint (no auth required)
+	mux.HandleFunc("/detrix/discover", s.handleDiscover)
+
 	// Authenticated endpoints
 	mux.HandleFunc("/detrix/status", s.withAuth(s.handleStatus))
 	mux.HandleFunc("/detrix/info", s.withAuth(s.handleInfo))
 	mux.HandleFunc("/detrix/wake", s.withAuth(s.handleWake))
 	mux.HandleFunc("/detrix/sleep", s.withAuth(s.handleSleep))
+	mux.HandleFunc("/detrix/files/read", s.withAuth(s.handleFilesRead))
 
 	s.httpServer = &http.Server{
 		Handler: mux,
@@ -131,10 +151,30 @@ func (s *Server) ActualPort() int {
 	return s.actualPort
 }
 
+// UpdateToken updates the auth token used for validating incoming requests.
+//
+// This should be called when the daemon restarts with a new token, so the
+// control server accepts requests authenticated with the fresh token.
+//
+// Concurrency: This method is safe for concurrent use. It acquires tokenMu
+// for writing. The withAuth middleware acquires tokenMu for reading.
+func (s *Server) UpdateToken(token string) {
+	s.tokenMu.Lock()
+	defer s.tokenMu.Unlock()
+	s.authToken = token
+}
+
+// getToken returns the current auth token (thread-safe).
+func (s *Server) getToken() string {
+	s.tokenMu.RLock()
+	defer s.tokenMu.RUnlock()
+	return s.authToken
+}
+
 // withAuth wraps a handler with authentication.
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !auth.IsAuthorized(r, s.authToken) {
+		if !auth.IsAuthorized(r, s.getToken()) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			if err := json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"}); err != nil {
@@ -157,6 +197,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"service": "detrix-client",
 	}); err != nil {
 		slog.Debug("failed to write health response", "error", err)
+	}
+}
+
+func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if s.discoverProvider == nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		if err := json.NewEncoder(w).Encode(map[string]string{"error": "discover provider not configured"}); err != nil {
+			slog.Debug("failed to write discover error response", "error", err)
+		}
+		return
+	}
+	if err := json.NewEncoder(w).Encode(s.discoverProvider()); err != nil {
+		slog.Debug("failed to write discover response", "error", err)
 	}
 }
 
@@ -262,4 +320,100 @@ func (s *Server) handleSleep(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		slog.Debug("failed to write sleep response", "error", err)
 	}
+}
+
+func (s *Server) handleFilesRead(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxFileSize+1))
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Path          string  `json:"path"`
+		WorkspaceRoot *string `json:"workspace_root"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil || req.Path == "" {
+		http.Error(w, "Missing or invalid 'path' in request body", http.StatusBadRequest)
+		return
+	}
+
+	// Resolve workspace: prefer workspace_root from request body (daemon provides
+	// the connection's workspace root), fall back to server-configured root or cwd.
+	workspace := s.workspaceRoot
+	if req.WorkspaceRoot != nil && *req.WorkspaceRoot != "" {
+		workspace = *req.WorkspaceRoot
+	}
+	if workspace == "" {
+		workspace, _ = os.Getwd()
+	}
+
+	// Canonicalize workspace to resolve symlinks (prevents symlink traversal)
+	workspace, err = filepath.EvalSymlinks(workspace)
+	if err != nil {
+		http.Error(w, "Invalid workspace path", http.StatusBadRequest)
+		return
+	}
+
+	// Security: validate that the request's workspace_root is within (or equal to)
+	// the server's own configured workspace root. This prevents an attacker from
+	// setting workspace_root to "/" to bypass path containment checks.
+	trustBoundary := s.workspaceRoot
+	if trustBoundary == "" {
+		trustBoundary, _ = os.Getwd()
+	}
+	trustBoundary, err = filepath.EvalSymlinks(trustBoundary)
+	if err != nil {
+		http.Error(w, "Invalid trust boundary path", http.StatusInternalServerError)
+		return
+	}
+	rel, err := filepath.Rel(trustBoundary, workspace)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		http.Error(w, "Workspace root escapes trust boundary", http.StatusForbidden)
+		return
+	}
+
+	// Resolve the requested path
+	resolved := req.Path
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(workspace, resolved)
+	}
+
+	// Canonicalize resolved path to resolve symlinks
+	resolved, err = filepath.EvalSymlinks(resolved)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	// Security: path must be within the workspace root
+	rel, err = filepath.Rel(workspace, resolved)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		http.Error(w, "Path not within workspace", http.StatusForbidden)
+		return
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if info.Size() > maxFileSize {
+		http.Error(w, "File exceeds maximum size", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	content, err := os.ReadFile(resolved)
+	if err != nil {
+		http.Error(w, "Failed to read file", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(content)
 }

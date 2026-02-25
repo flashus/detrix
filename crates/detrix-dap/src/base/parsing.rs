@@ -206,6 +206,34 @@ pub fn parse_value(value_str: &str) -> (String, Option<TypedValue>) {
     }
 }
 
+/// Parse logpoint output using a language-specific thread extractor.
+///
+/// Shared implementation for Go and Rust adapters. Handles:
+/// 1. Trimming output
+/// 2. Parsing DETRICS logpoint format with thread extraction
+/// 3. Creating the MetricEvent if a matching metric is found
+///
+/// Returns `None` if the output is not a DETRICS logpoint or the metric is
+/// not found. The caller is responsible for fallback error detection.
+pub(crate) async fn parse_logpoint_output<E: ThreadExtractor>(
+    body: &OutputEventBody,
+    active_metrics: &Arc<RwLock<HashMap<String, Metric>>>,
+    extractor: &E,
+    adapter_label: &str,
+) -> Option<MetricEvent> {
+    let output = body.output.trim();
+    if let Some(parse_result) = parse_logpoint_core(output, extractor) {
+        tracing::trace!(
+            "Parsing {} DETRICS logpoint: {} (thread_id={:?})",
+            adapter_label,
+            parse_result.metric_name,
+            parse_result.thread_info.thread_id
+        );
+        return create_metric_event_from_logpoint(&parse_result, active_metrics).await;
+    }
+    None
+}
+
 /// Find metric by DAP output location, with fallback to first active metric.
 ///
 /// This is shared logic used by all language adapters for error event creation.

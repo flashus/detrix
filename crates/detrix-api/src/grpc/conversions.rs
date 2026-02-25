@@ -175,6 +175,7 @@ pub fn add_request_to_metric(req: &AddMetricRequest) -> Result<Metric, Error> {
         condition: req.condition.clone(),
         safety_level: proto_to_safety_level(&req.safety_level),
         created_at: None,
+        created_by: None,
         // Introspection fields from proto
         capture_stack_trace: req.capture_stack_trace.unwrap_or(false),
         stack_trace_ttl: req.stack_trace_ttl,
@@ -197,6 +198,8 @@ pub enum ConversionError {
     MissingField { field: String },
     #[error("Invalid language '{language}': {reason}")]
     InvalidLanguage { language: String, reason: String },
+    #[error("Invalid field '{field}': {reason}")]
+    InvalidField { field: String, reason: String },
 }
 
 /// Convert core Metric to MetricInfo (for listing)
@@ -240,6 +243,7 @@ pub fn metric_to_info_with_stats(
         snapshot_ttl: _,   // Not included in MetricInfo
         anchor: _,         // Anchor tracking - not exposed via gRPC yet
         anchor_status: _,  // Anchor tracking - not exposed via gRPC yet
+        created_by: _,     // Client identity - not exposed via gRPC yet
     } = metric;
 
     // Metric should always have ID when converting to proto (comes from storage)
@@ -459,6 +463,10 @@ pub fn connection_to_info(
         status,
         auto_reconnect,
         safe_mode,
+        control_plane_url: _,
+        build_commit: _,
+        build_tag: _,
+        created_by: _,
         created_at,
         last_connected_at,
         last_active,
@@ -673,6 +681,7 @@ pub fn proto_to_core_metric(
         condition: None,          // Not in proto MetricInfo
         safety_level: SafetyLevel::Strict, // Not in proto MetricInfo
         created_at: Some(proto.created_at),
+        created_by: None,
         capture_stack_trace: proto.capture_stack_trace,
         stack_trace_ttl: None,   // Not in proto MetricInfo
         stack_trace_slice: None, // Not in proto MetricInfo
@@ -723,11 +732,18 @@ pub fn proto_to_core_connection(
         workspace_root: proto.workspace_root.clone(),
         hostname: proto.hostname.clone(),
         host: proto.host.clone(),
-        port: proto.port as u16,
+        port: u16::try_from(proto.port).map_err(|_| ConversionError::InvalidField {
+            field: "port".to_string(),
+            reason: format!("port {} out of valid range (0-65535)", proto.port),
+        })?,
         language,
         status,
         auto_reconnect: proto.auto_reconnect,
         safe_mode: proto.safe_mode,
+        control_plane_url: None,
+        build_commit: None,
+        build_tag: None,
+        created_by: None,
         created_at: proto.created_at,
         last_connected_at: proto.connected_at,
         last_active: proto.last_active_at.unwrap_or(0),

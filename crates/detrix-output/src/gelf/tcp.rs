@@ -139,7 +139,7 @@ impl GelfTcpOutput {
 
         let stream = tokio::time::timeout(timeout, connect_future)
             .await
-            .map_err(|_| detrix_core::Error::Output(format!("Connection timeout to {}", addr)))?
+            .output_context(&format!("Connection timeout to {}", addr))?
             .output_context(&format!("Failed to connect to {}", addr))?;
 
         // Disable Nagle's algorithm for lower latency
@@ -188,7 +188,7 @@ impl GelfTcpOutput {
 
         tokio::time::timeout(timeout, write_future)
             .await
-            .map_err(|_| detrix_core::Error::Output("Write timeout".to_string()))?
+            .output_context("Write timeout")?
             .output_context("Write failed")?;
 
         self.bytes_sent

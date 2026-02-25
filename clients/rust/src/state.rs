@@ -29,6 +29,9 @@ pub struct InternalState {
     /// Control plane host.
     pub control_host: String,
 
+    /// Advertise host for daemon registration (if different from control_host).
+    pub advertise_host: Option<String>,
+
     /// Configured control port (0 = auto).
     pub control_port: u16,
 
@@ -56,8 +59,17 @@ pub struct InternalState {
     /// Detrix home directory.
     pub detrix_home: Option<String>,
 
+    /// Workspace root override.
+    pub workspace_root: Option<String>,
+
     /// Safe mode enabled.
     pub safe_mode: bool,
+
+    /// Build commit override (optional).
+    pub build_commit: Option<String>,
+
+    /// Build tag override (optional).
+    pub build_tag: Option<String>,
 
     /// Health check timeout in milliseconds.
     pub health_check_timeout_ms: u64,
@@ -70,6 +82,9 @@ pub struct InternalState {
 
     /// lldb-dap start timeout in milliseconds.
     pub lldb_start_timeout_ms: u64,
+
+    /// Daemon's advertise URL from registration response.
+    pub daemon_advertise_url: Option<String>,
 }
 
 impl Default for InternalState {
@@ -78,6 +93,7 @@ impl Default for InternalState {
             state: ClientState::Sleeping,
             name: String::new(),
             control_host: "127.0.0.1".to_string(),
+            advertise_host: None,
             control_port: 0,
             actual_control_port: 0,
             debug_port: 0,
@@ -87,11 +103,15 @@ impl Default for InternalState {
             connection_id: None,
             lldb_dap_path: String::new(),
             detrix_home: None,
+            workspace_root: None,
             safe_mode: false,
+            build_commit: None,
+            build_tag: None,
             health_check_timeout_ms: 2000,
             register_timeout_ms: 5000,
             unregister_timeout_ms: 2000,
             lldb_start_timeout_ms: 10000,
+            daemon_advertise_url: None,
         }
     }
 }

@@ -13,16 +13,20 @@ pub mod environment_service;
 pub mod event_capture_service;
 pub mod file_inspection_service;
 pub mod file_inspection_types;
+pub mod file_serving;
+pub mod file_source_chain;
 pub mod file_watcher_service;
 pub mod jwt_validator;
 pub mod mcp_usage_service;
 pub mod metric_service;
+pub mod remote_app_service;
 pub mod shutdown;
 pub mod streaming_service;
 pub mod system_event_service;
 
 pub use adapter_lifecycle_manager::{
-    AdapterLifecycleManager, ManagedAdapterInfo, ManagedAdapterStatus, StartAdapterResult,
+    AdapterLifecycleManager, DisconnectAllResult, ManagedAdapterInfo, ManagedAdapterStatus,
+    StartAdapterResult,
 };
 pub use anchor_service::{
     AnchorServiceConfig, DefaultAnchorService, LspSymbolLookup, LspSymbolLookupRef, NullLspLookup,
@@ -31,12 +35,14 @@ pub use config_service::{ConfigService, ConfigUpdateResult, RESTART_REQUIRED_FIE
 pub use connection_service::ConnectionService;
 pub use environment_service::{EnvironmentCheckResult, EnvironmentService};
 pub use event_capture_service::EventCaptureService;
-pub use file_inspection_service::FileInspectionService;
+pub use file_inspection_service::{resolve_file_path, FileInspectionService};
 pub use file_inspection_types::{
     CodeContext, CodeLine, FileInspectionRequest, FileInspectionResult, FileOverview,
     LanguageCapabilities, LineInspectionResult, SourceLanguage, TextSearchMatch,
     VariableDefinition, VariableSearchResult,
 };
+pub use file_serving::{FileServingError, FileServingService, ReadFileRequest, ReadFileResponse};
+pub use file_source_chain::FileSourceChain;
 pub use file_watcher_service::{FileWatcherOrchestrator, NotifyFileWatcher};
 pub use metric_service::{FileChangeResult, MetricService, MetricServiceBuilder};
 pub use streaming_service::{
@@ -49,6 +55,9 @@ pub use jwt_validator::{Audience, JwksValidator, JwtClaims, JwtError};
 
 // Dead-letter queue recovery
 pub use dlq_recovery_service::{DlqRecoveryService, DlqStats};
+
+// Remote app control
+pub use remote_app_service::RemoteAppService;
 
 // Graceful shutdown utilities
 pub use shutdown::{GracefulShutdownHandle, ShutdownReceiver};

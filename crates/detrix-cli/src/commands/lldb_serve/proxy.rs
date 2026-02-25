@@ -314,7 +314,8 @@ pub fn handle_client(
                     state_clone.launch_sent.store(true, Ordering::Relaxed);
                     // Store the seq number so we can synthesize a matching response
                     if let Some(seq) = json.get("seq").and_then(|v| v.as_u64()) {
-                        launch_request_seq_clone.store(seq as u32, Ordering::Relaxed);
+                        launch_request_seq_clone
+                            .store(u32::try_from(seq).unwrap_or(u32::MAX), Ordering::Relaxed);
                         debug!(
                             seq = seq,
                             "[client->lldb] Launch request seq stored for synthetic response"

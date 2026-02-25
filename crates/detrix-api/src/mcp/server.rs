@@ -10,19 +10,16 @@
 //! - Tool implementations (via `#[tool_router]` macro)
 //! - `ServerHandler` implementation
 
-use crate::mcp::error::ToMcpResult;
 use crate::mcp::instrumentation::McpInstrumentation;
 use crate::mcp::params::{
     AcknowledgeEventsParams, AddMetricParams, CloseConnectionParams, CreateConnectionParams,
-    EnableFromDiffParams, GetConfigParams, GetConnectionParams, GetMetricParams, GroupParams,
-    InspectFileParams, ListConnectionsParams, ListGroupsParams, ListMetricsParams, ObserveParams,
-    QueryMetricsParams, QuerySystemEventsParams, RemoveMetricParams, ToggleMetricParams,
-    UpdateConfigParams, UpdateMetricParams, ValidateConfigParams, ValidateExpressionParams,
+    DisconnectAllParams, EnableFromDiffParams, GetConfigParams, GetConnectionParams,
+    GetMetricParams, GroupParams, InspectFileParams, ListConnectionsParams, ListGroupsParams,
+    ListMetricsParams, ObserveParams, QueryMetricsParams, QuerySystemEventsParams,
+    RemoveMetricParams, SleepParams, ToggleMetricParams, UpdateConfigParams, UpdateMetricParams,
+    ValidateConfigParams, ValidateExpressionParams, WakeParams,
 };
 use crate::state::ApiState;
-// McpErrorCode and McpUsageEvent used internally by McpUsageService
-#[allow(unused_imports)]
-use detrix_application::{CallTimer, McpErrorCode, McpUsageEvent};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
@@ -49,15 +46,22 @@ pub struct DetrixServer {
     state: Arc<ApiState>,
     tool_router: ToolRouter<Self>,
     instrumentation: McpInstrumentation,
+    /// Client identity for traceability. Per-session UUID for MCP bridges,
+    /// ephemeral UUID for direct stdio mode.
+    client_id: Option<String>,
 }
-
-#[allow(unused_imports)]
-use detrix_application::DapAdapterRef;
 
 #[tool_router]
 impl DetrixServer {
-    /// Create a new MCP server with the given API state
+    /// Create a new MCP server with an ephemeral UUID (for stdio/test path).
     pub fn new(state: Arc<ApiState>) -> Self {
+        let client_id = uuid::Uuid::new_v4().to_string();
+        tracing::info!(client_id = %client_id, "MCP stdio: generated ephemeral client_id");
+        Self::with_client_id(state, Some(client_id))
+    }
+
+    /// Create a new MCP server with an explicit client identity (for HTTP bridge path).
+    pub fn with_client_id(state: Arc<ApiState>, client_id: Option<String>) -> Self {
         let instrumentation = McpInstrumentation::new(
             state.context.mcp_usage.clone(),
             state.mcp_usage_repository.clone(),
@@ -67,6 +71,7 @@ impl DetrixServer {
             state,
             tool_router: Self::tool_router(),
             instrumentation,
+            client_id,
         }
     }
 
@@ -93,28 +98,60 @@ impl DetrixServer {
     // MCP Tools
     // =========================================================================
 
-    /// Wake Detrix - check status and auto-start daemon if needed
-    ///
-    /// This is the recommended first tool to call. The MCP bridge automatically
-    /// starts the daemon if it's not running, so calling wake() ensures Detrix
-    /// is ready to accept connections.
+    /// Sleep an app's Detrix client via its control plane
     #[tool(
-        description = "Check Detrix status. Auto-starts daemon if not running. Call this first to ensure Detrix is ready."
+        description = "Sleep an app by calling its control plane /detrix/sleep endpoint. The app stops its debugger and unregisters from this Detrix server."
     )]
-    async fn wake(&self) -> Result<CallToolResult, McpError> {
-        let result = tools::wake_impl(&self.state).await?;
-        Ok(CallToolResult::success(vec![Content::text(
-            result.build_message(),
-        )]))
+    async fn sleep(
+        &self,
+        Parameters(params): Parameters<SleepParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("sleep");
+
+        match tools::sleep_impl(&self.state, params).await {
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                let json = serde_json::to_string_pretty(&result.build_json())
+                    .unwrap_or_else(|_| "Error serializing response".to_string());
+
+                Ok(CallToolResult::success(vec![
+                    Content::text(result.build_message()),
+                    Content::text(json),
+                ]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
+        }
     }
 
-    /// Put Detrix to sleep (stop observing Python code, zero overhead)
-    #[tool(description = "Stop all connections. Zero overhead when sleeping.")]
-    async fn sleep(&self) -> Result<CallToolResult, McpError> {
-        let result = tools::sleep_impl(&self.state).await;
-        Ok(CallToolResult::success(vec![Content::text(
-            result.build_message(),
-        )]))
+    /// Disconnect all local debugger adapters
+    #[tool(
+        description = "Stop all local debugger adapters. Metrics remain configured. Use this to cleanly disconnect from all debug sessions."
+    )]
+    async fn disconnect_all(
+        &self,
+        Parameters(params): Parameters<DisconnectAllParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("disconnect_all");
+
+        match tools::disconnect_all_impl(&self.state, params).await {
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                let json = serde_json::to_string_pretty(&result.build_json())
+                    .unwrap_or_else(|_| "Error serializing response".to_string());
+
+                Ok(CallToolResult::success(vec![
+                    Content::text(result.build_message()),
+                    Content::text(json),
+                ]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
+        }
     }
 
     /// Add a new metric - USE THIS INSTEAD OF print() or log.debug()
@@ -127,7 +164,7 @@ impl DetrixServer {
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("add_metric");
 
-        match tools::add_metric_impl(&self.state, params).await {
+        match tools::add_metric_impl(&self.state, params, self.client_id.clone()).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 let message = result.build_message();
@@ -165,7 +202,7 @@ impl DetrixServer {
     /// observe(file="auth.py", expression="user.session", ttl_seconds=300)
     /// ```
     #[tool(
-        description = "Observe a value in code. Simplest way to add metrics - auto-finds line if not specified."
+        description = "Observe a value in code. Simplest way to add metrics - auto-finds line if not specified.\n\nWhen the connection has a pinned build_commit, source is served from that git commit. Response includes source info (commit SHA, drift detection)."
     )]
     async fn observe(
         &self,
@@ -173,7 +210,7 @@ impl DetrixServer {
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("observe");
 
-        match tools::observe_impl(&self.state, params, None).await {
+        match tools::observe_impl(&self.state, params, None, self.client_id.clone()).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 let message = result.build_message();
@@ -204,7 +241,7 @@ impl DetrixServer {
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("enable_from_diff");
 
-        match tools::enable_from_diff_impl(&self.state, params).await {
+        match tools::enable_from_diff_impl(&self.state, params, self.client_id.clone()).await {
             Ok(Ok(result)) => {
                 self.finish_tool_success(timer);
                 let message = result.build_message();
@@ -240,11 +277,18 @@ impl DetrixServer {
         &self,
         Parameters(params): Parameters<RemoveMetricParams>,
     ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("remove_metric");
         match tools::remove_metric_impl(&self.state, params).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.build_message(),
-            )])),
-            Err(e) => Err(e),
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                Ok(CallToolResult::success(vec![Content::text(
+                    result.build_message(),
+                )]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -254,11 +298,18 @@ impl DetrixServer {
         &self,
         Parameters(params): Parameters<ToggleMetricParams>,
     ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("toggle_metric");
         match tools::toggle_metric_impl(&self.state, params).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.build_message(),
-            )])),
-            Err(e) => Err(e),
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                Ok(CallToolResult::success(vec![Content::text(
+                    result.build_message(),
+                )]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -268,12 +319,19 @@ impl DetrixServer {
         &self,
         Parameters(params): Parameters<ListMetricsParams>,
     ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("list_metrics");
         match tools::list_metrics_impl(&self.state, params).await {
-            Ok(result) => Ok(CallToolResult::success(vec![
-                Content::text(result.build_message()),
-                Content::text(result.formatted_output),
-            ])),
-            Err(e) => Err(e),
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                Ok(CallToolResult::success(vec![
+                    Content::text(result.build_message()),
+                    Content::text(result.formatted_output),
+                ]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -285,12 +343,19 @@ impl DetrixServer {
         &self,
         Parameters(params): Parameters<QueryMetricsParams>,
     ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("query_metrics");
         match tools::query_metrics_impl(&self.state, params).await {
-            Ok(result) => Ok(CallToolResult::success(vec![
-                Content::text(result.build_message()),
-                Content::text(result.formatted_output),
-            ])),
-            Err(e) => Err(e),
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                Ok(CallToolResult::success(vec![
+                    Content::text(result.build_message()),
+                    Content::text(result.formatted_output),
+                ]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -300,11 +365,20 @@ impl DetrixServer {
         &self,
         Parameters(params): Parameters<ValidateExpressionParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result = tools::validate_expression_impl(&self.state, params)?;
-        Ok(CallToolResult::success(vec![
-            Content::text(result.build_message()),
-            Content::text(result.build_json()),
-        ]))
+        let timer = self.start_tool_call("validate_expression");
+        match tools::validate_expression_impl(&self.state, params) {
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                Ok(CallToolResult::success(vec![
+                    Content::text(result.build_message()),
+                    Content::text(result.build_json()),
+                ]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
+        }
     }
 
     /// Inspect a source file to find correct line placement for metrics
@@ -312,16 +386,27 @@ impl DetrixServer {
     /// For Python files: Full AST analysis (variable scope, definitions)
     /// For other languages: Code context extraction around specified line
     #[tool(
-        description = "Find correct line for metric. Returns variables at line. USE BEFORE add_metric."
+        description = "Find correct line for metric. Returns variables at line. USE BEFORE add_metric.\n\nFile Paths\nAll file paths (observe, add_metric, inspect_file) accept **absolute or relative** paths.\nRelative paths are resolved against the connection's workspace_root.\n\nWhen the connection has a pinned build_commit, source is served from that git commit with local drift detection."
     )]
     async fn inspect_file(
         &self,
         Parameters(params): Parameters<InspectFileParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result = tools::inspect_file_impl(params)?;
-        Ok(CallToolResult::success(result.messages))
+        let timer = self.start_tool_call("inspect_file");
+        match tools::inspect_file_impl(&self.state, params).await {
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                Ok(CallToolResult::success(result.messages))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
+        }
     }
 
+    // ========================================================================
+    // VFS (Virtual File System) Tools
     // ========================================================================
     // Connection Management Tools
     // ========================================================================
@@ -342,9 +427,13 @@ Language-specific setup:
         &self,
         Parameters(params): Parameters<CreateConnectionParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::create_connection_impl(&self.state, params).await {
+        let timer = self.start_tool_call("create_connection");
+        match tools::create_connection_impl(&self.state, params, self.client_id.clone()).await {
             Ok(result) => {
-                // Update MCP tracker with new connection count
+                self.finish_tool_success(timer);
+                // Update MCP tracker with new connection count.
+                // Note: slight TOCTOU between adapter_count() and update_connection_count()
+                // is acceptable — this is informational for display/shutdown decisions only.
                 let adapter_count = self
                     .state
                     .context
@@ -363,7 +452,10 @@ Language-specific setup:
                     Content::text(json),
                 ]))
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -375,8 +467,10 @@ Language-specific setup:
         &self,
         Parameters(params): Parameters<CloseConnectionParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::close_connection_impl(&self.state, params).await {
+        let timer = self.start_tool_call("close_connection");
+        match tools::close_connection_impl(&self.state, params, self.client_id.as_deref()).await {
             Ok(result) => {
+                self.finish_tool_success(timer);
                 // Update MCP tracker with new connection count
                 let adapter_count = self
                     .state
@@ -392,7 +486,10 @@ Language-specific setup:
                     result.build_message(),
                 )]))
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -402,8 +499,10 @@ Language-specific setup:
         &self,
         Parameters(params): Parameters<GetConnectionParams>,
     ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("get_connection");
         match tools::get_connection_impl(&self.state, params).await {
             Ok(result) => {
+                self.finish_tool_success(timer);
                 let json = serde_json::to_string_pretty(&result.build_json())
                     .unwrap_or_else(|_| "Error serializing connection".to_string());
 
@@ -412,7 +511,10 @@ Language-specific setup:
                     Content::text(json),
                 ]))
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -424,12 +526,19 @@ Language-specific setup:
         &self,
         Parameters(params): Parameters<ListConnectionsParams>,
     ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("list_connections");
         match tools::list_connections_impl(&self.state, params).await {
-            Ok(result) => Ok(CallToolResult::success(vec![
-                Content::text(result.build_message()),
-                Content::text(result.formatted_output),
-            ])),
-            Err(e) => Err(e),
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                Ok(CallToolResult::success(vec![
+                    Content::text(result.build_message()),
+                    Content::text(result.formatted_output),
+                ]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -442,45 +551,36 @@ Language-specific setup:
         description = "Get Detrix system status including uptime, active connections, and metrics count."
     )]
     async fn get_status(&self) -> Result<CallToolResult, McpError> {
-        let adapter_count = self
-            .state
-            .context
-            .adapter_lifecycle_manager
-            .adapter_count()
-            .await;
-
-        let metrics = self
-            .state
-            .context
-            .metric_service
-            .list_metrics()
-            .await
-            .mcp_context("Failed to list metrics")?;
-
-        let enabled_count = metrics.iter().filter(|m| m.enabled).count();
-        let uptime_secs = self.state.uptime_seconds();
+        let timer = self.start_tool_call("get_status");
+        let s = crate::system_status::gather_system_status(&self.state).await;
 
         let status_json = serde_json::to_string_pretty(&serde_json::json!({
-            "mode": if adapter_count > 0 { "active" } else { "sleeping" },
-            "uptime_seconds": uptime_secs,
-            "active_connections": adapter_count,
-            "total_metrics": metrics.len(),
-            "enabled_metrics": enabled_count,
+            "mode": s.mode,
+            "uptime_seconds": s.uptime_seconds,
+            "uptime_formatted": s.uptime_formatted,
+            "started_at": s.started_at,
+            "adapter_connected": s.adapter_connected,
+            "active_connections": s.active_connections,
+            "total_connections": s.total_connections,
+            "total_metrics": s.total_metrics,
+            "enabled_metrics": s.active_metrics,
+            "total_events": s.total_events,
+            "cpu_usage_percent": s.process_metrics.cpu_usage_percent,
+            "memory_usage_bytes": s.process_metrics.memory_usage_bytes,
+            "daemon": {
+                "pid": s.daemon.pid,
+                "ppid": s.daemon.ppid,
+            },
+            "mcp_clients": s.mcp_clients.len(),
+            "degraded": s.degraded,
         }))
         .unwrap_or_else(|_| "Error serializing status".to_string());
 
+        self.finish_tool_success(timer);
         Ok(CallToolResult::success(vec![
             Content::text(format!(
                 "Status: {} | Uptime: {}s | {} connection(s) | {}/{} metrics enabled",
-                if adapter_count > 0 {
-                    "active"
-                } else {
-                    "sleeping"
-                },
-                uptime_secs,
-                adapter_count,
-                enabled_count,
-                metrics.len()
+                s.mode, s.uptime_seconds, s.active_connections, s.active_metrics, s.total_metrics,
             )),
             Content::text(status_json),
         ]))
@@ -496,8 +596,10 @@ Language-specific setup:
         &self,
         Parameters(params): Parameters<GetMetricParams>,
     ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("get_metric");
         match tools::get_metric_impl(&self.state, params).await {
             Ok(result) => {
+                self.finish_tool_success(timer);
                 let json = serde_json::to_string_pretty(&result.build_json())
                     .unwrap_or_else(|_| "Error serializing metric".to_string());
 
@@ -506,7 +608,10 @@ Language-specific setup:
                     Content::text(json),
                 ]))
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -518,11 +623,18 @@ Language-specific setup:
         &self,
         Parameters(params): Parameters<UpdateMetricParams>,
     ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("update_metric");
         match tools::update_metric_impl(&self.state, params).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.build_message(),
-            )])),
-            Err(e) => Err(e),
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                Ok(CallToolResult::success(vec![Content::text(
+                    result.build_message(),
+                )]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -536,11 +648,18 @@ Language-specific setup:
         &self,
         Parameters(params): Parameters<GroupParams>,
     ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("enable_group");
         match tools::enable_group_impl(&self.state, params).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.build_message(),
-            )])),
-            Err(e) => Err(e),
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                Ok(CallToolResult::success(vec![Content::text(
+                    result.build_message(),
+                )]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -550,11 +669,18 @@ Language-specific setup:
         &self,
         Parameters(params): Parameters<GroupParams>,
     ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("disable_group");
         match tools::disable_group_impl(&self.state, params).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.build_message(),
-            )])),
-            Err(e) => Err(e),
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                Ok(CallToolResult::success(vec![Content::text(
+                    result.build_message(),
+                )]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -564,12 +690,19 @@ Language-specific setup:
         &self,
         Parameters(params): Parameters<ListGroupsParams>,
     ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("list_groups");
         match tools::list_groups_impl(&self.state, params).await {
-            Ok(result) => Ok(CallToolResult::success(vec![
-                Content::text(result.build_message()),
-                Content::text(result.formatted_output),
-            ])),
-            Err(e) => Err(e),
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                Ok(CallToolResult::success(vec![
+                    Content::text(result.build_message()),
+                    Content::text(result.formatted_output),
+                ]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -583,11 +716,20 @@ Language-specific setup:
         &self,
         Parameters(params): Parameters<GetConfigParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result = tools::get_config_impl(&self.state, params).await?;
-        Ok(CallToolResult::success(vec![
-            Content::text(result.build_message()),
-            Content::text(result.config_toml),
-        ]))
+        let timer = self.start_tool_call("get_config");
+        match tools::get_config_impl(&self.state, params).await {
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                Ok(CallToolResult::success(vec![
+                    Content::text(result.build_message()),
+                    Content::text(result.config_toml),
+                ]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
+        }
     }
 
     /// Update configuration with partial TOML
@@ -598,12 +740,21 @@ Language-specific setup:
         &self,
         Parameters(params): Parameters<UpdateConfigParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result = tools::update_config_impl(&self.state, params).await?;
-        let mut messages = vec![Content::text(result.build_message())];
-        if let Some(warnings) = result.build_warnings() {
-            messages.push(Content::text(warnings));
+        let timer = self.start_tool_call("update_config");
+        match tools::update_config_impl(&self.state, params).await {
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                let mut messages = vec![Content::text(result.build_message())];
+                if let Some(warnings) = result.build_warnings() {
+                    messages.push(Content::text(warnings));
+                }
+                Ok(CallToolResult::success(messages))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
-        Ok(CallToolResult::success(messages))
     }
 
     /// Validate configuration without applying it
@@ -614,7 +765,9 @@ Language-specific setup:
         &self,
         Parameters(params): Parameters<ValidateConfigParams>,
     ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("validate_config");
         let result = tools::validate_config_impl(&self.state, params);
+        self.finish_tool_success(timer);
         Ok(CallToolResult::success(vec![Content::text(
             result.build_message(),
         )]))
@@ -623,10 +776,19 @@ Language-specific setup:
     /// Reload configuration from file
     #[tool(description = "Reload configuration from the config file on disk.")]
     async fn reload_config(&self) -> Result<CallToolResult, McpError> {
-        let result = tools::reload_config_impl(&self.state).await?;
-        Ok(CallToolResult::success(vec![Content::text(
-            result.build_message(),
-        )]))
+        let timer = self.start_tool_call("reload_config");
+        match tools::reload_config_impl(&self.state).await {
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                Ok(CallToolResult::success(vec![Content::text(
+                    result.build_message(),
+                )]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
+        }
     }
 
     // ========================================================================
@@ -641,14 +803,24 @@ Language-specific setup:
         &self,
         Parameters(params): Parameters<QuerySystemEventsParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::query_system_events_impl(&self.state, params).await? {
-            Ok(result) => Ok(CallToolResult::success(vec![
-                Content::text(result.build_message()),
-                Content::text(result.formatted_output),
-            ])),
-            Err(not_configured) => Ok(CallToolResult::success(vec![Content::text(
-                not_configured.build_message(),
-            )])),
+        let timer = self.start_tool_call("query_system_events");
+        match tools::query_system_events_impl(&self.state, params).await {
+            Ok(inner) => {
+                self.finish_tool_success(timer);
+                match inner {
+                    Ok(result) => Ok(CallToolResult::success(vec![
+                        Content::text(result.build_message()),
+                        Content::text(result.formatted_output),
+                    ])),
+                    Err(not_configured) => Ok(CallToolResult::success(vec![Content::text(
+                        not_configured.build_message(),
+                    )])),
+                }
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -660,16 +832,18 @@ Language-specific setup:
         &self,
         Parameters(params): Parameters<AcknowledgeEventsParams>,
     ) -> Result<CallToolResult, McpError> {
-        match tools::acknowledge_events_impl(&self.state, params).await? {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                result.build_message(),
-            )])),
-            Err(Ok(not_configured)) => Ok(CallToolResult::success(vec![Content::text(
-                not_configured.build_message(),
-            )])),
-            Err(Err(no_ids)) => Ok(CallToolResult::success(vec![Content::text(
-                no_ids.build_message(),
-            )])),
+        let timer = self.start_tool_call("acknowledge_events");
+        match tools::acknowledge_events_impl(&self.state, params).await {
+            Ok(outcome) => {
+                self.finish_tool_success(timer);
+                Ok(CallToolResult::success(vec![Content::text(
+                    outcome.build_message(),
+                )]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
         }
     }
 
@@ -678,11 +852,45 @@ Language-specific setup:
         description = "Get MCP tool usage statistics. Shows success rates, common errors, and workflow patterns. Use for debugging agent behavior and tuning prompts."
     )]
     async fn get_mcp_usage(&self) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("get_mcp_usage");
         let result = tools::get_mcp_usage_impl(&self.state);
+        self.finish_tool_success(timer);
         Ok(CallToolResult::success(vec![
             Content::text(result.build_message()),
             Content::text(result.build_json()),
         ]))
+    }
+
+    // ========================================================================
+    // Remote App Tools
+    // ========================================================================
+
+    /// Wake an app's Detrix client via its control plane
+    #[tool(
+        description = "Wake an app by calling its control plane /detrix/wake endpoint. The app starts its debugger and registers with this Detrix server. Use this to start observing an application."
+    )]
+    async fn wake(
+        &self,
+        Parameters(params): Parameters<WakeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let timer = self.start_tool_call("wake");
+
+        match tools::wake_impl(&self.state, params).await {
+            Ok(result) => {
+                self.finish_tool_success(timer);
+                let json = serde_json::to_string_pretty(&result.build_json())
+                    .unwrap_or_else(|_| "Error serializing response".to_string());
+
+                Ok(CallToolResult::success(vec![
+                    Content::text(result.build_message()),
+                    Content::text(json),
+                ]))
+            }
+            Err(e) => {
+                self.finish_tool_error(timer, &e);
+                Err(e)
+            }
+        }
     }
 }
 
@@ -714,6 +922,9 @@ impl rmcp::ServerHandler for DetrixServer {
                  The `observe` tool auto-finds the line and creates the metric!\n\n\
                  ## Location Format (for add_metric)\n\
                  `file.py#line` or `@file.py#line` (@ optional)\n\n\
+                 ## File Paths\n\
+                 All file paths (observe, add_metric, inspect_file) accept **absolute or relative** paths.\n\
+                 Relative paths are resolved against the connection's workspace_root.\n\n\
                  ## Auto Features\n\
                  - Single connection? Automatically selected!\n\
                  - No line specified? Auto-found from expression!\n\

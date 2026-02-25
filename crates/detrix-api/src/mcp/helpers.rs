@@ -80,7 +80,7 @@ pub mod connection {
             return Ok(conn_id);
         }
 
-        // Auto-select if only one connection exists
+        // Auto-select if only one connection exists, or exactly one is active
         let connections = state
             .context
             .connection_service
@@ -95,17 +95,22 @@ pub mod connection {
                  create_connection(host='127.0.0.1', port=5678, language='python')",
                 None,
             )),
-            1 => {
-                let conn = &connections[0];
-                Ok(conn.id.clone())
-            }
-            n => {
+            1 => Ok(connections[0].id.clone()),
+            _ => {
+                // Multiple connections: auto-select if exactly one is active (Connected/Connecting).
+                // This handles Docker/container restarts where old Disconnected connections
+                // accumulate until TTL cleanup removes them.
+                let active: Vec<_> = connections.iter().filter(|c| c.is_active()).collect();
+                if active.len() == 1 {
+                    return Ok(active[0].id.clone());
+                }
+
                 let ids: Vec<_> = connections.iter().map(|c| c.id.to_string()).collect();
                 Err(McpError::invalid_params(
                     format!(
                         "Multiple connections exist ({}). Specify connection_id.\n\
                          Available: {}",
-                        n,
+                        connections.len(),
                         ids.join(", ")
                     ),
                     None,
@@ -132,6 +137,8 @@ pub mod metrics {
         file: &str,
         expression: &str,
         find_variable: Option<&str>,
+        workspace_root: Option<&str>,
+        file_inspection: &FileInspectionService,
     ) -> Result<(u32, String, Vec<(u32, String)>), McpError> {
         // Determine what to search for
         let search_var = find_variable
@@ -153,14 +160,14 @@ pub mod metrics {
         };
 
         // Use file inspection service to find the variable
-        let service = FileInspectionService::new();
         let request = FileInspectionRequest {
             file_path: file.to_string(),
             line: None,
             find_variable: Some(search_var.clone()),
+            workspace_root: workspace_root.map(|s| s.to_string()),
         };
 
-        let (_lang, result) = service.inspect(request).map_err(|e| {
+        let (_lang, result) = file_inspection.inspect(request).map_err(|e| {
             McpError::internal_error(format!("Failed to inspect file: {}", e), None)
         })?;
 

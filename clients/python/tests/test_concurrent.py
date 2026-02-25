@@ -53,7 +53,9 @@ class MockDaemonHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(
-                json.dumps({"connectionId": data.get("name", data.get("connectionId", "mock-conn"))}).encode()
+                json.dumps(
+                    {"connectionId": data.get("name", data.get("connectionId", "mock-conn"))}
+                ).encode()
             )
         else:
             self.send_response(404)
@@ -152,9 +154,7 @@ class TestConcurrentWakeSleep:
         # (others return "already_awake")
         assert len(results) == 5
         awake_count = sum(1 for r in results if r.get("status") == "awake")
-        already_awake_count = sum(
-            1 for r in results if r.get("status") == "already_awake"
-        )
+        already_awake_count = sum(1 for r in results if r.get("status") == "already_awake")
 
         assert awake_count == 1
         assert already_awake_count == 4
@@ -183,9 +183,7 @@ class TestConcurrentWakeSleep:
         # All calls should succeed, but only one should actually sleep
         assert len(results) == 5
         sleeping_count = sum(1 for r in results if r.get("status") == "sleeping")
-        already_sleeping_count = sum(
-            1 for r in results if r.get("status") == "already_sleeping"
-        )
+        already_sleeping_count = sum(1 for r in results if r.get("status") == "already_sleeping")
 
         assert sleeping_count == 1
         assert already_sleeping_count == 4
@@ -250,7 +248,7 @@ class TestConcurrentControlPlane:
         assert len(results) == 20
         for r in results:
             assert "error" not in r
-            assert r["name"].startswith("test-")
+            assert r["name"] == "test"
 
     def test_concurrent_health_checks(self, mock_daemon):
         """Test concurrent health check requests."""
@@ -300,9 +298,9 @@ class TestStateConsistency:
                 try:
                     status = detrix.status()
                     # Status should always be a valid state
-                    assert status["state"] in ("sleeping", "warm", "awake")
+                    assert status["state"] in ("sleeping", "waking", "awake")
                     # name should always be set
-                    assert status["name"].startswith("test-")
+                    assert status["name"] == "test"
                 except AssertionError as e:
                     errors.append(str(e))
 

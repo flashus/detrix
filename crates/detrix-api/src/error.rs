@@ -137,6 +137,21 @@ impl<T> ToStatusResult<T> for std::result::Result<T, detrix_application::Error> 
     }
 }
 
+impl<T> ToStatusResult<T> for std::result::Result<T, detrix_core::Error> {
+    fn to_status(self) -> std::result::Result<T, tonic::Status> {
+        self.map_err(|err| {
+            let api_err: Error = Error::Core(err);
+            api_err.into()
+        })
+    }
+}
+
+impl<T> ToStatusResult<T> for std::result::Result<T, toml::ser::Error> {
+    fn to_status(self) -> std::result::Result<T, tonic::Status> {
+        self.map_err(|e| tonic::Status::internal(format!("Failed to serialize config: {}", e)))
+    }
+}
+
 // Convert API errors to gRPC Status
 impl From<Error> for tonic::Status {
     fn from(err: Error) -> Self {
@@ -162,7 +177,19 @@ impl From<Error> for tonic::Status {
             Error::Core(detrix_core::Error::Adapter(msg)) => {
                 tonic::Status::unavailable(format!("Adapter error: {}", msg))
             }
-            _ => tonic::Status::internal(err.to_string()),
+            Error::Core(detrix_core::Error::NotConnected(msg)) => {
+                tonic::Status::failed_precondition(format!("Not connected: {}", msg))
+            }
+            Error::Core(detrix_core::Error::InvalidConfig(msg)) => {
+                tonic::Status::invalid_argument(format!("Invalid config: {}", msg))
+            }
+            Error::Core(detrix_core::Error::RemoteApp(msg)) => {
+                tonic::Status::unavailable(format!("Remote app error: {}", msg))
+            }
+            _ => {
+                tracing::warn!("gRPC internal error: {}", err);
+                tonic::Status::internal("Internal error")
+            }
         }
     }
 }

@@ -10,6 +10,7 @@
 //! - Thread-safe for concurrent validation
 
 use detrix_config::JwtConfig;
+use detrix_logging::{debug, info, warn};
 use jsonwebtoken::{
     decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, TokenData, Validation,
 };
@@ -19,7 +20,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
 
 /// Errors that can occur during JWT validation
 #[derive(Debug, Error)]
@@ -55,6 +55,22 @@ impl From<reqwest::Error> for JwtError {
 impl From<serde_json::Error> for JwtError {
     fn from(err: serde_json::Error) -> Self {
         JwtError::ParseError(err.to_string())
+    }
+}
+
+/// Extension trait for converting jsonwebtoken errors to specific JwtError variants
+trait JwtTokenResultExt<T> {
+    fn invalid_header(self) -> Result<T, JwtError>;
+    fn validation_failed(self) -> Result<T, JwtError>;
+}
+
+impl<T> JwtTokenResultExt<T> for Result<T, jsonwebtoken::errors::Error> {
+    fn invalid_header(self) -> Result<T, JwtError> {
+        self.map_err(|e| JwtError::InvalidHeader(e.to_string()))
+    }
+
+    fn validation_failed(self) -> Result<T, JwtError> {
+        self.map_err(|e| JwtError::ValidationFailed(e.to_string()))
     }
 }
 
@@ -172,7 +188,9 @@ impl JwksValidator {
             .ok_or(JwtError::JwksUrlNotConfigured)?;
 
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(
+                detrix_config::constants::DEFAULT_JWKS_FETCH_TIMEOUT_SECS,
+            ))
             .build()?;
 
         info!(
@@ -202,7 +220,7 @@ impl JwksValidator {
     /// 4. Return the decoded claims
     pub async fn validate_token(&self, token: &str) -> Result<JwtClaims, JwtError> {
         // Extract header to get kid
-        let header = decode_header(token).map_err(|e| JwtError::InvalidHeader(e.to_string()))?;
+        let header = decode_header(token).invalid_header()?;
 
         let kid = header
             .kid
@@ -232,8 +250,8 @@ impl JwksValidator {
         // Note: If audience is not set, validation.aud remains None and audience is not validated
 
         // Validate and decode token
-        let token_data: TokenData<JwtClaims> = decode(token, &decoding_key, &validation)
-            .map_err(|e| JwtError::ValidationFailed(e.to_string()))?;
+        let token_data: TokenData<JwtClaims> =
+            decode(token, &decoding_key, &validation).validation_failed()?;
 
         debug!(
             sub = ?token_data.claims.sub,

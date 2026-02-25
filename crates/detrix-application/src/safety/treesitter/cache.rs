@@ -7,11 +7,11 @@ use super::TreeSitterResult;
 use dashmap::DashMap;
 use detrix_config::constants::DEFAULT_AST_CACHE_MAX_ENTRIES;
 use detrix_core::SafetyLevel;
+use detrix_logging::trace;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
-use tracing::trace;
 
 /// Global cache instance
 static CACHE: OnceLock<TreeSitterCache> = OnceLock::new();

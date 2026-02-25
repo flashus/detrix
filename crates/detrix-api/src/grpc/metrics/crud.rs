@@ -16,6 +16,7 @@ pub async fn handle_add_metric(
     state: &Arc<ApiState>,
     request: Request<AddMetricRequest>,
 ) -> Result<Response<MetricResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
     let mut req = request.into_inner();
 
     // If safety_level is not provided, use the default from config
@@ -24,25 +25,42 @@ pub async fn handle_add_metric(
         req.safety_level = config.safety.default_safety_level().as_str().to_string();
     }
 
-    // If language is not provided, derive it from the connection (same pattern as MCP/REST)
-    if req.language.as_ref().map_or(true, |l| l.is_empty()) {
-        let conn_id = detrix_core::ConnectionId::from(req.connection_id.as_str());
-        let connection = state
-            .context
-            .connection_service
-            .get_connection(&conn_id)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to get connection: {}", e)))?
-            .ok_or_else(|| {
-                Status::not_found(format!("Connection '{}' not found", req.connection_id))
-            })?;
+    // Fetch connection for language derivation and path resolution
+    let conn_id = detrix_core::ConnectionId::from(req.connection_id.as_str());
+    let connection = state
+        .context
+        .connection_service
+        .get_connection(&conn_id)
+        .await
+        .to_status()?
+        .ok_or_else(|| {
+            Status::not_found(format!("Connection '{}' not found", req.connection_id))
+        })?;
 
+    // Resolve relative file path against connection's workspace_root
+    if let Some(ref mut location) = req.location {
+        location.file = detrix_application::resolve_file_path(
+            &location.file,
+            connection.valid_workspace_root(),
+        );
+
+        // Pre-fetch file into VFS cache (transparent remote file fetching for cloud mode)
+        let _ = state
+            .context
+            .file_source_chain
+            .ensure_available(&connection, &location.file)
+            .await;
+    }
+
+    // If language is not provided, derive it from the connection (same pattern as MCP/REST)
+    if req.language.as_ref().is_none_or(|l| l.is_empty()) {
         req.language = Some(connection.language.to_string());
     }
 
     // Convert proto DTO to domain type
-    let metric =
+    let mut metric =
         add_request_to_metric(&req).map_err(|e| Status::invalid_argument(e.to_string()))?;
+    metric.created_by = client_id;
 
     // Call service (ALL business logic happens here)
     // Pass replace flag (default to false if not specified)
@@ -50,14 +68,15 @@ pub async fn handle_add_metric(
     let outcome = state
         .context
         .metric_service
-        .add_metric(metric.clone(), replace)
+        .add_metric(metric.clone(), replace, None)
         .await
         .to_status()?;
 
-    // Log any warnings to tracing (presentation layer responsibility)
+    // Log warnings to tracing and collect them for the response
     for warning in &outcome.warnings {
         tracing::warn!("{}", warning);
     }
+    let warnings: Vec<String> = outcome.warnings.iter().map(|w| w.to_string()).collect();
 
     // Return proto DTO
     Ok(Response::new(MetricResponse {
@@ -67,6 +86,7 @@ pub async fn handle_add_metric(
         location: Some(core_to_proto_location(&metric.location)),
         metadata: None,
         expressions: metric.expressions,
+        warnings,
     }))
 }
 
@@ -75,7 +95,9 @@ pub async fn handle_remove_metric(
     state: &Arc<ApiState>,
     request: Request<RemoveMetricRequest>,
 ) -> Result<Response<RemoveMetricResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
     let req = request.into_inner();
+    tracing::info!(?client_id, "gRPC: remove_metric");
 
     // Extract metric_id from oneof identifier
     let metric_id = match req.identifier {
@@ -116,7 +138,9 @@ pub async fn handle_update_metric(
     state: &Arc<ApiState>,
     request: Request<UpdateMetricRequest>,
 ) -> Result<Response<MetricResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
     let req = request.into_inner();
+    tracing::info!(metric_id = req.metric_id, ?client_id, "gRPC: update_metric");
     let metric_id = detrix_core::MetricId(req.metric_id);
 
     // Get existing metric
@@ -150,10 +174,11 @@ pub async fn handle_update_metric(
         .await
         .to_status()?;
 
-    // Log any warnings to tracing (presentation layer responsibility)
+    // Log warnings and collect for response
     for warning in &outcome.warnings {
         tracing::warn!("{}", warning);
     }
+    let warnings: Vec<String> = outcome.warnings.iter().map(|w| w.to_string()).collect();
 
     // Metric from service should always have ID - error if missing (database integrity issue)
     let metric_id = metric
@@ -169,6 +194,7 @@ pub async fn handle_update_metric(
         location: Some(core_to_proto_location(&metric.location)),
         metadata: None,
         expressions: metric.expressions,
+        warnings,
     }))
 }
 
@@ -207,7 +233,7 @@ pub async fn handle_get_metric(
         .map(|id| id.0)
         .ok_or_else(|| Status::internal("Found metric missing ID - database integrity issue"))?;
 
-    // Return proto DTO
+    // Return proto DTO (get is a read — no warnings)
     Ok(Response::new(MetricResponse {
         metric_id,
         name: metric.name.clone(),
@@ -215,5 +241,6 @@ pub async fn handle_get_metric(
         location: Some(core_to_proto_location(&metric.location)),
         metadata: None,
         expressions: metric.expressions,
+        warnings: vec![],
     }))
 }

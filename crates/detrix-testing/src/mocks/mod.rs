@@ -16,12 +16,17 @@
 //! - [`MockSystemEventRepository`] - In-memory system event storage
 //! - [`MockConnectionRepository`] - In-memory connection storage
 //! - [`MockDlqRepository`] - In-memory dead-letter queue storage
+//! - [`MockConnectionReferenceRepository`] - In-memory connection reference storage
 
 mod adapters;
+mod file_system;
 mod repositories;
 
-pub use adapters::{MockDapAdapter, MockDapAdapterFactory, StatefulMockDapAdapter};
+pub use adapters::{
+    MockDapAdapter, MockDapAdapterFactory, MockRemoteAppControl, StatefulMockDapAdapter,
+};
+pub use file_system::MockVfs;
 pub use repositories::{
-    MockConnectionRepository, MockDlqRepository, MockEventRepository, MockMetricRepository,
-    MockSystemEventRepository,
+    MockConnectionReferenceRepository, MockConnectionRepository, MockDlqRepository,
+    MockEventRepository, MockMetricRepository, MockSystemEventRepository,
 };

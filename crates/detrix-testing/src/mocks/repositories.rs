@@ -5,15 +5,17 @@
 //! - [`MockSystemEventRepository`] - In-memory system event storage
 //! - [`MockConnectionRepository`] - In-memory connection storage
 //! - [`MockDlqRepository`] - In-memory dead-letter queue storage
+//! - [`MockConnectionReferenceRepository`] - In-memory connection reference storage
 
 use async_trait::async_trait;
+use detrix_core::connection_reference::{ClientIdentity, ConnectionReference};
 use detrix_core::system_event::{SystemEvent, SystemEventType};
 use detrix_core::{
     Connection, ConnectionId, ConnectionStatus, Error, Metric, MetricEvent, MetricId, Result,
 };
 use detrix_ports::{
-    ConnectionRepository, DlqEntry, DlqEntryStatus, DlqRepository, EventRepository,
-    MetricRepository, SystemEventRepository,
+    ConnectionReferenceRepository, ConnectionRepository, DlqEntry, DlqEntryStatus, DlqRepository,
+    EventRepository, MetricRepository, SystemEventRepository,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -224,6 +226,26 @@ impl MetricRepository for MockMetricRepository {
         let before = metrics.len();
         metrics.retain(|_, m| m.connection_id != *connection_id);
         Ok((before - metrics.len()) as u64)
+    }
+
+    async fn migrate_connection_id(&self, from: &ConnectionId, to: &ConnectionId) -> Result<u64> {
+        let mut metrics = self.metrics.write().unwrap();
+        // Collect locations already occupied on the target connection (conflict detection)
+        let occupied: std::collections::HashSet<(String, u32)> = metrics
+            .values()
+            .filter(|m| &m.connection_id == to)
+            .map(|m| (m.location.file.clone(), m.location.line))
+            .collect();
+        let mut migrated = 0u64;
+        for metric in metrics.values_mut() {
+            if &metric.connection_id == from
+                && !occupied.contains(&(metric.location.file.clone(), metric.location.line))
+            {
+                metric.connection_id = to.clone();
+                migrated += 1;
+            }
+        }
+        Ok(migrated)
     }
 }
 
@@ -698,6 +720,31 @@ impl ConnectionRepository for MockConnectionRepository {
         });
         Ok((initial_count - connections.len()) as u64)
     }
+
+    async fn find_stale_same_project(
+        &self,
+        name: &str,
+        language: &str,
+        workspace_root: &str,
+        exclude_id: &ConnectionId,
+    ) -> Result<Vec<ConnectionId>> {
+        let connections = self.connections.lock().await;
+        let stale_ids = connections
+            .iter()
+            .filter(|(id, c)| {
+                *id != exclude_id
+                    && c.name.as_deref() == Some(name)
+                    && c.language.as_str() == language
+                    && c.workspace_root == workspace_root
+                    && matches!(
+                        c.status,
+                        ConnectionStatus::Disconnected | ConnectionStatus::Failed(_)
+                    )
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        Ok(stale_ids)
+    }
 }
 
 // ============================================================================
@@ -904,5 +951,163 @@ impl DlqRepository for MockDlqRepository {
         let before = entries.len();
         entries.retain(|e| e.status != DlqEntryStatus::Failed);
         Ok((before - entries.len()) as u64)
+    }
+}
+
+// ============================================================================
+// Mock Connection Reference Repository
+// ============================================================================
+
+/// In-memory mock implementation of ConnectionReferenceRepository for testing
+///
+/// Uses a HashMap keyed by (connection_id, client_identity_str) for O(1) lookup.
+#[derive(Debug, Default)]
+pub struct MockConnectionReferenceRepository {
+    /// References stored by (connection_id, client_identity) key
+    references: Mutex<HashMap<(String, String), ConnectionReference>>,
+}
+
+impl MockConnectionReferenceRepository {
+    pub fn new() -> Self {
+        Self {
+            references: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Get a count of all stored references
+    pub async fn count(&self) -> usize {
+        self.references.lock().await.len()
+    }
+}
+
+#[async_trait]
+impl ConnectionReferenceRepository for MockConnectionReferenceRepository {
+    async fn add_reference(&self, reference: &ConnectionReference) -> Result<()> {
+        let key = (
+            reference.connection_id.0.clone(),
+            reference.client_identity.as_str().to_string(),
+        );
+        let mut refs = self.references.lock().await;
+        refs.insert(key, reference.clone());
+        Ok(())
+    }
+
+    async fn remove_reference_and_count(
+        &self,
+        connection_id: &ConnectionId,
+        client_identity: &ClientIdentity,
+    ) -> Result<(bool, u64)> {
+        let key = (
+            connection_id.0.clone(),
+            client_identity.as_str().to_string(),
+        );
+        let mut refs = self.references.lock().await;
+        let was_removed = refs.remove(&key).is_some();
+        let remaining = refs
+            .keys()
+            .filter(|(cid, _)| cid == &connection_id.0)
+            .count() as u64;
+        Ok((was_removed, remaining))
+    }
+
+    async fn remove_all_by_client_and_count(
+        &self,
+        client_identity: &ClientIdentity,
+    ) -> Result<Vec<(ConnectionId, u64)>> {
+        let client_str = client_identity.as_str().to_string();
+        let mut refs = self.references.lock().await;
+
+        // Find affected connection IDs
+        let affected: Vec<String> = refs
+            .keys()
+            .filter(|(_, cid)| cid == &client_str)
+            .map(|(conn_id, _)| conn_id.clone())
+            .collect();
+
+        // Remove all by this client
+        refs.retain(|(_conn_id, cid), _| cid != &client_str);
+
+        // Count remaining for each affected connection
+        let mut result = Vec::new();
+        for conn_id in affected {
+            let remaining = refs.keys().filter(|(cid, _)| cid == &conn_id).count() as u64;
+            result.push((ConnectionId::new(&conn_id), remaining));
+        }
+        Ok(result)
+    }
+
+    async fn remove_all_by_connection(&self, connection_id: &ConnectionId) -> Result<u64> {
+        let mut refs = self.references.lock().await;
+        let before = refs.len();
+        refs.retain(|(cid, _), _| cid != &connection_id.0);
+        Ok((before - refs.len()) as u64)
+    }
+
+    async fn count_references(&self, connection_id: &ConnectionId) -> Result<u64> {
+        let refs = self.references.lock().await;
+        let count = refs
+            .keys()
+            .filter(|(cid, _)| cid == &connection_id.0)
+            .count() as u64;
+        Ok(count)
+    }
+
+    async fn find_by_connection(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Result<Vec<ConnectionReference>> {
+        let refs = self.references.lock().await;
+        let result: Vec<_> = refs
+            .iter()
+            .filter(|((cid, _), _)| cid == &connection_id.0)
+            .map(|(_, r)| r.clone())
+            .collect();
+        Ok(result)
+    }
+
+    async fn find_by_client(
+        &self,
+        client_identity: &ClientIdentity,
+    ) -> Result<Vec<ConnectionReference>> {
+        let client_str = client_identity.as_str().to_string();
+        let refs = self.references.lock().await;
+        let result: Vec<_> = refs
+            .iter()
+            .filter(|((_, cid), _)| cid == &client_str)
+            .map(|(_, r)| r.clone())
+            .collect();
+        Ok(result)
+    }
+
+    async fn has_reference(
+        &self,
+        connection_id: &ConnectionId,
+        client_identity: &ClientIdentity,
+    ) -> Result<bool> {
+        let key = (
+            connection_id.0.clone(),
+            client_identity.as_str().to_string(),
+        );
+        let refs = self.references.lock().await;
+        Ok(refs.contains_key(&key))
+    }
+
+    async fn cleanup_stale_references(&self, _ttl_days: i64) -> Result<u64> {
+        // In mock, no-op — tests can manipulate directly
+        Ok(0)
+    }
+
+    async fn touch_all_by_client(&self, client_identity: &ClientIdentity) -> Result<u64> {
+        let client_str = client_identity.as_str().to_string();
+        let mut refs = self.references.lock().await;
+        let now = chrono::Utc::now().timestamp_micros();
+        let mut touched = 0u64;
+        for ((_, cid), reference) in refs.iter_mut() {
+            if cid == &client_str {
+                reference.last_active = now;
+                touched += 1;
+            }
+        }
+        Ok(touched)
     }
 }

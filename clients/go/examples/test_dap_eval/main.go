@@ -6,14 +6,15 @@
 // - Function calls WORK with "call" prefix (but BLOCK the process)
 //
 // Usage:
-//   1. Build and run the fixture in one terminal:
-//      cd fixtures/go && go build -gcflags="all=-N -l" -o app . && ./app
 //
-//   2. In another terminal, attach Delve:
-//      dlv attach $(pgrep -f "detrix_example_app") --headless --listen=:2345 --api-version=2
+//  1. Build and run the fixture in one terminal:
+//     cd fixtures/go && go build -gcflags="all=-N -l" -o app . && ./app
 //
-//   3. Run this test:
-//      go run ./examples/test_dap_eval
+//  2. In another terminal, attach Delve:
+//     dlv attach $(pgrep -f "detrix_example_app") --headless --listen=:2345 --api-version=2
+//
+//  3. Run this test:
+//     go run ./examples/test_dap_eval
 //
 // Expected results:
 //   - "watch" context + simple variable: SUCCESS

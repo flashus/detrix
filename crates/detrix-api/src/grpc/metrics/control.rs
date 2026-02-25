@@ -13,7 +13,14 @@ pub async fn handle_toggle_metric(
     state: &Arc<ApiState>,
     request: Request<ToggleMetricRequest>,
 ) -> Result<Response<ToggleMetricResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
     let req = request.into_inner();
+    tracing::info!(
+        metric_id = req.metric_id,
+        enabled = req.enabled,
+        ?client_id,
+        "gRPC: toggle_metric"
+    );
     let metric_id = detrix_core::MetricId(req.metric_id);
 
     // Get metric for response
@@ -51,7 +58,9 @@ pub async fn handle_enable_group(
     state: &Arc<ApiState>,
     request: Request<GroupRequest>,
 ) -> Result<Response<GroupResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
     let req = request.into_inner();
+    tracing::info!(group = %req.group_name, ?client_id, "gRPC: enable_group");
 
     // Call service
     let result = state
@@ -84,7 +93,9 @@ pub async fn handle_disable_group(
     state: &Arc<ApiState>,
     request: Request<GroupRequest>,
 ) -> Result<Response<GroupResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
     let req = request.into_inner();
+    tracing::info!(group = %req.group_name, ?client_id, "gRPC: disable_group");
 
     // Call service
     let result = state

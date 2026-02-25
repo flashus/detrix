@@ -39,18 +39,18 @@ class TestGetDetrixHome:
 class TestGetTokenFilePath:
     """Test get_token_file_path function."""
 
-    def test_returns_mcp_token_in_home(self):
+    def test_returns_auth_token_in_home(self):
         """Test token file path is in detrix home."""
         home = Path("/custom/home")
         result = get_token_file_path(home)
-        assert result == Path("/custom/home/mcp-token")
+        assert result == Path("/custom/home/auth-token")
 
     def test_uses_default_home(self):
         """Test uses default detrix home."""
         with mock.patch.dict(os.environ, {}, clear=True):
             os.environ.pop("DETRIX_HOME", None)
             result = get_token_file_path()
-            assert result == Path.home() / "detrix" / "mcp-token"
+            assert result == Path.home() / "detrix" / "auth-token"
 
 
 class TestGetFreePort:
@@ -73,10 +73,9 @@ class TestGenerateConnectionName:
     """Test generate_connection_name function."""
 
     def test_with_name(self):
-        """Test with custom name."""
+        """Test with custom name — returned as-is (consistent with Go/Rust clients)."""
         result = generate_connection_name("my-service")
-        assert result.startswith("my-service-")
-        assert str(os.getpid()) in result
+        assert result == "my-service"
 
     def test_without_name(self):
         """Test with empty name."""
@@ -90,14 +89,17 @@ class TestGetEnvConfig:
 
     def test_returns_env_values(self):
         """Test returns environment variable values."""
-        with mock.patch.dict(os.environ, {
-            "DETRIX_NAME": "test-name",
-            "DETRIX_CONTROL_HOST": "192.168.1.1",
-            "DETRIX_CONTROL_PORT": "9000",
-            "DETRIX_DEBUG_PORT": "5679",
-            "DETRIX_DAEMON_URL": "http://example.com:8090",
-            "DETRIX_TOKEN": "secret-token",
-        }):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DETRIX_NAME": "test-name",
+                "DETRIX_CONTROL_HOST": "192.168.1.1",
+                "DETRIX_CONTROL_PORT": "9000",
+                "DETRIX_DEBUG_PORT": "5679",
+                "DETRIX_DAEMON_URL": "http://example.com:8090",
+                "DETRIX_TOKEN": "secret-token",
+            },
+        ):
             config = get_env_config()
             assert config["name"] == "test-name"
             assert config["control_host"] == "192.168.1.1"
@@ -119,11 +121,14 @@ class TestGetEnvConfig:
 
     def test_returns_timeout_env_values(self):
         """Test returns timeout environment variable values."""
-        with mock.patch.dict(os.environ, {
-            "DETRIX_HEALTH_CHECK_TIMEOUT": "3.5",
-            "DETRIX_REGISTER_TIMEOUT": "10.0",
-            "DETRIX_UNREGISTER_TIMEOUT": "1.5",
-        }):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DETRIX_HEALTH_CHECK_TIMEOUT": "3.5",
+                "DETRIX_REGISTER_TIMEOUT": "10.0",
+                "DETRIX_UNREGISTER_TIMEOUT": "1.5",
+            },
+        ):
             config = get_env_config()
             assert config["health_check_timeout"] == "3.5"
             assert config["register_timeout"] == "10.0"
@@ -185,8 +190,10 @@ class TestInitStoresSslFromEnv:
     def setup_method(self):
         """Reset state before each test."""
         import contextlib
+
         import detrix
         from detrix._state import reset_state
+
         with contextlib.suppress(Exception):
             detrix.shutdown()
         reset_state()
@@ -194,8 +201,10 @@ class TestInitStoresSslFromEnv:
     def teardown_method(self):
         """Reset state after each test."""
         import contextlib
+
         import detrix
         from detrix._state import reset_state
+
         with contextlib.suppress(Exception):
             detrix.shutdown()
         reset_state()

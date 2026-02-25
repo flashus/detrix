@@ -9,6 +9,7 @@ use crate::mcp::helpers;
 use crate::mcp::params::{AddMetricParams, EnableFromDiffParams, ObserveParams};
 use crate::mcp::proto_adapters::mcp_params_to_add_metric_request;
 use crate::state::ApiState;
+use detrix_application::resolve_file_path;
 use detrix_core::{ConnectionId, MetricId};
 use rmcp::ErrorData as McpError;
 use std::sync::Arc;
@@ -27,6 +28,8 @@ pub struct ObserveResult {
     pub line_source: &'static str,
     pub alternatives: Vec<(u32, String)>,
     pub warnings: Vec<String>,
+    /// Source info when file was served from git-pinned commit
+    pub source_info: Option<String>,
 }
 
 impl ObserveResult {
@@ -38,6 +41,10 @@ impl ObserveResult {
              Metric: {} (ID: {})",
             expr_display, self.file, self.line, self.metric_name, self.metric_id.0
         );
+
+        if let Some(ref info) = self.source_info {
+            message.push_str(&format!("\n{}", info));
+        }
 
         if !self.line_content.is_empty() {
             message.push_str(&format!("\nLine: {}", self.line_content.trim()));
@@ -87,6 +94,7 @@ pub async fn observe_impl(
     state: &Arc<ApiState>,
     params: ObserveParams,
     resolved_connection: Option<ConnectionId>,
+    created_by: Option<String>,
 ) -> Result<ObserveResult, McpError> {
     let ObserveParams {
         file,
@@ -124,25 +132,41 @@ pub async fn observe_impl(
         ));
     }
 
+    // Step 2: Resolve file path against connection's workspace_root
+    let workspace_root = connection.valid_workspace_root();
+    let file = resolve_file_path(&file, workspace_root);
+
+    // Pre-fetch file into VFS cache (transparent remote file fetching)
+    let _ = state
+        .context
+        .file_source_chain
+        .ensure_available(&connection, &file)
+        .await;
+
     // Use first expression for line-finding and name generation
     let first_expr = expressions[0].clone();
 
-    // Step 2: Determine line number
+    // Step 3: Determine line number
     let (final_line, line_content, alternatives, line_source) = if let Some(l) = line {
         // User provided explicit line
         (l, String::new(), Vec::new(), "user_provided")
     } else {
         // Auto-find best line
-        let (l, content, alts) =
-            helpers::metrics::find_best_line(&file, &first_expr, find_variable.as_deref())?;
+        let (l, content, alts) = helpers::metrics::find_best_line(
+            &file,
+            &first_expr,
+            find_variable.as_deref(),
+            workspace_root,
+            &state.context.file_inspection,
+        )?;
         (l, content, alts, "auto_found")
     };
 
-    // Step 3: Generate metric name if not provided
+    // Step 4: Generate metric name if not provided
     let metric_name = name
         .unwrap_or_else(|| helpers::metrics::generate_metric_name(&first_expr, &file, final_line));
 
-    // Step 4: Get defaults from config and build metric
+    // Step 5: Get defaults from config and build metric
     let config = state.config_service.get_config().await;
     let metric = MetricBuilder::new(
         metric_name.clone(),
@@ -157,16 +181,37 @@ pub async fn observe_impl(
     .with_stack_trace(capture_stack_trace.unwrap_or(false))
     .with_memory_snapshot(capture_memory_snapshot.unwrap_or(false))
     .with_ttl(ttl_seconds.map(|t| t as i64))
+    .with_created_by(created_by)
     .build();
 
     let outcome = state
         .context
         .metric_service
-        .add_metric(metric, false) // Don't replace by default
+        .add_metric(metric, false, None) // Don't replace by default
         .await
-        .map_err(|e| McpError::internal_error(format!("Failed to add metric: {}", e), None))?;
+        .mcp_context("Failed to add metric")?;
 
     let warnings: Vec<String> = outcome.warnings.iter().map(|w| w.to_string()).collect();
+
+    // Surface source metadata (pinned mode info) when available
+    let source_info = state.context.vfs.get_metadata(&file).and_then(|metadata| {
+        // Only surface when there's meaningful info (commit pinning or drift)
+        if metadata.commit.is_some() || metadata.differs_from_local == Some(true) {
+            let mut info = format!("Source: {}", metadata.source_kind);
+            if let Some(ref commit) = metadata.commit {
+                info.push_str(&format!(
+                    ", pinned to commit {}",
+                    &commit[..commit.len().min(12)]
+                ));
+            }
+            if let Some(true) = metadata.differs_from_local {
+                info.push_str(" (local drift: yes)");
+            }
+            Some(info)
+        } else {
+            None
+        }
+    });
 
     Ok(ObserveResult {
         metric_id: outcome.value,
@@ -179,6 +224,7 @@ pub async fn observe_impl(
         line_source,
         alternatives,
         warnings,
+        source_info,
     })
 }
 
@@ -237,6 +283,7 @@ impl AddMetricResult {
 pub async fn add_metric_impl(
     state: &Arc<ApiState>,
     params: AddMetricParams,
+    created_by: Option<String>,
 ) -> Result<AddMetricResult, McpError> {
     // Keep copies for response
     let metric_name = params.name.clone();
@@ -293,6 +340,17 @@ pub async fn add_metric_impl(
         ));
     }
 
+    // Resolve file path against connection's workspace_root
+    let workspace_root = connection.valid_workspace_root();
+    let parsed_file = resolve_file_path(&parsed_file, workspace_root);
+
+    // Pre-fetch file into VFS cache (transparent remote file fetching for cloud mode)
+    let _ = state
+        .context
+        .file_source_chain
+        .ensure_available(&connection, &parsed_file)
+        .await;
+
     // Get default safety level from config
     let config = state.config_service.get_config().await;
     let safety_level = config.safety.default_safety_level().as_str();
@@ -307,8 +365,9 @@ pub async fn add_metric_impl(
     );
     proto_request.language = Some(connection.language.to_string());
 
-    let metric = add_request_to_metric(&proto_request)
-        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+    let mut metric =
+        add_request_to_metric(&proto_request).mcp_invalid_params("Invalid metric parameters")?;
+    metric.created_by = created_by;
 
     // Check workflow
     state.context.mcp_usage.check_workflow_for_add_metric();
@@ -317,9 +376,9 @@ pub async fn add_metric_impl(
     let outcome = state
         .context
         .metric_service
-        .add_metric(metric, replace_flag)
+        .add_metric(metric, replace_flag, None)
         .await
-        .map_err(|e| McpError::internal_error(format!("Failed to add metric: {}", e), None))?;
+        .mcp_context("Failed to add metric")?;
 
     let warnings: Vec<String> = outcome.warnings.iter().map(|w| w.to_string()).collect();
 
@@ -470,6 +529,7 @@ pub struct NoDebugStatementsFound;
 pub async fn enable_from_diff_impl(
     state: &Arc<ApiState>,
     params: EnableFromDiffParams,
+    created_by: Option<String>,
 ) -> Result<Result<EnableFromDiffResult, NoDebugStatementsFound>, McpError> {
     let EnableFromDiffParams {
         diff,
@@ -503,6 +563,9 @@ pub async fn enable_from_diff_impl(
         .mcp_context("Failed to get connection")?
         .ok_or_else(|| McpError::internal_error("Connection disappeared after validation", None))?;
 
+    // Resolve workspace_root for relative paths in diff
+    let workspace_root = connection.valid_workspace_root();
+
     // Track results
     let mut added_metrics: Vec<AddedMetric> = Vec::new();
     let mut failed_metrics: Vec<FailedMetric> = Vec::new();
@@ -513,38 +576,48 @@ pub async fn enable_from_diff_impl(
             continue;
         }
 
+        let resolved_file = resolve_file_path(&parsed.file, workspace_root);
+
+        // Pre-fetch file into VFS cache (transparent remote file fetching)
+        let _ = state
+            .context
+            .file_source_chain
+            .ensure_available(&connection, &resolved_file)
+            .await;
+
         let metric_name =
-            helpers::metrics::generate_metric_name(&parsed.expression, &parsed.file, parsed.line);
+            helpers::metrics::generate_metric_name(&parsed.expression, &resolved_file, parsed.line);
 
         let metric = MetricBuilder::new(
             metric_name.clone(),
             conn_id.clone(),
-            parsed.file.clone(),
+            resolved_file.clone(),
             parsed.line,
             vec![parsed.expression.clone()],
             connection.language,
         )
         .with_group(group.clone())
         .with_ttl(ttl_seconds.map(|t| t as i64))
+        .with_created_by(created_by.clone())
         .build();
 
         match state
             .context
             .metric_service
-            .add_metric(metric, true) // Replace existing if any
+            .add_metric(metric, true, None) // Replace existing if any
             .await
         {
             Ok(outcome) => {
                 added_metrics.push(AddedMetric {
                     name: metric_name,
-                    file: parsed.file.clone(),
+                    file: resolved_file,
                     line: parsed.line,
                     id: outcome.value.0,
                 });
             }
             Err(e) => {
                 failed_metrics.push(FailedMetric {
-                    file: parsed.file.clone(),
+                    file: resolved_file,
                     line: parsed.line,
                     statement: parsed.original_statement.clone(),
                     error: e.to_string(),

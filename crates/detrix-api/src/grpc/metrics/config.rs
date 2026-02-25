@@ -1,5 +1,6 @@
 //! Config handlers: reload_config, validate_config, get_config, update_config
 
+use crate::error::ToStatusResult;
 use crate::generated::detrix::v1::{
     ConfigResponse, GetConfigRequest, ReloadConfigRequest, ReloadConfigResponse,
     UpdateConfigRequest, ValidateConfigRequest, ValidationResponse,
@@ -13,7 +14,9 @@ pub async fn handle_reload_config(
     state: &Arc<ApiState>,
     request: Request<ReloadConfigRequest>,
 ) -> Result<Response<ReloadConfigResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
     let req = request.into_inner();
+    tracing::info!(?client_id, "gRPC: reload_config");
 
     // Use request path or fall back to ConfigService's configured path
     let config_path = match req.config_path {
@@ -95,14 +98,10 @@ pub async fn handle_get_config(
     if let Some(path) = req.path {
         // Return specific config section as TOML
         let toml_content = match path.as_str() {
-            "api" => toml::to_string_pretty(&config.api)
-                .map_err(|e| Status::internal(format!("Failed to serialize config: {}", e)))?,
-            "limits" => toml::to_string_pretty(&config.limits)
-                .map_err(|e| Status::internal(format!("Failed to serialize config: {}", e)))?,
-            "safety" => toml::to_string_pretty(&config.safety)
-                .map_err(|e| Status::internal(format!("Failed to serialize config: {}", e)))?,
-            "storage" => toml::to_string_pretty(&config.storage)
-                .map_err(|e| Status::internal(format!("Failed to serialize config: {}", e)))?,
+            "api" => toml::to_string_pretty(&config.api).to_status()?,
+            "limits" => toml::to_string_pretty(&config.limits).to_status()?,
+            "safety" => toml::to_string_pretty(&config.safety).to_status()?,
+            "storage" => toml::to_string_pretty(&config.storage).to_status()?,
             _ => {
                 return Err(Status::not_found(format!(
                     "Config path '{}' not found. Available paths: api, limits, safety, storage",
@@ -119,8 +118,7 @@ pub async fn handle_get_config(
     }
 
     // Return the full config as TOML (redacted for security)
-    let toml_content = toml::to_string_pretty(&config)
-        .map_err(|e| Status::internal(format!("Failed to serialize config: {}", e)))?;
+    let toml_content = toml::to_string_pretty(&config).to_status()?;
 
     let config_path = state.config_service.config_path();
     Ok(Response::new(ConfigResponse {
@@ -138,8 +136,11 @@ pub async fn handle_get_config(
 /// Handle update_config request
 pub async fn handle_update_config(
     _state: &Arc<ApiState>,
-    _request: Request<UpdateConfigRequest>,
+    request: Request<UpdateConfigRequest>,
 ) -> Result<Response<ConfigResponse>, Status> {
+    let client_id = crate::grpc::extract_client_id(&request)?;
+    let _req = request.into_inner();
+    tracing::info!(?client_id, "gRPC: update_config");
     // Runtime config updates require careful state management
     // For safety, we only support reload from file
     Err(Status::unimplemented(

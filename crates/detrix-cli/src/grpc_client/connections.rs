@@ -8,7 +8,9 @@ use detrix_api::generated::detrix::v1::{
     CloseConnectionRequest, CreateConnectionRequest, GetConnectionRequest,
     ListActiveConnectionsRequest, ListConnectionsRequest, RequestMetadata,
 };
+use detrix_api::grpc::request_with_machine_client_id;
 use detrix_api::grpc::AuthChannel;
+use detrix_core::UNKNOWN_WORKSPACE_ROOT;
 
 /// gRPC client for connection operations
 pub struct ConnectionsClient {
@@ -50,7 +52,7 @@ impl ConnectionsClient {
         let workspace_root = std::env::current_dir()
             .ok()
             .and_then(|p| p.to_str().map(String::from))
-            .unwrap_or_else(|| "/unknown".to_string());
+            .unwrap_or_else(|| UNKNOWN_WORKSPACE_ROOT.to_string());
 
         let hostname = detrix_api::common::resolve_hostname();
 
@@ -65,11 +67,15 @@ impl ConnectionsClient {
             program: program.map(|s| s.to_string()),
             safe_mode,
             pid: None, // CLI doesn't use AttachPid mode
+            control_plane_url: None,
+            build_commit: None,
+            build_tag: None,
+            created_by: None, // Server will override with actual IP
         };
 
         let response = self
             .client
-            .create_connection(request)
+            .create_connection(request_with_machine_client_id(request))
             .await
             .context("Failed to create connection via gRPC")?
             .into_inner();
@@ -139,7 +145,7 @@ impl ConnectionsClient {
         };
 
         self.client
-            .close_connection(request)
+            .close_connection(request_with_machine_client_id(request))
             .await
             .context("Failed to close connection via gRPC")?;
 
@@ -154,7 +160,7 @@ impl ConnectionsClient {
 
         let response = self
             .client
-            .cleanup_connections(request)
+            .cleanup_connections(request_with_machine_client_id(request))
             .await
             .context("Failed to cleanup connections via gRPC")?
             .into_inner();

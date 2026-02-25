@@ -23,14 +23,17 @@ mod health;
 mod lifecycle;
 mod metrics;
 mod operations;
+pub mod references;
 mod values;
+mod vfs;
 pub use config::{
     get_config, reload_config, update_config, validate_config, ConfigResponse, GetConfigQuery,
     UpdateConfigRequest, UpdateConfigResponse,
 };
 pub use connections::{
     cleanup_connections, close_connection, create_connection, get_connection, list_connections,
-    CleanupResponse, ListConnectionsQuery,
+    touch_connections, CleanupResponse, ListConnectionsQuery, TouchConnectionsRequest,
+    TouchConnectionsResponse,
 };
 pub use diagnostic::{
     get_mcp_usage, inspect_file, validate_expression, CodeLineDto, InspectFileResponse,
@@ -40,7 +43,9 @@ pub use groups::{
     disable_group, enable_group, list_group_metrics, list_groups, GroupOperationResponse,
 };
 pub use health::{health_check, prometheus_metrics, HealthResponse};
-pub use lifecycle::{sleep, status, wake, StatusResponse, WakeResponse};
+pub use lifecycle::{
+    disconnect_all, sleep, status, wake, DisconnectAllResponse, StatusResponse, WakeResponse,
+};
 pub use metrics::{
     add_metric, delete_metric, get_metric, list_metrics, query_events, CreateMetricRequest,
     CreateMetricResponse, ListMetricsQuery, PaginatedMetricsResponse, QueryEventsParams,
@@ -51,6 +56,10 @@ pub use values::{
     get_metric_history, get_metric_value, MetricHistoryParams, MetricHistoryResponse,
     MetricValueResponse,
 };
+pub use vfs::{
+    get_cached_hashes, provide_file, validate_cache, GetCachedHashesResponse, ProvideFileRequest,
+    ProvideFileResponse, ValidateCacheRequest, ValidateCacheResponse,
+};
 
 // ============================================================================
 // Shared types and helpers used across handlers
@@ -58,10 +67,23 @@ pub use values::{
 
 use crate::grpc::conversions::{connection_to_info, metric_to_info};
 use crate::types::{ConnectionInfo, MetricInfo};
+use axum::http::HeaderMap;
 use detrix_core::{
     Connection, Metric, MetricMode, SafetyLevel, MODE_FIRST, MODE_SAMPLE, MODE_SAMPLE_INTERVAL,
     MODE_STREAM, MODE_THROTTLE, SAFETY_STRICT, SAFETY_TRUSTED,
 };
+
+/// Extract and validate client_id from `X-Detrix-Client-Id` header.
+///
+/// Returns `Ok(None)` if the header is absent (backwards compatible with SDK clients).
+/// Returns `Ok(Some(id))` if the header is present and valid.
+/// Returns `Err` if the header value is present but invalid.
+pub(crate) fn extract_client_id(
+    headers: &HeaderMap,
+) -> Result<Option<String>, crate::http::error::HttpError> {
+    crate::common::extract_client_id_from_headers(headers)
+        .map_err(crate::http::error::HttpError::bad_request)
+}
 
 /// Convert domain Metric to proto MetricInfo for REST responses
 ///

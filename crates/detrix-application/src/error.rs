@@ -165,6 +165,10 @@ pub enum FileInspectionError {
         line: u32,
         total_lines: usize,
     },
+
+    /// Variable found only in non-executable locations (signatures, struct fields)
+    #[error("Variable '{variable}' found only in {location} — logpoints cannot be placed there")]
+    VariableNotInExecutableScope { variable: String, location: String },
 }
 
 impl FileInspectionError {
@@ -179,6 +183,9 @@ impl FileInspectionError {
             FileInspectionError::NotFound(_) => ErrorCode::FileNotFound,
             FileInspectionError::NotAFile(_) => ErrorCode::NotAFile,
             FileInspectionError::LineNotFound { .. } => ErrorCode::LineNotFound,
+            FileInspectionError::VariableNotInExecutableScope { .. } => {
+                ErrorCode::VariableNotInExecutableScope
+            }
         }
     }
 }
@@ -337,25 +344,21 @@ impl<T> ConfigTomlResultExt<T> for std::result::Result<T, toml::de::Error> {
     }
 
     fn toml_serialize_current(self) -> Result<T> {
-        // This is for de::Error, not used for serialization
-        unreachable!("toml_serialize_current called on de::Error")
+        Err(ConfigError::TomlSerialize("toml_serialize_current called on de::Error".into()).into())
     }
 
     fn toml_serialize_for_file(self) -> Result<T> {
-        // This is for de::Error, not used for serialization
-        unreachable!("toml_serialize_for_file called on de::Error")
+        Err(ConfigError::TomlSerialize("toml_serialize_for_file called on de::Error".into()).into())
     }
 }
 
 impl<T> ConfigTomlResultExt<T> for std::result::Result<T, toml::ser::Error> {
     fn toml_parse_partial(self) -> Result<T> {
-        // This is for ser::Error, not used for parsing
-        unreachable!("toml_parse_partial called on ser::Error")
+        Err(ConfigError::TomlParse("toml_parse_partial called on ser::Error".into()).into())
     }
 
     fn toml_parse_current(self) -> Result<T> {
-        // This is for ser::Error, not used for parsing
-        unreachable!("toml_parse_current called on ser::Error")
+        Err(ConfigError::TomlParse("toml_parse_current called on ser::Error".into()).into())
     }
 
     fn toml_serialize_current(self) -> Result<T> {
@@ -462,6 +465,60 @@ pub trait EnvValidationOptionExt<T> {
 impl<T> EnvValidationOptionExt<T> for Option<T> {
     fn env_required(self, message: impl Into<String>) -> Result<T> {
         self.ok_or_else(|| ConfigError::EnvironmentValidation(message.into()).into())
+    }
+}
+
+/// Extension trait for converting errors to detrix_core::Error::InvalidConfig with context
+pub trait InvalidConfigResultExt<T> {
+    /// Convert any Display error to InvalidConfig with context message
+    fn invalid_config(self, context: impl Into<String>) -> detrix_core::Result<T>;
+}
+
+impl<T, E: std::fmt::Display> InvalidConfigResultExt<T> for std::result::Result<T, E> {
+    fn invalid_config(self, context: impl Into<String>) -> detrix_core::Result<T> {
+        self.map_err(|e| {
+            detrix_core::Error::InvalidConfig(format!("{}: {}", context.into(), e).into())
+        })
+    }
+}
+
+/// Extension trait for path canonicalization to FileInspectionError::InvalidPath
+pub trait PathCanonicalizeExt<T> {
+    /// Convert a canonicalize IO error to FileInspectionError::InvalidPath with context
+    fn path_canonicalize(self, original: impl AsRef<str>) -> Result<T>;
+}
+
+impl<T> PathCanonicalizeExt<T> for std::result::Result<T, std::io::Error> {
+    fn path_canonicalize(self, original: impl AsRef<str>) -> Result<T> {
+        self.map_err(|e| {
+            FileInspectionError::InvalidPath(format!(
+                "Cannot resolve path '{}': {}",
+                original.as_ref(),
+                e
+            ))
+            .into()
+        })
+    }
+}
+
+/// Extension trait for converting VFS read errors to application errors with path context
+pub trait VfsReadResultExt<T> {
+    /// Convert a VFS read error into IoErrorWithContext; use `?` to coerce to application Error
+    fn vfs_read_context(
+        self,
+        path: impl Into<String>,
+    ) -> std::result::Result<T, IoErrorWithContext>;
+}
+
+impl<T> VfsReadResultExt<T> for detrix_core::Result<T> {
+    fn vfs_read_context(
+        self,
+        path: impl Into<String>,
+    ) -> std::result::Result<T, IoErrorWithContext> {
+        self.map_err(|e| IoErrorWithContext {
+            error: std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()),
+            path: path.into(),
+        })
     }
 }
 
@@ -739,6 +796,22 @@ pub enum OperationWarning {
         error: String,
     },
 
+    /// New expressions were merged into an existing metric at the same location (non-fatal)
+    ///
+    /// Occurs when `add_metric` is called for a location that already has a metric and
+    /// `replace=false`. The new expressions are appended to the existing metric so the
+    /// single DAP logpoint captures all of them.
+    ExpressionsMerged {
+        /// Name of the metric that received the new expressions
+        metric_name: String,
+        /// ID of the metric
+        metric_id: u64,
+        /// The expressions that were added
+        added_expressions: Vec<String>,
+        /// Location where merge occurred (file:line)
+        location: String,
+    },
+
     /// Anchor capture failed for a metric (non-fatal, metric still works)
     AnchorCaptureFailed {
         /// Name of the metric
@@ -828,6 +901,22 @@ impl std::fmt::Display for OperationWarning {
             }
             Self::DeserializationFailed { field, error } => {
                 write!(f, "Failed to deserialize '{}': {}", field, error)
+            }
+            Self::ExpressionsMerged {
+                metric_name,
+                metric_id,
+                added_expressions,
+                location,
+            } => {
+                write!(
+                    f,
+                    "Merged {} expression(s) {:?} into metric '{}' (ID: {}) at {}",
+                    added_expressions.len(),
+                    added_expressions,
+                    metric_name,
+                    metric_id,
+                    location
+                )
             }
             Self::AnchorCaptureFailed {
                 metric_name,

@@ -1,0 +1,52 @@
+services:
+  detrix:
+    build:
+      context: ../../..
+      dockerfile: fixtures/docker/Dockerfile.server
+    ports:
+      - "8095:8090"
+      - "50065:50061"
+    volumes:
+      - detrix-data:/data/detrix
+      - ./detrix.toml:/data/detrix/detrix.toml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DETRIX_TOKEN: demo-token
+      DETRIX_ADVERTISE_URL: http://localhost:8095
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/detrix", "status", "--config", "/data/detrix/detrix.toml", "-q"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - demo
+
+  order-service:
+    build:
+      context: ../../..
+      dockerfile: examples/docker-demo/client-app/Dockerfile
+    ports:
+      - "8091:8091"
+    depends_on:
+      detrix:
+        condition: service_healthy
+    environment:
+      DETRIX_CLIENT_ENABLED: "1"
+      DETRIX_DAEMON_URL: http://detrix:8090
+      DETRIX_CONTROL_HOST: "0.0.0.0"
+      DETRIX_HOST: order-service
+      DETRIX_CONTROL_PORT: "8091"
+      DETRIX_TOKEN: demo-token
+      DETRIX_WORKSPACE_ROOT: /src/examples/docker-demo/client-app
+      PRICING_API_URL: http://pricing-api:8080
+    networks:
+      - demo
+
+volumes:
+  detrix-data:
+
+networks:
+  demo:
+    name: docker-demo
+    external: true

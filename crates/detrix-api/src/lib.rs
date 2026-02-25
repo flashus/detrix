@@ -56,8 +56,17 @@ pub mod supervisor;
 // MCP client tracking for daemon lifecycle
 pub mod mcp_client_tracker;
 
+// Pluggable file source implementations (control_plane, bridge, disk, git)
+pub mod file_sources;
+
+// Remote app control (HTTP implementation of RemoteAppControl port)
+pub mod remote_app_control;
+
 // System metrics (CPU, memory)
 pub mod system_metrics;
+
+// Shared system status gathering (used by REST, gRPC, MCP)
+pub mod system_status;
 
 // Shared test helpers (only compiled for tests)
 #[cfg(test)]

@@ -39,7 +39,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/flashus/detrix/clients/go/internal/auth"
@@ -57,6 +59,12 @@ type Config struct {
 
 	// ControlHost is the host for the control plane server (default: "127.0.0.1")
 	ControlHost string
+
+	// AdvertiseHost is the host sent to the detrix server for registration.
+	// If set, this is used instead of ControlHost when registering with the detrix server.
+	// Useful in Docker/cloud where bind address (0.0.0.0) differs from
+	// the reachable address (container hostname).
+	AdvertiseHost string
 
 	// ControlPort is the port for the control plane (0 = auto-assign)
 	ControlPort int
@@ -89,6 +97,17 @@ type Config struct {
 	// Disables operations that require breakpoints: function calls, stack traces, memory snapshots.
 	// Recommended for production environments where execution pauses are unacceptable.
 	SafeMode bool
+
+	// WorkspaceRoot overrides the workspace root sent to the daemon.
+	// Default: current working directory (os.Getwd).
+	// Set this in Docker/cloud where the CWD doesn't match the build source path.
+	WorkspaceRoot string
+
+	// BuildCommit allows explicit override of build commit detection (optional)
+	BuildCommit string
+
+	// BuildTag allows explicit override of build tag detection (optional)
+	BuildTag string
 }
 
 // StatusResponse contains the current client status.
@@ -114,8 +133,8 @@ type ClientState = generated.ClientState
 
 // Re-export status constants for convenience.
 const (
-	WakeStatusAwake        = generated.Awake
-	WakeStatusAlreadyAwake = generated.AlreadyAwake
+	WakeStatusAwake            = generated.Awake
+	WakeStatusAlreadyAwake     = generated.AlreadyAwake
 	SleepStatusSleeping        = generated.SleepResponseStatusSleeping
 	SleepStatusAlreadySleeping = generated.SleepResponseStatusAlreadySleeping
 )
@@ -127,11 +146,19 @@ var (
 	delveManager  *delve.Manager
 )
 
+// Default timeout values for client operations.
+const (
+	defaultHealthCheckTimeout = 2 * time.Second
+	defaultRegisterTimeout    = 5 * time.Second
+	defaultUnregisterTimeout  = 2 * time.Second
+	defaultDelveStartTimeout  = 10 * time.Second
+)
+
 // Common errors
 var (
-	ErrNotInitialized   = errors.New("detrix client not initialized")
+	ErrNotInitialized     = errors.New("detrix client not initialized")
 	ErrAlreadyInitialized = errors.New("detrix client already initialized")
-	ErrWakeInProgress   = errors.New("wake operation already in progress")
+	ErrWakeInProgress     = errors.New("wake operation already in progress")
 )
 
 // Init initializes the Detrix client.
@@ -171,12 +198,16 @@ func Init(cfg Config) error {
 	s.Lock()
 	s.Name = state.GenerateConnectionName(cfg.Name)
 	s.ControlHost = cfg.ControlHost
+	s.AdvertiseHost = cfg.AdvertiseHost
 	s.ControlPort = cfg.ControlPort
 	s.DebugPort = cfg.DebugPort
 	s.DaemonURL = cfg.DaemonURL
 	s.DelvePath = delvePath
 	s.DetrixHome = cfg.DetrixHome
 	s.SafeMode = cfg.SafeMode
+	s.WorkspaceRoot = cfg.WorkspaceRoot
+	s.BuildCommit = cfg.BuildCommit
+	s.BuildTag = cfg.BuildTag
 	s.HealthCheckTimeoutMs = int(cfg.HealthCheckTimeout.Milliseconds())
 	s.RegisterTimeoutMs = int(cfg.RegisterTimeout.Milliseconds())
 	s.UnregisterTimeoutMs = int(cfg.UnregisterTimeout.Milliseconds())
@@ -185,24 +216,38 @@ func Init(cfg Config) error {
 	s.Unlock()
 
 	// Initialize components
-	var err2 error
-	daemonClient, err2 = daemon.NewClient(nil) // nil = use defaults (VerifyTLS: true)
-	if err2 != nil {
-		return fmt.Errorf("failed to create daemon client: %w", err2)
-	}
 	delveManager = delve.NewManager(delvePath, cfg.DelveStartTimeout)
 
 	// Discover auth token
 	authToken := auth.DiscoverToken(cfg.DetrixHome)
+
+	var err2 error
+	daemonClient, err2 = daemon.NewClient(&daemon.ClientOptions{
+		VerifyTLS: true,
+		Token:     authToken,
+	})
+	if err2 != nil {
+		return fmt.Errorf("failed to create daemon client: %w", err2)
+	}
+
+	// Best-effort: fetch advertise_url from daemon (daemon may not be up yet)
+	if advURL := daemonClient.FetchAdvertiseURL(cfg.DaemonURL, 2*time.Second); advURL != "" {
+		s.Lock()
+		s.DaemonAdvertiseURL = advURL
+		s.Unlock()
+		slog.Debug("fetched daemon advertise URL at init", "advertise_url", advURL)
+	}
 
 	// Create and start control server
 	controlServer = control.NewServer(
 		cfg.ControlHost,
 		cfg.ControlPort,
 		authToken,
+		s.WorkspaceRoot,
 		statusProvider,
 		wakeHandler,
 		sleepHandler,
+		discoverProvider,
 	)
 
 	actualPort, err := controlServer.Start(cfg.ControlHost, cfg.ControlPort)
@@ -235,6 +280,84 @@ func Status() StatusResponse {
 	}
 }
 
+// detectBuildInfo detects build commit and tag from environment variables
+// with fallback to compile-time injection and runtime git detection (dev mode only).
+func detectBuildInfo(cfg *Config) (commit string, tag string) {
+	// Layer 1: Explicit parameter override
+	if cfg != nil {
+		if cfg.BuildCommit != "" {
+			commit = cfg.BuildCommit
+		}
+		if cfg.BuildTag != "" {
+			tag = cfg.BuildTag
+		}
+	}
+
+	// If both set via config, skip auto-detection
+	if commit != "" && tag != "" {
+		return commit, tag
+	}
+
+	// Layer 2: DETRIX_* environment variables (highest priority for auto-detection)
+	if commit == "" {
+		commit = os.Getenv("DETRIX_BUILD_COMMIT")
+	}
+	if tag == "" {
+		tag = os.Getenv("DETRIX_BUILD_TAG")
+	}
+
+	// Layer 3: CI-specific environment variables
+	if commit == "" {
+		if c := os.Getenv("GIT_COMMIT"); c != "" {
+			commit = c
+		} else if c := os.Getenv("CI_COMMIT_SHA"); c != "" {
+			commit = c
+		} else if c := os.Getenv("GITHUB_SHA"); c != "" {
+			commit = c
+		}
+	}
+
+	if tag == "" {
+		if t := os.Getenv("GIT_TAG"); t != "" {
+			tag = t
+		} else if t := os.Getenv("CI_COMMIT_TAG"); t != "" {
+			tag = t
+		} else if os.Getenv("GITHUB_REF_TYPE") == "tag" {
+			if t := os.Getenv("GITHUB_REF_NAME"); t != "" {
+				tag = t
+			}
+		}
+	}
+
+	// Layer 4: Compile-time injection (from ldflags)
+	if commit == "" && BuildCommit != "" {
+		commit = BuildCommit
+	}
+	if tag == "" && Version != "" && Version != "dev" {
+		tag = Version
+	}
+
+	// Layer 5: Runtime git detection (dev mode fallback)
+	if commit == "" {
+		if c := tryGitRevParse(); c != "" {
+			commit = c
+		}
+	}
+
+	return commit, tag
+}
+
+// tryGitRevParse attempts to get the current commit via git command.
+// Returns empty string on any error (expected in containers).
+func tryGitRevParse() string {
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
 // Wake starts the debugger and registers with the daemon.
 //
 // This spawns a Delve process to attach to the current process,
@@ -262,6 +385,7 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 			Status:       WakeStatusAlreadyAwake,
 			DebugPort:    int32(s.ActualDebugPort),
 			ConnectionId: "",
+			DaemonUrl:    stringPtrOrNil(s.DaemonAdvertiseURL),
 		}
 		if s.ConnectionID != nil {
 			resp.ConnectionId = *s.ConnectionID
@@ -281,10 +405,14 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 		targetDaemonURL = s.DaemonURL
 	}
 	debugHost := s.ControlHost
+	advertiseHost := s.AdvertiseHost
 	debugPort := s.DebugPort
 	name := s.Name
 	detrixHome := s.DetrixHome
 	safeMode := s.SafeMode
+	workspaceRootOverride := s.WorkspaceRoot
+	buildCommitOverride := s.BuildCommit
+	buildTagOverride := s.BuildTag
 	healthTimeout := time.Duration(s.HealthCheckTimeoutMs) * time.Millisecond
 	registerTimeout := time.Duration(s.RegisterTimeoutMs) * time.Millisecond
 	s.Unlock()
@@ -308,14 +436,19 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 		return WakeResponse{}, fmt.Errorf("failed to start delve: %w", err)
 	}
 
-	// 2c. Discover auth token
-	token := auth.DiscoverToken(detrixHome)
+	// 2c. Re-discover auth token (daemon may have restarted with a new one)
+	freshToken := auth.DiscoverToken(detrixHome)
+	daemonClient.UpdateToken(freshToken)
+	controlServer.UpdateToken(freshToken)
 
 	// 2d. Get workspace root and hostname for identity
-	workspaceRoot, err := os.Getwd()
-	if err != nil {
-		workspaceRoot = "/unknown"
-		slog.Warn("failed to get working directory", "error", err)
+	workspaceRoot := workspaceRootOverride
+	if workspaceRoot == "" {
+		workspaceRoot, err = os.Getwd()
+		if err != nil {
+			workspaceRoot = "/unknown"
+			slog.Warn("failed to get working directory", "error", err)
+		}
 	}
 
 	hostname, err := os.Hostname()
@@ -324,16 +457,28 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 		slog.Warn("failed to get hostname", "error", err)
 	}
 
-	// 2e. Register with daemon
-	connID, err := daemonClient.Register(targetDaemonURL, daemon.RegisterRequest{
-		Host:          debugHost,
+	// 2e. Detect build information
+	buildCommit, buildTag := detectBuildInfo(&Config{
+		BuildCommit: buildCommitOverride,
+		BuildTag:    buildTagOverride,
+	})
+
+	// 2f. Register with daemon
+	// Use advertise_host if set (for Docker/cloud), otherwise use control_host
+	registrationHost := debugHost
+	if advertiseHost != "" {
+		registrationHost = advertiseHost
+	}
+	connID, advertiseURL, err := daemonClient.Register(targetDaemonURL, daemon.RegisterRequest{
+		Host:          registrationHost,
 		Port:          delveProc.Port,
 		Language:      "go",
 		Name:          name,
 		WorkspaceRoot: workspaceRoot,
 		Hostname:      hostname,
-		Token:         token,
 		SafeMode:      safeMode,
+		BuildCommit:   buildCommit,
+		BuildTag:      buildTag,
 	}, registerTimeout)
 	if err != nil {
 		if killErr := delveManager.Kill(delveProc); killErr != nil {
@@ -351,6 +496,7 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 	s.ActualDebugPort = delveProc.Port
 	s.DebugPortActive = true
 	s.ConnectionID = &connID
+	s.DaemonAdvertiseURL = advertiseURL
 	s.DelveProcess = &state.DelveProcess{
 		Cmd:  delveProc.Cmd,
 		Host: delveProc.Host,
@@ -362,6 +508,7 @@ func WakeWithURL(daemonURL string) (WakeResponse, error) {
 		Status:       WakeStatusAwake,
 		DebugPort:    int32(delveProc.Port),
 		ConnectionId: connID,
+		DaemonUrl:    stringPtrOrNil(advertiseURL),
 	}, nil
 }
 
@@ -460,6 +607,9 @@ func resolveConfig(cfg Config) Config {
 	if cfg.ControlHost == "" {
 		cfg.ControlHost = getEnvOrDefault("DETRIX_CONTROL_HOST", "127.0.0.1")
 	}
+	if cfg.AdvertiseHost == "" {
+		cfg.AdvertiseHost = os.Getenv("DETRIX_HOST")
+	}
 	if cfg.DaemonURL == "" {
 		cfg.DaemonURL = getEnvOrDefault("DETRIX_DAEMON_URL", "http://127.0.0.1:8090")
 	}
@@ -472,38 +622,61 @@ func resolveConfig(cfg Config) Config {
 	if cfg.DetrixHome == "" {
 		cfg.DetrixHome = os.Getenv("DETRIX_HOME")
 	}
+	if cfg.WorkspaceRoot == "" {
+		cfg.WorkspaceRoot = os.Getenv("DETRIX_WORKSPACE_ROOT")
+	}
 
-	// Port overrides
+	// Port overrides (validate range 0-65535)
 	if cfg.ControlPort == 0 {
 		if v := os.Getenv("DETRIX_CONTROL_PORT"); v != "" {
 			if port, err := strconv.Atoi(v); err == nil {
-				cfg.ControlPort = port
+				if port >= 0 && port <= 65535 {
+					cfg.ControlPort = port
+				} else {
+					slog.Warn("invalid DETRIX_CONTROL_PORT value, must be 0-65535", "value", port)
+				}
+			} else {
+				slog.Warn("invalid DETRIX_CONTROL_PORT value", "value", v, "error", err)
 			}
 		}
 	}
 	if cfg.DebugPort == 0 {
 		if v := os.Getenv("DETRIX_DEBUG_PORT"); v != "" {
 			if port, err := strconv.Atoi(v); err == nil {
-				cfg.DebugPort = port
+				if port >= 0 && port <= 65535 {
+					cfg.DebugPort = port
+				} else {
+					slog.Warn("invalid DETRIX_DEBUG_PORT value, must be 0-65535", "value", port)
+				}
+			} else {
+				slog.Warn("invalid DETRIX_DEBUG_PORT value", "value", v, "error", err)
 			}
 		}
 	}
 
 	// Timeout defaults (with env var overrides)
 	if cfg.HealthCheckTimeout == 0 {
-		cfg.HealthCheckTimeout = getEnvDurationOrDefault("DETRIX_HEALTH_CHECK_TIMEOUT", 2*time.Second)
+		cfg.HealthCheckTimeout = getEnvDurationOrDefault("DETRIX_HEALTH_CHECK_TIMEOUT", defaultHealthCheckTimeout)
 	}
 	if cfg.RegisterTimeout == 0 {
-		cfg.RegisterTimeout = getEnvDurationOrDefault("DETRIX_REGISTER_TIMEOUT", 5*time.Second)
+		cfg.RegisterTimeout = getEnvDurationOrDefault("DETRIX_REGISTER_TIMEOUT", defaultRegisterTimeout)
 	}
 	if cfg.UnregisterTimeout == 0 {
-		cfg.UnregisterTimeout = getEnvDurationOrDefault("DETRIX_UNREGISTER_TIMEOUT", 2*time.Second)
+		cfg.UnregisterTimeout = getEnvDurationOrDefault("DETRIX_UNREGISTER_TIMEOUT", defaultUnregisterTimeout)
 	}
 	if cfg.DelveStartTimeout == 0 {
-		cfg.DelveStartTimeout = 10 * time.Second
+		cfg.DelveStartTimeout = defaultDelveStartTimeout
 	}
 
 	return cfg
+}
+
+// stringPtrOrNil returns a pointer to s if non-empty, or nil.
+func stringPtrOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 func getEnvOrDefault(key, defaultValue string) string {
@@ -516,8 +689,13 @@ func getEnvOrDefault(key, defaultValue string) string {
 func getEnvDurationOrDefault(key string, defaultValue time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if secs, err := strconv.ParseFloat(v, 64); err == nil {
+			if secs <= 0 {
+				slog.Warn("invalid timeout value, must be positive", "env", key, "value", secs)
+				return defaultValue
+			}
 			return time.Duration(secs * float64(time.Second))
 		}
+		slog.Warn("invalid timeout value", "env", key, "value", v)
 	}
 	return defaultValue
 }
@@ -538,16 +716,67 @@ func statusProvider() map[string]any {
 	}
 }
 
+func discoverProvider() map[string]any {
+	s := state.Get()
+	s.RLock()
+	daemonURL := s.DaemonAdvertiseURL
+	stDaemonURL := s.DaemonURL
+	name := s.Name
+	controlHost := s.ControlHost
+	advertiseHost := s.AdvertiseHost
+	actualControlPort := s.ActualControlPort
+	s.RUnlock()
+
+	// Lazy-fetch: if advertise URL unknown, ask daemon now
+	if daemonURL == "" {
+		if advURL := daemonClient.FetchAdvertiseURL(stDaemonURL, 2*time.Second); advURL != "" {
+			s.Lock()
+			s.DaemonAdvertiseURL = advURL
+			s.Unlock()
+			daemonURL = advURL
+			slog.Debug("fetched daemon advertise URL on discover", "advertise_url", advURL)
+		}
+	}
+
+	if daemonURL == "" {
+		daemonURL = stDaemonURL
+	}
+
+	result := map[string]any{
+		"daemon_url": daemonURL,
+		"name":       name,
+	}
+
+	// Build control_plane_url: daemon-visible URL of this app's control plane.
+	// Use advertise_host (DETRIX_HOST) if set; otherwise use control_host
+	// unless it's a bind-all address. Lets the MCP bridge route wake requests
+	// correctly in Docker/cloud (e.g. http://order-service:8091).
+	bindAll := map[string]bool{"0.0.0.0": true, "::": true, "": true}
+	cpHost := advertiseHost
+	if cpHost == "" && !bindAll[controlHost] {
+		cpHost = controlHost
+	}
+	if cpHost != "" && actualControlPort > 0 {
+		result["control_plane_url"] = fmt.Sprintf("http://%s:%d", cpHost, actualControlPort)
+	}
+
+	return result
+}
+
 func wakeHandler(daemonURL string) (map[string]any, error) {
 	resp, err := WakeWithURL(daemonURL)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
+	result := map[string]any{
 		"status":        resp.Status,
 		"debug_port":    resp.DebugPort,
 		"connection_id": resp.ConnectionId,
-	}, nil
+	}
+	if resp.DaemonUrl != nil && *resp.DaemonUrl != "" {
+		result["daemon_url"] = *resp.DaemonUrl
+	}
+	return result, nil
 }
 
 func sleepHandler() (map[string]any, error) {

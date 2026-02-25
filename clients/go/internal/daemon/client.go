@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -21,6 +22,8 @@ const maxResponseSize = 1 << 20
 // Client is an HTTP client for the Detrix daemon.
 type Client struct {
 	httpClient *http.Client
+	token      string
+	tokenMu    sync.RWMutex // protects token
 }
 
 // ClientOptions configures the daemon client.
@@ -31,6 +34,9 @@ type ClientOptions struct {
 	CABundle string
 	// Timeout is the request timeout (default: 30s).
 	Timeout time.Duration
+	// Token is the authentication token for daemon API requests.
+	// When set, sent as Authorization: Bearer header on all requests.
+	Token string
 }
 
 // NewClient creates a new daemon client.
@@ -65,7 +71,62 @@ func NewClient(opts *ClientOptions) (*Client, error) {
 			Timeout:   opts.Timeout,
 			Transport: transport,
 		},
+		token: opts.Token,
 	}, nil
+}
+
+// UpdateToken updates the auth token (e.g., after daemon restart with a new token).
+//
+// Concurrency: This method is safe for concurrent use. It acquires tokenMu
+// for writing. The setAuth method acquires tokenMu for reading.
+func (c *Client) UpdateToken(token string) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	c.token = token
+}
+
+// setAuth sets the Authorization header if a token is configured.
+func (c *Client) setAuth(req *http.Request) {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+}
+
+// FetchAdvertiseURL queries the daemon's health endpoint to get its advertise URL.
+// Returns empty string if not configured or daemon unreachable.
+func (c *Client) FetchAdvertiseURL(daemonURL string, timeout time.Duration) string {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", daemonURL+"/health", nil)
+	if err != nil {
+		return ""
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Debug("failed to close response body", "error", err)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	var result struct {
+		AdvertiseURL string `json:"advertiseUrl"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize)).Decode(&result); err != nil {
+		return ""
+	}
+	return result.AdvertiseURL
 }
 
 // HealthCheck checks if the daemon is reachable.
@@ -103,35 +164,40 @@ type RegisterRequest struct {
 	Name          string `json:"name"`
 	WorkspaceRoot string `json:"workspaceRoot"`
 	Hostname      string `json:"hostname"`
-	Token         string `json:"token,omitempty"`
 	SafeMode      bool   `json:"safeMode,omitempty"`
+	// Build metadata (optional)
+	BuildCommit string `json:"buildCommit,omitempty"`
+	BuildTag    string `json:"buildTag,omitempty"`
 }
 
 // RegisterResponse is the response from connection registration.
 type RegisterResponse struct {
 	ConnectionID string `json:"connectionId"`
 	Status       string `json:"status"`
+	AdvertiseURL string `json:"advertiseUrl,omitempty"`
 }
 
 // Register registers a connection with the daemon.
-func (c *Client) Register(daemonURL string, req RegisterRequest, timeout time.Duration) (string, error) {
+// Returns (connectionID, advertiseURL, error).
+func (c *Client) Register(daemonURL string, req RegisterRequest, timeout time.Duration) (string, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
+		return "", "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", daemonURL+"/api/v1/connections", bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+		return "", "", fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	c.setAuth(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("failed to register with daemon: %w", err)
+		return "", "", fmt.Errorf("failed to register with daemon: %w", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
@@ -141,19 +207,19 @@ func (c *Client) Register(daemonURL string, req RegisterRequest, timeout time.Du
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
-		return "", fmt.Errorf("failed to read response body: %w", err)
+		return "", "", fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("registration failed: status %d, body: %s", resp.StatusCode, string(respBody))
+		return "", "", fmt.Errorf("registration failed: status %d, body: %s", resp.StatusCode, string(respBody))
 	}
 
 	var regResp RegisterResponse
 	if err := json.Unmarshal(respBody, &regResp); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
+		return "", "", fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	return regResp.ConnectionID, nil
+	return regResp.ConnectionID, regResp.AdvertiseURL, nil
 }
 
 // Unregister unregisters a connection from the daemon.
@@ -166,6 +232,7 @@ func (c *Client) Unregister(daemonURL string, connectionID string, timeout time.
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

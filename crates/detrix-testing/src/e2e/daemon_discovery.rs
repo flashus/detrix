@@ -29,7 +29,7 @@ use std::fs;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Test harness for daemon discovery tests
 pub struct DaemonDiscoveryTests {
@@ -47,6 +47,10 @@ pub struct DaemonDiscoveryTests {
     http_port: u16,
     /// gRPC port for current daemon
     grpc_port: u16,
+    /// Decoy ports guaranteed unused (allocated from registry, never bound).
+    /// Used in tests that corrupt PID files with wrong ports.
+    wrong_http_port: u16,
+    wrong_grpc_port: u16,
     /// Path to PID file
     pid_file_path: PathBuf,
     /// Path to config file
@@ -72,6 +76,8 @@ impl DaemonDiscoveryTests {
             daemon_pid: None,
             http_port: get_http_port(),
             grpc_port: get_grpc_port(),
+            wrong_http_port: get_http_port(),
+            wrong_grpc_port: get_grpc_port(),
             pid_file_path,
             config_path,
         })
@@ -106,6 +112,9 @@ port_fallback = false
 enabled = true
 host = "{}"
 port = {}
+
+[api.auth]
+mode = "disabled"
 
 [api.grpc]
 enabled = true
@@ -201,16 +210,29 @@ enable_ast_analysis = false
         ))
     }
 
-    /// Stop the current daemon
+    /// Stop the current daemon and wait for port release.
     async fn stop_daemon(&mut self) {
+        let grpc_port = self.grpc_port;
+
         // Kill via PID from PID file (handles forked daemon)
         #[cfg(unix)]
         if let Some(pid) = self.daemon_pid.take() {
             use nix::sys::signal::{kill, Signal};
             use nix::unistd::Pid;
-            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+            let nix_pid = Pid::from_raw(pid as i32);
+            let _ = kill(nix_pid, Signal::SIGTERM);
+            // Wait up to 2s for graceful shutdown
+            let mut exited = false;
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if kill(nix_pid, None).is_err() {
+                    exited = true;
+                    break;
+                }
+            }
+            if !exited {
+                let _ = kill(nix_pid, Signal::SIGKILL);
+            }
         }
         #[cfg(not(unix))]
         {
@@ -226,8 +248,18 @@ enable_ast_analysis = false
         // Clean up PID file
         let _ = fs::remove_file(&self.pid_file_path);
 
-        // Wait for ports to be released
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Wait for gRPC port to actually close (up to 3s)
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(3) {
+            if !Self::is_port_open(DEFAULT_API_HOST, grpc_port) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        eprintln!(
+            "warning: gRPC port {} still open after stop_daemon timeout",
+            grpc_port
+        );
     }
 
     /// Check if a port is open
@@ -249,19 +281,59 @@ enable_ast_analysis = false
         Ok(())
     }
 
-    /// Run the CLI `status` command and check if it finds the daemon
-    async fn cli_status(&self) -> Result<CliStatusResult, String> {
-        let output = Command::new(&self.binary_path)
-            .args([
-                "status",
-                "--config",
-                self.config_path.to_str().unwrap(),
-                "--format",
-                "json",
-            ])
+    /// Run a CLI command with a timeout, returning its output.
+    ///
+    /// Uses `tokio::process::Command` to avoid blocking the async runtime, and
+    /// applies a 15s timeout to prevent hung subprocesses from stalling tests.
+    async fn run_cli_with_timeout(
+        &self,
+        args: &[&str],
+        extra_env: &[(&str, String)],
+    ) -> Result<std::process::Output, String> {
+        let mut cmd = tokio::process::Command::new(&self.binary_path);
+        cmd.args(args)
             .env("RUST_LOG", "warn")
-            .output()
-            .map_err(|e| format!("Failed to run CLI: {}", e))?;
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (key, val) in extra_env {
+            cmd.env(key, val);
+        }
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to spawn CLI: {}", e))?;
+        let child_id = child.id();
+
+        match tokio::time::timeout(Duration::from_secs(15), child.wait_with_output()).await {
+            Ok(result) => result.map_err(|e| format!("Failed to wait for CLI: {}", e)),
+            Err(_) => {
+                // Timeout — wait_with_output consumed the Child, kill by PID
+                #[cfg(unix)]
+                if let Some(pid) = child_id {
+                    let _ = nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(pid as i32),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                }
+                Err(format!("CLI command {:?} timed out after 15s", args))
+            }
+        }
+    }
+
+    /// Run the CLI `status` command and check if it finds the daemon.
+    async fn cli_status(&self) -> Result<CliStatusResult, String> {
+        let output = self
+            .run_cli_with_timeout(
+                &[
+                    "status",
+                    "--config",
+                    self.config_path.to_str().unwrap(),
+                    "--format",
+                    "json",
+                ],
+                &[],
+            )
+            .await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -486,27 +558,29 @@ enable_ast_analysis = false
             "Daemon should be running"
         );
 
-        // Corrupt the PID file with wrong ports
-        let wrong_port = self.grpc_port + 1000;
+        // Corrupt the PID file with wrong ports (decoy ports from registry)
         let corrupted_content = json!({
             "pid": self.daemon_pid,
             "ports": {
-                "http": self.http_port + 1000,
-                "grpc": wrong_port
+                "http": self.wrong_http_port,
+                "grpc": self.wrong_grpc_port
             },
             "host": DEFAULT_API_HOST
         });
         self.write_pid_file(&corrupted_content.to_string())?;
-        println!("  Corrupted PID file with wrong port {}", wrong_port);
+        println!(
+            "  Corrupted PID file with wrong port {}",
+            self.wrong_grpc_port
+        );
 
         // Use environment variable override to specify correct port
         // This should bypass PID file entirely
-        let output = Command::new(&self.binary_path)
-            .args(["status", "--format", "json"])
-            .env("DETRIX_GRPC_PORT_OVERRIDE", self.grpc_port.to_string())
-            .env("RUST_LOG", "warn")
-            .output()
-            .map_err(|e| format!("Failed to run CLI: {}", e))?;
+        let output = self
+            .run_cli_with_timeout(
+                &["status", "--format", "json"],
+                &[("DETRIX_GRPC_PORT_OVERRIDE", self.grpc_port.to_string())],
+            )
+            .await?;
 
         if output.status.success() {
             println!("  ✓ Explicit port override found daemon correctly");
@@ -542,20 +616,21 @@ enable_ast_analysis = false
             self.grpc_port
         );
 
-        // Corrupt the PID file with correct PID but wrong ports
-        let wrong_grpc_port = self.grpc_port + 1;
+        // Corrupt the PID file with correct PID but wrong ports.
+        // Use decoy ports from the registry (guaranteed unused, nothing listening)
+        // to avoid accidentally hitting another concurrent test's daemon.
         let corrupted_content = json!({
             "pid": actual_pid,
             "ports": {
-                "http": self.http_port + 1,
-                "grpc": wrong_grpc_port
+                "http": self.wrong_http_port,
+                "grpc": self.wrong_grpc_port
             },
             "host": DEFAULT_API_HOST
         });
         self.write_pid_file(&corrupted_content.to_string())?;
         println!(
             "  PID file has PID {} but wrong port {} (actual: {})",
-            actual_pid, wrong_grpc_port, self.grpc_port
+            actual_pid, self.wrong_grpc_port, self.grpc_port
         );
 
         // Discovery should use PID file ports first, which will fail to connect
@@ -608,8 +683,7 @@ impl Drop for DaemonDiscoveryTests {
         // Synchronous cleanup - kill daemon if still running
         #[cfg(unix)]
         if let Some(pid) = self.daemon_pid.take() {
-            use std::process::Command;
-            let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+            super::executor::kill_9(pid as u64);
         }
         #[cfg(not(unix))]
         {

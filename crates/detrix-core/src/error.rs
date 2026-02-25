@@ -102,6 +102,8 @@ pub enum ErrorCode {
     NotAFile = 4307,
     /// Line not found (4308)
     LineNotFound = 4308,
+    /// Variable found only in non-executable locations (4309)
+    VariableNotInExecutableScope = 4309,
 
     // Infrastructure errors (5xxx)
     /// Database error (5001)
@@ -118,6 +120,12 @@ pub enum ErrorCode {
     // Auth errors (6xxx)
     /// Unauthorized (6001)
     Unauthorized = 6001,
+    /// Forbidden (6002)
+    Forbidden = 6002,
+
+    // Remote app errors (7xxx)
+    /// Remote app error (7001)
+    RemoteAppError = 7001,
 
     // Generic (9xxx)
     /// Internal error (9001)
@@ -226,9 +234,14 @@ impl ErrorCode {
             ErrorCode::FileNotFound => ErrorCategory::Terminal,
             ErrorCode::NotAFile => ErrorCategory::Terminal,
             ErrorCode::LineNotFound => ErrorCategory::Terminal,
+            ErrorCode::VariableNotInExecutableScope => ErrorCategory::Terminal,
 
             // Security - authentication/authorization failures
             ErrorCode::Unauthorized => ErrorCategory::Security,
+            ErrorCode::Forbidden => ErrorCategory::Security,
+
+            // Remote app - retryable (network calls to remote apps)
+            ErrorCode::RemoteAppError => ErrorCategory::Retryable,
 
             // Internal - server-side issues
             ErrorCode::InternalError => ErrorCategory::Internal,
@@ -287,6 +300,7 @@ impl ErrorCode {
             ErrorCode::FileNotFound => "FILE_NOT_FOUND",
             ErrorCode::NotAFile => "NOT_A_FILE",
             ErrorCode::LineNotFound => "LINE_NOT_FOUND",
+            ErrorCode::VariableNotInExecutableScope => "VARIABLE_NOT_IN_EXECUTABLE_SCOPE",
 
             // Infrastructure errors (5xxx)
             ErrorCode::DatabaseError => "DATABASE_ERROR",
@@ -297,6 +311,10 @@ impl ErrorCode {
 
             // Auth errors (6xxx)
             ErrorCode::Unauthorized => "UNAUTHORIZED",
+            ErrorCode::Forbidden => "FORBIDDEN",
+
+            // Remote app errors (7xxx)
+            ErrorCode::RemoteAppError => "REMOTE_APP_ERROR",
 
             // Generic errors (9xxx)
             ErrorCode::InternalError => "INTERNAL_ERROR",
@@ -329,12 +347,13 @@ pub trait NotFoundError {
 
 impl NotFoundError for Error {
     fn is_not_found(&self) -> bool {
-        matches!(self, Error::MetricNotFound(_))
+        matches!(self, Error::MetricNotFound(_) | Error::FileNotFound(_))
     }
 
     fn resource_type(&self) -> Option<&'static str> {
         match self {
             Error::MetricNotFound(_) => Some("metric"),
+            Error::FileNotFound(_) => Some("file"),
             _ => None,
         }
     }
@@ -342,6 +361,7 @@ impl NotFoundError for Error {
     fn resource_id(&self) -> Option<&str> {
         match self {
             Error::MetricNotFound(id) => Some(id),
+            Error::FileNotFound(path) => Some(path),
             _ => None,
         }
     }
@@ -481,6 +501,14 @@ pub enum Error {
     // Output errors (GELF, etc.)
     #[error("Output error: {0}")]
     Output(String),
+
+    // File system errors
+    #[error("File not found: {0}")]
+    FileNotFound(String),
+
+    // Remote app control errors (wake/sleep proxy)
+    #[error("Remote app error: {0}")]
+    RemoteApp(String),
 }
 
 impl Error {
@@ -508,8 +536,9 @@ impl Error {
             // Config errors (3xxx)
             Error::InvalidConfig(_) => ErrorCode::ConfigInvalid,
 
-            // Connection errors (4xxx)
+            // Connection/File errors (4xxx)
             Error::NotConnected(_) => ErrorCode::ConnectionNotConnected,
+            Error::FileNotFound(_) => ErrorCode::FileNotFound,
 
             // Infrastructure errors (5xxx)
             Error::Database(_) => ErrorCode::DatabaseError,
@@ -517,6 +546,9 @@ impl Error {
             Error::Io(_) => ErrorCode::IoError,
             Error::Serialization(_) => ErrorCode::SerializationError,
             Error::Output(_) => ErrorCode::OutputError,
+
+            // Remote app errors (7xxx)
+            Error::RemoteApp(_) => ErrorCode::RemoteAppError,
         }
     }
 

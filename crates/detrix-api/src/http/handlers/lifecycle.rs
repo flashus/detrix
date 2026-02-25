@@ -1,27 +1,68 @@
 //! Lifecycle handlers
 //!
-//! Endpoints for wake, sleep, and status operations.
+//! Endpoints for wake, sleep, disconnect_all, and status operations.
+//!
+//! - `wake(app_url, daemon_url?)` — proxy to remote app's control plane
+//! - `sleep(app_url)` — proxy to remote app's control plane
+//! - `disconnect_all()` — stop all local adapters
+//! - `status()` — comprehensive system health
 
-use super::connection_to_rest_response;
 use crate::constants::status;
 use crate::http::error::{HttpError, ToHttpResult};
 use crate::mcp_client_tracker::McpClientSummary;
 use crate::state::{ApiState, DaemonInfo};
-use crate::system_metrics::get_process_metrics;
-use crate::types::{ConnectionInfo, SleepResponse};
-use axum::{extract::State, Json};
-use detrix_core::format_uptime;
+use axum::{extract::State, http::HeaderMap, Json};
+use detrix_config::constants::HEADER_CLIENT_ID;
+use detrix_core::connection_reference::ClientIdentity;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{info, instrument, warn};
+use tracing::{info, instrument};
 
-/// Wake response DTO
+/// Wake request DTO (REST)
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WakeRequest {
+    pub app_url: String,
+    pub daemon_url: Option<String>,
+}
+
+/// Wake response DTO (REST)
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WakeResponse {
     pub status: String,
+    pub app_url: String,
+    pub connection_id: Option<String>,
+    pub debug_port: Option<i32>,
     pub message: String,
-    pub connections: Vec<ConnectionInfo>,
+    /// Daemon URL for auto-discovery (e.g., "http://localhost:8090")
+    pub daemon_url: Option<String>,
+}
+
+/// Sleep request DTO (REST)
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SleepRequest {
+    pub app_url: String,
+}
+
+/// Sleep response DTO (REST)
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SleepResponse {
+    pub status: String,
+    pub app_url: String,
+    pub message: String,
+}
+
+/// Disconnect all response DTO (REST)
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisconnectAllResponse {
+    pub status: String,
+    pub adapters_stopped: u32,
+    pub message: String,
 }
 
 /// Status response DTO
@@ -52,71 +93,164 @@ pub struct StatusResponse {
     pub degraded: Vec<String>,
 }
 
-/// Wake endpoint - check status and list active connections
+/// Wake an app's Detrix client via its control plane.
 ///
-/// Adapters are started automatically when connections are created,
-/// so this endpoint primarily reports current status.
+/// Sends HTTP POST to `{app_url}/detrix/wake` to start the app's debugger.
 #[instrument(skip(state))]
-pub async fn wake(State(state): State<Arc<ApiState>>) -> Result<Json<WakeResponse>, HttpError> {
-    info!("REST: wake");
+pub async fn wake(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(req): Json<WakeRequest>,
+) -> Result<Json<WakeResponse>, HttpError> {
+    let client_id = super::extract_client_id(&headers)?;
+    info!(
+        "REST: wake app_url={}, client_id={:?}",
+        req.app_url, client_id
+    );
 
-    // Get active connections
-    let connections = state
-        .context
-        .connection_service
-        .list_active_connections()
+    let remote_app_service = state.context.remote_app_service.as_ref().ok_or_else(|| {
+        HttpError::with_code(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Remote app control not configured",
+            detrix_core::ErrorCode::RemoteAppError,
+        )
+    })?;
+
+    let result = remote_app_service
+        .wake_app(&req.app_url, req.daemon_url.as_deref())
         .await
-        .http_context("Failed to list connections")?;
+        .http_err()?;
 
-    // Convert to proto ConnectionInfo
-    let connection_dtos: Vec<ConnectionInfo> = connections
-        .iter()
-        .map(connection_to_rest_response)
-        .collect();
-    let adapter_connected = state
-        .context
-        .adapter_lifecycle_manager
-        .has_connected_adapters()
-        .await;
+    // Set control_plane_url on the connection so VFS can fetch files from the app
+    if let Some(ref conn_id) = result.connection_id {
+        let _ = state
+            .context
+            .connection_service
+            .set_control_plane_url(
+                &detrix_core::ConnectionId::new(conn_id),
+                req.app_url.trim_end_matches('/').to_string(),
+            )
+            .await;
+    }
 
-    let status = if adapter_connected { "awake" } else { "idle" };
-    let message = if connection_dtos.is_empty() {
-        "No active connections. Create a connection to start observing.".to_string()
-    } else {
-        format!("{} active connection(s)", connection_dtos.len())
-    };
+    // Return daemon's advertise URL for auto-discovery
+    let daemon_url = state.advertise_url.clone();
 
     Ok(Json(WakeResponse {
-        status: status.to_string(),
-        message,
-        connections: connection_dtos,
+        status: result.status,
+        app_url: result.app_url,
+        connection_id: result.connection_id,
+        debug_port: result.debug_port,
+        message: format!("Wake request sent to {}", req.app_url),
+        daemon_url,
     }))
 }
 
-/// Stop all active DAP adapters and enter sleep mode.
+/// Sleep an app's Detrix client via its control plane.
 ///
-/// Gracefully disconnects from all debug adapters. Metrics remain configured
-/// and will be re-enabled when connections are re-established.
-///
-/// # Response
-/// Returns `SleepResponse` (proto) with status "sleeping" on success.
+/// Sends HTTP POST to `{app_url}/detrix/sleep` to stop the app's debugger.
 #[instrument(skip(state))]
-pub async fn sleep(State(state): State<Arc<ApiState>>) -> Result<Json<SleepResponse>, HttpError> {
-    info!("REST: sleep");
+pub async fn sleep(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(req): Json<SleepRequest>,
+) -> Result<Json<SleepResponse>, HttpError> {
+    let client_id = super::extract_client_id(&headers)?;
+    info!(
+        "REST: sleep app_url={}, client_id={:?}",
+        req.app_url, client_id
+    );
 
-    // Stop all adapters
-    state
-        .context
-        .adapter_lifecycle_manager
-        .stop_all()
+    let remote_app_service = state.context.remote_app_service.as_ref().ok_or_else(|| {
+        HttpError::with_code(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Remote app control not configured",
+            detrix_core::ErrorCode::RemoteAppError,
+        )
+    })?;
+
+    let result = remote_app_service
+        .sleep_app(&req.app_url)
         .await
-        .http_context("Failed to sleep")?;
+        .http_err()?;
 
     Ok(Json(SleepResponse {
-        status: status::SLEEPING.to_string(),
-        message: "All adapters stopped".to_string(),
-        metrics_saved: 0, // REST doesn't track this
-        metadata: None,
+        status: result.status,
+        app_url: result.app_url,
+        message: format!("Sleep request sent to {}", req.app_url),
+    }))
+}
+
+/// Stop active DAP adapters.
+///
+/// When `X-Detrix-Client-Id` header is present, operates in user-scoped mode:
+/// releases only the caller's connection references, and disconnects connections
+/// that have zero remaining references. This ensures multi-user safety in cloud mode.
+///
+/// Without the header, only localhost callers may perform a global disconnect
+/// (stops all adapters). Remote callers without the header get 400.
+#[instrument(skip_all)]
+pub async fn disconnect_all(
+    State(state): State<Arc<ApiState>>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Json<DisconnectAllResponse>, HttpError> {
+    // User-scoped mode: release only caller's references
+    let extracted_client_id = super::extract_client_id(&headers)?;
+    if let Some(client_id) = &extracted_client_id {
+        let client_identity = ClientIdentity::bridge(client_id);
+        info!(
+            "REST: disconnect_all (user-scoped, client={})",
+            client_identity.as_str()
+        );
+
+        let (released, disconnected) = state
+            .context
+            .connection_service
+            .disconnect_all_connections(&client_identity)
+            .await
+            .http_err()?;
+
+        return Ok(Json(DisconnectAllResponse {
+            status: status::DISCONNECTED.to_string(),
+            adapters_stopped: disconnected as u32,
+            message: format!(
+                "{} reference(s) released, {} connection(s) disconnected",
+                released, disconnected
+            ),
+        }));
+    }
+
+    // Global mode requires localhost — remote callers must provide X-Detrix-Client-Id
+    if !addr.ip().is_loopback() {
+        return Err(HttpError::bad_request(format!(
+            "{} header required for remote disconnect_all",
+            HEADER_CLIENT_ID
+        )));
+    }
+
+    info!("REST: disconnect_all (global, localhost)");
+
+    let result = state
+        .context
+        .adapter_lifecycle_manager
+        .disconnect_all()
+        .await;
+
+    Ok(Json(DisconnectAllResponse {
+        status: if result.partial_failure {
+            status::PARTIAL_FAILURE
+        } else {
+            status::DISCONNECTED
+        }
+        .to_string(),
+        adapters_stopped: result.adapters_stopped as u32,
+        message: if result.partial_failure {
+            "Some adapters failed to stop"
+        } else {
+            "All adapters stopped"
+        }
+        .to_string(),
     }))
 }
 
@@ -138,95 +272,23 @@ pub async fn sleep(State(state): State<Arc<ApiState>>) -> Result<Json<SleepRespo
 pub async fn status(State(state): State<Arc<ApiState>>) -> Json<StatusResponse> {
     info!("REST: status");
 
-    let mut degraded = Vec::new();
-
-    let uptime_seconds = state.start_time.elapsed().as_secs();
-    let adapter_connected = state
-        .context
-        .adapter_lifecycle_manager
-        .has_connected_adapters()
-        .await;
-
-    // Get metrics counts
-    let (active_metrics, total_metrics) = match state.context.metric_service.list_metrics().await {
-        Ok(metrics) => {
-            let active = metrics.iter().filter(|m| m.enabled).count();
-            (active, metrics.len())
-        }
-        Err(e) => {
-            warn!(error = %e, "Failed to list metrics for status endpoint");
-            degraded.push("metrics".to_string());
-            (0, 0)
-        }
-    };
-
-    // Get connection counts
-    let total_connections = match state.context.connection_service.list_connections().await {
-        Ok(connections) => connections.len(),
-        Err(e) => {
-            warn!(error = %e, "Failed to list connections for status endpoint");
-            degraded.push("connections".to_string());
-            0
-        }
-    };
-
-    let active_connections = match state
-        .context
-        .connection_service
-        .list_active_connections()
-        .await
-    {
-        Ok(connections) => connections.len(),
-        Err(e) => {
-            warn!(error = %e, "Failed to list active connections for status endpoint");
-            if !degraded.contains(&"connections".to_string()) {
-                degraded.push("connections".to_string());
-            }
-            0
-        }
-    };
-
-    // Get total events count
-    let total_events = match state.event_repository.count_all().await {
-        Ok(count) => count,
-        Err(e) => {
-            warn!(error = %e, "Failed to count events for status endpoint");
-            degraded.push("events".to_string());
-            0
-        }
-    };
-
-    // Get process metrics
-    let process_metrics = get_process_metrics();
-
-    // Get MCP clients
-    let mcp_clients = state.get_mcp_clients().await;
-
-    // Get daemon info
-    let daemon = state.get_daemon_info();
-
-    // Get started timestamp
-    let started_at = state.started_at();
+    let s = crate::system_status::gather_system_status(&state).await;
 
     Json(StatusResponse {
-        status: if adapter_connected {
-            status::ACTIVE.to_string()
-        } else {
-            "idle".to_string()
-        },
-        uptime_seconds,
-        uptime_formatted: format_uptime(uptime_seconds),
-        started_at,
-        adapter_connected,
-        active_metrics,
-        total_metrics,
-        total_events,
-        active_connections,
-        total_connections,
-        cpu_usage_percent: process_metrics.cpu_usage_percent,
-        memory_usage_bytes: process_metrics.memory_usage_bytes,
-        daemon,
-        mcp_clients,
-        degraded,
+        status: s.mode.to_string(),
+        uptime_seconds: s.uptime_seconds,
+        uptime_formatted: s.uptime_formatted,
+        started_at: s.started_at,
+        adapter_connected: s.adapter_connected,
+        active_metrics: s.active_metrics,
+        total_metrics: s.total_metrics,
+        total_events: s.total_events,
+        active_connections: s.active_connections,
+        total_connections: s.total_connections,
+        cpu_usage_percent: s.process_metrics.cpu_usage_percent,
+        memory_usage_bytes: s.process_metrics.memory_usage_bytes,
+        daemon: s.daemon,
+        mcp_clients: s.mcp_clients,
+        degraded: s.degraded,
     })
 }

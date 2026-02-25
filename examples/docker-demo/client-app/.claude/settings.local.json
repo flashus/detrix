@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__detrix__list_connections",
+      "Bash(docker ps:*)",
+      "mcp__detrix__wake",
+      "mcp__detrix__get_status",
+      "mcp__detrix__get_config",
+      "Bash(docker-compose ps:*)",
+      "Bash(curl:*)",
+      "Bash(grpcurl:*)",
+      "mcp__detrix__observe",
+      "mcp__detrix__query_metrics",
+      "mcp__detrix__get_connection",
+      "mcp__detrix__inspect_file",
+      "Skill(detrix)",
+      "mcp__detrix__disable_group",
+      "mcp__detrix__add_metric",
+      "mcp__detrix__remove_metric",
+      "mcp__detrix__list_metrics",
+      "mcp__detrix__list_groups"
+    ]
+  }
+}

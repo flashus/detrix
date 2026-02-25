@@ -9,11 +9,11 @@
 
 use crate::mcp::{
     AcknowledgeEventsParams, AddMetricParams, CloseConnectionParams, CreateConnectionParams,
-    DetrixServer, EnableFromDiffParams, GetConfigParams, GetConnectionParams, GetMetricParams,
-    GroupParams, InspectFileParams, ListConnectionsParams, ListGroupsParams, ListMetricsParams,
-    ObserveParams, QueryMetricsParams, QuerySystemEventsParams, RemoveMetricParams,
-    ToggleMetricParams, UpdateConfigParams, UpdateMetricParams, ValidateConfigParams,
-    ValidateExpressionParams,
+    DetrixServer, DisconnectAllParams, EnableFromDiffParams, GetConfigParams, GetConnectionParams,
+    GetMetricParams, GroupParams, InspectFileParams, ListConnectionsParams, ListGroupsParams,
+    ListMetricsParams, ObserveParams, QueryMetricsParams, QuerySystemEventsParams,
+    RemoveMetricParams, SleepParams, ToggleMetricParams, UpdateConfigParams, UpdateMetricParams,
+    ValidateConfigParams, ValidateExpressionParams, WakeParams,
 };
 use crate::mcp_client_tracker::{McpClientId, ParentProcessInfo};
 use crate::state::ApiState;
@@ -22,6 +22,10 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
+};
+use detrix_config::constants::{
+    HEADER_BRIDGE_PID, HEADER_FILE_SERVER_TOKEN, HEADER_FILE_SERVER_URL, HEADER_PARENT_NAME,
+    HEADER_PARENT_PID,
 };
 use rmcp::ServerHandler;
 use serde_json::Value;
@@ -36,17 +40,17 @@ use tracing::{debug, error, info};
 /// - `X-Detrix-Bridge-Pid`: Bridge process ID (the MCP bridge process)
 fn extract_parent_process_info(headers: &HeaderMap) -> Option<ParentProcessInfo> {
     let parent_pid = headers
-        .get("X-Detrix-Parent-Pid")
+        .get(HEADER_PARENT_PID)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok())?;
 
     let parent_name = headers
-        .get("X-Detrix-Parent-Name")
+        .get(HEADER_PARENT_NAME)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())?;
 
     let bridge_pid = headers
-        .get("X-Detrix-Bridge-Pid")
+        .get(HEADER_BRIDGE_PID)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok())?;
 
@@ -75,7 +79,7 @@ fn extract_parent_process_info(headers: &HeaderMap) -> Option<ParentProcessInfo>
 /// ```ignore
 /// http_tool_router!(mcp_server, arguments, tool_name,
 ///     // Tools without parameters
-///     { wake, sleep, get_status },
+///     { get_status },
 ///     // Tools with parameters: tool_name => ParamType
 ///     { add_metric => AddMetricParams, remove_metric => RemoveMetricParams }
 /// )
@@ -92,7 +96,7 @@ macro_rules! http_tool_router {
     ) => {
         paste::paste! {
             match $tool_name {
-                // No-param tools: "wake" => mcp_server.call_wake().await
+                // No-param tools: "get_status" => mcp_server.call_get_status().await
                 $(
                     stringify!($no_param) => $server.[<call_ $no_param>]().await,
                 )*
@@ -129,14 +133,15 @@ macro_rules! http_router_tool_names {
 pub const HTTP_ROUTER_TOOLS: &[&str] = http_router_tool_names!(
     // Tools without parameters (must match http_tool_router! below)
     {
-        wake,
-        sleep,
         get_status,
         reload_config,
         get_mcp_usage
     },
     // Tools with parameters (must match http_tool_router! below)
     {
+        wake => (),
+        sleep => (),
+        disconnect_all => (),
         add_metric => (),
         remove_metric => (),
         toggle_metric => (),
@@ -178,7 +183,7 @@ pub async fn mcp_handler(
     debug!("MCP HTTP: Request payload: {:?}", payload);
 
     // Track MCP client activity for daemon lifecycle management
-    if let Some(client_id_header) = headers.get("X-Detrix-Client-Id") {
+    if let Some(client_id_header) = headers.get(crate::common::CLIENT_ID_HEADER) {
         if let Ok(client_id_str) = client_id_header.to_str() {
             let client_id = McpClientId::from_string(client_id_str);
 
@@ -200,6 +205,27 @@ pub async fn mcp_handler(
         }
     }
 
+    // Extract bridge file server URL + token if present and update bridge source.
+    // The token lets the daemon authenticate with the bridge's file server,
+    // which is required when the daemon runs inside Docker (different process,
+    // no shared auth-token file).
+    if let Some(file_server_header) = headers.get(HEADER_FILE_SERVER_URL) {
+        if let Ok(url) = file_server_header.to_str() {
+            if let Some(ref bridge_source) = state.bridge_file_source {
+                bridge_source.set_bridge_url(Some(url.to_string()));
+                debug!("MCP HTTP: Bridge file server URL set: {}", url);
+            }
+        }
+    }
+    if let Some(fs_token_header) = headers.get(HEADER_FILE_SERVER_TOKEN) {
+        if let Ok(token) = fs_token_header.to_str() {
+            if let Some(ref bridge_source) = state.bridge_file_source {
+                bridge_source.set_bridge_token(Some(token.to_string()));
+                debug!("MCP HTTP: Bridge file server token set");
+            }
+        }
+    }
+
     // Validate JSON-RPC 2.0 format
     let jsonrpc_version = payload.get("jsonrpc").and_then(|v| v.as_str());
     if jsonrpc_version != Some("2.0") {
@@ -209,8 +235,10 @@ pub async fn mcp_handler(
         ));
     }
 
-    // Create MCP server instance
-    let mcp_server = DetrixServer::new(Arc::clone(&state));
+    // Create MCP server instance with client identity from header (if present)
+    // Uses shared validation (rejects empty, reserved "__daemon__")
+    let client_id = crate::common::extract_client_id_from_headers(&headers).unwrap_or(None);
+    let mcp_server = DetrixServer::with_client_id(Arc::clone(&state), client_id);
 
     // Parse the method from the request
     let method = payload.get("method").and_then(|v| v.as_str());
@@ -292,7 +320,7 @@ pub async fn mcp_heartbeat_handler(
     headers: HeaderMap,
 ) -> StatusCode {
     // Track MCP client activity
-    if let Some(client_id_header) = headers.get("X-Detrix-Client-Id") {
+    if let Some(client_id_header) = headers.get(crate::common::CLIENT_ID_HEADER) {
         if let Ok(client_id_str) = client_id_header.to_str() {
             let client_id = McpClientId::from_string(client_id_str);
             state.mcp_client_tracker.touch(&client_id).await;
@@ -302,7 +330,10 @@ pub async fn mcp_heartbeat_handler(
     }
 
     // No client ID provided
-    debug!("MCP heartbeat: Missing X-Detrix-Client-Id header");
+    debug!(
+        "MCP heartbeat: Missing {} header",
+        crate::common::CLIENT_ID_HEADER
+    );
     StatusCode::BAD_REQUEST
 }
 
@@ -317,18 +348,44 @@ pub async fn mcp_disconnect_handler(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
 ) -> StatusCode {
-    // Unregister MCP client
-    if let Some(client_id_header) = headers.get("X-Detrix-Client-Id") {
+    // Unregister MCP client and release all connection references
+    if let Some(client_id_header) = headers.get(crate::common::CLIENT_ID_HEADER) {
         if let Ok(client_id_str) = client_id_header.to_str() {
             let client_id = McpClientId::from_string(client_id_str);
             state.mcp_client_tracker.unregister(&client_id).await;
-            info!("MCP disconnect: Client unregistered: {}", client_id_str);
+
+            // Release all connection references held by this client
+            let client_identity =
+                detrix_core::connection_reference::ClientIdentity::bridge(client_id_str);
+            match state
+                .context
+                .connection_service
+                .release_all_client_references(&client_identity)
+                .await
+            {
+                Ok((released, disconnected)) => {
+                    info!(
+                        "MCP disconnect: Client unregistered: {}, released {} refs, disconnected {} connections",
+                        client_id_str, released, disconnected
+                    );
+                }
+                Err(e) => {
+                    info!(
+                        "MCP disconnect: Client unregistered: {}, failed to release refs: {}",
+                        client_id_str, e
+                    );
+                }
+            }
+
             return StatusCode::OK;
         }
     }
 
     // No client ID provided
-    debug!("MCP disconnect: Missing X-Detrix-Client-Id header");
+    debug!(
+        "MCP disconnect: Missing {} header",
+        crate::common::CLIENT_ID_HEADER
+    );
     StatusCode::BAD_REQUEST
 }
 
@@ -376,14 +433,15 @@ async fn handle_tools_call(mcp_server: DetrixServer, id: Option<Value>, params: 
     let result = http_tool_router!(mcp_server, arguments, tool_name,
         // Tools without parameters
         {
-            wake,
-            sleep,
             get_status,
             reload_config,
             get_mcp_usage
         },
         // Tools with parameters: tool_name => ParamType
         {
+            wake => WakeParams,
+            sleep => SleepParams,
+            disconnect_all => DisconnectAllParams,
             add_metric => AddMetricParams,
             remove_metric => RemoveMetricParams,
             toggle_metric => ToggleMetricParams,
@@ -523,7 +581,6 @@ mod tests {
         let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(tool_names.contains(&"add_metric"));
         assert!(tool_names.contains(&"list_metrics"));
-        assert!(tool_names.contains(&"wake"));
         assert!(tool_names.contains(&"create_connection"));
     }
 
@@ -552,14 +609,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mcp_handler_tools_call_wake() {
+    async fn test_mcp_handler_tools_call_get_status() {
         let (state, _temp_dir) = create_test_state().await;
 
         let request = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "tools/call",
             "params": {
-                "name": "wake",
+                "name": "get_status",
                 "arguments": {}
             },
             "id": 1
@@ -567,7 +624,7 @@ mod tests {
 
         let headers = HeaderMap::new();
         let result = mcp_handler(State(state), headers, Json(request)).await;
-        assert!(result.is_ok(), "tools/call wake should succeed");
+        assert!(result.is_ok(), "tools/call get_status should succeed");
 
         let response = result.unwrap().0;
         assert_eq!(response["jsonrpc"], "2.0");
@@ -632,7 +689,10 @@ mod tests {
 
         // Create headers with client ID
         let mut headers = HeaderMap::new();
-        headers.insert("X-Detrix-Client-Id", "test-client-123".parse().unwrap());
+        headers.insert(
+            crate::common::CLIENT_ID_HEADER,
+            "test-client-123".parse().unwrap(),
+        );
 
         let result = mcp_handler(State(Arc::clone(&state)), headers, Json(request)).await;
         assert!(result.is_ok());

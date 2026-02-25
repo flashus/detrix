@@ -5,6 +5,15 @@ use std::fs;
 use std::net::IpAddr;
 use std::path::Path;
 
+/// Filename for the auto-generated auth token.
+const AUTH_TOKEN_FILENAME: &str = "auth-token";
+
+/// HTTP Authorization header name.
+pub const AUTHORIZATION_HEADER: &str = "Authorization";
+
+/// Bearer token prefix for Authorization headers.
+pub const BEARER_PREFIX: &str = "Bearer ";
+
 use subtle::ConstantTimeEq;
 
 /// Check token file permissions on Unix systems.
@@ -38,8 +47,8 @@ fn check_token_file_permissions(path: &Path) {
 ///
 /// Priority:
 /// 1. DETRIX_TOKEN environment variable
-/// 2. ~/detrix/mcp-token file
-/// 3. {detrix_home}/mcp-token file (if provided)
+/// 2. ~/detrix/auth-token file
+/// 3. {detrix_home}/auth-token file (if provided)
 pub fn discover_token(detrix_home: Option<&Path>) -> Option<String> {
     // 1. Check environment variable
     if let Ok(token) = env::var("DETRIX_TOKEN") {
@@ -48,9 +57,9 @@ pub fn discover_token(detrix_home: Option<&Path>) -> Option<String> {
         }
     }
 
-    // 2. Try ~/detrix/mcp-token
+    // 2. Try ~/detrix/auth-token
     if let Some(home) = dirs::home_dir() {
-        let token_path = home.join("detrix").join("mcp-token");
+        let token_path = home.join("detrix").join(AUTH_TOKEN_FILENAME);
         check_token_file_permissions(&token_path);
         if let Ok(token) = fs::read_to_string(&token_path) {
             let token = token.trim().to_string();
@@ -62,7 +71,7 @@ pub fn discover_token(detrix_home: Option<&Path>) -> Option<String> {
 
     // 3. Try custom detrix home
     if let Some(home) = detrix_home {
-        let token_path = home.join("mcp-token");
+        let token_path = home.join(AUTH_TOKEN_FILENAME);
         check_token_file_permissions(&token_path);
         if let Ok(token) = fs::read_to_string(&token_path) {
             let token = token.trim().to_string();
@@ -146,12 +155,11 @@ pub fn is_authorized(
     };
 
     // Parse Bearer token
-    const PREFIX: &str = "Bearer ";
-    if !auth_header.starts_with(PREFIX) {
+    if !auth_header.starts_with(BEARER_PREFIX) {
         return false;
     }
 
-    let token = &auth_header[PREFIX.len()..];
+    let token = &auth_header[BEARER_PREFIX.len()..];
 
     // Constant-time comparison to prevent timing attacks
     token.as_bytes().ct_eq(valid_token.as_bytes()).into()
@@ -273,13 +281,13 @@ mod tests {
         let orig = std::env::var("DETRIX_TOKEN").ok();
         std::env::remove_var("DETRIX_TOKEN");
 
-        // Note: discover_token checks ~/detrix/mcp-token first (priority 2),
-        // then the custom detrix_home (priority 3). If ~/detrix/mcp-token exists,
+        // Note: discover_token checks ~/detrix/auth-token first (priority 2),
+        // then the custom detrix_home (priority 3). If ~/detrix/auth-token exists,
         // it will be returned first. This test verifies that the custom home IS
         // checked by ensuring the token returned is valid (either from default home
         // or custom home).
         let temp_dir = TempDir::new().unwrap();
-        let token_path = temp_dir.path().join("mcp-token");
+        let token_path = temp_dir.path().join(AUTH_TOKEN_FILENAME);
         let mut file = std::fs::File::create(&token_path).unwrap();
         writeln!(file, "file-token-456").unwrap();
 
@@ -306,7 +314,7 @@ mod tests {
         std::env::remove_var("DETRIX_TOKEN");
 
         let temp_dir = TempDir::new().unwrap();
-        let token_path = temp_dir.path().join("mcp-token");
+        let token_path = temp_dir.path().join(AUTH_TOKEN_FILENAME);
         let mut file = std::fs::File::create(&token_path).unwrap();
         writeln!(file, "  token-with-spaces  \n").unwrap();
 
@@ -337,7 +345,7 @@ mod tests {
         // Set up both env and file
         std::env::set_var("DETRIX_TOKEN", "env-token");
         let temp_dir = TempDir::new().unwrap();
-        let token_path = temp_dir.path().join("mcp-token");
+        let token_path = temp_dir.path().join(AUTH_TOKEN_FILENAME);
         let mut file = std::fs::File::create(&token_path).unwrap();
         writeln!(file, "file-token").unwrap();
 
@@ -370,7 +378,7 @@ mod tests {
             None => std::env::remove_var("DETRIX_TOKEN"),
         }
 
-        // Result depends on whether ~/detrix/mcp-token exists
+        // Result depends on whether ~/detrix/auth-token exists
         // Just verify no panic and empty env was ignored
         assert!(token.is_none() || token.is_some());
     }

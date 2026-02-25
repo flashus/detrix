@@ -6,7 +6,7 @@ use super::adapter_lifecycle_manager::{AdapterLifecycleManager, ManagedAdapterSt
 use crate::ports::{
     ConnectionRepository, ConnectionRepositoryRef, DapAdapter, DapAdapterFactory,
     DapAdapterFactoryRef, DapAdapterRef, EventRepository, MetricRepository, MetricRepositoryRef,
-    RemoveMetricResult, SetMetricResult,
+    RemoveMetricResult, SetMetricResult, VfsRef,
 };
 use crate::services::EventCaptureService;
 use async_trait::async_trait;
@@ -14,7 +14,7 @@ use detrix_config::constants::DEFAULT_EVENT_FLUSH_INTERVAL_MS;
 use detrix_core::{
     Connection, ConnectionId, Metric, MetricEvent, MetricId, Result, SourceLanguage, SystemEvent,
 };
-use detrix_testing::MockConnectionRepository;
+use detrix_testing::{MockConnectionRepository, MockVfs};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -413,6 +413,10 @@ impl MetricRepository for MockMetricRepository {
     async fn delete_by_connection_id(&self, _connection_id: &ConnectionId) -> Result<u64> {
         Ok(0)
     }
+
+    async fn migrate_connection_id(&self, _from: &ConnectionId, _to: &ConnectionId) -> Result<u64> {
+        Ok(0)
+    }
 }
 
 // =============================================================================
@@ -458,6 +462,7 @@ async fn create_test_manager() -> (
     let adapter_factory = Arc::new(MockDapAdapterFactory::new());
     let metric_repo = Arc::new(MockMetricRepository::new());
     let connection_repo = Arc::new(MockConnectionRepository::new());
+    let vfs: VfsRef = Arc::new(MockVfs::new());
 
     let manager = AdapterLifecycleManager::new(
         event_capture,
@@ -466,6 +471,7 @@ async fn create_test_manager() -> (
         Arc::clone(&adapter_factory) as DapAdapterFactoryRef,
         metric_repo as MetricRepositoryRef,
         connection_repo as ConnectionRepositoryRef,
+        vfs,
     );
 
     (manager, event_repo, adapter_factory)
@@ -489,6 +495,7 @@ async fn create_test_manager_with_adapter(
     )));
     let metric_repo = Arc::new(MockMetricRepository::new());
     let connection_repo = Arc::new(MockConnectionRepository::new());
+    let vfs: VfsRef = Arc::new(MockVfs::new());
 
     let manager = AdapterLifecycleManager::new(
         event_capture,
@@ -497,6 +504,7 @@ async fn create_test_manager_with_adapter(
         adapter_factory as DapAdapterFactoryRef,
         metric_repo as MetricRepositoryRef,
         connection_repo as ConnectionRepositoryRef,
+        vfs,
     );
 
     (manager, event_repo, adapter)
@@ -736,6 +744,7 @@ async fn test_event_broadcast_to_subscribers() {
     )));
     let metric_repo = Arc::new(MockMetricRepository::new());
     let connection_repo = Arc::new(MockConnectionRepository::new());
+    let vfs: VfsRef = Arc::new(MockVfs::new());
 
     let (system_event_tx, _) = broadcast::channel::<SystemEvent>(100);
     let manager = AdapterLifecycleManager::new(
@@ -745,6 +754,7 @@ async fn test_event_broadcast_to_subscribers() {
         adapter_factory as DapAdapterFactoryRef,
         metric_repo as MetricRepositoryRef,
         connection_repo as ConnectionRepositoryRef,
+        vfs,
     );
 
     let conn_id = ConnectionId::new("test-conn");
@@ -935,6 +945,7 @@ async fn create_test_manager_with_connection_repo() -> (
     let adapter_factory = Arc::new(MockDapAdapterFactory::new());
     let metric_repo = Arc::new(MockMetricRepository::new());
     let connection_repo = Arc::new(MockConnectionRepository::new());
+    let vfs: VfsRef = Arc::new(MockVfs::new());
 
     let manager = AdapterLifecycleManager::new(
         event_capture,
@@ -943,6 +954,7 @@ async fn create_test_manager_with_connection_repo() -> (
         Arc::clone(&adapter_factory) as DapAdapterFactoryRef,
         metric_repo as MetricRepositoryRef,
         Arc::clone(&connection_repo) as ConnectionRepositoryRef,
+        vfs,
     );
 
     (manager, connection_repo, adapter_factory)
@@ -1219,6 +1231,7 @@ mod proptest_batching {
         let adapter_factory = Arc::new(MockDapAdapterFactory::new());
         let metric_repo = Arc::new(MockMetricRepository::new());
         let connection_repo = Arc::new(MockConnectionRepository::new());
+        let vfs: VfsRef = Arc::new(MockVfs::new());
 
         // Create batching config with disabled timer (we'll flush explicitly)
         let batching_config = EventBatchingConfig {
@@ -1239,6 +1252,7 @@ mod proptest_batching {
             Default::default(),
             DaemonConfig::default().drain_timeout_ms,
             None, // No GELF output in tests
+            vfs,
         );
 
         (manager, event_repo)

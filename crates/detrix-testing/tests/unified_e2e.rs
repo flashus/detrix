@@ -36,6 +36,8 @@
 use detrix_testing::e2e::unified::*;
 #[allow(unused_imports)]
 use detrix_testing::generate_tests_all_backends;
+#[allow(unused_imports)]
+use detrix_testing::generate_tests_single_backend;
 
 // ============================================================================
 // BASIC TESTS - Run on all backends (MCP, gRPC, REST)
@@ -47,9 +49,6 @@ generate_tests_all_backends! {
         // Health & Status
         health_check => scenario_health_check,
         get_status => scenario_get_status,
-        wake => scenario_wake,
-        sleep => scenario_sleep,
-        wake_sleep_cycle => scenario_wake_sleep_cycle,
 
         // Lists (empty results are OK)
         list_connections => scenario_list_connections,
@@ -97,6 +96,17 @@ generate_tests_all_backends! {
 }
 
 // ============================================================================
+// DISCONNECT_ALL TESTS - Server-side operation (all backends)
+// Wake/sleep require a remote app URL and mock server — tested separately.
+// ============================================================================
+
+generate_tests_all_backends! {
+    basic: [
+        disconnect_all => scenario_disconnect_all,
+    ]
+}
+
+// ============================================================================
 // DEBUGPY TESTS - Run on all backends (MCP, gRPC, REST)
 // Requires debugpy to be started
 // ============================================================================
@@ -133,6 +143,7 @@ generate_tests_all_backends! {
 
 mod dap_workflow_tests {
     use detrix_application::services::file_inspection_types::SourceLanguageExt;
+    use detrix_testing::e2e::dap_scenarios::go_lines;
     use detrix_testing::e2e::dap_scenarios::{DapWorkflowConfig, DapWorkflowScenarios};
     use detrix_testing::e2e::executor::TestExecutor;
     use detrix_testing::e2e::mcp::McpClient;
@@ -375,11 +386,18 @@ mod dap_workflow_tests {
 
         // Metric 1: Simple variable (logpoint mode) - line 117 where 'symbol' is assigned
         // This will use logpoint (setBreakpoints with logMessage)
-        // Use line 122 (orderID := placeOrder) where symbol is in scope
-        let location1 = format!("@{}#122", script_path.display());
+        // Use the orderID declaration slot — symbol is already in scope at that line
+        let location1 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::CODEMAP.find_decl("orderID")
+        );
         let step = reporter.step_start(
             "Add Logpoint Metric",
-            "Add simple variable 'symbol' at line 122 (logpoint mode)",
+            &format!(
+                "Add simple variable 'symbol' at line {} (logpoint mode)",
+                go_lines::CODEMAP.find_decl("orderID")
+            ),
         );
 
         let mut request1 =
@@ -399,11 +417,18 @@ mod dap_workflow_tests {
         // Metric 2: Function call (breakpoint mode) - line 127 where pnl is calculated
         // This will use breakpoint (pauses execution) because it's a function call
         // Using len() which is a non-variadic function that Delve supports
-        // Use line 127 (pnl := calculatePnl) which is a function call
-        let location2 = format!("@{}#127", script_path.display());
+        // Use the pnl declaration slot (pnl := calculatePnl) which is a function call
+        let location2 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::CODEMAP.find_decl("pnl")
+        );
         let step = reporter.step_start(
             "Add Breakpoint Metric",
-            "Add function 'len(symbol)' at line 127 (breakpoint mode)",
+            &format!(
+                "Add function 'len(symbol)' at line {} (breakpoint mode)",
+                go_lines::CODEMAP.find_decl("pnl")
+            ),
         );
 
         let mut request2 = AddMetricRequest::new(
@@ -583,12 +608,19 @@ mod dap_workflow_tests {
         // ====================================================================
         reporter.section("PHASE 2: ADD METRICS (2 LOGPOINTS + 2 BREAKPOINTS)");
 
-        // Metric 1: LOGPOINT — simple variable 'symbol' at line 118
-        // symbol is assigned on line 117, in scope from line 118
-        let location1 = format!("@{}#118", script_path.display());
+        // Metric 1: LOGPOINT — simple variable 'symbol' at the quantity declaration slot
+        // symbol is assigned earlier and is in scope at the quantity declaration line
+        let location1 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::CODEMAP.find_decl("quantity")
+        );
         let step = reporter.step_start(
             "Add Logpoint #1",
-            "order_symbol: simple variable 'symbol' at line 118 (LOGPOINT)",
+            &format!(
+                "order_symbol: simple variable 'symbol' at line {} (LOGPOINT)",
+                go_lines::CODEMAP.find_decl("quantity")
+            ),
         );
         let mut req1 = AddMetricRequest::new("order_symbol", &location1, "symbol", &connection_id);
         req1.language = Some("go".to_string());
@@ -600,12 +632,19 @@ mod dap_workflow_tests {
             }
         }
 
-        // Metric 2: LOGPOINT — simple variable 'pnl' at line 130
-        // pnl is assigned on line 127, in scope from line 128
-        let location2 = format!("@{}#130", script_path.display());
+        // Metric 2: LOGPOINT — simple variable 'pnl' at the totalPnl slot
+        // pnl is assigned earlier and is in scope at the totalPnl declaration line
+        let location2 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::CODEMAP.find_decl("totalPnl")
+        );
         let step = reporter.step_start(
             "Add Logpoint #2",
-            "pnl_value: simple variable 'pnl' at line 130 (LOGPOINT)",
+            &format!(
+                "pnl_value: simple variable 'pnl' at line {} (LOGPOINT)",
+                go_lines::CODEMAP.find_decl("totalPnl")
+            ),
         );
         let mut req2 = AddMetricRequest::new("pnl_value", &location2, "pnl", &connection_id);
         req2.language = Some("go".to_string());
@@ -617,12 +656,19 @@ mod dap_workflow_tests {
             }
         }
 
-        // Metric 3: BREAKPOINT — Go function call len(symbol) at line 122
+        // Metric 3: BREAKPOINT — Go function call len(symbol) at the orderID declaration slot
         // symbol is in scope; len() is a non-variadic function Delve supports via "call" prefix
-        let location3 = format!("@{}#122", script_path.display());
+        let location3 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::CODEMAP.find_decl("orderID")
+        );
         let step = reporter.step_start(
             "Add Breakpoint #1",
-            "symbol_length: function call 'len(symbol)' at line 122 (BREAKPOINT)",
+            &format!(
+                "symbol_length: function call 'len(symbol)' at line {} (BREAKPOINT)",
+                go_lines::CODEMAP.find_decl("orderID")
+            ),
         );
         let mut req3 =
             AddMetricRequest::new("symbol_length", &location3, "len(symbol)", &connection_id);
@@ -635,12 +681,16 @@ mod dap_workflow_tests {
             }
         }
 
-        // Metric 4: BREAKPOINT — simple variable with stack trace at line 126
-        // entryPrice assigned on line 125, in scope from line 126
-        let location4 = format!("@{}#126", script_path.display());
+        // Metric 4: BREAKPOINT — simple variable with stack trace at the currentPrice declaration slot
+        // entryPrice is assigned earlier and is in scope at the currentPrice declaration line
+        let location4 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::CODEMAP.find_decl("currentPrice")
+        );
         let step = reporter.step_start(
             "Add Breakpoint #2",
-            "entry_price_with_stack: 'entryPrice' with captureStackTrace at line 126 (BREAKPOINT)",
+            &format!("entry_price_with_stack: 'entryPrice' with captureStackTrace at line {} (BREAKPOINT)", go_lines::CODEMAP.find_decl("currentPrice")),
         );
         let mut req4 = AddMetricRequest::new(
             "entry_price_with_stack",
@@ -955,7 +1005,11 @@ mod dap_workflow_tests {
         reporter.section("PART A: REMOVE BREAKPOINT, VERIFY LOGPOINT SURVIVES");
 
         // Add logpoint metric (simple variable)
-        let location1 = format!("@{}#122", script_path.display());
+        let location1 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::CODEMAP.find_decl("orderID")
+        );
         let mut req1 = AddMetricRequest::new("lp_symbol", &location1, "symbol", &connection_id);
         req1.language = Some("go".to_string());
         client
@@ -964,7 +1018,11 @@ mod dap_workflow_tests {
             .expect("Failed to add logpoint metric");
 
         // Add breakpoint metric (introspection)
-        let location2 = format!("@{}#130", script_path.display());
+        let location2 = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::CODEMAP.find_decl("totalPnl")
+        );
         let mut req2 = AddMetricRequest::new("bp_order", &location2, "orderID", &connection_id);
         req2.language = Some("go".to_string());
         req2.capture_stack_trace = Some(true);
@@ -1064,11 +1122,18 @@ mod dap_workflow_tests {
         // =====================================================================
         reporter.section("PART B: REMOVE LOGPOINT, VERIFY BREAKPOINT SURVIVES");
 
-        // Add logpoint metric
+        // Add logpoint metric.
+        // Use pnl declaration slot (find_decl("pnl")), but measure "currentPrice" —
+        // pnl is NOT in scope at its own declaration line (Delve fires before the RHS
+        // executes), while currentPrice was assigned one statement earlier and IS in scope.
         let mut req3 = AddMetricRequest::new(
-            "lp_pnl",
-            &format!("@{}#127", script_path.display()),
-            "pnl",
+            "lp_current_price",
+            &format!(
+                "@{}#{}",
+                script_path.display(),
+                go_lines::CODEMAP.find_decl("pnl")
+            ),
+            "currentPrice",
             &connection_id,
         );
         req3.language = Some("go".to_string());
@@ -1080,7 +1145,11 @@ mod dap_workflow_tests {
         // Add breakpoint metric
         let mut req4 = AddMetricRequest::new(
             "bp_entry_price",
-            &format!("@{}#130", script_path.display()),
+            &format!(
+                "@{}#{}",
+                script_path.display(),
+                go_lines::CODEMAP.find_decl("totalPnl")
+            ),
             "entryPrice",
             &connection_id,
         );
@@ -1097,7 +1166,7 @@ mod dap_workflow_tests {
         let mut bp_count = 0;
         for _ in 0..15 {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            if let Ok(r) = client.query_events("lp_pnl", 10).await {
+            if let Ok(r) = client.query_events("lp_current_price", 10).await {
                 lp_count = r.data.len();
             }
             if let Ok(r) = client.query_events("bp_entry_price", 10).await {
@@ -1126,10 +1195,10 @@ mod dap_workflow_tests {
         // Remove the logpoint metric
         let step = reporter.step_start("Remove Logpoint", "Remove logpoint metric");
         client
-            .remove_metric("lp_pnl")
+            .remove_metric("lp_current_price")
             .await
             .expect("Failed to remove logpoint metric");
-        reporter.step_success(step, Some("Removed lp_pnl"));
+        reporter.step_success(step, Some("Removed lp_current_price"));
 
         // Record baseline for breakpoint
         let baseline = if let Ok(r) = client.query_events("bp_entry_price", 100).await {
@@ -1247,8 +1316,12 @@ mod dap_workflow_tests {
         // Step 2: Add metric with variadic function (should fail)
         reporter.section("PHASE 2: ADD VARIADIC FUNCTION METRIC");
 
-        // Use a line where 'symbol' is in scope (line 122 after it's assigned on 117)
-        let location = format!("@{}#122", script_path.display());
+        // Use the orderID declaration slot — symbol is already in scope at that line
+        let location = format!(
+            "@{}#{}",
+            script_path.display(),
+            go_lines::CODEMAP.find_decl("orderID")
+        );
 
         let step = reporter.step_start(
             "Add Variadic Metric",
@@ -1394,8 +1467,9 @@ mod dap_workflow_tests {
         let client = McpClient::new(executor.http_port);
         let config = DapWorkflowConfig::rust();
 
-        // For Rust workflow, we need the source file path for the config
-        let source_file = std::path::PathBuf::from(&config.source_file);
+        // Use absolute path (relative paths resolve against connection workspace_root
+        // which defaults to /unknown when not provided by MCP client)
+        let source_file = executor.workspace_root.join(&config.source_file);
 
         // When using lldb-serve, don't pass program_path (lldb-serve handles launch)
         match DapWorkflowScenarios::run_workflow(
@@ -1484,8 +1558,9 @@ mod dap_workflow_tests {
         let client = McpClient::new(executor.http_port);
         let config = DapWorkflowConfig::rust();
 
-        // For Rust workflow, we need the source file path for the config
-        let source_file = std::path::PathBuf::from(&config.source_file);
+        // Use absolute path (relative paths resolve against connection workspace_root
+        // which defaults to /unknown when not provided by MCP client)
+        let source_file = executor.workspace_root.join(&config.source_file);
 
         // When using lldb-serve (proxy mode), don't pass program_path
         // lldb-serve already handles launching the program
@@ -4193,6 +4268,7 @@ mod error_handling_tests {
 
 mod observe_workflow_tests {
     use detrix_testing::e2e::client::{ApiClient, ObserveRequest};
+    use detrix_testing::e2e::dap_scenarios::go_lines;
     use detrix_testing::e2e::dap_scenarios::DapWorkflowConfig;
     use detrix_testing::e2e::executor::TestExecutor;
     use detrix_testing::e2e::mcp::McpClient;
@@ -4562,15 +4638,18 @@ mod observe_workflow_tests {
         reporter.section("STEP 5: OBSERVE GO VARIABLES");
         let step = reporter.step_start(
             "Observe (Go)",
-            "Using observe tool on line 127 (all variables in scope)",
+            &format!(
+                "Using observe tool on line {} (all variables in scope)",
+                go_lines::CODEMAP.find_decl("pnl")
+            ),
         );
         reporter.info(&format!("  File: {}", source_path.display()));
         reporter.info("  Expression: orderID");
-        reporter.info("  Line: 127");
+        reporter.info(&format!("  Line: {}", go_lines::CODEMAP.find_decl("pnl")));
 
-        // Line 127 is `pnl := calculatePnl(...)` where all variables are in scope
+        // find_decl("pnl") is `pnl := calculatePnl(...)` where all variables are in scope
         let observe_request = ObserveRequest::new(source_path.to_str().unwrap(), "orderID")
-            .with_line(127)
+            .with_line(go_lines::CODEMAP.find_decl("pnl"))
             .with_connection_id(&connection_id)
             .with_name("observe_go_orderid");
 

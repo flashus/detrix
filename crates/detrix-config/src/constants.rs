@@ -29,6 +29,10 @@
 /// Default host for API servers (localhost only for security)
 pub const DEFAULT_API_HOST: &str = "127.0.0.1";
 
+/// Docker internal host — used when bridge connects to a daemon running in Docker.
+/// Resolves to the Docker host machine from within a container.
+pub const DOCKER_INTERNAL_HOST: &str = "host.docker.internal";
+
 /// Default host as IPv4 address (for direct socket connections)
 pub const LOCALHOST_IPV4: std::net::Ipv4Addr = std::net::Ipv4Addr::new(127, 0, 0, 1);
 
@@ -38,6 +42,41 @@ pub const LOCALHOST_IPV4: std::net::Ipv4Addr = std::net::Ipv4Addr::new(127, 0, 0
 
 /// Auth token for daemon communication
 pub const ENV_DETRIX_TOKEN: &str = "DETRIX_TOKEN";
+
+// ============================================================================
+// HTTP AUTH PROTOCOL CONSTANTS
+// ============================================================================
+
+/// HTTP Authorization header name.
+pub const AUTHORIZATION_HEADER: &str = "Authorization";
+
+/// gRPC metadata key for authorization (lowercase per gRPC convention).
+pub const AUTHORIZATION_METADATA_KEY: &str = "authorization";
+
+/// Bearer token prefix for Authorization headers.
+pub const BEARER_PREFIX: &str = "Bearer ";
+
+// ============================================================================
+// MCP BRIDGE HTTP HEADERS
+// ============================================================================
+
+/// HTTP header carrying the parent process PID for the MCP bridge session.
+pub const HEADER_PARENT_PID: &str = "X-Detrix-Parent-Pid";
+
+/// HTTP header carrying the parent process name for the MCP bridge session.
+pub const HEADER_PARENT_NAME: &str = "X-Detrix-Parent-Name";
+
+/// HTTP header carrying the bridge process PID.
+pub const HEADER_BRIDGE_PID: &str = "X-Detrix-Bridge-Pid";
+
+/// HTTP header carrying the file server URL for bridge file serving.
+pub const HEADER_FILE_SERVER_URL: &str = "X-Detrix-File-Server-Url";
+
+/// HTTP header carrying the auth token for the bridge file server.
+pub const HEADER_FILE_SERVER_TOKEN: &str = "X-Detrix-File-Server-Token";
+
+/// HTTP header carrying the client ID for disconnect_all scoping.
+pub const HEADER_CLIENT_ID: &str = "X-Detrix-Client-Id";
 
 /// Override gRPC port (highest priority, typically for testing)
 pub const ENV_DETRIX_GRPC_PORT_OVERRIDE: &str = "DETRIX_GRPC_PORT_OVERRIDE";
@@ -134,6 +173,19 @@ pub const DEFAULT_GELF_TCP_CONNECT_TIMEOUT_MS: u64 = 5_000;
 
 /// GELF TCP write timeout
 pub const DEFAULT_GELF_TCP_WRITE_TIMEOUT_MS: u64 = 10_000;
+
+/// Remote app HTTP client timeout (wake/sleep proxy)
+pub const DEFAULT_REMOTE_APP_TIMEOUT_MS: u64 = 30_000;
+
+/// Allowed URL schemes for remote app control (SSRF prevention)
+pub const ALLOWED_REMOTE_APP_URL_SCHEMES: &[&str] = &["http", "https"];
+
+/// Maximum number of polling attempts when verifying wake connection
+pub const DEFAULT_REMOTE_APP_POLL_MAX_RETRIES: u32 = 10;
+/// Interval between wake/sleep polling attempts (milliseconds)
+pub const DEFAULT_REMOTE_APP_POLL_INTERVAL_MS: u64 = 500;
+/// JWKS fetch HTTP timeout (seconds)
+pub const DEFAULT_JWKS_FETCH_TIMEOUT_SECS: u64 = 10;
 
 /// AST/safety analysis timeout
 pub const DEFAULT_ANALYSIS_TIMEOUT_MS: u64 = 5_000;
@@ -369,6 +421,11 @@ pub const DEFAULT_AUDIT_RETENTION_DAYS: u32 = 90;
 /// Log files older than this will be deleted at daemon startup
 pub const DEFAULT_LOG_RETENTION_DAYS: u32 = 7;
 
+/// Connection TTL in calendar days (7 days)
+/// Connections inactive for more than this many calendar days will be removed on daemon startup.
+/// Set to -1 for indefinite retention.
+pub const DEFAULT_CONNECTION_TTL_DAYS: i64 = 7;
+
 /// System event cleanup interval in seconds
 pub const DEFAULT_SYSTEM_EVENT_CLEANUP_INTERVAL_SECS: u64 = 3_600;
 
@@ -396,6 +453,23 @@ pub const DEFAULT_MAX_EVAL_TIME_MS: u32 = 1_000;
 
 /// Maximum entries in the AST parse cache for tree-sitter analysis
 pub const DEFAULT_AST_CACHE_MAX_ENTRIES: usize = 10_000;
+
+// ============================================================================
+// VFS (Virtual File System)
+// ============================================================================
+
+/// Default HTTP fetch timeout for remote file sources (seconds)
+pub const DEFAULT_VFS_FETCH_TIMEOUT_SECONDS: u64 = 10;
+
+/// Default maximum file size for VFS caching (10 MB)
+pub const DEFAULT_VFS_MAX_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Default VFS cache hot-reload TTL in seconds
+/// Cached files are re-read from source after this duration
+pub const DEFAULT_VFS_HOT_RELOAD_TTL_SECONDS: u64 = 60;
+
+/// Server identifier included in gRPC response metadata
+pub const DEFAULT_SERVER_ID: &str = "detrix-server";
 
 // ============================================================================
 // FILE INSPECTION
@@ -528,9 +602,11 @@ pub const DEFAULT_WS_IDLE_CHECK_INTERVAL_MS: u64 = 10_000;
 /// If no heartbeat received within this duration, client is considered dead
 pub const DEFAULT_MCP_HEARTBEAT_TIMEOUT_SECS: u64 = 30;
 
-/// MCP daemon spawn timeout (seconds)
-/// Maximum time to wait for daemon to become healthy after spawning
-pub const DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS: u64 = 30;
+/// MCP daemon spawn timeout per attempt (seconds)
+/// Maximum time to wait for daemon to become healthy after spawning.
+/// If the daemon dies during init, `spawn_daemon_for_mcp` retries up to 3 times
+/// (handles transient resource contention under heavy parallel load).
+pub const DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS: u64 = 60;
 
 /// MCP daemon health poll interval (milliseconds)
 /// How often to poll daemon health during startup

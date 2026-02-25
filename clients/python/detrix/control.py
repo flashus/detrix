@@ -29,6 +29,9 @@ _logger = logging.getLogger("detrix.control")
 # Maximum request body size (1MB) to prevent DoS via large payloads
 MAX_BODY_SIZE = 1_048_576
 
+# Maximum file size for /detrix/files/read (10MB)
+MAX_FILE_SIZE = 10 * 1024 * 1024
+
 
 class ControlHandler(BaseHTTPRequestHandler):
     """HTTP request handler for client control plane."""
@@ -58,7 +61,7 @@ class ControlHandler(BaseHTTPRequestHandler):
               without authentication. This is safe because only local processes
               can access these addresses.
             - Remote requests require a valid Bearer token that matches the
-              token configured in DETRIX_TOKEN or ~/detrix/mcp-token.
+              token configured in DETRIX_TOKEN or ~/detrix/auth-token.
             - If no token is configured AND the request is from a non-localhost
               address, access is DENIED. This is a change from the previous
               behavior which allowed all access when no token was set.
@@ -140,6 +143,8 @@ class ControlHandler(BaseHTTPRequestHandler):
                 self._send_error_response("Unauthorized", 401)
                 return
             self._handle_info()
+        elif path == "/detrix/discover":
+            self._handle_discover()
         else:
             self._send_error_response("Not found", 404)
 
@@ -155,6 +160,8 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._handle_wake()
         elif path == "/detrix/sleep":
             self._handle_sleep()
+        elif path == "/detrix/files/read":
+            self._handle_files_read()
         else:
             self._send_error_response("Not found", 404)
 
@@ -192,6 +199,53 @@ class ControlHandler(BaseHTTPRequestHandler):
             )
             self._send_json_response(response.model_dump())
 
+    def _handle_discover(self) -> None:
+        """Handle /detrix/discover endpoint (no auth required).
+
+        Returns daemon discovery information for MCP bridge auto-switching.
+        If the daemon's advertise URL hasn't been fetched yet, attempts a
+        lazy fetch from the daemon's health endpoint before responding.
+        """
+        state = get_state()
+        with state.lock:
+            daemon_url = state.daemon_advertise_url
+            daemon_base_url = state.daemon_url
+            name = state.name
+            http_client = state.http_client
+            control_host = state.control_host
+            advertise_host = state.advertise_host
+            actual_control_port = state.actual_control_port
+
+        # Lazy-fetch: if advertise URL unknown, ask daemon now
+        if not daemon_url and http_client:
+            try:
+                adv_url = http_client.fetch_advertise_url()
+                if adv_url:
+                    with state.lock:
+                        state.daemon_advertise_url = adv_url
+                    daemon_url = adv_url
+                    _logger.debug("Fetched daemon advertise URL on discover: %s", adv_url)
+            except Exception:
+                pass
+
+        if not daemon_url:
+            daemon_url = daemon_base_url
+
+        # Build control_plane_url: the URL the daemon can use to reach this app's
+        # control plane (may differ from the user-visible URL in Docker/cloud).
+        # Use advertise_host if set (e.g. DETRIX_HOST=order-service), otherwise
+        # use control_host unless it's a bind-all address.
+        _BIND_ALL = {"0.0.0.0", "::", ""}
+        cp_host = advertise_host or (control_host if control_host not in _BIND_ALL else None)
+        control_plane_url = (
+            f"http://{cp_host}:{actual_control_port}" if cp_host and actual_control_port else None
+        )
+
+        response: dict = {"daemon_url": daemon_url, "name": name}
+        if control_plane_url:
+            response["control_plane_url"] = control_plane_url
+        self._send_json_response(response)
+
     def _handle_wake(self) -> None:
         """Handle /detrix/wake endpoint.
 
@@ -205,7 +259,7 @@ class ControlHandler(BaseHTTPRequestHandler):
 
         try:
             response = do_wake(daemon_url)
-            self._send_json_response(response.model_dump())
+            self._send_json_response(response.model_dump(mode="json"))
         except DaemonError as e:
             self._send_error_response(str(e), 503)
         except DebuggerError as e:
@@ -221,6 +275,89 @@ class ControlHandler(BaseHTTPRequestHandler):
         """
         response = do_sleep()
         self._send_json_response(response.model_dump())
+
+    def _handle_files_read(self) -> None:
+        """Handle /detrix/files/read endpoint.
+
+        Reads a file from the local filesystem and returns its content as plain text.
+        Used by the Detrix daemon to transparently fetch source files from the
+        application's control plane in cloud/Docker deployments.
+
+        Request body: {"path": "relative/or/absolute/path"}
+        Response: plain text file content (200), or 404 if not found.
+        """
+        body = self._read_json_body()
+        if not body or "path" not in body:
+            self._send_error_response("Missing 'path' in request body", 400)
+            return
+
+        file_path = body["path"]
+        if not isinstance(file_path, str) or not file_path.strip():
+            self._send_error_response("Invalid 'path' value", 400)
+            return
+
+        # Resolve workspace: prefer workspace_root from request body (daemon provides
+        # the connection's workspace root), fall back to cwd.
+        trust_boundary = Path(os.getcwd()).resolve()
+        workspace_root = body.get("workspace_root")
+        if workspace_root and isinstance(workspace_root, str) and workspace_root.strip():
+            workspace = Path(workspace_root).resolve()
+        else:
+            workspace = trust_boundary
+
+        # Security: validate that request's workspace_root is within (or equal to)
+        # the client's own cwd. Prevents setting workspace_root to "/" to bypass
+        # path containment checks.
+        try:
+            workspace.relative_to(trust_boundary)
+        except ValueError:
+            _logger.warning(
+                "File read blocked (workspace_root escapes trust boundary): %s", workspace
+            )
+            self._send_error_response("Workspace root escapes trust boundary", 403)
+            return
+
+        # Resolve relative paths against the workspace
+        resolved = Path(file_path)
+        if not resolved.is_absolute():
+            resolved = workspace / resolved
+        resolved = resolved.resolve()
+
+        # Security: prevent directory traversal outside workspace
+        try:
+            resolved.relative_to(workspace)
+        except ValueError:
+            _logger.warning("File read blocked (path escapes workspace): %s", resolved)
+            self._send_error_response("Path not within workspace", 403)
+            return
+
+        if not resolved.is_file():
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        try:
+            size = resolved.stat().st_size
+            if size > MAX_FILE_SIZE:
+                _logger.warning("File too large: %s (%d bytes)", resolved, size)
+                self._send_error_response("File exceeds maximum size", 413)
+                return
+
+            content = resolved.read_text(encoding="utf-8")
+            encoded = content.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+        except PermissionError:
+            self._send_error_response("Permission denied", 403)
+        except UnicodeDecodeError:
+            self._send_error_response("File is not valid UTF-8 text", 400)
+        except Exception as e:
+            _logger.exception("File read failed: %s", resolved)
+            self._send_error_response(f"File read error: {e}", 500)
 
 
 class ControlServer:

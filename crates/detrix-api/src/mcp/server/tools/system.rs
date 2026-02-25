@@ -12,9 +12,9 @@ use crate::mcp::params::{
 };
 use crate::state::ApiState;
 use detrix_application::{
-    FileInspectionRequest, FileInspectionService, UsageSnapshot, ValidationResult,
+    resolve_file_path, FileInspectionRequest, UsageSnapshot, ValidationResult,
 };
-use detrix_core::{ConnectionId, SafetyLevel, SourceLanguage};
+use detrix_core::{ConnectionId, SafetyLevel};
 use rmcp::model::Content;
 use rmcp::ErrorData as McpError;
 use std::sync::Arc;
@@ -147,12 +147,26 @@ impl AcknowledgeEventsResult {
     }
 }
 
-/// Result when no event IDs provided
-pub struct NoEventIdsProvided;
+/// Outcome of acknowledge_events operation
+pub enum AcknowledgeOutcome {
+    /// Events were successfully acknowledged
+    Success(AcknowledgeEventsResult),
+    /// System events are not configured
+    NotConfigured,
+    /// No event IDs were provided
+    NoEventIds,
+}
 
-impl NoEventIdsProvided {
-    pub fn build_message(&self) -> &'static str {
-        "No event IDs provided to acknowledge."
+impl AcknowledgeOutcome {
+    /// Build human-readable message for MCP response
+    pub fn build_message(&self) -> String {
+        match self {
+            AcknowledgeOutcome::Success(result) => result.build_message(),
+            AcknowledgeOutcome::NotConfigured => {
+                SystemEventsNotConfigured.build_message().to_string()
+            }
+            AcknowledgeOutcome::NoEventIds => "No event IDs provided to acknowledge.".to_string(),
+        }
     }
 }
 
@@ -160,18 +174,15 @@ impl NoEventIdsProvided {
 pub async fn acknowledge_events_impl(
     state: &Arc<ApiState>,
     params: AcknowledgeEventsParams,
-) -> Result<
-    Result<AcknowledgeEventsResult, Result<SystemEventsNotConfigured, NoEventIdsProvided>>,
-    McpError,
-> {
+) -> Result<AcknowledgeOutcome, McpError> {
     // Check if system event repository is available
     let repo = match &state.system_event_repository {
         Some(repo) => repo,
-        None => return Ok(Err(Ok(SystemEventsNotConfigured))),
+        None => return Ok(AcknowledgeOutcome::NotConfigured),
     };
 
     if params.event_ids.is_empty() {
-        return Ok(Err(Err(NoEventIdsProvided)));
+        return Ok(AcknowledgeOutcome::NoEventIds);
     }
 
     let acknowledged = repo
@@ -179,7 +190,7 @@ pub async fn acknowledge_events_impl(
         .await
         .mcp_context("Failed to acknowledge events")?;
 
-    Ok(Ok(AcknowledgeEventsResult {
+    Ok(AcknowledgeOutcome::Success(AcknowledgeEventsResult {
         acknowledged,
         requested: params.event_ids.len(),
     }))
@@ -240,7 +251,11 @@ impl GetMcpUsageResult {
         ));
 
         // Add recommendations if there are issues
-        if snapshot.success_rate < 0.9 && snapshot.total_calls > 10 {
+        const RECOMMENDATION_SUCCESS_RATE_THRESHOLD: f64 = 0.9;
+        const RECOMMENDATION_MIN_CALLS: u64 = 10;
+        if snapshot.success_rate < RECOMMENDATION_SUCCESS_RATE_THRESHOLD
+            && snapshot.total_calls > RECOMMENDATION_MIN_CALLS
+        {
             output.push_str("\n⚠️ Recommendations:\n");
             if snapshot.workflow.no_connection > 0 {
                 output.push_str("  - Always call create_connection first before adding metrics\n");
@@ -317,25 +332,58 @@ pub fn validate_expression_impl(
 
 /// Result of inspect_file operation
 pub struct InspectFileResult {
-    /// Detected source language (available for future use)
-    #[allow(dead_code)]
-    pub language: SourceLanguage,
     pub messages: Vec<Content>,
 }
 
 /// Core inspect_file implementation
-pub fn inspect_file_impl(params: InspectFileParams) -> Result<InspectFileResult, McpError> {
+pub async fn inspect_file_impl(
+    state: &Arc<ApiState>,
+    params: InspectFileParams,
+) -> Result<InspectFileResult, McpError> {
+    // Resolve workspace_root from connection (or auto-select single connection)
+    let workspace_root =
+        crate::common::resolve_workspace_root(state, params.connection_id.as_deref()).await;
+
+    // Resolve file path against workspace root
+    let resolved_file = resolve_file_path(&params.file_path, workspace_root.as_deref());
+
+    // Pre-fetch file into VFS cache (transparent remote file fetching)
+    crate::common::ensure_file_cached(state, params.connection_id.as_deref(), &resolved_file).await;
+
     let request = FileInspectionRequest {
-        file_path: params.file_path.clone(),
+        file_path: resolved_file.clone(),
         line: params.line,
         find_variable: params.find_variable,
+        workspace_root,
     };
 
-    let service = FileInspectionService::new();
-    let (language, result) = service
+    let (language, result) = state
+        .context
+        .file_inspection
         .inspect(request)
         .mcp_context("File inspection failed")?;
 
-    let messages = format_inspection_result(language, result, &params.file_path);
-    Ok(InspectFileResult { language, messages })
+    let messages = format_inspection_result(language, result, &resolved_file);
+    let mut all_messages = Vec::new();
+
+    // Surface source metadata (pinned mode info) when available
+    if let Some(metadata) = state.context.vfs.get_metadata(&resolved_file) {
+        let mut source_info = format!("Source: {}", metadata.source_kind);
+        if let Some(ref commit) = metadata.commit {
+            source_info.push_str(&format!(
+                ", pinned to commit {}",
+                &commit[..commit.len().min(12)]
+            ));
+        }
+        if let Some(true) = metadata.differs_from_local {
+            source_info.push_str(" (local drift: yes)");
+        }
+        all_messages.push(Content::text(source_info));
+    }
+
+    all_messages.push(Content::text(format!("Detected language: {}", language)));
+    all_messages.extend(messages);
+    Ok(InspectFileResult {
+        messages: all_messages,
+    })
 }

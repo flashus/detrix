@@ -2,19 +2,19 @@
 //
 // Prerequisites:
 //
-//	1. Start the Detrix daemon first:
-//	   $ detrix serve --daemon
+//  1. Start the Detrix daemon first:
+//     $ detrix serve --daemon
 //
-//	2. Run this example (from clients/go directory):
-//	   $ go run ./examples/basic_usage
+//  2. Run this example (from clients/go directory):
+//     $ go run ./examples/basic_usage
 //
 // The client will:
 //
-//	1. Start a control plane server for remote management
-//	2. Stay in SLEEPING state (zero overhead)
-//	3. On wake(): start Delve and register with daemon
-//	4. Allow the daemon to set metrics/observation points
-//	5. On sleep(): stop debugger and unregister
+//  1. Start a control plane server for remote management
+//  2. Stay in SLEEPING state (zero overhead)
+//  3. On wake(): start Delve and register with daemon
+//  4. Allow the daemon to set metrics/observation points
+//  5. On sleep(): stop debugger and unregister
 package main
 
 import (

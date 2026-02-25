@@ -64,7 +64,7 @@ def main():
 
     symbols = ["BTCUSD", "ETHUSD", "SOLUSD"]
 
-    for i in range(10):
+    while True:
         symbol = random.choice(symbols)
 
         # Place an order

@@ -7,10 +7,10 @@ use crate::ports::{DlqEntryStatus, DlqRepositoryRef, EventRepositoryRef};
 use detrix_config::DlqConfig;
 use detrix_core::error::Result;
 use detrix_core::MetricEvent;
+use detrix_logging::{debug, error, info, trace, warn};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, trace, warn};
 
 /// Dead-letter queue recovery service
 ///
@@ -200,7 +200,9 @@ impl DlqRecoveryService {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_micros() as i64)
                 .unwrap_or(0);
-            now - (older_than_hours as i64 * 3600 * 1_000_000)
+            now - (older_than_hours as i64)
+                .saturating_mul(3600)
+                .saturating_mul(1_000_000)
         };
 
         let deleted = self.dlq_repo.delete_old_failed(cutoff_micros).await?;

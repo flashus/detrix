@@ -9,8 +9,10 @@
 //! a channel. Events are debounced to prevent processing the same
 //! file multiple times during rapid changes (e.g., editor auto-save).
 
+use crate::error::InvalidConfigResultExt;
 use crate::ports::{FileEvent, FileWatcher, FileWatcherConfig};
 use async_trait::async_trait;
+use detrix_logging::{debug, error, trace, warn};
 use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind, Debouncer};
 use std::collections::HashSet;
@@ -18,7 +20,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, trace, warn};
 
 /// File watcher implementation using the notify crate
 pub struct NotifyFileWatcher {
@@ -89,11 +90,7 @@ impl NotifyFileWatcher {
                 }
             },
         )
-        .map_err(|e| {
-            detrix_core::Error::InvalidConfig(
-                format!("Failed to create file watcher: {}", e).into(),
-            )
-        })?;
+        .invalid_config("Failed to create file watcher")?;
 
         let watcher = Self {
             config,
@@ -112,14 +109,6 @@ impl NotifyFileWatcher {
     }
 }
 
-impl Default for NotifyFileWatcher {
-    fn default() -> Self {
-        Self::new()
-            .expect("Failed to create default file watcher")
-            .0
-    }
-}
-
 #[async_trait]
 impl FileWatcher for NotifyFileWatcher {
     async fn watch(&self, path: PathBuf) -> detrix_core::Result<()> {
@@ -131,16 +120,10 @@ impl FileWatcher for NotifyFileWatcher {
         }
 
         // Canonicalize path for consistent comparison
-        let canonical_path = path.canonicalize().map_err(|e| {
-            detrix_core::Error::InvalidConfig(
-                format!(
-                    "Path '{}' does not exist or cannot be resolved: {}",
-                    path.display(),
-                    e
-                )
-                .into(),
-            )
-        })?;
+        let canonical_path = path.canonicalize().invalid_config(format!(
+            "Path '{}' does not exist or cannot be resolved",
+            path.display()
+        ))?;
 
         // Check if already watching
         {
@@ -164,11 +147,7 @@ impl FileWatcher for NotifyFileWatcher {
                 debouncer
                     .watcher()
                     .watch(&canonical_path, recursive_mode)
-                    .map_err(|e| {
-                        detrix_core::Error::InvalidConfig(
-                            format!("Failed to watch '{}': {}", canonical_path.display(), e).into(),
-                        )
-                    })?;
+                    .invalid_config(format!("Failed to watch '{}'", canonical_path.display()))?;
             } else {
                 return Err(detrix_core::Error::InvalidConfig(
                     "File watcher has been shut down".into(),
@@ -279,9 +258,9 @@ impl FileWatcher for NotifyFileWatcher {
 
 use crate::services::MetricService;
 use detrix_config::AnchorConfig;
+use detrix_logging::info;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::info;
 
 /// Orchestrates file watching and metric relocation
 ///

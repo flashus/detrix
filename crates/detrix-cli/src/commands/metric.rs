@@ -60,7 +60,7 @@ pub struct AddArgs {
     replace: bool,
 
     /// Start metric enabled (default: true)
-    #[arg(long, default_value = "true")]
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
     enabled: bool,
 }
 

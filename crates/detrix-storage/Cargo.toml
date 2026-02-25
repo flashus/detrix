@@ -8,6 +8,7 @@ rust-version.workspace = true
 detrix-core = { path = "../detrix-core", features = ["sqlx"] }
 detrix-application = { path = "../detrix-application" }
 detrix-config = { path = "../detrix-config" }
+detrix-ports = { path = "../detrix-ports" }
 
 # Async runtime
 tokio = { workspace = true }
@@ -17,6 +18,9 @@ sqlx = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+
+# Hashing (for VFS cache)
+sha2.workspace = true
 
 # Utilities
 async-trait.workspace = true

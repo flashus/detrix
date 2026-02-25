@@ -17,7 +17,9 @@ use detrix_config::{AuthConfig, AuthMode};
 use std::sync::Arc;
 use tracing::{debug, error, warn};
 
-use crate::grpc::BEARER_PREFIX;
+#[cfg(test)]
+use detrix_config::constants::AUTHORIZATION_HEADER;
+use detrix_config::constants::BEARER_PREFIX;
 
 /// Authenticated user claims extracted from JWT
 ///
@@ -83,8 +85,8 @@ pub async fn auth_middleware(
 ) -> Result<Response, StatusCode> {
     let config = &auth_state.config;
 
-    // Skip auth if disabled
-    if config.mode == AuthMode::Disabled {
+    // Skip auth if disabled or not configured
+    if config.effective_mode() == AuthMode::Disabled {
         return Ok(next.run(request).await);
     }
 
@@ -113,7 +115,7 @@ pub async fn auth_middleware(
                 StatusCode::UNAUTHORIZED
             })?;
 
-            match config.mode {
+            match config.effective_mode() {
                 AuthMode::Simple => {
                     // Validate against static bearer_token
                     if let Some(expected_token) = config.bearer_token.as_deref() {
@@ -195,7 +197,7 @@ mod tests {
 
     fn test_config_simple(token: &str) -> AuthConfig {
         AuthConfig {
-            mode: AuthMode::Simple,
+            mode: Some(AuthMode::Simple),
             bearer_token: Some(token.to_string()),
             public_endpoints: vec!["/health".to_string()],
             ..Default::default()
@@ -204,10 +206,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_disabled_allows_all() {
-        let config = AuthConfig::default(); // mode = Disabled by default
+        let config = AuthConfig::default(); // mode = None → effective_mode() = Disabled
         let auth_state = AuthState::new(config);
         let router = create_test_router(auth_state);
 
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_auth_explicit_disabled_allows_all() {
+        let config = AuthConfig {
+            mode: Some(AuthMode::Disabled),
+            ..Default::default()
+        };
+        let auth_state = AuthState::new(config);
+        let router = create_test_router(auth_state);
+
+        // Explicit Some(Disabled) should also allow all requests
         let response = router
             .oneshot(
                 Request::builder()
@@ -272,7 +297,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/protected")
-                    .header("Authorization", "Bearer secret")
+                    .header(AUTHORIZATION_HEADER, format!("{}secret", BEARER_PREFIX))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -293,7 +318,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/protected")
-                    .header("Authorization", "Bearer wrong-token")
+                    .header(
+                        AUTHORIZATION_HEADER,
+                        format!("{}wrong-token", BEARER_PREFIX),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -314,7 +342,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/protected")
-                    .header("Authorization", "Basic secret")
+                    .header(AUTHORIZATION_HEADER, "Basic secret")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -327,7 +355,7 @@ mod tests {
     #[tokio::test]
     async fn test_external_mode_without_validator_returns_error() {
         let config = AuthConfig {
-            mode: AuthMode::External,
+            mode: Some(AuthMode::External),
             ..Default::default()
         };
         // Create without validator - should return 500 for external mode
@@ -338,7 +366,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/protected")
-                    .header("Authorization", "Bearer some-jwt-token")
+                    .header(
+                        AUTHORIZATION_HEADER,
+                        format!("{}some-jwt-token", BEARER_PREFIX),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )

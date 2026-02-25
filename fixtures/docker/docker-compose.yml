@@ -1,0 +1,80 @@
+services:
+  detrix:
+    build:
+      context: ../..
+      dockerfile: fixtures/docker/Dockerfile.server
+    ports:
+      - "8095:8090"
+      - "50065:50061"
+    volumes:
+      - detrix-data:/data/detrix
+      - ./detrix.toml:/data/detrix/detrix.toml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DETRIX_TOKEN: docker-test-token
+      DETRIX_ADVERTISE_URL: ${TEST_ADVERTISE_URL:-}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/detrix", "status", "--config", "/data/detrix/detrix.toml", "-q"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  test-app-python:
+    build:
+      context: ../..
+      dockerfile: fixtures/docker/Dockerfile.python
+    ports:
+      - "18091:8091"
+    depends_on:
+      detrix:
+        condition: service_healthy
+    environment:
+      DETRIX_CLIENT_ENABLED: "1"
+      DETRIX_DAEMON_URL: http://detrix:8090
+      DETRIX_CONTROL_HOST: "0.0.0.0"
+      DETRIX_HOST: test-app-python
+      DETRIX_CONTROL_PORT: "8091"
+      DETRIX_TOKEN: docker-test-token
+      GIT_COMMIT: ${TEST_GIT_COMMIT:-}
+
+  test-app-go:
+    build:
+      context: ../..
+      dockerfile: fixtures/docker/Dockerfile.go
+    depends_on:
+      detrix:
+        condition: service_healthy
+    environment:
+      DETRIX_CLIENT_ENABLED: "1"
+      DETRIX_DAEMON_URL: http://detrix:8090
+      DETRIX_CONTROL_HOST: "0.0.0.0"
+      DETRIX_HOST: test-app-go
+      DETRIX_CONTROL_PORT: "8091"
+      DETRIX_TOKEN: docker-test-token
+
+  test-app-rust:
+    build:
+      context: ../..
+      dockerfile: fixtures/docker/Dockerfile.rust
+    depends_on:
+      detrix:
+        condition: service_healthy
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      DETRIX_CLIENT_ENABLED: "1"
+      DETRIX_DAEMON_URL: http://detrix:8090
+      DETRIX_CONTROL_HOST: "0.0.0.0"
+      DETRIX_HOST: test-app-rust
+      DETRIX_CONTROL_PORT: "8091"
+      DETRIX_TOKEN: docker-test-token
+      # Rust needs a longer registration timeout because the daemon's
+      # adapter setup uses ptrace (via lldb-dap) to attach to this process,
+      # which freezes all threads while the monotonic timeout clock keeps ticking.
+      DETRIX_REGISTER_TIMEOUT: "30"
+
+volumes:
+  detrix-data:

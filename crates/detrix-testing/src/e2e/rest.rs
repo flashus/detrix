@@ -17,7 +17,7 @@ use detrix_api::{
     // REST handler DTOs (now have both Serialize and Deserialize)
     http::handlers::{
         ConfigResponse, CreateMetricRequest as RestCreateMetricRequest, CreateMetricResponse,
-        GroupOperationResponse, HealthResponse, PaginatedMetricsResponse,
+        DisconnectAllResponse, GroupOperationResponse, HealthResponse, PaginatedMetricsResponse,
         StackTraceSliceDto as RestStackTraceSliceDto, StatusResponse, WakeResponse,
     },
     // ErrorResponse for parsing API errors
@@ -79,10 +79,16 @@ pub struct RestClient {
 impl RestClient {
     /// Create a new REST client
     pub fn new(http_port: u16) -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            detrix_api::common::CLIENT_ID_HEADER,
+            "test-client".parse().unwrap(),
+        );
         Self {
             base_url: format!("http://127.0.0.1:{}", http_port),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(120))
+                .default_headers(headers)
                 .build()
                 .expect("Failed to create HTTP client"),
         }
@@ -90,10 +96,16 @@ impl RestClient {
 
     /// Create a new REST client with custom base URL
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            detrix_api::common::CLIENT_ID_HEADER,
+            "test-client".parse().unwrap(),
+        );
         Self {
             base_url: base_url.into(),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(120))
+                .default_headers(headers)
                 .build()
                 .expect("Failed to create HTTP client"),
         }
@@ -254,10 +266,16 @@ impl ApiClient for RestClient {
         .with_raw(raw))
     }
 
-    async fn wake(&self) -> ApiResult<String> {
+    async fn wake(&self, app_url: &str, daemon_url: Option<&str>) -> ApiResult<String> {
+        let mut body = serde_json::json!({ "appUrl": app_url });
+        if let Some(url) = daemon_url {
+            body["daemonUrl"] = serde_json::json!(url);
+        }
+
         let response = self
             .client
             .post(format!("{}/api/v1/wake", self.base_url))
+            .json(&body)
             .send()
             .await
             .map_err(|e| ApiError::new(format!("Wake request failed: {}", e)))?;
@@ -267,7 +285,6 @@ impl ApiClient for RestClient {
             .await
             .map_err(|e| ApiError::new(format!("Failed to read response: {}", e)))?;
 
-        // REST API returns different format than proto - use REST-specific DTO
         let wake: WakeResponse = serde_json::from_str(&raw).map_err(|e| {
             ApiError::new(format!("Failed to parse wake response: {}", e)).with_raw(raw.clone())
         })?;
@@ -275,10 +292,13 @@ impl ApiClient for RestClient {
         Ok(ApiResponse::new(format!("{}: {}", wake.status, wake.message)).with_raw(raw))
     }
 
-    async fn sleep(&self) -> ApiResult<String> {
+    async fn sleep(&self, app_url: &str) -> ApiResult<String> {
+        let body = serde_json::json!({ "appUrl": app_url });
+
         let response = self
             .client
             .post(format!("{}/api/v1/sleep", self.base_url))
+            .json(&body)
             .send()
             .await
             .map_err(|e| ApiError::new(format!("Sleep request failed: {}", e)))?;
@@ -288,12 +308,32 @@ impl ApiClient for RestClient {
             .await
             .map_err(|e| ApiError::new(format!("Failed to read response: {}", e)))?;
 
-        // SleepResponse is proto-generated with both Serialize and Deserialize
         let sleep: SleepResponse = serde_json::from_str(&raw).map_err(|e| {
             ApiError::new(format!("Failed to parse sleep response: {}", e)).with_raw(raw.clone())
         })?;
 
         Ok(ApiResponse::new(format!("{}: {}", sleep.status, sleep.message)).with_raw(raw))
+    }
+
+    async fn disconnect_all(&self) -> ApiResult<String> {
+        let response = self
+            .client
+            .post(format!("{}/api/v1/disconnect_all", self.base_url))
+            .send()
+            .await
+            .map_err(|e| ApiError::new(format!("Disconnect all request failed: {}", e)))?;
+
+        let raw = response
+            .text()
+            .await
+            .map_err(|e| ApiError::new(format!("Failed to read response: {}", e)))?;
+
+        let result: DisconnectAllResponse = serde_json::from_str(&raw).map_err(|e| {
+            ApiError::new(format!("Failed to parse disconnect_all response: {}", e))
+                .with_raw(raw.clone())
+        })?;
+
+        Ok(ApiResponse::new(format!("{}: {}", result.status, result.message)).with_raw(raw))
     }
 
     // ========================================================================
@@ -314,12 +354,18 @@ impl ApiClient for RestClient {
             language: language.to_string(),
             // Identity fields for UUID-based connection tracking
             name: format!("e2e-test-{}-{}", language, port),
-            workspace_root: "/e2e-test".to_string(),
+            workspace_root: crate::e2e::executor::get_workspace_root()
+                .to_string_lossy()
+                .into_owned(),
             hostname: detrix_api::common::resolve_hostname(),
             metadata: None,
             program: program.map(|s| s.to_string()), // Optional program path for launch mode (Rust direct lldb-dap)
             safe_mode: false,                        // Default to false for tests
             pid: None,                               // Tests don't use AttachPid mode
+            control_plane_url: None,
+            build_commit: None,
+            build_tag: None,
+            created_by: None, // Will be set by server from socket
         };
 
         let response = self
@@ -862,6 +908,8 @@ impl ApiClient for RestClient {
             line,
             find_variable: find_variable.map(String::from),
             metadata: None,
+            connection_id: None,
+            file_content: None,
         };
 
         let response = self

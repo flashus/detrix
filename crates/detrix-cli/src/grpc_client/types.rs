@@ -124,7 +124,16 @@ pub struct McpClientDto {
 #[derive(Debug, Serialize)]
 pub struct WakeInfo {
     pub status: String,
-    pub metrics_loaded: u32,
+    pub app_url: String,
+    pub connection_id: Option<String>,
+    pub debug_port: Option<i32>,
+}
+
+/// Disconnect all response info
+#[derive(Debug, Serialize)]
+pub struct DisconnectAllInfo {
+    pub status: String,
+    pub adapters_stopped: u32,
 }
 
 /// Config validation result

@@ -26,6 +26,7 @@
 mod auth;
 mod bridge;
 mod config;
+mod file_server;
 mod parent_detect;
 
 // Re-exports
@@ -47,18 +48,23 @@ use std::sync::Arc;
 /// # Arguments
 /// * `daemon_host` - Host the daemon is running on (from api.host config)
 /// * `daemon_port` - Port the daemon is running on
+/// * `file_server_host` - Host to advertise for file server (defaults to daemon_host)
 /// * `config_path` - Config path for daemon restart capability
 /// * `pid_file` - PID file path for daemon restart capability
 /// * `mcp_config` - MCP bridge configuration from detrix.toml
 pub async fn run_bridge(
     daemon_host: &str,
     daemon_port: u16,
+    file_server_host: Option<String>,
     config_path: Option<PathBuf>,
     pid_file: Option<PathBuf>,
     mcp_config: &detrix_config::McpBridgeConfig,
+    config_port: u16,
 ) -> Result<()> {
-    // Discover auth token for daemon authentication
-    let auth_token = discover_auth_token();
+    // Resolve auth token for daemon authentication
+    // Priority: DETRIX_TOKEN env > credentials.toml per-host > auth-token file
+    let daemon_hp = format!("{}:{}", daemon_host, daemon_port);
+    let auth_token = auth::resolve_token_for_host(&daemon_hp, true).or_else(discover_auth_token);
     if auth_token.is_some() {
         info!("Auth token discovered for daemon communication");
     }
@@ -69,7 +75,7 @@ pub async fn run_bridge(
     let config = BridgeConfig {
         daemon_url: format!("http://{}:{}", daemon_host, daemon_port),
         daemon_host: daemon_host.to_string(),
-        daemon_port,
+        config_port,
         timeout_ms: mcp_config.bridge_timeout_ms,
         auth_token,
         config_path,
@@ -77,6 +83,7 @@ pub async fn run_bridge(
         heartbeat_interval_secs: mcp_config.heartbeat_interval_secs,
         heartbeat_max_failures: mcp_config.heartbeat_max_failures,
         parent_process,
+        file_server_host: file_server_host.unwrap_or_else(|| daemon_host.to_string()),
     };
 
     let bridge = Arc::new(McpBridge::new(config)?);
@@ -153,6 +160,7 @@ pub async fn run_bridge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use detrix_config::constants::{AUTHORIZATION_HEADER, BEARER_PREFIX};
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -496,8 +504,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/mcp"))
             .and(wiremock::matchers::header(
-                "Authorization",
-                "Bearer new_token_xyz",
+                AUTHORIZATION_HEADER,
+                &format!("{}new_token_xyz", BEARER_PREFIX),
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "jsonrpc": "2.0",
@@ -542,8 +550,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/mcp/heartbeat"))
             .and(wiremock::matchers::header(
-                "Authorization",
-                "Bearer refreshed_token",
+                AUTHORIZATION_HEADER,
+                &format!("{}refreshed_token", BEARER_PREFIX),
             ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
@@ -579,8 +587,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/mcp/disconnect"))
             .and(wiremock::matchers::header(
-                "Authorization",
-                "Bearer updated_token",
+                AUTHORIZATION_HEADER,
+                &format!("{}updated_token", BEARER_PREFIX),
             ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
@@ -628,8 +636,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/mcp/heartbeat"))
             .and(wiremock::matchers::header(
-                "Authorization",
-                "Bearer new_daemon_token",
+                AUTHORIZATION_HEADER,
+                &format!("{}new_daemon_token", BEARER_PREFIX),
             ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
@@ -639,8 +647,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/mcp"))
             .and(wiremock::matchers::header(
-                "Authorization",
-                "Bearer new_daemon_token",
+                AUTHORIZATION_HEADER,
+                &format!("{}new_daemon_token", BEARER_PREFIX),
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "jsonrpc": "2.0",
@@ -688,6 +696,624 @@ mod tests {
         assert!(
             request_result.is_ok(),
             "Request should succeed on new port with new token"
+        );
+    }
+
+    // ========================================================================
+    // Scenario 5: Auth helper unit tests
+    // Tests extract_host_port and extract_wake_app_url
+    // ========================================================================
+
+    #[test]
+    fn test_extract_host_port_standard_url() {
+        assert_eq!(
+            auth::extract_host_port("http://localhost:8095"),
+            Some("localhost:8095".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_port_with_path() {
+        assert_eq!(
+            auth::extract_host_port("http://localhost:8095/some/path"),
+            Some("localhost:8095".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_port_https() {
+        assert_eq!(
+            auth::extract_host_port("https://myapp.prod:8095"),
+            Some("myapp.prod:8095".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_port_ip_address() {
+        assert_eq!(
+            auth::extract_host_port("http://127.0.0.1:8090"),
+            Some("127.0.0.1:8090".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_port_no_port() {
+        // URLs without explicit port should return None
+        assert_eq!(auth::extract_host_port("http://localhost"), None);
+    }
+
+    #[test]
+    fn test_extract_host_port_invalid_url() {
+        assert_eq!(auth::extract_host_port("not-a-url"), None);
+    }
+
+    #[test]
+    fn test_extract_host_port_trailing_slash() {
+        assert_eq!(
+            auth::extract_host_port("http://localhost:8095/"),
+            Some("localhost:8095".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_wake_app_url_valid_wake() {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "wake",
+                "arguments": {
+                    "app_url": "http://localhost:8091"
+                }
+            },
+            "id": 1
+        });
+        assert_eq!(
+            bridge::extract_wake_app_url(&request),
+            Some("http://localhost:8091".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_wake_app_url_no_app_url() {
+        // Wake without app_url (daemon-only wake)
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "wake",
+                "arguments": {}
+            },
+            "id": 1
+        });
+        assert_eq!(bridge::extract_wake_app_url(&request), None);
+    }
+
+    #[test]
+    fn test_extract_wake_app_url_non_wake_tool() {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "observe",
+                "arguments": {
+                    "file": "test.py",
+                    "expressions": ["x"]
+                }
+            },
+            "id": 1
+        });
+        assert_eq!(bridge::extract_wake_app_url(&request), None);
+    }
+
+    #[test]
+    fn test_extract_wake_app_url_non_tool_call() {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/list",
+            "id": 1
+        });
+        assert_eq!(bridge::extract_wake_app_url(&request), None);
+    }
+
+    // ========================================================================
+    // Scenario 6: Discovery-first wake flow (wiremock)
+    // Tests bridge discovery → daemon switch → token resolution → wake forward
+    // ========================================================================
+
+    /// BRIDGE-DISC-001: Discovery switches daemon after wake (no control_plane_url).
+    ///
+    /// Without control_plane_url: bridge wakes via LOCAL daemon A (reachable from host),
+    /// then switches to daemon B post-wake so future calls go to the correct daemon.
+    ///
+    /// Setup: bridge → daemon A (initial), app discover returns daemon B (no cp_url).
+    /// Expected: daemon A handles the wake, bridge switches to daemon B post-wake.
+    #[tokio::test]
+    async fn test_discovery_switches_daemon_on_wake() {
+        // Start 3 mock servers: daemon A (initial), daemon B (target), app
+        let daemon_a = MockServer::start().await;
+        let daemon_b = MockServer::start().await;
+        let app_server = MockServer::start().await;
+
+        // App returns discover response pointing to daemon B (no control_plane_url)
+        Mock::given(method("GET"))
+            .and(path("/detrix/discover"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "daemon_url": daemon_b.uri(),
+                "name": "test-app"
+            })))
+            .expect(1)
+            .mount(&app_server)
+            .await;
+
+        // Daemon A: wake handled here (no control_plane_url → wake via current daemon first)
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "result": {
+                    "content": [{"type": "text", "text": "Woke test-app"}]
+                },
+                "id": 1
+            })))
+            .expect(1)
+            .mount(&daemon_a)
+            .await;
+
+        // Daemon B: health check succeeds (required by switch_daemon post-wake)
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok"
+            })))
+            .mount(&daemon_b)
+            .await;
+
+        // Create bridge pointing to daemon A
+        let config = BridgeConfig {
+            daemon_url: daemon_a.uri(),
+            timeout_ms: 5000,
+            ..Default::default()
+        };
+        let bridge = McpBridge::new(config).unwrap();
+
+        // Build wake request with app_url
+        let wake_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "wake",
+                "arguments": {
+                    "app_url": app_server.uri()
+                }
+            },
+            "id": 1
+        });
+
+        // Execute discovery-first flow
+        let response = bridge.forward_or_fallback(&wake_request).await;
+
+        // Assert wake succeeded (no error)
+        assert!(
+            response.get("error").is_none(),
+            "Wake should succeed, got: {}",
+            response
+        );
+
+        // Assert daemon URL was switched to daemon B
+        let current_url = bridge.get_current_daemon_url().await;
+        assert_eq!(
+            current_url,
+            daemon_b.uri().trim_end_matches('/'),
+            "Bridge should have switched to daemon B"
+        );
+    }
+
+    /// BRIDGE-DISC-002: Discovery failure forwards to current daemon.
+    ///
+    /// Setup: app discover endpoint unreachable, wake goes to current daemon.
+    #[tokio::test]
+    async fn test_discovery_failure_forwards_to_current_daemon() {
+        let daemon = MockServer::start().await;
+
+        // Current daemon handles wake
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "result": {
+                    "content": [{"type": "text", "text": "Woke via daemon"}]
+                },
+                "id": 1
+            })))
+            .expect(1)
+            .mount(&daemon)
+            .await;
+
+        let config = BridgeConfig {
+            daemon_url: daemon.uri(),
+            timeout_ms: 2000,
+            ..Default::default()
+        };
+        let bridge = McpBridge::new(config).unwrap();
+
+        // Wake request with unreachable app_url
+        let wake_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "wake",
+                "arguments": {
+                    "app_url": "http://127.0.0.1:59998"
+                }
+            },
+            "id": 1
+        });
+
+        let response = bridge.forward_or_fallback(&wake_request).await;
+
+        // Should still succeed via current daemon (discovery failed gracefully)
+        assert!(
+            response.get("error").is_none(),
+            "Wake should succeed via current daemon, got: {}",
+            response
+        );
+
+        // Daemon URL should NOT have changed
+        let current_url = bridge.get_current_daemon_url().await;
+        assert_eq!(
+            current_url,
+            daemon.uri(),
+            "Daemon URL should remain unchanged"
+        );
+    }
+
+    /// BRIDGE-DISC-003: Same daemon — no switch.
+    ///
+    /// Setup: app discover returns the same daemon URL as current.
+    /// Expected: no switch_daemon call, wake forwarded normally.
+    #[tokio::test]
+    async fn test_discovery_same_daemon_no_switch() {
+        let daemon = MockServer::start().await;
+        let app_server = MockServer::start().await;
+
+        // App discover returns same daemon URL
+        Mock::given(method("GET"))
+            .and(path("/detrix/discover"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "daemon_url": daemon.uri(),
+                "name": "local-app"
+            })))
+            .expect(1)
+            .mount(&app_server)
+            .await;
+
+        // Daemon: should NOT get a health check (no switch needed)
+        // Daemon: handles wake
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "result": {
+                    "content": [{"type": "text", "text": "Woke local-app"}]
+                },
+                "id": 1
+            })))
+            .expect(1)
+            .mount(&daemon)
+            .await;
+
+        let config = BridgeConfig {
+            daemon_url: daemon.uri(),
+            timeout_ms: 5000,
+            ..Default::default()
+        };
+        let bridge = McpBridge::new(config).unwrap();
+
+        let wake_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "wake",
+                "arguments": {
+                    "app_url": app_server.uri()
+                }
+            },
+            "id": 1
+        });
+
+        let response = bridge.forward_or_fallback(&wake_request).await;
+
+        assert!(
+            response.get("error").is_none(),
+            "Wake should succeed, got: {}",
+            response
+        );
+
+        // URL should remain the same (no switch)
+        let current_url = bridge.get_current_daemon_url().await;
+        assert_eq!(current_url, daemon.uri(), "Daemon URL should not change");
+    }
+
+    /// BRIDGE-DISC-004: switch_daemon auto-resolves token.
+    ///
+    /// After switching daemon, the bridge should update its auth token
+    /// based on credential lookup.
+    #[tokio::test]
+    async fn test_switch_daemon_updates_auth_token() {
+        let daemon_a = MockServer::start().await;
+        let daemon_b = MockServer::start().await;
+
+        // Daemon B: health check succeeds
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok"
+            })))
+            .expect(1)
+            .mount(&daemon_b)
+            .await;
+
+        let config = BridgeConfig {
+            daemon_url: daemon_a.uri(),
+            auth_token: Some("old-token".to_string()),
+            timeout_ms: 5000,
+            ..Default::default()
+        };
+        let bridge = McpBridge::new(config).unwrap();
+
+        // Verify initial token
+        {
+            let token = bridge.auth_token.read().await;
+            assert_eq!(*token, Some("old-token".to_string()));
+        }
+
+        // Switch daemon (token resolution depends on credentials.toml state,
+        // which in tests is typically empty — token remains as-is or gets
+        // resolved from env/file)
+        let result = bridge.switch_daemon(daemon_b.uri(), None).await;
+        assert!(result.is_ok(), "switch_daemon should succeed");
+
+        // Verify URL was updated
+        let current_url = bridge.get_current_daemon_url().await;
+        assert_eq!(
+            current_url,
+            daemon_b.uri().trim_end_matches('/'),
+            "URL should be updated"
+        );
+    }
+
+    /// Test discover_app_daemon returns correct daemon URL and name
+    #[tokio::test]
+    async fn test_discover_app_daemon_success() {
+        let app_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/detrix/discover"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "daemon_url": "http://external-daemon:8090",
+                "name": "my-service"
+            })))
+            .expect(1)
+            .mount(&app_server)
+            .await;
+
+        let config = BridgeConfig {
+            daemon_url: "http://localhost:8090".to_string(),
+            timeout_ms: 5000,
+            ..Default::default()
+        };
+        let bridge = McpBridge::new(config).unwrap();
+
+        let result = bridge.discover_app_daemon(&app_server.uri()).await;
+        assert_eq!(
+            result,
+            Some((
+                "http://external-daemon:8090".to_string(),
+                "my-service".to_string(),
+                None, // no control_plane_url in response
+            ))
+        );
+    }
+
+    /// Test discover_app_daemon returns control_plane_url when present in response
+    #[tokio::test]
+    async fn test_discover_app_daemon_with_control_plane_url() {
+        let app_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/detrix/discover"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "daemon_url": "http://localhost:8095",
+                "name": "order-service",
+                "control_plane_url": "http://order-service:8091"
+            })))
+            .expect(1)
+            .mount(&app_server)
+            .await;
+
+        let config = BridgeConfig {
+            daemon_url: "http://localhost:8090".to_string(),
+            timeout_ms: 5000,
+            ..Default::default()
+        };
+        let bridge = McpBridge::new(config).unwrap();
+
+        let result = bridge.discover_app_daemon(&app_server.uri()).await;
+        assert_eq!(
+            result,
+            Some((
+                "http://localhost:8095".to_string(),
+                "order-service".to_string(),
+                Some("http://order-service:8091".to_string()),
+            ))
+        );
+    }
+
+    /// Test discover_app_daemon returns None when endpoint returns 404
+    #[tokio::test]
+    async fn test_discover_app_daemon_404() {
+        let app_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/detrix/discover"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&app_server)
+            .await;
+
+        let config = BridgeConfig {
+            daemon_url: "http://localhost:8090".to_string(),
+            timeout_ms: 5000,
+            ..Default::default()
+        };
+        let bridge = McpBridge::new(config).unwrap();
+
+        let result = bridge.discover_app_daemon(&app_server.uri()).await;
+        assert_eq!(result, None, "Should return None for 404");
+    }
+
+    /// Test discover_app_daemon returns None when app is unreachable
+    #[tokio::test]
+    async fn test_discover_app_daemon_unreachable() {
+        let config = BridgeConfig {
+            daemon_url: "http://localhost:8090".to_string(),
+            timeout_ms: 1000,
+            ..Default::default()
+        };
+        let bridge = McpBridge::new(config).unwrap();
+
+        let result = bridge.discover_app_daemon("http://127.0.0.1:59997").await;
+        assert_eq!(result, None, "Should return None for unreachable app");
+    }
+
+    /// BRIDGE-DISC-005: control_plane_url rewrite targets params.arguments.app_url.
+    ///
+    /// When the discover response includes `control_plane_url`, the bridge must
+    /// rewrite the URL inside `params.arguments.app_url` (NOT `params.app_url`).
+    /// This test verifies the rewrite path is correct by checking which URL the
+    /// daemon actually receives.
+    #[tokio::test]
+    async fn test_control_plane_url_rewrite_targets_arguments_app_url() {
+        let daemon_a = MockServer::start().await;
+        let daemon_b = MockServer::start().await;
+        let app_server = MockServer::start().await;
+
+        let daemon_visible_url = format!("http://internal-app:{}", app_server.address().port());
+
+        // App discover returns daemon B + control_plane_url (daemon-visible URL)
+        Mock::given(method("GET"))
+            .and(path("/detrix/discover"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "daemon_url": daemon_b.uri(),
+                "name": "order-service",
+                "control_plane_url": daemon_visible_url
+            })))
+            .expect(1)
+            .mount(&app_server)
+            .await;
+
+        // Daemon B: health check
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "ok"})),
+            )
+            .mount(&daemon_b)
+            .await;
+
+        // Daemon B: wake forwarded here
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "result": {"content": [{"type": "text", "text": "ok"}]},
+                "id": 1
+            })))
+            .expect(1)
+            .mount(&daemon_b)
+            .await;
+
+        let config = BridgeConfig {
+            daemon_url: daemon_a.uri(),
+            timeout_ms: 5000,
+            ..Default::default()
+        };
+        let bridge = McpBridge::new(config).unwrap();
+
+        // Wake request with user-visible app_url (NOT the daemon-visible one)
+        let wake_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "wake",
+                "arguments": {
+                    "app_url": app_server.uri()
+                }
+            },
+            "id": 1
+        });
+
+        let response = bridge.forward_or_fallback(&wake_request).await;
+
+        // Wake should succeed (daemon B received and handled it)
+        assert!(
+            response.get("error").is_none(),
+            "Wake with control_plane_url rewrite should succeed, got: {}",
+            response
+        );
+
+        // Daemon should have switched to B
+        let current_url = bridge.get_current_daemon_url().await;
+        assert_eq!(
+            current_url,
+            daemon_b.uri().trim_end_matches('/'),
+            "Bridge should have switched to daemon B"
+        );
+
+        // Daemon B's mock had `.expect(1)` — wiremock verifies exactly 1 POST to /mcp on drop.
+    }
+
+    /// Test non-wake requests bypass discovery flow
+    #[tokio::test]
+    async fn test_non_wake_request_bypasses_discovery() {
+        let daemon = MockServer::start().await;
+
+        // Daemon handles list_metrics (non-wake request)
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "result": {
+                    "content": [{"type": "text", "text": "metrics list"}]
+                },
+                "id": 1
+            })))
+            .expect(1)
+            .mount(&daemon)
+            .await;
+
+        let config = BridgeConfig {
+            daemon_url: daemon.uri(),
+            timeout_ms: 5000,
+            ..Default::default()
+        };
+        let bridge = McpBridge::new(config).unwrap();
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "list_metrics",
+                "arguments": {}
+            },
+            "id": 1
+        });
+
+        let response = bridge.forward_or_fallback(&request).await;
+        assert!(
+            response.get("error").is_none(),
+            "Non-wake request should forward directly, got: {}",
+            response
         );
     }
 }

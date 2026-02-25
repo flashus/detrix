@@ -225,28 +225,17 @@ impl MetricService {
             file_path: metric.location.file.clone(),
             line: Some(metric.location.line),
             find_variable: None,
+            workspace_root: None,
         };
 
-        // ALWAYS check file existence - this is a fundamental safety check
-        // Inspect file for available variables - fail if inspection fails
-        // (don't silently skip validation, that defeats the purpose of safety checks)
+        // Inspect file for available variables.
+        // In cloud mode the file may only exist inside a remote container and not be
+        // accessible to the daemon. Treat "file not found" the same as "analyzer
+        // unavailable": log a warning and skip scope validation. The logpoint will
+        // simply not fire if the file/line is wrong, which is safe.
         let result = match self.file_inspection.inspect(request) {
             Ok((_, result)) => result,
             Err(e) => {
-                // Check if this is a "file not found" error vs analyzer error
-                let error_str = e.to_string();
-                if error_str.contains("not found")
-                    || error_str.contains("No such file")
-                    || error_str.contains("does not exist")
-                {
-                    return Err(detrix_core::Error::InvalidLocation(format!(
-                        "File '{}' not found at line {}: {}",
-                        metric.location.file, metric.location.line, error_str
-                    ))
-                    .into());
-                }
-                // For analyzer errors (e.g., analyzer not installed), log warning and continue
-                // but only in development - in production we should fail
                 tracing::warn!(
                     "Scope validation unavailable for metric '{}': {} (validation skipped)",
                     metric.name,

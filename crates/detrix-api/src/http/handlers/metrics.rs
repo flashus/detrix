@@ -264,8 +264,10 @@ pub async fn get_metric(
 /// - 409 Conflict: Metric already exists at location (when `replace=false`)
 pub async fn add_metric(
     State(state): State<Arc<ApiState>>,
-    Json(payload): Json<CreateMetricRequest>,
+    headers: axum::http::HeaderMap,
+    Json(mut payload): Json<CreateMetricRequest>,
 ) -> Result<(StatusCode, Json<CreateMetricResponse>), HttpError> {
+    let client_id = super::extract_client_id(&headers)?;
     use crate::grpc::conversions::add_request_to_metric;
     use crate::http::proto_adapters::rest_request_to_add_metric_request;
 
@@ -284,6 +286,19 @@ pub async fn add_metric(
         .http_context("Failed to get connection")?
         .http_not_found("Connection")?;
 
+    // Resolve relative file path against connection's workspace_root
+    payload.location.file = detrix_application::resolve_file_path(
+        &payload.location.file,
+        connection.valid_workspace_root(),
+    );
+
+    // Pre-fetch file into VFS cache (transparent remote file fetching for cloud mode)
+    let _ = state
+        .context
+        .file_source_chain
+        .ensure_available(&connection, &payload.location.file)
+        .await;
+
     // Resolve safety level: use provided value or default from config
     let safety_level = match &payload.safety_level {
         Some(level) => level.clone(),
@@ -299,14 +314,14 @@ pub async fn add_metric(
         rest_request_to_add_metric_request(&payload, &safety_level, connection.language);
 
     // 2. Convert Proto → Core Metric (shared conversion from grpc/conversions.rs)
-    let metric =
-        add_request_to_metric(&proto_request).map_err(|e| HttpError::bad_request(e.to_string()))?;
+    let mut metric = add_request_to_metric(&proto_request).http_bad_request()?;
+    metric.created_by = client_id;
 
     // Call service (ALL business logic happens here)
     let outcome = state
         .context
         .metric_service
-        .add_metric(metric.clone(), payload.replace)
+        .add_metric(metric.clone(), payload.replace, None)
         .await
         .http_context("Failed to add metric")?;
 
@@ -352,9 +367,11 @@ pub async fn add_metric(
 /// - 404 Not Found: Metric with given ID does not exist
 pub async fn delete_metric(
     State(state): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<u64>,
 ) -> Result<StatusCode, HttpError> {
-    info!("REST: delete_metric (id={})", id);
+    let client_id = super::extract_client_id(&headers)?;
+    info!("REST: delete_metric (id={}, client_id={:?})", id, client_id);
 
     state
         .context

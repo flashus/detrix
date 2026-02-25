@@ -10,15 +10,15 @@ use tracing::debug;
 
 /// Column list for SELECT queries on the connections table.
 const CONNECTION_COLUMNS: &str =
-    "id, name, workspace_root, hostname, host, port, language, status, auto_reconnect, safe_mode, created_at, last_connected_at, last_active";
+    "id, name, workspace_root, hostname, host, port, language, status, auto_reconnect, safe_mode, created_at, last_connected_at, last_active, control_plane_url, build_commit, build_tag, created_by";
 
 #[async_trait]
 impl ConnectionRepository for SqliteStorage {
     async fn save(&self, connection: &Connection) -> Result<ConnectionId> {
         sqlx::query(
             r#"
-            INSERT INTO connections (id, name, workspace_root, hostname, host, port, language, status, auto_reconnect, safe_mode, created_at, last_connected_at, last_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO connections (id, name, workspace_root, hostname, host, port, language, status, auto_reconnect, safe_mode, created_at, last_connected_at, last_active, control_plane_url, build_commit, build_tag, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 workspace_root = excluded.workspace_root,
@@ -30,7 +30,11 @@ impl ConnectionRepository for SqliteStorage {
                 auto_reconnect = excluded.auto_reconnect,
                 safe_mode = excluded.safe_mode,
                 last_connected_at = excluded.last_connected_at,
-                last_active = excluded.last_active
+                last_active = excluded.last_active,
+                control_plane_url = excluded.control_plane_url,
+                build_commit = excluded.build_commit,
+                build_tag = excluded.build_tag,
+                created_by = COALESCE(excluded.created_by, connections.created_by)
             "#,
         )
         .bind(&connection.id.0)
@@ -46,6 +50,10 @@ impl ConnectionRepository for SqliteStorage {
         .bind(connection.created_at)
         .bind(connection.last_connected_at)
         .bind(connection.last_active)
+        .bind(&connection.control_plane_url)
+        .bind(&connection.build_commit)
+        .bind(&connection.build_tag)
+        .bind(&connection.created_by)
         .execute(self.pool())
         .await?;
 
@@ -340,6 +348,33 @@ impl ConnectionRepository for SqliteStorage {
 
         Ok(result.rows_affected())
     }
+
+    async fn find_stale_same_project(
+        &self,
+        name: &str,
+        language: &str,
+        workspace_root: &str,
+        exclude_id: &ConnectionId,
+    ) -> Result<Vec<ConnectionId>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT id FROM connections
+            WHERE name = ?
+              AND language = ?
+              AND workspace_root = ?
+              AND id != ?
+              AND (LOWER(status) = 'disconnected' OR LOWER(status) LIKE 'failed:%')
+            "#,
+        )
+        .bind(name)
+        .bind(language)
+        .bind(workspace_root)
+        .bind(&exclude_id.0)
+        .fetch_all(self.pool())
+        .await?;
+
+        Ok(rows.into_iter().map(ConnectionId).collect())
+    }
 }
 
 /// Convert database row to Connection entity
@@ -357,6 +392,10 @@ fn row_to_connection(row: &sqlx::sqlite::SqliteRow) -> Result<Connection> {
     let created_at: i64 = row.try_get("created_at")?;
     let last_connected_at: Option<i64> = row.try_get("last_connected_at")?;
     let last_active: i64 = row.try_get("last_active")?;
+    let control_plane_url: Option<String> = row.try_get("control_plane_url")?;
+    let build_commit: Option<String> = row.try_get("build_commit")?;
+    let build_tag: Option<String> = row.try_get("build_tag")?;
+    let created_by: Option<String> = row.try_get("created_by")?;
 
     // Parse status string to enum (case-insensitive for compatibility)
     let status = match status_str.to_lowercase().as_str() {
@@ -397,6 +436,10 @@ fn row_to_connection(row: &sqlx::sqlite::SqliteRow) -> Result<Connection> {
         status,
         auto_reconnect: auto_reconnect != 0,
         safe_mode: safe_mode != 0,
+        control_plane_url,
+        build_commit,
+        build_tag,
+        created_by,
         created_at,
         last_connected_at,
         last_active,

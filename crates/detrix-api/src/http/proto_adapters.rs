@@ -84,6 +84,8 @@ pub fn rest_request_to_add_metric_request(
         capture_memory_snapshot: Some(req.capture_memory_snapshot),
         snapshot_scope: req.snapshot_scope.clone(),
         snapshot_ttl: req.snapshot_ttl,
+        // Cloud VFS
+        file_content: None, // TODO: Support file_content in REST API
     }
 }
 

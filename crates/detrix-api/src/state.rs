@@ -32,6 +32,8 @@ pub struct ApiStateBuilder {
     mcp_spawned: bool,
     system_event_repository: Option<SystemEventRepositoryRef>,
     mcp_usage_repository: Option<McpUsageRepositoryRef>,
+    bridge_file_source: Option<Arc<crate::file_sources::BridgeSource>>,
+    advertise_url: Option<String>,
 }
 
 impl ApiStateBuilder {
@@ -45,6 +47,8 @@ impl ApiStateBuilder {
             mcp_spawned: false,
             system_event_repository: None,
             mcp_usage_repository: None,
+            bridge_file_source: None,
+            advertise_url: None,
         }
     }
 
@@ -88,6 +92,21 @@ impl ApiStateBuilder {
         self
     }
 
+    /// Set the bridge file source for runtime URL updates from MCP HTTP headers.
+    pub fn bridge_file_source(mut self, source: Arc<crate::file_sources::BridgeSource>) -> Self {
+        self.bridge_file_source = Some(source);
+        self
+    }
+
+    /// Set the daemon's external advertise URL.
+    ///
+    /// This URL is returned to clients during connection registration so they
+    /// can discover how to reach this daemon externally (e.g., through Docker port mapping).
+    pub fn advertise_url(mut self, url: Option<String>) -> Self {
+        self.advertise_url = url;
+        self
+    }
+
     /// Build the ApiState
     pub fn build(self) -> ApiState {
         let config = self.config.unwrap_or_default();
@@ -118,6 +137,8 @@ impl ApiStateBuilder {
             mcp_client_tracker,
             config_service,
             mcp_usage_repository: self.mcp_usage_repository,
+            bridge_file_source: self.bridge_file_source,
+            advertise_url: self.advertise_url,
         }
     }
 }
@@ -173,6 +194,14 @@ pub struct ApiState {
     /// Set via `with_mcp_usage_repository()` builder method.
     /// When None, usage analytics are not persisted.
     pub mcp_usage_repository: Option<McpUsageRepositoryRef>,
+
+    /// Bridge file source for setting bridge URL from MCP HTTP headers.
+    /// Set when bridge source is included in the file source chain.
+    pub bridge_file_source: Option<Arc<crate::file_sources::BridgeSource>>,
+
+    /// Daemon's external advertise URL, returned to clients during registration.
+    /// Like Kafka's advertised.listeners. Enables auto-discovery in Docker/cloud.
+    pub advertise_url: Option<String>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -330,6 +359,12 @@ mod tests {
         let storage = Arc::new(SqliteStorage::new(&sqlite_config).await.unwrap());
         let mock_factory = Arc::new(MockDapAdapterFactory::new());
 
+        let vfs = Arc::new(detrix_storage::DiskVfs::new()) as detrix_application::VfsRef;
+        let file_source_chain = Arc::new(detrix_application::FileSourceChain::new(
+            Arc::clone(&vfs),
+            vec![],
+            &[],
+        ));
         let context = AppContext::new(
             Arc::clone(&storage) as MetricRepositoryRef,
             Arc::clone(&storage) as EventRepositoryRef,
@@ -344,6 +379,11 @@ mod tests {
             &detrix_config::LimitsConfig::default(),
             None,
             None, // No separate DLQ storage in tests
+            None,
+            None, // No auth token in tests
+            vfs,
+            file_source_chain,
+            Arc::clone(&storage) as detrix_application::ConnectionReferenceRepositoryRef,
         );
 
         (context, storage as EventRepositoryRef, temp_dir)

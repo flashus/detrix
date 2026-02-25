@@ -4,7 +4,7 @@
 //! the single-instance Detrix daemon process.
 
 use crate::context::ClientContext;
-use crate::utils::daemon_discovery::{DaemonDiscovery, DaemonInfo, DiscoveryMethod};
+use crate::utils::daemon_discovery::{DaemonDiscovery, DiscoveredDaemon, DiscoveryMethod};
 use crate::utils::pid::PidFile;
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -196,7 +196,8 @@ pub async fn stop(pid_file_path: &PathBuf, poll_interval_ms: u64) -> Result<()> 
         use nix::sys::signal::{kill, Signal};
         use nix::unistd::Pid;
 
-        kill(Pid::from_raw(pid as i32), Signal::SIGTERM)
+        let pid_i32 = i32::try_from(pid).context("PID out of i32 range")?;
+        kill(Pid::from_raw(pid_i32), Signal::SIGTERM)
             .context("Failed to send SIGTERM to daemon")?;
     }
 
@@ -232,7 +233,8 @@ pub async fn stop(pid_file_path: &PathBuf, poll_interval_ms: u64) -> Result<()> 
         use nix::sys::signal::{kill, Signal};
         use nix::unistd::Pid;
 
-        kill(Pid::from_raw(pid as i32), Signal::SIGKILL)
+        let pid_i32 = i32::try_from(pid).context("PID out of i32 range")?;
+        kill(Pid::from_raw(pid_i32), Signal::SIGKILL)
             .context("Failed to send SIGKILL to daemon")?;
     }
 
@@ -319,7 +321,7 @@ pub async fn status(
 }
 
 /// Print detailed daemon information
-fn print_daemon_info(info: &DaemonInfo, pid_file_path: &Path) {
+fn print_daemon_info(info: &DiscoveredDaemon, pid_file_path: &Path) {
     // Show discovery method
     let method = match info.discovery_method {
         DiscoveryMethod::PidFile => "PID file",

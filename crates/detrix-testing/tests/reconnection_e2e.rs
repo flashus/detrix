@@ -25,6 +25,7 @@ use detrix_testing::e2e::{
     executor::{find_detrix_binary, get_workspace_root},
     require_tool, RestClient, TestExecutor, TestReporter,
 };
+use serial_test::serial;
 use std::time::{Duration, Instant};
 
 /// Test: Reconnection after daemon restart with different debug port
@@ -35,6 +36,7 @@ use std::time::{Duration, Instant};
 /// 3. Events from the new session are captured correctly
 /// 4. No old events from previous sessions appear
 #[tokio::test]
+#[serial]
 async fn test_rust_reconnection_different_port() {
     let config = ClientTestConfig::rust();
 
@@ -523,6 +525,7 @@ async fn test_rust_reconnection_different_port() {
 ///
 /// Verifies that rapid state changes don't cause race conditions or deadlocks.
 #[tokio::test]
+#[serial]
 async fn test_rust_rapid_wake_sleep_cycles() {
     let config = ClientTestConfig::rust();
 
@@ -646,6 +649,7 @@ async fn test_rust_rapid_wake_sleep_cycles() {
 /// Verifies that connection metadata is preserved in the database
 /// and auto-reconnect works when the debugger is still running.
 #[tokio::test]
+#[serial]
 async fn test_rust_connection_persistence() {
     let config = ClientTestConfig::rust();
 

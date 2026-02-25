@@ -369,13 +369,23 @@ impl ApiClient for CliClient {
         }))
     }
 
-    async fn wake(&self) -> ApiResult<String> {
-        let output = self.run_command(&["wake"]).await?;
+    async fn wake(&self, app_url: &str, daemon_url: Option<&str>) -> ApiResult<String> {
+        let mut args = vec!["wake", app_url];
+        if let Some(url) = daemon_url {
+            args.push("--daemon-url");
+            args.push(url);
+        }
+        let output = self.run_command(&args).await?;
         Ok(ApiResponse::new(output.trim().to_string()))
     }
 
-    async fn sleep(&self) -> ApiResult<String> {
-        let output = self.run_command(&["sleep"]).await?;
+    async fn sleep(&self, app_url: &str) -> ApiResult<String> {
+        let output = self.run_command(&["sleep", app_url]).await?;
+        Ok(ApiResponse::new(output.trim().to_string()))
+    }
+
+    async fn disconnect_all(&self) -> ApiResult<String> {
+        let output = self.run_command(&["disconnect-all"]).await?;
         Ok(ApiResponse::new(output.trim().to_string()))
     }
 
@@ -528,8 +538,11 @@ impl ApiClient for CliClient {
             args.push(group.clone());
         }
 
-        // Note: CLI doesn't support --disabled flag, metrics are enabled by default
-        // We'll disable after creation if needed
+        // Pass --enabled false directly to create as disabled (avoids needing adapter for disabled metrics)
+        if let Some(false) = request.enabled {
+            args.push("--enabled".to_string());
+            args.push("false".to_string());
+        }
 
         if let Some(capture_stack_trace) = request.capture_stack_trace {
             if capture_stack_trace {
@@ -545,14 +558,6 @@ impl ApiClient for CliClient {
 
         let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let _output = self.run_command(&args_refs).await?;
-
-        // If metric should be disabled, disable it now
-        if let Some(enabled) = request.enabled {
-            if !enabled {
-                self.run_command(&["metric", "disable", &request.name])
-                    .await?;
-            }
-        }
 
         // Return the metric name
         Ok(ApiResponse::new(request.name))

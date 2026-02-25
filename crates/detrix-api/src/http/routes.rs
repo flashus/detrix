@@ -27,12 +27,17 @@ pub enum RouterConfigError {
 use super::middleware::{auth_middleware, AuthState};
 use super::paths;
 use super::websocket::websocket_handler;
+use crate::http::handlers::references::{
+    admin_disable_metrics_by_owner, admin_disconnect_all, attach_connection, list_references,
+    release_connection, release_connections,
+};
 use crate::http::handlers::{
     add_metric, cleanup_connections, close_connection, create_connection, delete_metric,
-    disable_group, disable_metric, enable_group, enable_metric, get_config, get_connection,
-    get_mcp_usage, get_metric, get_metric_history, get_metric_value, health_check, inspect_file,
-    list_connections, list_group_metrics, list_groups, list_metrics, prometheus_metrics,
-    query_events, reload_config, sleep, status, update_config, update_metric, validate_config,
+    disable_group, disable_metric, disconnect_all, enable_group, enable_metric, get_cached_hashes,
+    get_config, get_connection, get_mcp_usage, get_metric, get_metric_history, get_metric_value,
+    health_check, inspect_file, list_connections, list_group_metrics, list_groups, list_metrics,
+    prometheus_metrics, provide_file, query_events, reload_config, sleep, status,
+    touch_connections, update_config, update_metric, validate_cache, validate_config,
     validate_expression, wake,
 };
 use crate::state::ApiState;
@@ -42,7 +47,7 @@ use axum::{
     http::Request,
     middleware,
     response::Response,
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 use detrix_application::JwksValidator;
@@ -289,6 +294,7 @@ pub fn create_router_with_jwt_validator(
         // System control endpoints
         .route(paths::API_V1_WAKE, post(wake))
         .route(paths::API_V1_SLEEP, post(sleep))
+        .route(paths::API_V1_DISCONNECT_ALL, post(disconnect_all))
         .route(paths::API_V1_STATUS, get(status))
         // REST API v1 - Metrics
         .route(paths::API_V1_METRICS, get(list_metrics).post(add_metric))
@@ -317,6 +323,21 @@ pub fn create_router_with_jwt_validator(
             get(get_connection).delete(close_connection),
         )
         .route(paths::API_V1_CONNECTIONS_CLEANUP, post(cleanup_connections))
+        .route(paths::API_V1_CONNECTIONS_TOUCH, post(touch_connections))
+        // Connection reference management (multi-user safety)
+        .route(paths::API_V1_CONNECTIONS_RELEASE, post(release_connections))
+        .route(paths::API_V1_CONNECTION_ATTACH, post(attach_connection))
+        .route(paths::API_V1_CONNECTION_RELEASE, post(release_connection))
+        .route(paths::API_V1_CONNECTION_REFERENCES, get(list_references))
+        // Admin endpoints
+        .route(
+            paths::API_V1_ADMIN_DISCONNECT_ALL,
+            post(admin_disconnect_all),
+        )
+        .route(
+            paths::API_V1_ADMIN_DISABLE_METRICS_BY_OWNER,
+            post(admin_disable_metrics_by_owner),
+        )
         // Config management REST API
         .route(paths::API_V1_CONFIG, get(get_config).put(update_config))
         .route(paths::API_V1_CONFIG_RELOAD, post(reload_config))
@@ -324,6 +345,10 @@ pub fn create_router_with_jwt_validator(
         // Diagnostic endpoints
         .route(paths::API_V1_VALIDATE_EXPRESSION, post(validate_expression))
         .route(paths::API_V1_INSPECT_FILE, post(inspect_file))
+        // VFS endpoints
+        .route(paths::API_V1_FILES, put(provide_file))
+        .route(paths::API_V1_CACHE_VALIDATE, post(validate_cache))
+        .route(paths::API_V1_CACHE_HASHES, get(get_cached_hashes))
         // MCP usage statistics
         .route(paths::API_V1_MCP_USAGE, get(get_mcp_usage))
         // WebSocket endpoint for real-time events
@@ -354,8 +379,7 @@ pub fn create_router_with_jwt_validator(
 
     if auth.is_enabled() {
         // Validate auth configuration before starting
-        auth.validate()
-            .map_err(|e| RouterConfigError::Auth(e.to_string()))?;
+        auth.validate().map_err(RouterConfigError::Auth)?;
         info!(
             mode = ?auth.mode,
             public_endpoints = ?auth.public_endpoints,
@@ -372,7 +396,7 @@ pub fn create_router_with_jwt_validator(
         // Validate rate limiting configuration before building governor config
         rate_limit
             .validate()
-            .map_err(|e| RouterConfigError::RateLimit(e.to_string()))?;
+            .map_err(RouterConfigError::RateLimit)?;
 
         let localhost_exempt = rate_limit.localhost_exempt;
         info!(

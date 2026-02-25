@@ -11,6 +11,7 @@
 //! - Symbol lookup via LSP (when available)
 //! - Multi-tier relocation fallback chain
 
+use crate::error::InvalidConfigResultExt;
 use crate::ports::{AnchorService, SourceContext, SymbolInfo};
 use async_trait::async_trait;
 use detrix_config::constants::{
@@ -20,9 +21,10 @@ use detrix_config::{AnchorConfig, NormalizationConfig};
 use detrix_core::entities::{Location, MetricAnchor, RelocationResult};
 use detrix_core::error::{Error, Result};
 use detrix_core::SourceLanguage;
+use detrix_logging::{debug, trace, warn};
+use detrix_ports::VfsRef;
 use sha2::{Digest, Sha256};
 use tokio::fs;
-use tracing::{debug, trace, warn};
 
 /// Parse line number from location string format "@file.py#123"
 ///
@@ -124,6 +126,7 @@ pub type LspSymbolLookupRef = std::sync::Arc<dyn LspSymbolLookup + Send + Sync>;
 pub struct DefaultAnchorService {
     config: AnchorServiceConfig,
     lsp: Option<LspSymbolLookupRef>,
+    vfs: Option<VfsRef>,
 }
 
 impl DefaultAnchorService {
@@ -132,12 +135,26 @@ impl DefaultAnchorService {
         Self {
             config: AnchorServiceConfig::default(),
             lsp: None,
+            vfs: None,
         }
     }
 
     /// Create a new anchor service with custom configuration
     pub fn with_config(config: AnchorServiceConfig) -> Self {
-        Self { config, lsp: None }
+        Self {
+            config,
+            lsp: None,
+            vfs: None,
+        }
+    }
+
+    /// Create a new anchor service with VFS integration
+    pub fn with_vfs(config: AnchorServiceConfig, vfs: VfsRef) -> Self {
+        Self {
+            config,
+            lsp: None,
+            vfs: Some(vfs),
+        }
     }
 
     /// Create a new anchor service with LSP integration
@@ -145,6 +162,20 @@ impl DefaultAnchorService {
         Self {
             config,
             lsp: Some(lsp),
+            vfs: None,
+        }
+    }
+
+    /// Create a new anchor service with LSP and VFS integration
+    pub fn with_lsp_and_vfs(
+        config: AnchorServiceConfig,
+        lsp: LspSymbolLookupRef,
+        vfs: VfsRef,
+    ) -> Self {
+        Self {
+            config,
+            lsp: Some(lsp),
+            vfs: Some(vfs),
         }
     }
 
@@ -154,10 +185,16 @@ impl DefaultAnchorService {
     }
 
     /// Read all lines from a file
+    ///
+    /// Uses VFS when available (cloud mode), falls back to tokio::fs (local mode).
     async fn read_file_lines(&self, file: &str) -> Result<Vec<String>> {
-        let content = fs::read_to_string(file).await.map_err(|e| {
-            Error::InvalidConfig(format!("Failed to read file '{}': {}", file, e).into())
-        })?;
+        let content = if let Some(ref vfs) = self.vfs {
+            vfs.read_to_string(file)?
+        } else {
+            fs::read_to_string(file)
+                .await
+                .invalid_config(format!("Failed to read file '{}'", file))?
+        };
         Ok(content.lines().map(|l| l.to_string()).collect())
     }
 
@@ -289,7 +326,7 @@ impl DefaultAnchorService {
                 continue;
             }
 
-            if best_match.map_or(true, |(_, best_sim)| similarity > best_sim) {
+            if best_match.is_none_or(|(_, best_sim)| similarity > best_sim) {
                 best_match = Some((line_num, similarity));
             }
         }
@@ -782,7 +819,10 @@ impl AnchorService for DefaultAnchorService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use detrix_ports::VirtualFileSystem;
+    use detrix_testing::MockVfs;
     use std::io::Write;
+    use std::sync::Arc;
     use tempfile::NamedTempFile;
 
     fn create_test_file(content: &str) -> NamedTempFile {
@@ -1260,5 +1300,48 @@ mod tests {
         let fp1 = DefaultAnchorService::compute_fingerprint_from_normalized(&norm1);
         let fp2 = DefaultAnchorService::compute_fingerprint_from_normalized(&norm2);
         assert_eq!(fp1, fp2);
+    }
+
+    // ============================================================================
+    // VFS integration tests
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_read_file_lines_from_vfs() {
+        let vfs = Arc::new(MockVfs::new());
+        vfs.store(
+            "conn1",
+            "/cloud/app.py",
+            "line1\nline2\nline3\n".to_string(),
+        );
+
+        let service = DefaultAnchorService::with_vfs(AnchorServiceConfig::default(), vfs);
+
+        let lines = service.read_file_lines("/cloud/app.py").await.unwrap();
+        assert_eq!(lines, vec!["line1", "line2", "line3"]);
+    }
+
+    #[tokio::test]
+    async fn test_capture_anchor_via_vfs() {
+        let vfs = Arc::new(MockVfs::new());
+        vfs.store(
+            "conn1",
+            "/cloud/app.py",
+            "def foo():\n    x = 1\n    y = 2\n    return x + y\n".to_string(),
+        );
+
+        let service = DefaultAnchorService::with_vfs(AnchorServiceConfig::default(), vfs);
+        let location = Location {
+            file: "/cloud/app.py".to_string(),
+            line: 3,
+        };
+
+        let anchor = service
+            .capture_anchor(&location, SourceLanguage::Python)
+            .await
+            .unwrap();
+
+        assert!(anchor.context_fingerprint.is_some());
+        assert_eq!(anchor.source_line.as_deref(), Some("    y = 2"));
     }
 }

@@ -51,6 +51,179 @@ impl DapLanguageExt for SourceLanguage {
     }
 }
 
+/// Code map for a language fixture: maps symbol names to their declaration line
+/// and the first safe logpoint line.
+///
+/// Background: DAP logpoints fire at the START of a statement, BEFORE the RHS
+/// executes. So a variable declared as `x := expr` is NOT yet in scope at that
+/// statement's line — it becomes safe to observe only from the NEXT statement.
+///
+/// Usage:
+///   - `find_decl("symbol")` → absolute line where "symbol" is declared.
+///     Use this to identify a particular "slot" in the fixture by its variable name.
+///   - `find_logpoint("symbol")` → first line where "symbol" is safely in scope.
+///     Use this when you want to measure "symbol" itself.
+///   - `line(offset)` → absolute line from a raw offset (base + offset).
+pub struct FixtureCodeMap {
+    base: u32,
+    /// (symbol_name, decl_offset, first_safe_logpoint_offset)
+    symbols: &'static [(&'static str, u32, u32)],
+}
+
+impl FixtureCodeMap {
+    pub const fn new(base: u32, symbols: &'static [(&'static str, u32, u32)]) -> Self {
+        Self { base, symbols }
+    }
+
+    /// Returns the absolute line number where `symbol` is declared.
+    /// Panics if `symbol` is not in the map.
+    pub fn find_decl(&self, symbol: &str) -> u32 {
+        for (name, decl_offset, _) in self.symbols {
+            if *name == symbol {
+                return self.base + decl_offset;
+            }
+        }
+        let available: Vec<&str> = self.symbols.iter().map(|(n, _, _)| *n).collect();
+        panic!(
+            "Symbol '{}' not found in FixtureCodeMap. Available: {:?}",
+            symbol, available
+        )
+    }
+
+    /// Returns the first absolute line number where `symbol` is safely in scope
+    /// (i.e., after its declaration has fully executed).
+    /// Panics if `symbol` is not in the map.
+    pub fn find_logpoint(&self, symbol: &str) -> u32 {
+        for (name, _, lp_offset) in self.symbols {
+            if *name == symbol {
+                return self.base + lp_offset;
+            }
+        }
+        let available: Vec<&str> = self.symbols.iter().map(|(n, _, _)| *n).collect();
+        panic!(
+            "Symbol '{}' not found in FixtureCodeMap. Available: {:?}",
+            symbol, available
+        )
+    }
+
+    /// Returns the absolute line number for a raw offset from the base line.
+    pub fn line(&self, offset: u32) -> u32 {
+        self.base + offset
+    }
+}
+
+// Go fixture line numbers — single source of truth.
+// Update MAIN_LINE if you add/remove lines before `func main()` in
+// fixtures/go/detrix_example_app.go
+pub mod go_lines {
+    use super::FixtureCodeMap;
+
+    /// Line of `func main()` in detrix_example_app.go.
+    /// Update this if you add/remove lines before `func main()`.
+    pub const MAIN_LINE: u32 = 101;
+
+    /// Last line of the Order struct (`}` on line 87).
+    /// Used by scope-aware tests to verify struct fields are deprioritized.
+    pub const ORDER_STRUCT_END: u32 = 87;
+
+    /// Symbol map: (name, decl_offset, first_safe_logpoint_offset)
+    ///
+    /// Each entry describes a named point in func main():
+    ///   - decl_offset: offset from MAIN_LINE where the symbol is assigned/declared.
+    ///   - first_safe_logpoint_offset: first offset where the symbol is safely in scope.
+    ///
+    /// Background: Delve fires logpoints at the START of a statement (before the
+    /// RHS executes), so a variable is NOT yet in scope at its own declaration line.
+    const SYMBOL_MAP: &[(&str, u32, u32)] = &[
+        // (name,             decl, logpt)
+        ("signal_handler", 13, 13), // go signalHandler() goroutine — no new var
+        ("symbol", 26, 27),         // symbol := ...; safe from +27 (quantity)
+        ("quantity", 27, 28),       // quantity := ...; safe from +28 (price)
+        ("price", 28, 31),          // price := ...; safe from +31 (orderID)
+        ("orderID", 31, 34),        // orderID := placeOrder(); safe from +34 (entryPrice)
+        ("entryPrice", 34, 35),     // entryPrice := price; safe from +35 (currentPrice)
+        ("currentPrice", 35, 36),   // currentPrice := ...; safe from +36 (pnl)
+        ("pnl", 36, 39),            // pnl := calculatePnl(); safe from +39 (totalPnl)
+        ("totalPnl", 39, 40),       // totalPnl = ...; safe from +40 (lastOrderID)
+        ("lastOrderID", 40, 42),    // lastOrderID := orderID; safe from +42 (log)
+        ("log", 42, 42),            // log(...) call — all vars in scope
+        ("sleep", 44, 44),          // time.Sleep — all vars in scope
+    ];
+
+    /// Code map for the Go fixture.
+    /// Use `CODEMAP.find_decl("x")` to get the line where "x" is declared.
+    /// Use `CODEMAP.find_logpoint("x")` to get the first line where "x" is safely in scope.
+    pub static CODEMAP: FixtureCodeMap = FixtureCodeMap::new(MAIN_LINE, SYMBOL_MAP);
+
+    /// Helper: absolute line from raw offset (MAIN_LINE + offset).
+    /// Prefer `CODEMAP.find_decl()` or `CODEMAP.find_logpoint()` for named points.
+    pub const fn line(offset: u32) -> u32 {
+        MAIN_LINE + offset
+    }
+}
+
+/// Python fixture line numbers — single source of truth.
+/// Update MAIN_LINE if you add/remove lines before `def main()` in
+/// fixtures/python/trade_bot_forever.py
+pub mod python_lines {
+    use super::FixtureCodeMap;
+
+    /// Line of `def main():` in trade_bot_forever.py.
+    pub const MAIN_LINE: u32 = 44;
+
+    /// Symbol map: (name, decl_offset_from_main, first_safe_logpoint_offset)
+    ///
+    /// Python uses absolute line numbers as offsets with MAIN_LINE = 44.
+    /// Note: debugpy moves breakpoints on blank/comment lines to the next
+    /// executable line automatically, so those are valid logpoint targets.
+    const SYMBOL_MAP: &[(&str, u32, u32)] = &[
+        // (name,             decl, logpt)  absolute line = MAIN_LINE + offset
+        ("symbol", 11, 19), // L55: symbol = ...; logpoint at L63 (entry_price line)
+        ("quantity", 12, 18), // L56: quantity = ...; logpoint at L62 (comment → L63)
+        ("price", 13, 15),  // L57: price = ...; logpoint at L59 (comment → L60)
+        ("order_id", 16, 22), // L60: order_id = ...; logpoint at L66 (blank → L67)
+        ("entry_price", 19, 20), // L63: entry_price = ...; logpoint at L64 (current_price)
+        ("current_price", 20, 21), // L64: current_price = ...; logpoint at L65 (pnl)
+        ("pnl", 21, 23),    // L65: pnl = ...; logpoint at L67 (first print)
+        ("print1", 23, 23), // L67: print(...) — all vars in scope
+        ("sleep", 25, 25),  // L69: blank → L70 (time.sleep) — all vars in scope
+    ];
+
+    /// Code map for the Python fixture.
+    pub static CODEMAP: FixtureCodeMap = FixtureCodeMap::new(MAIN_LINE, SYMBOL_MAP);
+}
+
+/// Rust fixture line numbers — single source of truth.
+/// Update MAIN_LINE if you add/remove lines before `fn main()` in
+/// fixtures/rust/src/main.rs
+pub mod rust_lines {
+    use super::FixtureCodeMap;
+
+    /// Line of `fn main()` in fixtures/rust/src/main.rs.
+    pub const MAIN_LINE: u32 = 76;
+
+    /// Symbol map: (name, decl_offset, first_safe_logpoint_offset)
+    ///
+    /// lldb-dap fires logpoints at the START of a statement (before the
+    /// RHS executes), so a variable is NOT yet in scope at its own declaration.
+    const SYMBOL_MAP: &[(&str, u32, u32)] = &[
+        // (name,             decl, logpt)
+        ("symbol", 31, 33),   // L107: let symbol = ...; safe from +33 (quantity)
+        ("quantity", 33, 35), // L109: let quantity = ...; safe from +35 (price)
+        ("price", 35, 38),    // L111: let price = ...; safe from +38 (order_id)
+        ("order_id", 38, 41), // L114: let order_id = ...; safe from +41 (entry_price)
+        ("entry_price", 41, 43), // L117: let entry_price = ...; safe from +43 (current_price)
+        ("current_price", 43, 45), // L119: let current_price = ...; safe from +45 (pnl)
+        ("pnl", 45, 52),      // L121: let pnl = ...; safe from +52 (log!)
+        ("log", 52, 52),      // L128: log! macro — all vars in scope
+        ("flush", 54, 54),    // L130: stderr().flush() — all vars in scope
+        ("sleep", 56, 56),    // L132: thread::sleep() — all vars in scope
+    ];
+
+    /// Code map for the Rust fixture.
+    pub static CODEMAP: FixtureCodeMap = FixtureCodeMap::new(MAIN_LINE, SYMBOL_MAP);
+}
+
 /// Configuration for a metric point in a specific language
 #[derive(Debug, Clone)]
 pub struct MetricPoint {
@@ -138,60 +311,86 @@ pub struct DapWorkflowConfig {
 impl DapWorkflowConfig {
     /// Create a Python workflow config using trade_bot_forever.py
     ///
-    /// IMPORTANT: DAP logpoints evaluate BEFORE the line executes, so we must use
-    /// lines where variables are already in scope from PREVIOUS assignments.
+    /// Line numbers are derived from `python_lines::CODEMAP`.
+    /// Update `python_lines::MAIN_LINE` if you add/remove lines before `def main()`.
     ///
-    /// Variables defined at (after Detrix client init block - +13 lines offset):
-    /// - Line 54: `symbol = random.choice(symbols)`
-    /// - Line 55: `quantity = random.randint(1, 50)`
-    /// - Line 56: `price = random.uniform(100, 1000)`
-    /// - Line 59: `order_id = place_order(...)` <- symbol, quantity, price in scope here
-    /// - Line 66: `print(...)` <- all variables in scope here
-    ///
-    /// So we use:
-    /// - Line 59 for symbol, quantity, price (before order_id is assigned, but after others)
-    /// - Line 66 for order_id (after it's assigned on line 59)
+    /// IMPORTANT: DAP logpoints evaluate BEFORE the line executes. debugpy moves
+    /// breakpoints on blank/comment lines to the next executable line. We exploit
+    /// this to place logpoints at comment/blank lines that fall after all needed
+    /// variable declarations have executed.
     pub fn python() -> Self {
+        use python_lines::CODEMAP;
         Self {
             language: SourceLanguage::Python,
             source_file: PathBuf::from("fixtures/python/trade_bot_forever.py"),
             metrics: vec![
-                // order_id is assigned on line 59, so evaluate after that (line 66)
-                MetricPoint::new("order_metric", 66, "order_id").with_group("python_workflow"),
-                // price is assigned on line 56, so evaluate after that (line 59)
-                MetricPoint::new("price_metric", 59, "price").with_group("python_workflow"),
-                // IMPORTANT: Each metric must be on a DIFFERENT line because DAP logpoints
-                // evaluate only one expression per breakpoint location
-                // quantity is assigned on line 55, evaluate on line 62 (entry_price := price)
-                MetricPoint::new("quantity_metric", 62, "quantity").with_group("python_workflow"),
-                // symbol is assigned on line 54, evaluate on line 63 (current_price := ...)
-                MetricPoint::new("symbol_metric", 63, "symbol").with_group("python_workflow"),
-                // Multi-expression metric: capture symbol + quantity + price on a single metric
-                // Line 64: pnl = calculate_pnl(...) - all 3 vars in scope
-                MetricPoint::new("trade_details", 64, "symbol")
-                    .with_extra_expressions(vec!["quantity", "price"])
+                // order_id assigned at L60; logpoint at L66 (blank → L67 print) — order_id in scope
+                MetricPoint::new(
+                    "order_metric",
+                    CODEMAP.find_logpoint("order_id"),
+                    "order_id",
+                )
+                .with_group("python_workflow"),
+                // price assigned at L57; logpoint at L59 (comment → L60 order_id) — price in scope
+                MetricPoint::new("price_metric", CODEMAP.find_logpoint("price"), "price")
                     .with_group("python_workflow"),
+                // IMPORTANT: Each metric must be on a DIFFERENT line (one logpoint per line).
+                // quantity assigned at L56; logpoint at L62 (comment → L63 entry_price) — in scope
+                MetricPoint::new(
+                    "quantity_metric",
+                    CODEMAP.find_logpoint("quantity"),
+                    "quantity",
+                )
+                .with_group("python_workflow"),
+                // symbol assigned at L55; logpoint at L63 (entry_price line) — symbol in scope
+                MetricPoint::new("symbol_metric", CODEMAP.find_logpoint("symbol"), "symbol")
+                    .with_group("python_workflow"),
+                // Multi-expression: L64 (current_price line) — symbol, quantity, price all in scope
+                MetricPoint::new(
+                    "trade_details",
+                    CODEMAP.find_logpoint("entry_price"),
+                    "symbol",
+                )
+                .with_extra_expressions(vec!["quantity", "price"])
+                .with_group("python_workflow"),
             ],
-            // Introspection metrics: stack trace and memory snapshot capture
-            // Each metric MUST be on a different line (Detrix allows only one metric per line)
-            // - Line 66: `print(f"  -> P&L: ...")` - all vars in scope
-            // - Line 67: `print()` - all vars in scope
-            // - Line 69: `time.sleep(3)` - all vars in scope
+            // Introspection metrics: stack trace and memory snapshot capture.
+            // Each metric MUST be on a different line (one metric per line).
             introspection_metrics: vec![
-                MetricPoint::new("stack_trace_metric", 66, "order_id")
-                    .with_group("python_introspection")
-                    .with_stack_trace(),
-                MetricPoint::new("memory_snapshot_metric", 67, "price")
-                    .with_group("python_introspection")
-                    .with_memory_snapshot(),
-                MetricPoint::new("full_introspection_metric", 69, "quantity")
-                    .with_group("python_introspection")
-                    .with_introspection(),
+                // L66 (blank → L67 print) — all vars in scope
+                MetricPoint::new(
+                    "stack_trace_metric",
+                    CODEMAP.find_logpoint("order_id"),
+                    "order_id",
+                )
+                .with_group("python_introspection")
+                .with_stack_trace(),
+                // L67 (first print) — all vars in scope
+                MetricPoint::new(
+                    "memory_snapshot_metric",
+                    CODEMAP.find_logpoint("pnl"),
+                    "price",
+                )
+                .with_group("python_introspection")
+                .with_memory_snapshot(),
+                // L69 (blank → L70 time.sleep) — all vars in scope
+                MetricPoint::new(
+                    "full_introspection_metric",
+                    CODEMAP.find_logpoint("sleep"),
+                    "quantity",
+                )
+                .with_group("python_introspection")
+                .with_introspection(),
             ],
-            inspect_line: 66,
+            inspect_line: CODEMAP.find_logpoint("order_id"),
             inspect_variable: "price".to_string(),
             invalid_metric: Some(
-                MetricPoint::new("bad_metric", 66, "nonexistent_var").with_group("python_workflow"),
+                MetricPoint::new(
+                    "bad_metric",
+                    CODEMAP.find_logpoint("order_id"),
+                    "nonexistent_var",
+                )
+                .with_group("python_workflow"),
             ),
             group_name: "python_workflow".to_string(),
             event_wait_secs: 15,
@@ -201,70 +400,81 @@ impl DapWorkflowConfig {
 
     /// Create a Go workflow config using detrix_example_app.go
     ///
-    /// IMPORTANT: DAP logpoints evaluate BEFORE the line executes, so we must use
-    /// lines where variables are already in scope from PREVIOUS assignments.
+    /// Line numbers are derived from `go_lines::CODEMAP`.
+    /// Update `go_lines::MAIN_LINE` if you add/remove lines before `func main()`.
     ///
-    /// Variables defined at (with Detrix client init block + log function):
-    /// - Line 117: `symbol := symbols[...]`
-    /// - Line 118: `quantity := rand.Intn(50) + 1`
-    /// - Line 119: `price := rand.Float64()*900 + 100`
-    /// - Line 122: `orderID := placeOrder(...)` <- symbol, quantity, price in scope here
-    /// - Line 125: `entryPrice := price`
-    /// - Line 126: `currentPrice := ...`
-    /// - Line 127: `pnl := calculatePnl(...)` <- all variables in scope here
-    /// - Line 130: `_ = orderID` <- all variables in scope here
-    /// - Line 131: `_ = pnl` <- all variables in scope here
-    /// - Line 133: `log(...)` <- all variables in scope here
-    ///
-    /// So we use:
-    /// - Line 122 for symbol, quantity, price (on orderID assignment, after others assigned)
-    /// - Line 127 for orderID (after it's assigned on line 122, on pnl calculation)
-    /// - Line 130-133 for introspection (all variables in scope)
+    /// IMPORTANT: Delve fires logpoints at the START of a statement (before the RHS
+    /// executes), so a variable is NOT yet in scope at its own declaration line.
+    /// We identify each "slot" (line) by the variable declared there via `find_decl`,
+    /// and place a metric for a DIFFERENT variable that is already in scope at that slot.
     pub fn go() -> Self {
+        use go_lines::CODEMAP;
+
         Self {
             language: SourceLanguage::Go,
             source_file: PathBuf::from("fixtures/go/detrix_example_app.go"),
             metrics: vec![
-                // orderID is assigned on line 122, so evaluate after that on line 127
-                // Use line 127 (`pnl := calculatePnl(...)`) which is a real executable statement
-                MetricPoint::new("order_metric", 127, "orderID").with_group("go_workflow"),
-                // price is assigned on line 119, so evaluate after that (line 122)
-                MetricPoint::new("price_metric", 122, "price").with_group("go_workflow"),
-                // IMPORTANT: Each metric must be on a DIFFERENT line because DAP logpoints
-                // evaluate only one expression per breakpoint location
-                // quantity is assigned on line 118, evaluate on line 125 (entryPrice := price)
-                MetricPoint::new("quantity_metric", 125, "quantity").with_group("go_workflow"),
-                // symbol is assigned on line 117, evaluate on line 126 (currentPrice := ...)
-                MetricPoint::new("symbol_metric", 126, "symbol").with_group("go_workflow"),
-                // Multi-expression metric: capture symbol + quantity + price on a single metric
-                // Line 135: time.Sleep(3 * time.Second) - all vars in scope
-                MetricPoint::new("trade_details", 135, "symbol")
+                // Slot: pnl declaration line — orderID is already in scope here
+                MetricPoint::new("order_metric", CODEMAP.find_decl("pnl"), "orderID")
+                    .with_group("go_workflow"),
+                // Slot: orderID declaration line — price is already in scope here
+                MetricPoint::new("price_metric", CODEMAP.find_decl("orderID"), "price")
+                    .with_group("go_workflow"),
+                // IMPORTANT: Each metric must be on a DIFFERENT line (one logpoint per line).
+                // Slot: entryPrice declaration line — quantity is already in scope here
+                MetricPoint::new(
+                    "quantity_metric",
+                    CODEMAP.find_decl("entryPrice"),
+                    "quantity",
+                )
+                .with_group("go_workflow"),
+                // Slot: currentPrice declaration line — symbol is already in scope here
+                MetricPoint::new("symbol_metric", CODEMAP.find_decl("currentPrice"), "symbol")
+                    .with_group("go_workflow"),
+                // Multi-expression: time.Sleep line — all vars in scope
+                MetricPoint::new("trade_details", CODEMAP.find_decl("sleep"), "symbol")
                     .with_extra_expressions(vec!["quantity", "price"])
                     .with_group("go_workflow"),
             ],
-            // Introspection metrics: stack trace and memory snapshot capture
-            // Each metric MUST be on a different line (Detrix allows only one metric per line)
-            // Lines must be REAL executable statements (not `_ = x` dead assignments).
-            // Delve requires actual code at the line to set a verified breakpoint.
-            // - Line 130: `totalPnl = totalPnl + pnl` - real assignment
-            // - Line 131: `lastOrderID := orderID` - real assignment
-            // - Line 133: `log(...)` - function call
+            // Introspection metrics: stack trace and memory snapshot capture.
+            // Each metric MUST be on a different line (one metric per line).
+            // Lines must be REAL executable statements — Delve requires actual code.
             introspection_metrics: vec![
-                MetricPoint::new("stack_trace_metric", 130, "orderID")
-                    .with_group("go_introspection")
-                    .with_stack_trace(),
-                MetricPoint::new("memory_snapshot_metric", 131, "price")
-                    .with_group("go_introspection")
-                    .with_memory_snapshot(),
-                MetricPoint::new("full_introspection_metric", 133, "quantity")
-                    .with_group("go_introspection")
-                    .with_introspection(),
+                // totalPnl update: `totalPnl = totalPnl + pnl` — real assignment
+                MetricPoint::new(
+                    "stack_trace_metric",
+                    CODEMAP.find_decl("totalPnl"),
+                    "orderID",
+                )
+                .with_group("go_introspection")
+                .with_stack_trace(),
+                // lastOrderID declaration: `lastOrderID := orderID` — real assignment
+                MetricPoint::new(
+                    "memory_snapshot_metric",
+                    CODEMAP.find_decl("lastOrderID"),
+                    "price",
+                )
+                .with_group("go_introspection")
+                .with_memory_snapshot(),
+                // log() call — function call, all vars in scope
+                MetricPoint::new(
+                    "full_introspection_metric",
+                    CODEMAP.find_decl("log"),
+                    "quantity",
+                )
+                .with_group("go_introspection")
+                .with_introspection(),
             ],
-            inspect_line: 127,
+            inspect_line: CODEMAP.find_decl("pnl"),
             inspect_variable: "price".to_string(),
             invalid_metric: Some(
-                // Line 104 is `go signalHandler(sigChan)` - sigChan is only variable in scope
-                MetricPoint::new("bad_metric", 104, "nonexistent_var").with_group("go_workflow"),
+                // signal_handler line: only sigChan in scope — good for "not in scope" test
+                MetricPoint::new(
+                    "bad_metric",
+                    CODEMAP.find_decl("signal_handler"),
+                    "nonexistent_var",
+                )
+                .with_group("go_workflow"),
             ),
             group_name: "go_workflow".to_string(),
             event_wait_secs: 15,
@@ -274,101 +484,72 @@ impl DapWorkflowConfig {
 
     /// Create a Rust workflow config using fixtures/rust/src/main.rs
     ///
-    /// This uses the unified fixture that works for both DAP and client tests:
-    ///   cargo build  # for DAP tests (no client feature)
-    ///   cargo run --features client  # for client tests
+    /// Line numbers are derived from `rust_lines::CODEMAP`.
+    /// Update `rust_lines::MAIN_LINE` if you add/remove lines before `fn main()`.
     ///
-    /// LINE NUMBER CALCULATION:
-    /// All line numbers are calculated as MAIN_LINE + offset.
-    /// If you modify fixtures/rust/src/main.rs, only update MAIN_LINE here.
-    ///
-    /// MAIN_LINE = 76 (the line where `fn main()` is defined)
-    ///
-    /// Offset definitions (from main):
-    /// - main+31: symbol assignment (line 107)
-    /// - main+33: quantity assignment (line 109)
-    /// - main+35: price assignment (line 111)
-    /// - main+38: order_id = place_order (line 114, symbol/quantity/price in scope)
-    /// - main+41: entry_price assignment (line 117)
-    /// - main+43: current_price assignment (line 119)
-    /// - main+45: pnl = calculate_pnl (line 121, all vars in scope)
-    /// - main+52: log! (line 128, introspection point 1)
-    /// - main+54: stderr().flush() (line 130, introspection point 2)
-    /// - main+56: thread::sleep() (line 132, introspection point 3)
-    ///
-    /// IMPORTANT: DAP logpoints evaluate BEFORE the line executes, so we use
-    /// lines where variables are already in scope from PREVIOUS assignments.
+    /// IMPORTANT: lldb-dap fires logpoints at the START of a statement (before the
+    /// RHS executes), so a variable is NOT yet in scope at its own declaration line.
+    /// We identify each "slot" (line) by the variable declared there via `find_decl`,
+    /// and place a metric for a DIFFERENT variable that is already in scope at that slot.
     pub fn rust() -> Self {
-        // Base line number for fn main() - update this if you add/remove lines before main()
-        const MAIN_LINE: u32 = 76;
-
-        // Offsets from main() for each variable/metric point
-        // Note: Not all offsets are used directly - some are for documentation
-        #[allow(dead_code)]
-        const OFFSET_SYMBOL: u32 = 31; // symbol assignment (line 107)
-        #[allow(dead_code)]
-        const OFFSET_QUANTITY: u32 = 33; // quantity assignment (line 109)
-        #[allow(dead_code)]
-        const OFFSET_PRICE: u32 = 35; // price assignment (line 111)
-        const OFFSET_ORDER_ID: u32 = 38; // place_order call (line 114)
-        const OFFSET_ENTRY_PRICE: u32 = 41; // entry_price assignment (line 117)
-        const OFFSET_CURRENT_PRICE: u32 = 43; // current_price assignment (line 119)
-        const OFFSET_PNL: u32 = 45; // pnl calculation (line 121)
-        const OFFSET_LOG: u32 = 52; // log! introspection point (line 128)
-        const OFFSET_FLUSH: u32 = 54; // stderr flush introspection point (line 130)
-        const OFFSET_SLEEP: u32 = 56; // thread::sleep introspection point (line 132)
+        use rust_lines::CODEMAP;
 
         Self {
             language: SourceLanguage::Rust,
             source_file: PathBuf::from("fixtures/rust/src/main.rs"),
             metrics: vec![
-                // order_id is assigned at main+33, evaluate after (main+36 = entry_price line)
-                MetricPoint::new("order_metric", MAIN_LINE + OFFSET_ENTRY_PRICE, "order_id")
+                // Slot: entry_price declaration line — order_id is already in scope here
+                MetricPoint::new("order_metric", CODEMAP.find_decl("entry_price"), "order_id")
                     .with_group("rust_workflow"),
-                // price is assigned at main+30, evaluate after (main+33 = place_order line)
-                MetricPoint::new("price_metric", MAIN_LINE + OFFSET_ORDER_ID, "price")
+                // Slot: order_id declaration line — price is already in scope here
+                MetricPoint::new("price_metric", CODEMAP.find_decl("order_id"), "price")
                     .with_group("rust_workflow"),
-                // quantity is assigned at main+28, evaluate after (main+38 = current_price line)
+                // IMPORTANT: Each metric must be on a DIFFERENT line (one logpoint per line).
+                // Slot: current_price declaration line — quantity is already in scope here
                 MetricPoint::new(
                     "quantity_metric",
-                    MAIN_LINE + OFFSET_CURRENT_PRICE,
+                    CODEMAP.find_decl("current_price"),
                     "quantity",
                 )
                 .with_group("rust_workflow"),
-                // symbol is assigned at main+26, evaluate after (main+40 = pnl line)
-                MetricPoint::new("symbol_metric", MAIN_LINE + OFFSET_PNL, "symbol")
+                // Slot: pnl declaration line — symbol is already in scope here
+                MetricPoint::new("symbol_metric", CODEMAP.find_decl("pnl"), "symbol")
                     .with_group("rust_workflow"),
-                // NOTE: No multi-expression metric for Rust - all executable lines are taken
+                // NOTE: No multi-expression metric for Rust — all executable lines are taken
                 // by other metrics, and `let _ = x` dead assignments are unreliable breakpoint
                 // targets with lldb-dap. Multi-expression DAP coverage is provided by Python
                 // and Go workflows.
             ],
-            // Introspection metrics: stack trace and memory snapshot capture
-            // Use distinct function call lines for reliable breakpoint placement
+            // Introspection metrics: stack trace and memory snapshot capture.
+            // Use distinct function call lines for reliable breakpoint placement.
             introspection_metrics: vec![
-                // main+52: log! - all variables in scope
-                MetricPoint::new("stack_trace_metric", MAIN_LINE + OFFSET_LOG, "order_id")
+                // log! macro — all variables in scope
+                MetricPoint::new("stack_trace_metric", CODEMAP.find_decl("log"), "order_id")
                     .with_group("rust_introspection")
                     .with_stack_trace(),
-                // main+54: stderr().flush() - I/O syscall
-                MetricPoint::new("memory_snapshot_metric", MAIN_LINE + OFFSET_FLUSH, "price")
-                    .with_group("rust_introspection")
-                    .with_memory_snapshot(),
-                // main+56: thread::sleep() - function call
+                // stderr().flush() — I/O syscall
+                MetricPoint::new(
+                    "memory_snapshot_metric",
+                    CODEMAP.find_decl("flush"),
+                    "price",
+                )
+                .with_group("rust_introspection")
+                .with_memory_snapshot(),
+                // thread::sleep() — function call
                 MetricPoint::new(
                     "full_introspection_metric",
-                    MAIN_LINE + OFFSET_SLEEP,
+                    CODEMAP.find_decl("sleep"),
                     "quantity",
                 )
                 .with_group("rust_introspection")
                 .with_introspection(),
             ],
-            inspect_line: MAIN_LINE + OFFSET_LOG,
+            inspect_line: CODEMAP.find_decl("log"),
             inspect_variable: "price".to_string(),
             invalid_metric: Some(
                 MetricPoint::new(
                     "bad_metric",
-                    MAIN_LINE + OFFSET_ENTRY_PRICE,
+                    CODEMAP.find_decl("entry_price"),
                     "nonexistent_var",
                 )
                 .with_group("rust_workflow"),

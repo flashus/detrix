@@ -4,10 +4,10 @@
 //! with configurable drain timeout and abort fallback.
 
 use detrix_config::constants::DEFAULT_DRAIN_TIMEOUT_MS;
+use detrix_logging::{debug, info, warn};
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
 
 /// A handle for graceful shutdown of a background task
 ///

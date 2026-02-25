@@ -670,11 +670,17 @@ pub trait ApiClient: Send + Sync {
     /// Get system status
     async fn get_status(&self) -> ApiResult<StatusInfo>;
 
-    /// Wake Detrix (informational - shows current status)
-    async fn wake(&self) -> ApiResult<String>;
+    /// Wake a remote app via its control plane.
+    /// Requires app_url. Returns status info.
+    async fn wake(&self, app_url: &str, daemon_url: Option<&str>) -> ApiResult<String>;
 
-    /// Sleep Detrix (stop all connections)
-    async fn sleep(&self) -> ApiResult<String>;
+    /// Sleep a remote app via its control plane.
+    /// Requires app_url.
+    async fn sleep(&self, app_url: &str) -> ApiResult<String>;
+
+    /// Disconnect all local debugger adapters.
+    /// Stops all active debug sessions. Metrics remain configured.
+    async fn disconnect_all(&self) -> ApiResult<String>;
 
     // ========================================================================
     // Connection Management

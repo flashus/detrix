@@ -287,42 +287,80 @@ impl McpErrorCode {
 #[serde(rename_all = "camelCase")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WakeRequest {
-    #[prost(message, optional, tag = "1")]
+    /// URL of the app's control plane
+    #[prost(string, tag = "1")]
+    pub app_url: ::prost::alloc::string::String,
+    /// optional: daemon URL to pass to the app
+    #[prost(string, tag = "2")]
+    pub daemon_url: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
     pub metadata: ::core::option::Option<RequestMetadata>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WakeResponse {
-    /// "active"
     #[prost(string, tag = "1")]
     pub status: ::prost::alloc::string::String,
-    #[prost(uint32, tag = "2")]
-    pub metrics_loaded: u32,
-    #[prost(message, optional, tag = "3")]
+    #[prost(string, tag = "2")]
+    pub app_url: ::prost::alloc::string::String,
+    /// optional: connection_id if app registered
+    #[prost(string, tag = "3")]
+    pub connection_id: ::prost::alloc::string::String,
+    /// optional: debug port
+    #[prost(int32, tag = "4")]
+    pub debug_port: i32,
+    #[prost(string, tag = "5")]
+    pub message: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "6")]
     pub metadata: ::core::option::Option<ResponseMetadata>,
+    /// Daemon URL for auto-discovery (e.g., "<http://localhost:8090">)
+    #[prost(string, optional, tag = "7")]
+    pub daemon_url: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SleepRequest {
-    #[prost(message, optional, tag = "1")]
+    /// URL of the app's control plane
+    #[prost(string, tag = "1")]
+    pub app_url: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
     pub metadata: ::core::option::Option<RequestMetadata>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SleepResponse {
-    /// "sleeping"
+    #[prost(string, tag = "1")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub app_url: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub message: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub metadata: ::core::option::Option<ResponseMetadata>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DisconnectAllRequest {
+    #[prost(message, optional, tag = "1")]
+    pub metadata: ::core::option::Option<RequestMetadata>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DisconnectAllResponse {
+    /// "disconnected" or "partial_failure"
     #[prost(string, tag = "1")]
     pub status: ::prost::alloc::string::String,
     #[prost(uint32, tag = "2")]
-    pub metrics_saved: u32,
-    #[prost(message, optional, tag = "3")]
-    pub metadata: ::core::option::Option<ResponseMetadata>,
-    /// Human-readable message (e.g., "All adapters stopped")
-    #[prost(string, tag = "4")]
+    pub adapters_stopped: u32,
+    #[prost(string, tag = "3")]
     pub message: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub metadata: ::core::option::Option<ResponseMetadata>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -434,6 +472,11 @@ pub struct AddMetricRequest {
     /// TTL in seconds, null for continuous
     #[prost(uint64, optional, tag = "18")]
     pub snapshot_ttl: ::core::option::Option<u64>,
+    /// Cloud VFS: Optional file content for remote execution
+    ///
+    /// Full file content to cache in VFS
+    #[prost(string, optional, tag = "19")]
+    pub file_content: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Stack trace capture configuration
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -466,6 +509,9 @@ pub struct MetricResponse {
     pub metadata: ::core::option::Option<ResponseMetadata>,
     #[prost(string, repeated, tag = "6")]
     pub expressions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Non-fatal warnings from the operation (e.g. expressions merged, breakpoint not verified)
+    #[prost(string, repeated, tag = "7")]
+    pub warnings: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -785,16 +831,16 @@ pub struct ValidateExpressionResponse {
     pub is_safe: bool,
     #[prost(string, tag = "2")]
     pub expression: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "4")]
+    #[prost(message, optional, tag = "3")]
     pub metadata: ::core::option::Option<ResponseMetadata>,
     /// Language that was validated
-    #[prost(string, tag = "5")]
+    #[prost(string, tag = "4")]
     pub language: ::prost::alloc::string::String,
     /// List of violations (reasons why expression is unsafe)
-    #[prost(string, repeated, tag = "6")]
+    #[prost(string, repeated, tag = "5")]
     pub violations: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     /// List of warnings (non-blocking issues)
-    #[prost(string, repeated, tag = "7")]
+    #[prost(string, repeated, tag = "6")]
     pub warnings: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -811,6 +857,12 @@ pub struct InspectFileRequest {
     pub find_variable: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "4")]
     pub metadata: ::core::option::Option<RequestMetadata>,
+    /// If provided, resolve relative paths against connection's workspace_root
+    #[prost(string, optional, tag = "5")]
+    pub connection_id: ::core::option::Option<::prost::alloc::string::String>,
+    /// Cloud VFS: Optional file content to cache in VFS
+    #[prost(string, optional, tag = "6")]
+    pub file_content: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -825,6 +877,96 @@ pub struct InspectFileResponse {
     pub error: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "4")]
     pub metadata: ::core::option::Option<ResponseMetadata>,
+}
+/// Provide file content to cache in VFS
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProvideFileRequest {
+    #[prost(string, tag = "1")]
+    pub connection_id: ::prost::alloc::string::String,
+    /// Relative or absolute file path
+    #[prost(string, tag = "2")]
+    pub path: ::prost::alloc::string::String,
+    /// Full file content
+    #[prost(string, tag = "3")]
+    pub content: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub metadata: ::core::option::Option<RequestMetadata>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProvideFileResponse {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+    /// Cached file path
+    #[prost(string, tag = "2")]
+    pub path: ::prost::alloc::string::String,
+    /// SHA256 hash of the content
+    #[prost(string, tag = "3")]
+    pub hash: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "4")]
+    pub error: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "5")]
+    pub metadata: ::core::option::Option<ResponseMetadata>,
+}
+/// Validate cached files against client hashes
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ValidateCacheRequest {
+    #[prost(string, tag = "1")]
+    pub connection_id: ::prost::alloc::string::String,
+    /// Client's file hashes
+    #[prost(message, repeated, tag = "2")]
+    pub files: ::prost::alloc::vec::Vec<FileHash>,
+    #[prost(message, optional, tag = "3")]
+    pub metadata: ::core::option::Option<RequestMetadata>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ValidateCacheResponse {
+    /// Paths client should re-provide (stale or missing)
+    #[prost(string, repeated, tag = "1")]
+    pub evicted_paths: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Server's current cache state
+    #[prost(message, repeated, tag = "2")]
+    pub cached: ::prost::alloc::vec::Vec<FileHash>,
+    #[prost(message, optional, tag = "3")]
+    pub metadata: ::core::option::Option<ResponseMetadata>,
+}
+/// Get all cached file hashes for a connection
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetCachedHashesRequest {
+    #[prost(string, tag = "1")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub metadata: ::core::option::Option<RequestMetadata>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetCachedHashesResponse {
+    /// All cached files with hashes
+    #[prost(message, repeated, tag = "1")]
+    pub cached: ::prost::alloc::vec::Vec<FileHash>,
+    #[prost(message, optional, tag = "2")]
+    pub metadata: ::core::option::Option<ResponseMetadata>,
+}
+/// File hash entry (used in validation)
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FileHash {
+    #[prost(string, tag = "1")]
+    pub path: ::prost::alloc::string::String,
+    /// SHA256 hash
+    #[prost(string, tag = "2")]
+    pub hash: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -974,6 +1116,30 @@ pub mod metrics_service_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("detrix.v1.MetricsService", "Sleep"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn disconnect_all(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DisconnectAllRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DisconnectAllResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/detrix.v1.MetricsService/DisconnectAll",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("detrix.v1.MetricsService", "DisconnectAll"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn get_status(
@@ -1342,6 +1508,79 @@ pub mod metrics_service_client {
                 .insert(GrpcMethod::new("detrix.v1.MetricsService", "InspectFile"));
             self.inner.unary(req, path, codec).await
         }
+        /// Cloud VFS operations
+        pub async fn provide_file(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ProvideFileRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ProvideFileResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/detrix.v1.MetricsService/ProvideFile",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("detrix.v1.MetricsService", "ProvideFile"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn validate_cache(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ValidateCacheRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ValidateCacheResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/detrix.v1.MetricsService/ValidateCache",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("detrix.v1.MetricsService", "ValidateCache"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_cached_hashes(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetCachedHashesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetCachedHashesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/detrix.v1.MetricsService/GetCachedHashes",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("detrix.v1.MetricsService", "GetCachedHashes"));
+            self.inner.unary(req, path, codec).await
+        }
         /// MCP usage statistics
         pub async fn get_mcp_usage(
             &mut self,
@@ -1391,6 +1630,13 @@ pub mod metrics_service_server {
             &self,
             request: tonic::Request<super::SleepRequest>,
         ) -> std::result::Result<tonic::Response<super::SleepResponse>, tonic::Status>;
+        async fn disconnect_all(
+            &self,
+            request: tonic::Request<super::DisconnectAllRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DisconnectAllResponse>,
+            tonic::Status,
+        >;
         async fn get_status(
             &self,
             request: tonic::Request<super::StatusRequest>,
@@ -1481,6 +1727,28 @@ pub mod metrics_service_server {
             request: tonic::Request<super::InspectFileRequest>,
         ) -> std::result::Result<
             tonic::Response<super::InspectFileResponse>,
+            tonic::Status,
+        >;
+        /// Cloud VFS operations
+        async fn provide_file(
+            &self,
+            request: tonic::Request<super::ProvideFileRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ProvideFileResponse>,
+            tonic::Status,
+        >;
+        async fn validate_cache(
+            &self,
+            request: tonic::Request<super::ValidateCacheRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ValidateCacheResponse>,
+            tonic::Status,
+        >;
+        async fn get_cached_hashes(
+            &self,
+            request: tonic::Request<super::GetCachedHashesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetCachedHashesResponse>,
             tonic::Status,
         >;
         /// MCP usage statistics
@@ -1641,6 +1909,51 @@ pub mod metrics_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SleepSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/detrix.v1.MetricsService/DisconnectAll" => {
+                    #[allow(non_camel_case_types)]
+                    struct DisconnectAllSvc<T: MetricsService>(pub Arc<T>);
+                    impl<
+                        T: MetricsService,
+                    > tonic::server::UnaryService<super::DisconnectAllRequest>
+                    for DisconnectAllSvc<T> {
+                        type Response = super::DisconnectAllResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DisconnectAllRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MetricsService>::disconnect_all(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DisconnectAllSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -2363,6 +2676,142 @@ pub mod metrics_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = InspectFileSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/detrix.v1.MetricsService/ProvideFile" => {
+                    #[allow(non_camel_case_types)]
+                    struct ProvideFileSvc<T: MetricsService>(pub Arc<T>);
+                    impl<
+                        T: MetricsService,
+                    > tonic::server::UnaryService<super::ProvideFileRequest>
+                    for ProvideFileSvc<T> {
+                        type Response = super::ProvideFileResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ProvideFileRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MetricsService>::provide_file(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ProvideFileSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/detrix.v1.MetricsService/ValidateCache" => {
+                    #[allow(non_camel_case_types)]
+                    struct ValidateCacheSvc<T: MetricsService>(pub Arc<T>);
+                    impl<
+                        T: MetricsService,
+                    > tonic::server::UnaryService<super::ValidateCacheRequest>
+                    for ValidateCacheSvc<T> {
+                        type Response = super::ValidateCacheResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ValidateCacheRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MetricsService>::validate_cache(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ValidateCacheSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/detrix.v1.MetricsService/GetCachedHashes" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetCachedHashesSvc<T: MetricsService>(pub Arc<T>);
+                    impl<
+                        T: MetricsService,
+                    > tonic::server::UnaryService<super::GetCachedHashesRequest>
+                    for GetCachedHashesSvc<T> {
+                        type Response = super::GetCachedHashesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetCachedHashesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MetricsService>::get_cached_hashes(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetCachedHashesSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -3339,6 +3788,22 @@ pub struct CreateConnectionRequest {
     /// Machine hostname for multi-host support
     #[prost(string, tag = "10")]
     pub hostname: ::prost::alloc::string::String,
+    /// Cloud metadata for transparent file fetching
+    ///
+    /// App control plane URL (e.g., "<http://app:8091">)
+    #[prost(string, optional, tag = "11")]
+    pub control_plane_url: ::core::option::Option<::prost::alloc::string::String>,
+    /// Git commit SHA at build time
+    #[prost(string, optional, tag = "12")]
+    pub build_commit: ::core::option::Option<::prost::alloc::string::String>,
+    /// Build version tag (e.g., "v1.2.3")
+    #[prost(string, optional, tag = "13")]
+    pub build_tag: ::core::option::Option<::prost::alloc::string::String>,
+    /// User identity tracking (for multi-user reference counting)
+    ///
+    /// Client identity of the creator (from X-Detrix-Client-Id header)
+    #[prost(string, optional, tag = "14")]
+    pub created_by: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -3355,6 +3820,9 @@ pub struct CreateConnectionResponse {
     pub connection: ::core::option::Option<ConnectionInfo>,
     #[prost(message, optional, tag = "4")]
     pub metadata: ::core::option::Option<ResponseMetadata>,
+    /// Daemon's external URL (from advertise_url config)
+    #[prost(string, optional, tag = "5")]
+    pub advertise_url: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -3429,6 +3897,25 @@ pub struct CleanupConnectionsResponse {
     /// Number of connections deleted
     #[prost(uint64, tag = "1")]
     pub deleted: u64,
+    #[prost(message, optional, tag = "2")]
+    pub metadata: ::core::option::Option<ResponseMetadata>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TouchConnectionsRequest {
+    #[prost(string, repeated, tag = "1")]
+    pub connection_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "2")]
+    pub metadata: ::core::option::Option<RequestMetadata>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TouchConnectionsResponse {
+    /// Number of connections updated
+    #[prost(uint32, tag = "1")]
+    pub updated: u32,
     #[prost(message, optional, tag = "2")]
     pub metadata: ::core::option::Option<ResponseMetadata>,
 }
@@ -3771,6 +4258,33 @@ pub mod connection_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Touch connections to update last_active timestamp
+        pub async fn touch_connections(
+            &mut self,
+            request: impl tonic::IntoRequest<super::TouchConnectionsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TouchConnectionsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/detrix.v1.ConnectionService/TouchConnections",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("detrix.v1.ConnectionService", "TouchConnections"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -3832,6 +4346,14 @@ pub mod connection_service_server {
             request: tonic::Request<super::CleanupConnectionsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::CleanupConnectionsResponse>,
+            tonic::Status,
+        >;
+        /// Touch connections to update last_active timestamp
+        async fn touch_connections(
+            &self,
+            request: tonic::Request<super::TouchConnectionsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TouchConnectionsResponse>,
             tonic::Status,
         >;
     }
@@ -4178,6 +4700,52 @@ pub mod connection_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = CleanupConnectionsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/detrix.v1.ConnectionService/TouchConnections" => {
+                    #[allow(non_camel_case_types)]
+                    struct TouchConnectionsSvc<T: ConnectionService>(pub Arc<T>);
+                    impl<
+                        T: ConnectionService,
+                    > tonic::server::UnaryService<super::TouchConnectionsRequest>
+                    for TouchConnectionsSvc<T> {
+                        type Response = super::TouchConnectionsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::TouchConnectionsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ConnectionService>::touch_connections(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = TouchConnectionsSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

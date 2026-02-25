@@ -37,6 +37,9 @@ thiserror.workspace = true
 # Logging
 detrix-logging = { workspace = true }
 
+# gRPC client
+tonic = { workspace = true }
+
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -60,6 +63,12 @@ regex.workspace = true
 # HTTP client (for MCP bridge and CodeLLDB download)
 reqwest = { workspace = true, features = ["json", "blocking"] }
 
+# HTTP server (for bridge file server)
+axum.workspace = true
+
+# Hashing (for drift detection in git-pinned file serving)
+sha2.workspace = true
+
 # ZIP archive extraction (for CodeLLDB VSIX files)
 zip = "2.2"
 
@@ -78,7 +87,7 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
-wiremock = "0.6"
+wiremock.workspace = true
 sqlx.workspace = true
 detrix-testing = { path = "../detrix-testing" }
 

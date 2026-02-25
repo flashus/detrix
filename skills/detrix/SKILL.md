@@ -3,7 +3,7 @@ name: Detrix Dynamic Observability
 description: This skill should be used when the user asks to "debug without print", "debug", "observe running code", "add metric", "inspect variables at runtime", "see what a variable is", or mentions "detrix", "logpoint", "dynamic metrics", "debugpy", "observe code". Debugger for agents.
 license: MIT
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
   languages: ["Python", "Go", "Rust"]
 ---
 
@@ -67,7 +67,7 @@ inspect_file(file_path="auth.py", find_variable="user")
 inspect_file(file_path="auth.py", line=42)  # see available vars at line
 ```
 
-## All 28 Tools
+## All 29 Tools
 
 **Metrics:** `list_metrics`, `get_metric`, `update_metric`, `remove_metric`, `toggle_metric`
 **Groups:** `list_groups`, `enable_group`, `disable_group`
@@ -75,7 +75,8 @@ inspect_file(file_path="auth.py", line=42)  # see available vars at line
 **Connections:** `list_connections`, `get_connection`, `close_connection`
 **Diagnostics:** `validate_expression`
 **Config:** `get_config`, `update_config`, `validate_config`, `reload_config`
-**System:** `wake`, `sleep`, `get_status`, `get_mcp_usage`
+**System:** `get_status`, `get_mcp_usage`, `disconnect_all`
+**Remote:** `wake`, `sleep`
 
 ## Capture Modes
 

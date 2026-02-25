@@ -19,6 +19,7 @@ use anyhow::{Context, Result};
 use detrix_api::mcp::DetrixServer;
 use detrix_api::ApiState;
 use detrix_application::{EventRepositoryRef, McpUsageRepositoryRef, SystemEventRepositoryRef};
+use detrix_config::pid::PidInfo;
 use detrix_config::{load_config, resolve_config_path, Config};
 use detrix_logging::{debug, info, warn};
 use rmcp::transport::stdio;
@@ -53,6 +54,8 @@ pub async fn run(
     transport: &str,
     no_daemon: bool,
     daemon_port: u16,
+    daemon_url: Option<String>,
+    file_server_host: Option<String>,
 ) -> Result<()> {
     // Note: Logging is already initialized by main.rs with config from detrix.toml
     // (including use_utc timestamp setting and file logging to ~/detrix/log/mcp_{pid}.log)
@@ -93,87 +96,121 @@ pub async fn run(
         return run_direct(&config_path_str, &config).await;
     }
 
-    // Use centralized daemon discovery (PID file + port probe fallback)
-    let discovery = DaemonDiscovery::new()
-        .with_pid_file(&config.daemon.pid_file)
-        .with_probe_host(&config.api.rest.host)
-        .with_probe_ports(config.api.rest.port, config.api.grpc.port);
+    // If --daemon-url is provided, parse it and use it directly (skip discovery)
+    let (actual_host, actual_port) = if let Some(ref url) = daemon_url {
+        // Parse the daemon URL to extract host and port
+        // Expected format: http://host:port or https://host:port
+        let url_without_scheme = url
+            .strip_prefix("http://")
+            .or_else(|| url.strip_prefix("https://"))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid daemon URL: {}. Expected format: http://host:port",
+                    url
+                )
+            })?;
 
-    let (actual_host, actual_port) = match discovery.find_daemon() {
-        Ok(Some(daemon_info)) => {
-            let method = match daemon_info.discovery_method {
-                DiscoveryMethod::PidFile => "PID file",
-                DiscoveryMethod::PortProbe => "port probe",
-            };
-            info!(
-                "Found running daemon via {} (PID: {}, endpoint: {})",
-                method,
-                daemon_info
-                    .pid
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                daemon_info.http_endpoint()
+        let parts: Vec<&str> = url_without_scheme.split(':').collect();
+        if parts.len() != 2 {
+            anyhow::bail!(
+                "Invalid daemon URL: {}. Expected format: http://host:port",
+                url
             );
+        }
 
-            // Verify daemon is actually healthy before using it
-            if is_daemon_healthy(&daemon_info.host, daemon_info.http_port).await {
-                (daemon_info.host, daemon_info.http_port)
-            } else {
-                // Daemon found but not healthy yet - wait for it to become ready
-                // This handles the case where daemon is still starting up
+        let host = parts[0].to_string();
+        let port: u16 = parts[1].parse().with_context(|| {
+            format!(
+                "Invalid port in daemon URL: {}. Port must be a number.",
+                parts[1]
+            )
+        })?;
+
+        info!("Using daemon URL from --daemon-url flag: {}", url);
+        (host, port)
+    } else {
+        // Use centralized daemon discovery (PID file + port probe fallback)
+        let discovery = DaemonDiscovery::new()
+            .with_pid_file(&config.daemon.pid_file)
+            .with_probe_host(&config.api.rest.host)
+            .with_probe_ports(config.api.rest.port, config.api.grpc.port);
+
+        match discovery.find_daemon() {
+            Ok(Some(daemon_info)) => {
+                let method = match daemon_info.discovery_method {
+                    DiscoveryMethod::PidFile => "PID file",
+                    DiscoveryMethod::PortProbe => "port probe",
+                };
                 info!(
+                    "Found running daemon via {} (PID: {}, endpoint: {})",
+                    method,
+                    daemon_info
+                        .pid
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    daemon_info.http_endpoint()
+                );
+
+                // Verify daemon is actually healthy before using it
+                if is_daemon_healthy(&daemon_info.host, daemon_info.http_port).await {
+                    (daemon_info.host, daemon_info.http_port)
+                } else {
+                    // Daemon found but not healthy yet - wait for it to become ready
+                    // This handles the case where daemon is still starting up
+                    info!(
                     "Daemon found via {} but not responding yet, waiting for it to become healthy...",
                     method
                 );
-                match wait_for_daemon_healthy(
-                    &daemon_info.host,
-                    daemon_info.http_port,
-                    &config.daemon.pid_file,
-                )
-                .await
-                {
-                    Ok(port) => (daemon_info.host, port),
-                    Err(_) => {
-                        // Timeout waiting - daemon may have crashed, respawn
-                        warn!("Daemon didn't become healthy, respawning...");
-                        let port = spawn_daemon_for_mcp(
-                            &config.api.rest.host,
-                            &config_path_str,
-                            &config.daemon.pid_file,
-                            daemon_port,
-                        )
-                        .await?;
-                        (config.api.rest.host.clone(), port)
+                    match wait_for_daemon_healthy(
+                        &daemon_info.host,
+                        daemon_info.http_port,
+                        &config.daemon.pid_file,
+                    )
+                    .await
+                    {
+                        Ok(port) => (daemon_info.host, port),
+                        Err(_) => {
+                            // Timeout waiting - daemon may have crashed, respawn
+                            warn!("Daemon didn't become healthy, respawning...");
+                            let port = spawn_daemon_for_mcp(
+                                &config.api.rest.host,
+                                &config_path_str,
+                                &config.daemon.pid_file,
+                                config.api.rest.port,
+                            )
+                            .await?;
+                            (config.api.rest.host.clone(), port)
+                        }
                     }
                 }
             }
-        }
-        Ok(None) => {
-            // Daemon not running - spawn it
-            info!(
-                "Daemon not running, auto-spawning (config: {})...",
-                config_path_str
-            );
-            let port = spawn_daemon_for_mcp(
-                &config.api.rest.host,
-                &config_path_str,
-                &config.daemon.pid_file,
-                daemon_port,
-            )
-            .await?;
-            (config.api.rest.host.clone(), port)
-        }
-        Err(e) => {
-            // Error during discovery - try spawning anyway
-            warn!("Error discovering daemon: {}, trying to spawn...", e);
-            let port = spawn_daemon_for_mcp(
-                &config.api.rest.host,
-                &config_path_str,
-                &config.daemon.pid_file,
-                daemon_port,
-            )
-            .await?;
-            (config.api.rest.host.clone(), port)
+            Ok(None) => {
+                // Daemon not running - spawn it
+                info!(
+                    "Daemon not running, auto-spawning (config: {})...",
+                    config_path_str
+                );
+                let port = spawn_daemon_for_mcp(
+                    &config.api.rest.host,
+                    &config_path_str,
+                    &config.daemon.pid_file,
+                    config.api.rest.port,
+                )
+                .await?;
+                (config.api.rest.host.clone(), port)
+            }
+            Err(e) => {
+                // Error during discovery - try spawning anyway
+                warn!("Error discovering daemon: {}, trying to spawn...", e);
+                let port = spawn_daemon_for_mcp(
+                    &config.api.rest.host,
+                    &config_path_str,
+                    &config.daemon.pid_file,
+                    config.api.rest.port,
+                )
+                .await?;
+                (config.api.rest.host.clone(), port)
+            }
         }
     };
 
@@ -184,9 +221,11 @@ pub async fn run(
     mcp_bridge::run_bridge(
         &actual_host,
         actual_port,
-        Some(config_path.clone()),
+        file_server_host,
+        Some(config_path),
         Some(config.daemon.pid_file.clone()),
         &config.mcp,
+        config.api.rest.port,
     )
     .await
 }
@@ -221,6 +260,7 @@ async fn run_direct(config_path: &str, config: &Config) -> Result<()> {
         &config.adapter,
         &config.anchor,
         &config.limits,
+        &config.vfs,
         gelf_output.clone(),
     );
 
@@ -233,6 +273,7 @@ async fn run_direct(config_path: &str, config: &Config) -> Result<()> {
         .full_config(config.clone())
         .system_event_repository(Arc::clone(&ctx.storage) as SystemEventRepositoryRef)
         .mcp_usage_repository(ctx.storage as McpUsageRepositoryRef)
+        .bridge_file_source(ctx.bridge_file_source)
         .build(),
     );
 
@@ -283,17 +324,37 @@ async fn run_direct(config_path: &str, config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Read daemon PID and port from PID file (with flock liveness probe).
+///
+/// Returns `Some((pid, port))` if the PID file contains a valid running daemon with a port.
+/// Returns `None` if the PID file is missing, stale, or has no port yet.
+fn read_daemon_port(pid_file: &std::path::Path) -> Option<(u32, u16)> {
+    PidFile::read_info(pid_file)
+        .ok()
+        .flatten()
+        .and_then(|info| info.port().map(|port| (info.pid, port)))
+}
+
+/// Read daemon PID and port from PID file (direct read, no flock probe).
+///
+/// Use this when we know the daemon was just spawned and don't need liveness verification.
+/// Avoids the exclusive flock probe in `PidFile::read_info()` which can spuriously succeed
+/// under heavy parallel load on macOS, falsely reporting the daemon as not running.
+fn read_daemon_port_direct(pid_file: &std::path::Path) -> Option<(u32, u16)> {
+    PidInfo::read_from_file(pid_file)
+        .ok()
+        .flatten()
+        .filter(|info| info.pid > 0)
+        .and_then(|info| info.port().map(|port| (info.pid, port)))
+}
+
 /// Wait for a daemon to become healthy
 ///
 /// Used when daemon is found via PID file but not responding yet (still starting up).
 /// Also checks PID file for updated port information in case daemon chooses a different port.
 ///
 /// Returns the actual port once daemon is healthy.
-async fn wait_for_daemon_healthy(
-    host: &str,
-    initial_port: u16,
-    pid_file: &std::path::PathBuf,
-) -> Result<u16> {
+async fn wait_for_daemon_healthy(host: &str, initial_port: u16, pid_file: &Path) -> Result<u16> {
     use detrix_config::constants::{
         DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS, DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS,
     };
@@ -303,24 +364,19 @@ async fn wait_for_daemon_healthy(
     for i in 0..max_iterations {
         tokio::time::sleep(Duration::from_millis(DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS)).await;
 
-        // Check if PID file has been updated with a port
-        let port_to_check = if let Ok(Some(pid_info)) = PidFile::read_info(pid_file) {
-            pid_info.port().unwrap_or(initial_port)
-        } else {
-            initial_port
-        };
+        let port = read_daemon_port(pid_file)
+            .map(|(_, port)| port)
+            .unwrap_or(initial_port);
 
-        // Check if daemon is healthy on this port
-        if is_daemon_healthy(host, port_to_check).await {
+        if is_daemon_healthy(host, port).await {
             info!(
                 "Daemon became healthy on port {} after {}ms",
-                port_to_check,
+                port,
                 (i + 1) * DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS
             );
-            return Ok(port_to_check);
+            return Ok(port);
         }
 
-        // Log progress every 5 seconds
         if i % 50 == 49 {
             debug!(
                 "Waiting for daemon to become healthy... ({}/{} seconds)",
@@ -343,132 +399,236 @@ async fn wait_for_daemon_healthy(
 /// The daemon is spawned with a special marker to indicate it was started by MCP.
 ///
 /// Key features:
+/// - Retries up to 3 times if daemon dies during initialization (handles transient
+///   resource contention under heavy parallel load, e.g. `cargo test --all`)
 /// - Uses `process_group(0)` to isolate daemon from MCP bridge's process group
 /// - Redirects stdout/stderr to log file in detrix_home/log/
 /// - This prevents SIGTERM propagation when MCP bridge is killed
 pub async fn spawn_daemon_for_mcp(
     host: &str,
     config_path: &str,
-    pid_file: &std::path::PathBuf,
+    pid_file: &Path,
     fallback_port: u16,
 ) -> Result<u16> {
     use std::fs::OpenOptions;
     use std::process::{Command, Stdio};
 
-    // Get current executable path
+    use detrix_config::constants::{
+        DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS, DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS,
+    };
+
+    const MAX_SPAWN_ATTEMPTS: u32 = 3;
+
+    // Get current executable path (once, shared across retries)
     let exe_path = std::env::current_exe().context("Failed to get current executable path")?;
 
-    // Set up log file for daemon stdout/stderr (for startup errors, panics, etc.)
-    // The daemon's tracing logs go to detrix_daemon.log.{date} via daily rotation
+    // Set up log directory (once, shared across retries)
     let log_dir = detrix_config::paths::default_log_dir();
     detrix_config::paths::ensure_parent_dir(&log_dir.join("placeholder"))
         .context("Failed to create log directory")?;
     let daemon_log_path = detrix_config::paths::default_daemon_startup_log_path();
 
-    info!(
-        "Spawning daemon from MCP (exe: {}, config: {}, log: {})",
-        exe_path.display(),
-        config_path,
-        daemon_log_path.display()
-    );
+    let max_iterations =
+        (DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS * 1000) / DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS;
 
-    // Open log file for stdout/stderr
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&daemon_log_path)
-        .context("Failed to open daemon log file")?;
-    let log_file_stderr = log_file
-        .try_clone()
-        .context("Failed to clone log file handle")?;
+    let mut last_error = String::new();
 
-    // Spawn daemon as detached background process
-    // CRITICAL: Use process_group(0) to create a new process group
-    // This prevents SIGTERM from propagating when MCP bridge is killed
-    #[cfg(unix)]
-    let _child = {
-        let mut cmd = Command::new(&exe_path);
-        cmd.arg("serve")
+    for attempt in 1..=MAX_SPAWN_ATTEMPTS {
+        if attempt > 1 {
+            warn!(
+                "Retrying daemon spawn (attempt {}/{}) after failure: {}",
+                attempt, MAX_SPAWN_ATTEMPTS, last_error
+            );
+            // Brief delay before retry to let resources settle
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        info!(
+            "Spawning daemon from MCP (exe: {}, config: {}, log: {}, attempt: {}/{})",
+            exe_path.display(),
+            config_path,
+            daemon_log_path.display(),
+            attempt,
+            MAX_SPAWN_ATTEMPTS
+        );
+
+        // Open log file for stdout/stderr (fresh handle per attempt)
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&daemon_log_path)
+            .context("Failed to open daemon log file")?;
+        let log_file_stderr = log_file
+            .try_clone()
+            .context("Failed to clone log file handle")?;
+
+        // Spawn daemon as detached background process
+        // CRITICAL: Use process_group(0) to create a new process group
+        // This prevents SIGTERM from propagating when MCP bridge is killed
+        #[cfg(unix)]
+        let mut child = {
+            let mut cmd = Command::new(&exe_path);
+            cmd.arg("serve")
+                .arg("--config")
+                .arg(config_path)
+                .arg("--daemon")
+                .arg("--pid-file")
+                .arg(pid_file)
+                .arg("--mcp-spawned") // Marker for MCP-spawned daemon
+                .stdin(Stdio::null())
+                .stdout(Stdio::from(log_file))
+                .stderr(Stdio::from(log_file_stderr))
+                .process_group(0); // Create new process group to isolate from parent signals
+
+            cmd.spawn().context("Failed to spawn daemon process")?
+        };
+
+        #[cfg(windows)]
+        let mut child = Command::new(&exe_path)
+            .arg("serve")
             .arg("--config")
             .arg(config_path)
             .arg("--daemon")
             .arg("--pid-file")
             .arg(pid_file)
-            .arg("--mcp-spawned") // Marker for MCP-spawned daemon
+            .arg("--mcp-spawned")
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_stderr))
-            .process_group(0); // Create new process group to isolate from parent signals
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .spawn()
+            .context("Failed to spawn daemon process")?;
 
-        cmd.spawn().context("Failed to spawn daemon process")?
-    };
+        let child_pid = child.id();
+        info!("Spawned daemon child process PID: {}", child_pid);
 
-    #[cfg(windows)]
-    let _child = Command::new(&exe_path)
-        .arg("serve")
-        .arg("--config")
-        .arg(config_path)
-        .arg("--daemon")
-        .arg("--pid-file")
-        .arg(pid_file)
-        .arg("--mcp-spawned")
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_file_stderr))
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .spawn()
-        .context("Failed to spawn daemon process")?;
+        // Poll for daemon to become healthy
+        let mut daemon_died = false;
 
-    // Wait for daemon to become healthy and get the actual port from PID file
-    use detrix_config::constants::{
-        DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS, DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS,
-    };
-    let max_iterations =
-        (DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS * 1000) / DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS;
+        for i in 0..max_iterations {
+            tokio::time::sleep(Duration::from_millis(DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS)).await;
 
-    for i in 0..max_iterations {
-        tokio::time::sleep(Duration::from_millis(DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS)).await;
+            // Check if daemon process is still alive — detect crashes early instead of
+            // polling for the full timeout. try_wait() is non-blocking.
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // Daemon exited — record error for retry/reporting
+                    let startup_log = detrix_config::paths::default_daemon_startup_log_path();
+                    let log_tail = std::fs::read_to_string(&startup_log)
+                        .ok()
+                        .map(|content| {
+                            content
+                                .lines()
+                                .rev()
+                                .take(10)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .unwrap_or_default();
 
-        // Check PID file for actual port
-        if let Ok(Some(pid_info)) = PidFile::read_info(pid_file) {
-            if let Some(port) = pid_info.port() {
-                // Port is in PID file - verify daemon is healthy
+                    last_error = format!(
+                        "Daemon process (PID {}) exited with {} after {}ms. \
+                         Config: {}. Startup log tail:\n{}",
+                        child_pid,
+                        status,
+                        (i + 1) * DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS,
+                        config_path,
+                        log_tail
+                    );
+                    warn!("{}", last_error);
+                    daemon_died = true;
+                    break;
+                }
+                Ok(None) => { /* still running, continue polling */ }
+                Err(e) => {
+                    warn!("Failed to check daemon status: {}", e);
+                }
+            }
+
+            // Read PID file directly (no flock probe) — we just spawned this daemon so we
+            // know it should be running. Using PidFile::read_info() here would do an exclusive
+            // flock probe that can spuriously succeed on macOS under heavy parallel load,
+            // falsely reporting "daemon not running" and causing a 30s timeout.
+            if let Some((pid, port)) = read_daemon_port_direct(pid_file) {
                 if is_daemon_healthy(host, port).await {
+                    // Verify this is OUR daemon (not another daemon that grabbed the same port
+                    // after ours died). Also confirm our child is still alive via try_wait().
+                    if pid == child_pid {
+                        if let Ok(None) = child.try_wait() {
+                            // Child still running — success
+                            info!(
+                                "Daemon started on port {} (PID: {}) after {}ms (attempt {}/{})",
+                                port,
+                                pid,
+                                (i + 1) * DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS,
+                                attempt,
+                                MAX_SPAWN_ATTEMPTS
+                            );
+                            return Ok(port);
+                        }
+                        // Child exited — will be caught by try_wait check at top of next iteration
+                    } else {
+                        debug!(
+                            "PID file has PID {} but we spawned PID {} — stale PID file, \
+                             continuing to poll",
+                            pid, child_pid
+                        );
+                    }
+                }
+                if i % 10 == 0 {
+                    info!("Poll {}: PID={}, port={}, not healthy yet", i, pid, port);
+                }
+            } else if i % 10 == 0 {
+                info!("Poll {}: waiting for daemon PID file...", i);
+            }
+
+            // Fallback: check the configured port AND verify our child is still alive
+            // (prevents accepting a health check from a different daemon on the same port)
+            if is_daemon_healthy(host, fallback_port).await {
+                if let Ok(None) = child.try_wait() {
                     info!(
-                        "Daemon started on port {} (PID: {}) after {}ms",
-                        port,
-                        pid_info.pid,
+                        "Daemon healthy on fallback port {} after {}ms",
+                        fallback_port,
                         (i + 1) * DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS
                     );
-                    return Ok(port);
+                    return Ok(fallback_port);
                 }
+            }
+
+            if i % 50 == 49 {
+                info!(
+                    "Waiting for daemon to become healthy... ({}/{} seconds)",
+                    (i + 1) / 10,
+                    DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS
+                );
             }
         }
 
-        // Fallback: also check the expected port (in case PID file is slow to update)
-        if is_daemon_healthy(host, fallback_port).await {
-            info!(
-                "Daemon healthy on fallback port {} after {}ms",
-                fallback_port,
-                (i + 1) * DEFAULT_MCP_DAEMON_POLL_INTERVAL_MS
-            );
-            return Ok(fallback_port);
+        // If daemon died and we have retries left, try again
+        if daemon_died && attempt < MAX_SPAWN_ATTEMPTS {
+            continue;
         }
 
-        // Log progress every 5 seconds
-        if i % 50 == 49 {
-            debug!(
-                "Waiting for daemon to become healthy... ({}/{} seconds)",
-                (i + 1) / 10,
-                DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS
-            );
+        // Either daemon died on last attempt, or timed out
+        if daemon_died {
+            break;
         }
+
+        // Timeout — daemon is still running but not healthy
+        anyhow::bail!(
+            "Daemon spawned but failed to become healthy within {} seconds. \
+             Check logs for errors. Config: {}",
+            DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS,
+            config_path
+        );
     }
 
     anyhow::bail!(
-        "Daemon spawned but failed to become healthy within {} seconds. \
-         Check logs for errors. Config: {}",
-        DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS,
-        config_path
+        "Daemon failed to start after {} attempts. Last error: {}",
+        MAX_SPAWN_ATTEMPTS,
+        last_error
     )
 }

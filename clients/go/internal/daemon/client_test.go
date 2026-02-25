@@ -97,7 +97,7 @@ func TestRegister_Success(t *testing.T) {
 		t.Fatalf("NewClient failed: %v", err)
 	}
 
-	connID, err := client.Register(server.URL, RegisterRequest{
+	connID, _, err := client.Register(server.URL, RegisterRequest{
 		Host:     "127.0.0.1",
 		Port:     5678,
 		Language: "go",
@@ -123,7 +123,7 @@ func TestRegister_ServerError(t *testing.T) {
 		t.Fatalf("NewClient failed: %v", err)
 	}
 
-	_, err = client.Register(server.URL, RegisterRequest{
+	_, _, err = client.Register(server.URL, RegisterRequest{
 		Host:     "127.0.0.1",
 		Port:     5678,
 		Language: "go",
@@ -241,6 +241,32 @@ func TestRegisterRequestIdentityFields(t *testing.T) {
 	}
 	if _, ok := raw["hostname"]; !ok {
 		t.Errorf("JSON must contain \"hostname\" key, got: %s", string(data))
+	}
+}
+
+func TestUpdateToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer new-token" {
+			t.Errorf("expected Authorization: Bearer new-token, got %q", auth)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(&ClientOptions{Token: "old-token"})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	client.UpdateToken("new-token")
+
+	// Verify the new token is used in subsequent requests via Unregister,
+	// which calls setAuth (unlike HealthCheck which is unauthenticated).
+	if err := client.Unregister(server.URL, "test-conn", 5*time.Second); err != nil {
+		t.Errorf("Unregister with updated token failed: %v", err)
 	}
 }
 

@@ -1,6 +1,6 @@
 **target**
 .cargo/
-.claude/
+.claude/settings.local.json
 logs/
 fixtures/go/detrix_example_app
 
@@ -9,3 +9,6 @@ clients/go/basic_usage
 clients/go/test_wake
 clients/go/trade_bot
 fixtures/go/go
+.mcp.json
+.serena/
+.agents/

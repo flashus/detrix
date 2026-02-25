@@ -122,6 +122,69 @@ impl ::std::convert::TryFrom<::std::string::String> for ClientState {
         value.parse()
     }
 }
+///Daemon discovery response (no auth required)
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "description": "Daemon discovery response (no auth required)",
+///  "type": "object",
+///  "required": [
+///    "daemon_url",
+///    "name"
+///  ],
+///  "properties": {
+///    "control_plane_url": {
+///      "description": "Daemon-visible URL of this app's control plane.\nMay differ from the user-visible URL in Docker/cloud deployments where\nthe bind address (0.0.0.0) differs from the routable hostname.\nThe MCP bridge uses this URL (instead of the user-provided app_url)\nwhen forwarding wake requests to the daemon, so the daemon can reach\nthe app across network boundaries (e.g. http://order-service:8091).\nPresent only when the client knows its routable hostname (advertise_host\nor non-bind-all control_host).\n",
+///      "type": "string",
+///      "example": "http://order-service:8091",
+///      "nullable": true
+///    },
+///    "daemon_url": {
+///      "description": "External daemon URL (daemon_advertise_url if set, else daemon_url).\nUsed by MCP bridge to discover which daemon to connect to.\n",
+///      "type": "string",
+///      "example": "http://localhost:8095"
+///    },
+///    "name": {
+///      "description": "Connection name for this client",
+///      "type": "string",
+///      "example": "order-service"
+///    }
+///  },
+///  "example": {
+///    "control_plane_url": "http://order-service:8091",
+///    "daemon_url": "http://localhost:8095",
+///    "name": "order-service"
+///  }
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+pub struct DiscoverResponse {
+    /**Daemon-visible URL of this app's control plane.
+    May differ from the user-visible URL in Docker/cloud deployments where
+    the bind address (0.0.0.0) differs from the routable hostname.
+    The MCP bridge uses this URL (instead of the user-provided app_url)
+    when forwarding wake requests to the daemon, so the daemon can reach
+    the app across network boundaries (e.g. http://order-service:8091).
+    Present only when the client knows its routable hostname (advertise_host
+    or non-bind-all control_host).
+    */
+    #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+    pub control_plane_url: ::std::option::Option<::std::string::String>,
+    /**External daemon URL (daemon_advertise_url if set, else daemon_url).
+    Used by MCP bridge to discover which daemon to connect to.
+    */
+    pub daemon_url: ::std::string::String,
+    ///Connection name for this client
+    pub name: ::std::string::String,
+}
+impl ::std::convert::From<&DiscoverResponse> for DiscoverResponse {
+    fn from(value: &DiscoverResponse) -> Self {
+        value.clone()
+    }
+}
 ///Error response
 ///
 /// <details><summary>JSON schema</summary>
@@ -424,6 +487,62 @@ impl ::std::convert::From<&InfoResponse> for InfoResponse {
         value.clone()
     }
 }
+///Request body for /detrix/files/read
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "description": "Request body for /detrix/files/read",
+///  "type": "object",
+///  "required": [
+///    "path"
+///  ],
+///  "properties": {
+///    "commit": {
+///      "description": "Git commit SHA for pinned source fetching (optional).\nIf provided, the file is fetched from the specified git commit.\n",
+///      "type": "string",
+///      "example": "abc123def456",
+///      "nullable": true
+///    },
+///    "path": {
+///      "description": "File path to read. Can be absolute or relative.\nRelative paths are resolved against the workspace root.\nMust not escape the workspace root.\n",
+///      "type": "string",
+///      "example": "/src/examples/docker-demo/client-app/main.go"
+///    },
+///    "workspace_root": {
+///      "description": "Workspace root hint from the daemon (optional).\nOverrides the client's own workspace root for path resolution.\n",
+///      "type": "string",
+///      "example": "/src/examples/docker-demo/client-app",
+///      "nullable": true
+///    }
+///  }
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+pub struct ReadFileRequest {
+    /**Git commit SHA for pinned source fetching (optional).
+    If provided, the file is fetched from the specified git commit.
+    */
+    #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+    pub commit: ::std::option::Option<::std::string::String>,
+    /**File path to read. Can be absolute or relative.
+    Relative paths are resolved against the workspace root.
+    Must not escape the workspace root.
+    */
+    pub path: ::std::string::String,
+    /**Workspace root hint from the daemon (optional).
+    Overrides the client's own workspace root for path resolution.
+    */
+    #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+    pub workspace_root: ::std::option::Option<::std::string::String>,
+}
+impl ::std::convert::From<&ReadFileRequest> for ReadFileRequest {
+    fn from(value: &ReadFileRequest) -> Self {
+        value.clone()
+    }
+}
 ///Response from sleep operation
 ///
 /// <details><summary>JSON schema</summary>
@@ -711,6 +830,12 @@ impl ::std::default::Default for WakeRequest {
 ///      "type": "string",
 ///      "example": "conn_abc123"
 ///    },
+///    "daemon_url": {
+///      "description": "External URL of the daemon this client registered with.\nSet from daemon's advertise_url returned during registration.\nUsed by MCP bridge for auto-discovery of remote daemons.\n",
+///      "type": "string",
+///      "format": "uri",
+///      "example": "http://localhost:8095"
+///    },
 ///    "debug_port": {
 ///      "description": "Port the debug adapter is listening on",
 ///      "type": "integer",
@@ -730,6 +855,7 @@ impl ::std::default::Default for WakeRequest {
 ///  },
 ///  "example": {
 ///    "connection_id": "conn_abc123",
+///    "daemon_url": "http://localhost:8095",
 ///    "debug_port": 5678,
 ///    "status": "awake"
 ///  }
@@ -740,6 +866,12 @@ impl ::std::default::Default for WakeRequest {
 pub struct WakeResponse {
     ///Connection ID assigned by the daemon
     pub connection_id: ::std::string::String,
+    /**External URL of the daemon this client registered with.
+    Set from daemon's advertise_url returned during registration.
+    Used by MCP bridge for auto-discovery of remote daemons.
+    */
+    #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+    pub daemon_url: ::std::option::Option<::std::string::String>,
     ///Port the debug adapter is listening on
     pub debug_port: i32,
     /**"awake" if the client transitioned from sleeping to awake.

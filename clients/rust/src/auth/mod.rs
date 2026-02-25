@@ -2,4 +2,4 @@
 
 mod token;
 
-pub use token::{discover_token, is_authorized};
+pub use token::{discover_token, is_authorized, AUTHORIZATION_HEADER, BEARER_PREFIX};

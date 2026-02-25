@@ -7,14 +7,14 @@
 //! Follows Clean Architecture - this is where all the infrastructure wiring happens.
 
 use anyhow::{Context, Result};
-use detrix_application::ports::{DlqRepositoryRef, EventOutputRef};
+use detrix_application::ports::{DlqRepositoryRef, EventOutputRef, RemoteAppControlRef};
 use detrix_application::{
     middleware::ReconnectingAdapterFactory, AppContext, ConnectionRepositoryRef,
-    DapAdapterFactoryRef, EventRepositoryRef, MetricRepositoryRef,
+    DapAdapterFactoryRef, EventRepositoryRef, FileSourceChain, FileSourceRef, MetricRepositoryRef,
 };
 use detrix_config::{
     AdapterConnectionConfig, AnchorConfig, ApiConfig, Config, DaemonConfig, DlqBackend,
-    LimitsConfig, SafetyConfig, StorageConfig,
+    LimitsConfig, SafetyConfig, StorageConfig, VfsConfig,
 };
 use detrix_dap::DapAdapterFactoryImpl;
 use detrix_logging::{debug, info};
@@ -43,6 +43,8 @@ pub struct AppContextWithStorage {
     pub app_context: AppContext,
     /// Storage reference (for API state creation)
     pub storage: Arc<SqliteStorage>,
+    /// Bridge file source reference (for setting bridge URL from MCP headers)
+    pub bridge_file_source: Arc<detrix_api::file_sources::BridgeSource>,
 }
 
 impl InfrastructureComponents {
@@ -67,10 +69,50 @@ impl InfrastructureComponents {
         adapter_config: &AdapterConnectionConfig,
         anchor_config: &AnchorConfig,
         limits_config: &LimitsConfig,
+        vfs_config: &VfsConfig,
         output: Option<EventOutputRef>,
     ) -> AppContextWithStorage {
         // Convert DlqStorage to DlqRepositoryRef if available
         let dlq_repo: Option<DlqRepositoryRef> = self.dlq_storage.map(|s| s as DlqRepositoryRef);
+
+        // Create HttpRemoteAppControl for wake/sleep proxy to remote apps
+        let remote_control: Option<RemoteAppControlRef> =
+            match detrix_api::remote_app_control::HttpRemoteAppControl::new(
+                daemon_config.remote_app_timeout_ms,
+            ) {
+                Ok(ctrl) => Some(Arc::new(ctrl) as RemoteAppControlRef),
+                Err(e) => {
+                    detrix_logging::warn!("Failed to create remote app control: {}", e);
+                    None
+                }
+            };
+
+        // Create VFS: CachedFileSystem with disk fallback for production use
+        let vfs: detrix_application::VfsRef = Arc::new(detrix_storage::CachedFileSystem::new(
+            std::time::Duration::from_secs(vfs_config.hot_reload_ttl_seconds),
+        ));
+
+        // Build pluggable file source chain from VFS config
+        let timeout = std::time::Duration::from_secs(vfs_config.fetch_timeout_seconds);
+        let max_size = vfs_config.max_file_size_bytes;
+        // Keep a concrete reference to BridgeSource for runtime URL updates from MCP headers
+        let bridge_source = Arc::new(detrix_api::file_sources::BridgeSource::new(
+            timeout, max_size,
+        ));
+        let available_sources: Vec<FileSourceRef> = vec![
+            Arc::new(detrix_api::file_sources::ControlPlaneSource::new(
+                timeout,
+                max_size,
+                std::env::var("DETRIX_TOKEN").ok(),
+            )),
+            Arc::clone(&bridge_source) as FileSourceRef,
+            Arc::new(detrix_api::file_sources::DiskSource),
+        ];
+        let file_source_chain = Arc::new(FileSourceChain::new(
+            Arc::clone(&vfs),
+            available_sources,
+            &vfs_config.source_priority,
+        ));
 
         let app_context = AppContext::new(
             Arc::clone(&self.storage) as MetricRepositoryRef,
@@ -86,10 +128,16 @@ impl InfrastructureComponents {
             limits_config,
             output,
             dlq_repo,
+            remote_control,
+            std::env::var("DETRIX_TOKEN").ok(),
+            vfs,
+            file_source_chain,
+            Arc::clone(&self.storage) as detrix_application::ConnectionReferenceRepositoryRef,
         );
         AppContextWithStorage {
             app_context,
             storage: self.storage,
+            bridge_file_source: bridge_source,
         }
     }
 
@@ -104,6 +152,7 @@ impl InfrastructureComponents {
             &AdapterConnectionConfig::default(),
             &AnchorConfig::default(),
             &LimitsConfig::default(),
+            &VfsConfig::default(),
             None,
         )
     }

@@ -77,40 +77,45 @@ pub use error::{
     FileInspectionError,
     FileIoResultExt,
     GroupOperationResult,
+    InvalidConfigResultExt,
     IoErrorWithContext,
     JsonParseErrorWithContext,
     OperationOutcome,
     OperationWarning,
+    PathCanonicalizeExt,
     Result,
     SafetyError,
     SafetyJsonParseError,
+    VfsReadResultExt,
 };
 
 // Re-export port types from detrix-ports for convenience
 pub use detrix_ports::{
-    AnchorService, AnchorServiceRef, ConnectionRepository, ConnectionRepositoryRef, DapAdapter,
-    DapAdapterFactory, DapAdapterFactoryRef, DapAdapterRef, DlqEntry, DlqEntryStatus,
-    DlqRepository, DlqRepositoryRef, ErrorCountRow, EventOutput, EventOutputRef, EventRepository,
-    EventRepositoryRef, FileEvent, FileWatcher, FileWatcherConfig, FileWatcherRef, GroupSummary,
+    AnchorService, AnchorServiceRef, ConnectionLookup, ConnectionLookupRef,
+    ConnectionReferenceRepository, ConnectionReferenceRepositoryRef, ConnectionRepository,
+    ConnectionRepositoryRef, DapAdapter, DapAdapterFactory, DapAdapterFactoryRef, DapAdapterRef,
+    DlqEntry, DlqEntryStatus, DlqRepository, DlqRepositoryRef, ErrorCountRow, EventOutput,
+    EventOutputRef, EventRepository, EventRepositoryRef, FetchResult, FileEvent, FileSource,
+    FileSourceRef, FileWatcher, FileWatcherConfig, FileWatcherRef, GroupSummary,
     McpUsageRepository, McpUsageRepositoryRef, MetricFilter, MetricRepository, MetricRepositoryRef,
     NullFileWatcher, NullOutput, PurityAnalyzer, PurityAnalyzerRef, PurityCache, PurityCacheEntry,
     PurityCacheKey, PurityCacheRef, PurityCacheStats, RemoveMetricResult, SetMetricResult,
-    SourceContext, SymbolInfo, SystemEventRepository, SystemEventRepositoryRef, ToggleMetricResult,
-    ToolCountRow, UsageStats,
+    SourceContext, SourceMetadata, SymbolInfo, SystemEventRepository, SystemEventRepositoryRef,
+    ToggleMetricResult, ToolCountRow, UsageStats, VfsRef, VirtualFileSystem,
 };
 
 // Thread-safe reference to expression validator (defined here since ExpressionValidator is in this crate)
 pub type ExpressionValidatorRef = std::sync::Arc<dyn safety::ExpressionValidator + Send + Sync>;
 pub use safety::{ExpressionValidator, PythonValidator, ValidationResult, ValidatorRegistry};
 pub use services::{
-    AdapterLifecycleManager, AnchorServiceConfig, Audience, CallTimer, CodeContext, CodeLine,
-    ConfigService, ConfigUpdateResult, ConnectionService, DefaultAnchorService,
-    EnvironmentCheckResult, EnvironmentService, EventCaptureService, FileChangeResult,
-    FileInspectionRequest, FileInspectionResult, FileInspectionService, FileOverview,
-    JwksValidator, JwtClaims, JwtError, LanguageCapabilities, LineInspectionResult,
-    LspSymbolLookup, LspSymbolLookupRef, ManagedAdapterInfo, ManagedAdapterStatus, McpErrorCode,
-    McpUsageCounters, McpUsageEvent, McpUsageService, MetricService, NotifyFileWatcher,
-    NullLspLookup, SourceLanguage, StreamingService, SystemEventService, TextSearchMatch,
-    UsageSnapshot, VariableDefinition, VariableSearchResult, WorkflowStats,
-    RESTART_REQUIRED_FIELDS,
+    resolve_file_path, AdapterLifecycleManager, AnchorServiceConfig, Audience, CallTimer,
+    CodeContext, CodeLine, ConfigService, ConfigUpdateResult, ConnectionService,
+    DefaultAnchorService, DisconnectAllResult, EnvironmentCheckResult, EnvironmentService,
+    EventCaptureService, FileChangeResult, FileInspectionRequest, FileInspectionResult,
+    FileInspectionService, FileOverview, FileSourceChain, JwksValidator, JwtClaims, JwtError,
+    LanguageCapabilities, LineInspectionResult, LspSymbolLookup, LspSymbolLookupRef,
+    ManagedAdapterInfo, ManagedAdapterStatus, McpErrorCode, McpUsageCounters, McpUsageEvent,
+    McpUsageService, MetricService, NotifyFileWatcher, NullLspLookup, RemoteAppService,
+    SourceLanguage, StreamingService, SystemEventService, TextSearchMatch, UsageSnapshot,
+    VariableDefinition, VariableSearchResult, WorkflowStats, RESTART_REQUIRED_FIELDS,
 };

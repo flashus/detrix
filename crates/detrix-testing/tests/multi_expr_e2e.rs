@@ -13,6 +13,7 @@
 //! This validates the end-to-end flow of the multi-expression feature:
 //! DAP logpoint → `{symbol}\x1F{quantity}\x1F{price}` → parsed into Vec<ExpressionValue>
 
+use detrix_testing::e2e::dap_scenarios::go_lines;
 use detrix_testing::e2e::{
     executor::TestExecutor, reporter::TestReporter, require_tool, ToolDependency,
 };
@@ -371,7 +372,7 @@ async fn test_multi_expr_python() {
 /// Test multi-expression metric with Go/Delve
 ///
 /// Uses detrix_example_app.go fixture:
-/// - Line 122: `orderID := placeOrder(symbol, quantity, price)`
+/// - OFFSET_ORDER_ID: `orderID := placeOrder(symbol, quantity, price)`
 ///   At this line, symbol (str), quantity (int), price (float64) are in scope
 #[tokio::test]
 async fn test_multi_expr_go() {
@@ -380,7 +381,7 @@ async fn test_multi_expr_go() {
         language: "go",
         tool: ToolDependency::Delve,
         fixture_path: "fixtures/go/detrix_example_app.go",
-        line: 122,
+        line: go_lines::CODEMAP.find_decl("orderID"),
         wait_secs: 12,
     })
     .await;

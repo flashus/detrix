@@ -46,7 +46,9 @@ class MockDaemonHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(
-                json.dumps({"connectionId": data.get("name", data.get("connectionId", "mock-conn"))}).encode()
+                json.dumps(
+                    {"connectionId": data.get("name", data.get("connectionId", "mock-conn"))}
+                ).encode()
             )
         else:
             self.send_response(404)
@@ -141,10 +143,9 @@ class TestConnectionNames:
         assert result.startswith("detrix-client-")
         assert str(os.getpid()) in result
 
-        # Provided name should be used with PID
+        # Provided name should be used as-is (consistent with Go/Rust clients)
         result = generate_connection_name("my-service")
-        assert result.startswith("my-service-")
-        assert str(os.getpid()) in result
+        assert result == "my-service"
 
 
 class TestPortNumbers:
@@ -197,6 +198,7 @@ class TestPortNumbers:
         # Port 65536 is invalid
         monkeypatch.setenv("DETRIX_CONTROL_PORT", "65536")
         from detrix.errors import ConfigError
+
         with pytest.raises(ConfigError):
             detrix.init(name="test")
 
@@ -276,7 +278,7 @@ class TestEnvironmentVariables:
         status = detrix.status()
 
         # Explicit name should win
-        assert status["name"].startswith("explicit-name-")
+        assert status["name"] == "explicit-name"
 
 
 class TestStateTransitions:
@@ -293,7 +295,7 @@ class TestStateTransitions:
         # Should be able to reinit
         detrix.init(name="test-2", daemon_url=mock_daemon)
         status = detrix.status()
-        assert status["name"].startswith("test-2-")
+        assert status["name"] == "test-2"
 
     def test_multiple_shutdowns(self):
         """Test multiple shutdown calls are safe."""

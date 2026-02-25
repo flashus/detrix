@@ -1,0 +1,54 @@
+# Rust Test App Docker Image
+# Multi-stage: build fixture with debug symbols, runtime with lldb-dap
+
+# ---- Build Stage ----
+# Pin to bookworm so the binary links against glibc 2.36 (matching the runtime stage).
+FROM rust:1-bookworm AS builder
+
+WORKDIR /src
+
+# Override target dir (the repo's .cargo/config.toml points elsewhere)
+ENV CARGO_TARGET_DIR=/build/target
+
+# Copy the Rust client
+COPY clients/rust /src/clients/rust
+
+# Copy the fixture
+COPY fixtures/rust /src/fixtures/rust
+
+WORKDIR /src/fixtures/rust
+
+# Build with debug symbols (NOT --release) and client feature enabled.
+# The binary must be copied out of the cache mount in the same RUN step,
+# because --mount=type=cache contents are not persisted to the image layer.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    cargo build --features client \
+    && cp /build/target/debug/detrix_example_app /src/fixtures/rust/detrix_example_app
+
+# ---- Runtime Stage ----
+FROM debian:bookworm-slim
+
+# Install lldb-21 from apt.llvm.org (LLVM 21+ has the --connection flag for lldb-dap).
+# Full package installation is required — minimal binary extraction (via ldd) doesn't save
+# space because libclang-cpp.so and libLLVM-21.so alone are ~300MB, and splitting them into
+# a separate layer + adding libpython3.11 actually increases the total image size.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates gnupg wget \
+    && wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
+    && echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-21 main" \
+       > /etc/apt/sources.list.d/llvm.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends lldb-21 \
+    && apt-get purge -y --auto-remove gnupg wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Symlink lldb-dap and lldb-server to PATH so Detrix finds them
+RUN ln -s /usr/lib/llvm-21/bin/lldb-dap /usr/local/bin/lldb-dap \
+    && ln -s /usr/lib/llvm-21/bin/lldb-server /usr/local/bin/lldb-server
+
+# Copy binary from build stage (extracted from cache mount during build)
+COPY --from=builder /src/fixtures/rust/detrix_example_app /usr/local/bin/detrix_example_app
+
+CMD ["detrix_example_app"]

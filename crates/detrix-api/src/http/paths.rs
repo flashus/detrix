@@ -12,6 +12,7 @@ pub const MCP_DISCONNECT: &str = "/mcp/disconnect";
 
 pub const API_V1_WAKE: &str = "/api/v1/wake";
 pub const API_V1_SLEEP: &str = "/api/v1/sleep";
+pub const API_V1_DISCONNECT_ALL: &str = "/api/v1/disconnect_all";
 pub const API_V1_STATUS: &str = "/api/v1/status";
 
 pub const API_V1_METRICS: &str = "/api/v1/metrics";
@@ -31,6 +32,13 @@ pub const API_V1_GROUP_DISABLE: &str = "/api/v1/groups/{name}/disable";
 pub const API_V1_CONNECTIONS: &str = "/api/v1/connections";
 pub const API_V1_CONNECTION_BY_ID: &str = "/api/v1/connections/{id}";
 pub const API_V1_CONNECTIONS_CLEANUP: &str = "/api/v1/connections/cleanup";
+pub const API_V1_CONNECTIONS_TOUCH: &str = "/api/v1/connections/touch";
+pub const API_V1_CONNECTIONS_RELEASE: &str = "/api/v1/connections/release";
+pub const API_V1_CONNECTION_ATTACH: &str = "/api/v1/connections/{id}/attach";
+pub const API_V1_CONNECTION_RELEASE: &str = "/api/v1/connections/{id}/release";
+pub const API_V1_CONNECTION_REFERENCES: &str = "/api/v1/connections/{id}/references";
+pub const API_V1_ADMIN_DISCONNECT_ALL: &str = "/api/v1/admin/disconnect-all";
+pub const API_V1_ADMIN_DISABLE_METRICS_BY_OWNER: &str = "/api/v1/admin/disable-metrics-by-owner";
 
 pub const API_V1_CONFIG: &str = "/api/v1/config";
 pub const API_V1_CONFIG_RELOAD: &str = "/api/v1/config/reload";
@@ -40,3 +48,8 @@ pub const API_V1_VALIDATE_EXPRESSION: &str = "/api/v1/validate_expression";
 pub const API_V1_INSPECT_FILE: &str = "/api/v1/inspect_file";
 
 pub const API_V1_MCP_USAGE: &str = "/api/v1/mcp/usage";
+
+// VFS endpoints
+pub const API_V1_FILES: &str = "/api/v1/files";
+pub const API_V1_CACHE_VALIDATE: &str = "/api/v1/cache/validate";
+pub const API_V1_CACHE_HASHES: &str = "/api/v1/cache/{connection_id}";

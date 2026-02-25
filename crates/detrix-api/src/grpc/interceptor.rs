@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tonic::{Request, Status};
 use tracing::{debug, error, warn};
 
-use super::auth::{AUTHORIZATION_METADATA_KEY, BEARER_PREFIX};
+use detrix_config::constants::{AUTHORIZATION_METADATA_KEY, BEARER_PREFIX};
 
 /// Auth interceptor state (shared across all interceptor clones)
 #[derive(Clone)]
@@ -65,8 +65,8 @@ pub fn create_auth_interceptor(
     move |request: Request<()>| {
         let config = &state.config;
 
-        // Skip auth if disabled
-        if config.mode == AuthMode::Disabled {
+        // Skip auth if disabled or not configured
+        if config.effective_mode() == AuthMode::Disabled {
             return Ok(request);
         }
 
@@ -90,7 +90,7 @@ pub fn create_auth_interceptor(
                     Status::unauthenticated("Authorization header must use Bearer scheme")
                 })?;
 
-                match config.mode {
+                match config.effective_mode() {
                     AuthMode::Simple => {
                         // Validate against static bearer_token
                         let expected_token = config.bearer_token.as_deref().ok_or_else(|| {
@@ -158,20 +158,20 @@ mod tests {
     #[test]
     fn test_auth_state_new() {
         let config = AuthConfig {
-            mode: AuthMode::Simple,
+            mode: Some(AuthMode::Simple),
             bearer_token: Some("test-token".to_string()),
             ..Default::default()
         };
 
         let state = AuthInterceptorState::new(config.clone());
-        assert_eq!(state.config.mode, AuthMode::Simple);
+        assert_eq!(state.config.mode, Some(AuthMode::Simple));
         assert_eq!(state.config.bearer_token, Some("test-token".to_string()));
         assert!(state.jwt_validator.is_none());
     }
 
     #[test]
     fn test_auth_disabled() {
-        let config = AuthConfig::default(); // mode = Disabled by default
+        let config = AuthConfig::default(); // mode = None → effective_mode() = Disabled
         let state = AuthInterceptorState::new(config);
         let interceptor = create_auth_interceptor(state);
 
@@ -182,9 +182,24 @@ mod tests {
     }
 
     #[test]
+    fn test_auth_explicit_disabled() {
+        let config = AuthConfig {
+            mode: Some(AuthMode::Disabled),
+            ..Default::default()
+        };
+        let state = AuthInterceptorState::new(config);
+        let interceptor = create_auth_interceptor(state);
+
+        // Explicit Some(Disabled) should also allow all requests
+        let request = Request::new(());
+        let result = interceptor(request);
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_simple_mode_valid_token() {
         let config = AuthConfig {
-            mode: AuthMode::Simple,
+            mode: Some(AuthMode::Simple),
             bearer_token: Some("valid-token".to_string()),
             ..Default::default()
         };
@@ -205,7 +220,7 @@ mod tests {
     #[test]
     fn test_simple_mode_invalid_token() {
         let config = AuthConfig {
-            mode: AuthMode::Simple,
+            mode: Some(AuthMode::Simple),
             bearer_token: Some("valid-token".to_string()),
             ..Default::default()
         };
@@ -227,7 +242,7 @@ mod tests {
     #[test]
     fn test_missing_auth_header() {
         let config = AuthConfig {
-            mode: AuthMode::Simple,
+            mode: Some(AuthMode::Simple),
             bearer_token: Some("valid-token".to_string()),
             ..Default::default()
         };
@@ -244,7 +259,7 @@ mod tests {
     #[test]
     fn test_wrong_auth_scheme() {
         let config = AuthConfig {
-            mode: AuthMode::Simple,
+            mode: Some(AuthMode::Simple),
             bearer_token: Some("valid-token".to_string()),
             ..Default::default()
         };
@@ -266,7 +281,7 @@ mod tests {
     #[test]
     fn test_external_mode_without_validator() {
         let config = AuthConfig {
-            mode: AuthMode::External,
+            mode: Some(AuthMode::External),
             ..Default::default()
         };
         // Create without validator

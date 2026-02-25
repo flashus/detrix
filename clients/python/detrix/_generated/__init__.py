@@ -8,11 +8,15 @@ from .models import (
     Service,
     SleepResponse,
     Status,
-    Status1 as WakeStatus,
-    Status2 as SleepStatus,
     StatusResponse,
     WakeRequest,
     WakeResponse,
+)
+from .models import (
+    Status1 as WakeStatus,
+)
+from .models import (
+    Status2 as SleepStatus,
 )
 
 __all__ = [

@@ -84,7 +84,7 @@ class DaemonClient(Protocol):
         connection_id: str,
         token: str | None = None,
         timeout: float = 5.0,
-    ) -> str:
+    ) -> tuple[str, str | None]:
         """Register a DAP connection with the daemon.
 
         Args:
@@ -98,7 +98,7 @@ class DaemonClient(Protocol):
             DaemonError: If daemon is not reachable or registration fails
 
         Returns:
-            Connection ID from daemon response
+            Tuple of (connection_id, advertise_url) from daemon response
         """
         ...
 
@@ -117,6 +117,17 @@ class DaemonClient(Protocol):
 
         Note:
             Errors are typically ignored (best effort cleanup).
+        """
+        ...
+
+    def fetch_advertise_url(self, timeout: float = 2.0) -> str | None:
+        """Fetch the daemon's advertise URL from its health endpoint.
+
+        Args:
+            timeout: Request timeout in seconds
+
+        Returns:
+            The daemon's advertise URL, or None if not configured or unreachable.
         """
         ...
 
@@ -219,6 +230,26 @@ class HttpDaemonClient:
             _logger.debug("Health check failed: %s", e)
         return False
 
+    def fetch_advertise_url(self, timeout: float = 2.0) -> str | None:
+        """Fetch the daemon's advertise URL from its health endpoint.
+
+        Returns None if not configured or daemon unreachable.
+
+        Args:
+            timeout: Request timeout in seconds
+
+        Returns:
+            The daemon's advertise URL, or None if not configured or unreachable.
+        """
+        try:
+            response = self._client.get("/health", timeout=timeout)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("advertiseUrl") or None
+        except (httpx.HTTPError, ValueError) as e:
+            _logger.debug("Failed to fetch advertise URL: %s", e)
+        return None
+
     def register(
         self,
         host: str,
@@ -226,7 +257,9 @@ class HttpDaemonClient:
         connection_id: str,
         token: str | None = None,
         timeout: float = 5.0,
-    ) -> str:
+        control_plane_url: str | None = None,
+        workspace_root: str | None = None,
+    ) -> tuple[str, str | None]:
         """Register a DAP connection with the daemon.
 
         Args:
@@ -235,28 +268,33 @@ class HttpDaemonClient:
             connection_id: Unique connection identifier (user-facing name)
             token: Optional authentication token
             timeout: Request timeout in seconds
+            control_plane_url: URL of this client's control plane for file fetching
+            workspace_root: Override workspace root (default: cwd or DETRIX_WORKSPACE_ROOT)
 
         Raises:
             DaemonError: If daemon is not reachable or registration fails
 
         Returns:
-            Connection ID (UUID) from daemon response
+            Tuple of (connection_id, advertise_url) from daemon response
         """
         import os
         import socket
 
         # Build identity fields for UUID-based connection tracking
-        try:
-            workspace_root = os.getcwd()
-        except OSError:
-            workspace_root = ""
+        if not workspace_root:
+            workspace_root = os.environ.get("DETRIX_WORKSPACE_ROOT", "")
+        if not workspace_root:
+            try:
+                workspace_root = os.getcwd()
+            except OSError:
+                workspace_root = ""
 
         try:
             hostname = socket.gethostname()
         except OSError:
             hostname = "unknown"
 
-        payload = {
+        payload: dict[str, object] = {
             "host": host,
             "port": port,
             "language": "python",
@@ -264,6 +302,28 @@ class HttpDaemonClient:
             "workspaceRoot": workspace_root,
             "hostname": hostname,
         }
+
+        # Include control plane URL so the daemon can fetch files from us
+        if control_plane_url:
+            payload["controlPlaneUrl"] = control_plane_url
+
+        # Auto-detect build commit from CI environment variables
+        build_commit = (
+            os.environ.get("GIT_COMMIT")
+            or os.environ.get("CI_COMMIT_SHA")
+            or os.environ.get("GITHUB_SHA")
+        )
+        if build_commit:
+            payload["buildCommit"] = build_commit
+
+        github_ref_tag = (
+            os.environ.get("GITHUB_REF_NAME")
+            if os.environ.get("GITHUB_REF_TYPE") == "tag"
+            else None
+        )
+        build_tag = os.environ.get("GIT_TAG") or os.environ.get("CI_COMMIT_TAG") or github_ref_tag
+        if build_tag:
+            payload["buildTag"] = build_tag
 
         headers = {}
         if token:
@@ -278,21 +338,18 @@ class HttpDaemonClient:
             )
             response.raise_for_status()
             data = response.json()
-            result: str = data.get("connectionId", connection_id)
-            return result
+            result_id: str = data.get("connectionId", connection_id)
+            advertise_url: str | None = data.get("advertiseUrl")
+            return result_id, advertise_url
         except httpx.HTTPStatusError as e:
             raise DaemonError(
                 f"Failed to register connection: HTTP {e.response.status_code} - "
                 f"{e.response.reason_phrase}"
             ) from e
         except httpx.ConnectError as e:
-            raise DaemonError(
-                f"Cannot connect to daemon at {self.base_url}: {e}"
-            ) from e
+            raise DaemonError(f"Cannot connect to daemon at {self.base_url}: {e}") from e
         except httpx.HTTPError as e:
-            raise DaemonError(
-                f"Cannot connect to daemon at {self.base_url}: {e}"
-            ) from e
+            raise DaemonError(f"Cannot connect to daemon at {self.base_url}: {e}") from e
 
     def unregister(
         self,
@@ -361,7 +418,8 @@ def register_connection(
     timeout: float = 5.0,
     verify_ssl: bool = True,
     ca_bundle: str | None = None,
-) -> str:
+    control_plane_url: str | None = None,
+) -> tuple[str, str | None]:
     """Register a DAP connection with the daemon.
 
     This is a convenience wrapper around HttpDaemonClient.register().
@@ -375,15 +433,16 @@ def register_connection(
         timeout: Request timeout in seconds
         verify_ssl: Whether to verify SSL certificates (default: True)
         ca_bundle: Path to CA bundle file for SSL verification
+        control_plane_url: URL of this client's control plane for file fetching
 
     Raises:
         DaemonError: If daemon is not reachable or registration fails
 
     Returns:
-        Connection ID from daemon response
+        Tuple of (connection_id, advertise_url) from daemon response
     """
     with HttpDaemonClient(daemon_url, verify_ssl=verify_ssl, ca_bundle=ca_bundle) as client:
-        return client.register(host, port, connection_id, token, timeout)
+        return client.register(host, port, connection_id, token, timeout, control_plane_url)
 
 
 def unregister_connection(

@@ -115,7 +115,18 @@ impl MetricService {
         &self,
         metric: Metric,
         replace: bool,
+        file_content: Option<String>,
     ) -> Result<OperationOutcome<MetricId>> {
+        // If file content is provided, store it in VFS so downstream
+        // validation (scope check, anchor capture) can read the file.
+        if let Some(content) = file_content {
+            self.file_inspection.vfs().store(
+                &metric.connection_id.0,
+                &metric.location.file,
+                content,
+            );
+        }
+
         // Validate SafeMode constraints (stack trace/memory snapshot in SafeMode)
         self.validate_safe_mode(&metric)?;
 
@@ -160,23 +171,68 @@ impl MetricService {
                     location: format!("{}:{}", metric.location.file, metric.location.line),
                 });
             } else {
-                // No replace flag: idempotent behavior - return existing metric ID
-                // This allows clients to re-add the same metric after daemon restart without error
+                // No replace flag: merge any new expressions into the existing metric.
+                // This handles the case where a second add_metric call targets the same
+                // line (e.g. via find_logpoint) with an additional expression. The DAP
+                // logpoint is updated in-place so both expressions are captured together.
+                // If no new expressions, this is fully idempotent (daemon-restart safe).
                 let existing_id = existing.id.ok_or_else(|| {
                     Error::Storage(format!(
                         "Existing metric '{}' at {}:{} missing ID - database integrity issue",
                         existing.name, metric.location.file, metric.location.line
                     ))
                 })?;
-                tracing::info!(
-                    "Metric already exists at {}:{} for connection {}, returning existing ID {} (name='{}')",
-                    metric.location.file,
-                    metric.location.line,
-                    metric.connection_id.0,
-                    existing_id.0,
-                    existing.name
-                );
-                return Ok(OperationOutcome::ok(existing_id));
+
+                let new_exprs: Vec<String> = metric
+                    .expressions
+                    .iter()
+                    .filter(|e| !existing.expressions.contains(*e))
+                    .cloned()
+                    .collect();
+
+                if !new_exprs.is_empty() {
+                    let mut merged = existing.clone();
+                    merged.expressions.extend(new_exprs.clone());
+
+                    // Persist the merged expressions
+                    self.storage.update(&merged).await?;
+
+                    // Re-register the logpoint with the adapter so it captures all expressions
+                    if merged.enabled {
+                        if let Ok(adapter) =
+                            self.get_adapter_for_connection(&metric.connection_id).await
+                        {
+                            let _ = adapter.remove_metric(&existing).await;
+                            let _ = adapter.set_metric(&merged).await;
+                        }
+                    }
+
+                    tracing::info!(
+                        "Merged {} new expression(s) {:?} into metric '{}' at {}:{} for connection {}",
+                        new_exprs.len(),
+                        new_exprs,
+                        existing.name,
+                        metric.location.file,
+                        metric.location.line,
+                        metric.connection_id.0,
+                    );
+                    warnings.push(OperationWarning::ExpressionsMerged {
+                        metric_name: existing.name.clone(),
+                        metric_id: existing_id.0,
+                        added_expressions: new_exprs,
+                        location: format!("{}:{}", metric.location.file, metric.location.line),
+                    });
+                } else {
+                    tracing::info!(
+                        "Metric already exists at {}:{} for connection {}, returning existing ID {} (name='{}')",
+                        metric.location.file,
+                        metric.location.line,
+                        metric.connection_id.0,
+                        existing_id.0,
+                        existing.name
+                    );
+                }
+                return Ok(OperationOutcome::with_warnings(existing_id, warnings));
             }
         }
 

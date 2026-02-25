@@ -128,6 +128,19 @@ pub trait MetricRepository: Send + Sync {
     /// # Returns
     /// The number of metrics deleted.
     async fn delete_by_connection_id(&self, connection_id: &ConnectionId) -> Result<u64>;
+
+    /// Migrate all metrics from one connection to another.
+    ///
+    /// Used when a container restarts with a new hostname (new `connection_id`) but the same
+    /// project identity. Metrics from the old connection carry over to the new one so debugging
+    /// can continue without re-adding them.
+    ///
+    /// Metrics that would conflict with an existing metric at the same location on the target
+    /// connection are skipped (keeping the target's version).
+    ///
+    /// # Returns
+    /// The number of metrics migrated.
+    async fn migrate_connection_id(&self, from: &ConnectionId, to: &ConnectionId) -> Result<u64>;
 }
 
 /// Repository for metric events
@@ -241,6 +254,106 @@ pub trait ConnectionRepository: Send + Sync {
     /// Removes connections with status: Disconnected, Failed
     /// Returns the number of deleted connections
     async fn delete_disconnected(&self) -> Result<u64>;
+
+    /// Find stale connections for the same project, excluding a specific connection.
+    ///
+    /// When a new connection registers for (name, language, workspace_root) with a different
+    /// hostname (e.g. Docker container restart with new container ID), old disconnected/failed
+    /// connections with the same project identity are stale. This method returns their IDs so
+    /// the caller can migrate metrics before cleaning up the stale connections.
+    ///
+    /// Only returns connections with status: Disconnected or Failed.
+    /// Connected/Connecting connections are excluded to avoid race conditions.
+    ///
+    /// # Arguments
+    /// * `name` - Connection name (app name)
+    /// * `language` - Source language (e.g. "go", "python")
+    /// * `workspace_root` - Workspace root path
+    /// * `exclude_id` - The newly registered connection to preserve
+    ///
+    /// # Returns
+    /// IDs of stale connections that should be migrated and cleaned up
+    async fn find_stale_same_project(
+        &self,
+        name: &str,
+        language: &str,
+        workspace_root: &str,
+        exclude_id: &ConnectionId,
+    ) -> Result<Vec<ConnectionId>>;
+}
+
+/// Minimal read-only lookup for connections.
+///
+/// A narrow trait extracted from `ConnectionService` so that `RemoteAppService`
+/// depends on an abstraction rather than a concrete service type.
+#[async_trait]
+pub trait ConnectionLookup: Send + Sync {
+    /// Retrieve a connection by its UUID, or None if not found.
+    async fn get_connection(&self, id: &ConnectionId) -> Result<Option<Connection>>;
+}
+
+/// Repository for connection reference counting (multi-user safety)
+///
+/// Manages references that clients hold on connections. A connection should
+/// only be disconnected when its last reference is removed.
+///
+/// Key atomic methods:
+/// - `remove_reference_and_count`: atomically removes a reference and returns remaining count
+/// - `remove_all_by_client_and_count`: atomically removes all client refs and returns affected counts
+#[async_trait]
+pub trait ConnectionReferenceRepository: Send + Sync {
+    /// Upsert reference (if same client+connection exists, touch it)
+    async fn add_reference(&self, reference: &detrix_core::ConnectionReference) -> Result<()>;
+
+    /// Atomically remove reference and return remaining count.
+    /// Wraps DELETE + SELECT COUNT in a transaction.
+    /// Returns `(was_removed, remaining_count)`.
+    async fn remove_reference_and_count(
+        &self,
+        connection_id: &ConnectionId,
+        client_identity: &detrix_core::ClientIdentity,
+    ) -> Result<(bool, u64)>;
+
+    /// Atomically remove ALL references by client, return vec of (connection_id, remaining_count).
+    /// Connections not in the result have 0 remaining references.
+    async fn remove_all_by_client_and_count(
+        &self,
+        client_identity: &detrix_core::ClientIdentity,
+    ) -> Result<Vec<(ConnectionId, u64)>>;
+
+    /// Remove ALL references for a connection (for admin/cascade)
+    async fn remove_all_by_connection(&self, connection_id: &ConnectionId) -> Result<u64>;
+
+    /// Count references for a connection
+    async fn count_references(&self, connection_id: &ConnectionId) -> Result<u64>;
+
+    /// List references for a connection
+    async fn find_by_connection(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Result<Vec<detrix_core::ConnectionReference>>;
+
+    /// List references held by a client
+    async fn find_by_client(
+        &self,
+        client_identity: &detrix_core::ClientIdentity,
+    ) -> Result<Vec<detrix_core::ConnectionReference>>;
+
+    /// Check if client holds a reference
+    async fn has_reference(
+        &self,
+        connection_id: &ConnectionId,
+        client_identity: &detrix_core::ClientIdentity,
+    ) -> Result<bool>;
+
+    /// Remove references inactive > N calendar days
+    async fn cleanup_stale_references(&self, ttl_days: i64) -> Result<u64>;
+
+    /// Touch all references by client (update last_active)
+    async fn touch_all_by_client(
+        &self,
+        client_identity: &detrix_core::ClientIdentity,
+    ) -> Result<u64>;
 }
 
 /// Repository for system events (crashes, connections, metric CRUD)

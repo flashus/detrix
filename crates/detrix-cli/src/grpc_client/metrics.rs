@@ -2,18 +2,20 @@
 
 use super::helpers::{metric_info_from_proto, parse_location};
 use super::types::{
-    AddMetricParams, ConfigValidationResult, DaemonInfoDto, ExpressionValidationResult, GroupInfo,
-    InspectFileInfo, McpClientDto, McpErrorCount, McpUsageInfo, McpWorkflowStats, MetricInfo,
-    ParentProcessDto, StatusInfo, WakeInfo,
+    AddMetricParams, ConfigValidationResult, DaemonInfoDto, DisconnectAllInfo,
+    ExpressionValidationResult, GroupInfo, InspectFileInfo, McpClientDto, McpErrorCount,
+    McpUsageInfo, McpWorkflowStats, MetricInfo, ParentProcessDto, StatusInfo, WakeInfo,
 };
 use anyhow::{Context, Result};
 use detrix_api::generated::detrix::v1::{
     metric_mode::Mode, metrics_service_client::MetricsServiceClient, AddMetricRequest,
-    GetMcpUsageRequest, GetMetricRequest, GroupRequest, InspectFileRequest, ListGroupsRequest,
-    ListMetricsRequest, Location, MetricMode, ReloadConfigRequest, RemoveMetricRequest,
-    RequestMetadata, SleepRequest, StatusRequest, StreamMode, UpdateConfigRequest,
-    UpdateMetricRequest, ValidateConfigRequest, ValidateExpressionRequest, WakeRequest,
+    DisconnectAllRequest, GetMcpUsageRequest, GetMetricRequest, GroupRequest, InspectFileRequest,
+    ListGroupsRequest, ListMetricsRequest, Location, MetricMode, ReloadConfigRequest,
+    RemoveMetricRequest, RequestMetadata, SleepRequest, StatusRequest, StreamMode,
+    UpdateConfigRequest, UpdateMetricRequest, ValidateConfigRequest, ValidateExpressionRequest,
+    WakeRequest,
 };
+use detrix_api::grpc::request_with_machine_client_id;
 use detrix_api::grpc::AuthChannel;
 use detrix_core::SAFETY_STRICT;
 
@@ -127,12 +129,13 @@ impl MetricsClient {
             capture_memory_snapshot: None,
             snapshot_scope: None,
             snapshot_ttl: None,
+            file_content: None,
             metadata: Some(RequestMetadata::default()),
         };
 
         let _response = self
             .client
-            .add_metric(request)
+            .add_metric(request_with_machine_client_id(request))
             .await
             .context("Failed to add metric via gRPC")?
             .into_inner();
@@ -152,7 +155,7 @@ impl MetricsClient {
         };
 
         self.client
-            .remove_metric(request)
+            .remove_metric(request_with_machine_client_id(request))
             .await
             .context("Failed to remove metric via gRPC")?;
 
@@ -173,7 +176,7 @@ impl MetricsClient {
         };
 
         self.client
-            .toggle_metric(request)
+            .toggle_metric(request_with_machine_client_id(request))
             .await
             .context("Failed to toggle metric via gRPC")?;
 
@@ -201,7 +204,7 @@ impl MetricsClient {
         };
 
         self.client
-            .update_metric(request)
+            .update_metric(request_with_machine_client_id(request))
             .await
             .context("Failed to update metric via gRPC")?;
 
@@ -246,7 +249,7 @@ impl MetricsClient {
 
         let response = self
             .client
-            .enable_group(request)
+            .enable_group(request_with_machine_client_id(request))
             .await
             .context("Failed to enable group via gRPC")?
             .into_inner();
@@ -263,7 +266,7 @@ impl MetricsClient {
 
         let response = self
             .client
-            .disable_group(request)
+            .disable_group(request_with_machine_client_id(request))
             .await
             .context("Failed to disable group via gRPC")?
             .into_inner();
@@ -326,37 +329,69 @@ impl MetricsClient {
         })
     }
 
-    /// Wake the system
-    pub async fn wake(&mut self) -> Result<WakeInfo> {
+    /// Wake a remote app
+    pub async fn wake(&mut self, app_url: &str, daemon_url: Option<&str>) -> Result<WakeInfo> {
         let request = WakeRequest {
+            app_url: app_url.to_string(),
+            daemon_url: daemon_url.unwrap_or_default().to_string(),
             metadata: Some(RequestMetadata::default()),
         };
 
         let response = self
             .client
-            .wake(request)
+            .wake(request_with_machine_client_id(request))
             .await
             .context("Failed to wake via gRPC")?
             .into_inner();
 
         Ok(WakeInfo {
             status: response.status,
-            metrics_loaded: response.metrics_loaded,
+            app_url: response.app_url,
+            connection_id: if response.connection_id.is_empty() {
+                None
+            } else {
+                Some(response.connection_id)
+            },
+            debug_port: if response.debug_port == 0 {
+                None
+            } else {
+                Some(response.debug_port)
+            },
         })
     }
 
-    /// Sleep the system
-    pub async fn sleep(&mut self) -> Result<()> {
+    /// Sleep a remote app
+    pub async fn sleep(&mut self, app_url: &str) -> Result<()> {
         let request = SleepRequest {
+            app_url: app_url.to_string(),
             metadata: Some(RequestMetadata::default()),
         };
 
         self.client
-            .sleep(request)
+            .sleep(request_with_machine_client_id(request))
             .await
             .context("Failed to sleep via gRPC")?;
 
         Ok(())
+    }
+
+    /// Disconnect all local adapters
+    pub async fn disconnect_all(&mut self) -> Result<DisconnectAllInfo> {
+        let request = DisconnectAllRequest {
+            metadata: Some(RequestMetadata::default()),
+        };
+
+        let response = self
+            .client
+            .disconnect_all(request_with_machine_client_id(request))
+            .await
+            .context("Failed to disconnect all via gRPC")?
+            .into_inner();
+
+        Ok(DisconnectAllInfo {
+            status: response.status,
+            adapters_stopped: response.adapters_stopped,
+        })
     }
 
     // ========================================================================
@@ -411,7 +446,7 @@ impl MetricsClient {
         };
 
         self.client
-            .reload_config(request)
+            .reload_config(request_with_machine_client_id(request))
             .await
             .context("Failed to reload config via gRPC")?;
 
@@ -512,6 +547,8 @@ impl MetricsClient {
             line,
             find_variable: find_variable.map(|v| v.to_string()),
             metadata: Some(RequestMetadata::default()),
+            connection_id: None,
+            file_content: None,
         };
 
         let response = self
@@ -553,7 +590,7 @@ impl MetricsClient {
         };
 
         self.client
-            .update_config(request)
+            .update_config(request_with_machine_client_id(request))
             .await
             .context("Failed to update config via gRPC")?;
 

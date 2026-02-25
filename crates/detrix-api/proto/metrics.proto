@@ -12,6 +12,7 @@ service MetricsService {
   // Runtime control
   rpc Wake(WakeRequest) returns (WakeResponse);
   rpc Sleep(SleepRequest) returns (SleepResponse);
+  rpc DisconnectAll(DisconnectAllRequest) returns (DisconnectAllResponse);
   rpc GetStatus(StatusRequest) returns (StatusResponse);
 
   // Metric management
@@ -37,6 +38,11 @@ service MetricsService {
   rpc ValidateExpression(ValidateExpressionRequest) returns (ValidateExpressionResponse);
   rpc InspectFile(InspectFileRequest) returns (InspectFileResponse);
 
+  // Cloud VFS operations
+  rpc ProvideFile(ProvideFileRequest) returns (ProvideFileResponse);
+  rpc ValidateCache(ValidateCacheRequest) returns (ValidateCacheResponse);
+  rpc GetCachedHashes(GetCachedHashesRequest) returns (GetCachedHashesResponse);
+
   // MCP usage statistics
   rpc GetMcpUsage(GetMcpUsageRequest) returns (GetMcpUsageResponse);
 }
@@ -46,25 +52,42 @@ service MetricsService {
 // ============================================================
 
 message WakeRequest {
-  RequestMetadata metadata = 1;
+  string app_url = 1;           // URL of the app's control plane
+  string daemon_url = 2;        // optional: daemon URL to pass to the app
+  RequestMetadata metadata = 3;
 }
 
 message WakeResponse {
-  string status = 1;           // "active"
-  uint32 metrics_loaded = 2;
-  ResponseMetadata metadata = 3;
+  string status = 1;
+  string app_url = 2;
+  string connection_id = 3;     // optional: connection_id if app registered
+  int32 debug_port = 4;         // optional: debug port
+  string message = 5;
+  ResponseMetadata metadata = 6;
+  optional string daemon_url = 7;  // Daemon URL for auto-discovery (e.g., "http://localhost:8090")
 }
 
 message SleepRequest {
-  RequestMetadata metadata = 1;
+  string app_url = 1;           // URL of the app's control plane
+  RequestMetadata metadata = 2;
 }
 
 message SleepResponse {
-  string status = 1;           // "sleeping"
-  uint32 metrics_saved = 2;
-  ResponseMetadata metadata = 3;
-  // Human-readable message (e.g., "All adapters stopped")
-  string message = 4;
+  string status = 1;
+  string app_url = 2;
+  string message = 3;
+  ResponseMetadata metadata = 4;
+}
+
+message DisconnectAllRequest {
+  RequestMetadata metadata = 1;
+}
+
+message DisconnectAllResponse {
+  string status = 1;            // "disconnected" or "partial_failure"
+  uint32 adapters_stopped = 2;
+  string message = 3;
+  ResponseMetadata metadata = 4;
 }
 
 message StatusRequest {
@@ -134,6 +157,9 @@ message AddMetricRequest {
   optional bool capture_memory_snapshot = 16;
   optional string snapshot_scope = 17;  // "local", "global", "both"
   optional uint64 snapshot_ttl = 18;    // TTL in seconds, null for continuous
+
+  // Cloud VFS: Optional file content for remote execution
+  optional string file_content = 19;    // Full file content to cache in VFS
 }
 
 // Stack trace capture configuration
@@ -150,6 +176,8 @@ message MetricResponse {
   Location location = 4;
   ResponseMetadata metadata = 5;
   repeated string expressions = 6;
+  // Non-fatal warnings from the operation (e.g. expressions merged, breakpoint not verified)
+  repeated string warnings = 7;
 }
 
 message RemoveMetricRequest {
@@ -327,13 +355,13 @@ message ValidateExpressionRequest {
 message ValidateExpressionResponse {
   bool is_safe = 1;
   string expression = 2;
-  ResponseMetadata metadata = 4;
+  ResponseMetadata metadata = 3;
   // Language that was validated
-  string language = 5;
+  string language = 4;
   // List of violations (reasons why expression is unsafe)
-  repeated string violations = 6;
+  repeated string violations = 5;
   // List of warnings (non-blocking issues)
-  repeated string warnings = 7;
+  repeated string warnings = 6;
 }
 
 message InspectFileRequest {
@@ -341,6 +369,8 @@ message InspectFileRequest {
   optional uint32 line = 2;    // If provided, inspect specific line (1-based)
   optional string find_variable = 3;  // If provided, search for variable occurrences
   RequestMetadata metadata = 4;
+  optional string connection_id = 5;  // If provided, resolve relative paths against connection's workspace_root
+  optional string file_content = 6;    // Cloud VFS: Optional file content to cache in VFS
 }
 
 message InspectFileResponse {
@@ -348,6 +378,56 @@ message InspectFileResponse {
   string content = 2;          // JSON-encoded inspection result
   optional string error = 3;
   ResponseMetadata metadata = 4;
+}
+
+// ============================================================
+// CLOUD VFS MESSAGES
+// ============================================================
+
+// Provide file content to cache in VFS
+message ProvideFileRequest {
+  string connection_id = 1;
+  string path = 2;              // Relative or absolute file path
+  string content = 3;           // Full file content
+  RequestMetadata metadata = 4;
+}
+
+message ProvideFileResponse {
+  bool success = 1;
+  string path = 2;              // Cached file path
+  string hash = 3;              // SHA256 hash of the content
+  optional string error = 4;
+  ResponseMetadata metadata = 5;
+}
+
+// Validate cached files against client hashes
+message ValidateCacheRequest {
+  string connection_id = 1;
+  repeated FileHash files = 2;  // Client's file hashes
+  RequestMetadata metadata = 3;
+}
+
+message ValidateCacheResponse {
+  repeated string evicted_paths = 1;  // Paths client should re-provide (stale or missing)
+  repeated FileHash cached = 2;        // Server's current cache state
+  ResponseMetadata metadata = 3;
+}
+
+// Get all cached file hashes for a connection
+message GetCachedHashesRequest {
+  string connection_id = 1;
+  RequestMetadata metadata = 2;
+}
+
+message GetCachedHashesResponse {
+  repeated FileHash cached = 1;  // All cached files with hashes
+  ResponseMetadata metadata = 2;
+}
+
+// File hash entry (used in validation)
+message FileHash {
+  string path = 1;
+  string hash = 2;  // SHA256 hash
 }
 
 // ============================================================

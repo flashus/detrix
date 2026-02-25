@@ -13,6 +13,7 @@ if os.environ.get("DETRIX_CLIENT_ENABLED", "0") == "1":
     detrix.init(
         name=os.environ.get("DETRIX_CLIENT_NAME", "trade-bot"),
         daemon_url=os.environ.get("DETRIX_DAEMON_URL", "http://127.0.0.1:8090"),
+        control_host=os.environ.get("DETRIX_CONTROL_HOST", "127.0.0.1"),
         control_port=int(os.environ.get("DETRIX_CONTROL_PORT", "0")),
     )
     _status = detrix.status()

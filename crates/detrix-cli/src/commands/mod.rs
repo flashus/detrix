@@ -1,5 +1,6 @@
 //! CLI command implementations
 
+pub mod auth;
 pub mod config;
 pub mod connection;
 pub mod daemon;
