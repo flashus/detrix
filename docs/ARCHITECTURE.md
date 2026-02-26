@@ -39,6 +39,30 @@ Detrix uses **debugger protocols (DAP - Debug Adapter Protocol)** to set **non-b
 **Alternative: Direct Mode** (`detrix mcp --no-daemon`)
 - Runs full MCP server without daemon, useful for testing
 
+### Cloud Mode
+
+For Docker containers and remote hosts, the daemon runs alongside your service and the AI agent connects to it remotely:
+
+```
+  AI Agent              Detrix Daemon               Your Container
+  (local machine)       (Docker/remote)             (Go/Python/Rust)
+       │                       │                           │
+       │── MCP over HTTP ─────▶│                           │
+       │                       │── DAP logpoint ──────────▶│
+       │                       │◀─ captured values ────────│
+       │◀── structured events ─│                           │
+       │                       │                           │
+       │          VFS fetches source files automatically   │
+```
+
+**Cloud mode components:**
+- **`advertise_url`** — Set `DETRIX_ADVERTISE_URL` on the daemon so the MCP bridge knows where to connect
+- **Detrix client** — Embed in your app (`detrix.Init(...)`); it registers with the daemon and exposes a control plane HTTP server. Enables on-demand debugger wake/sleep
+- **Virtual File System (VFS)** — Daemon fetches source files transparently so the agent can suggest correct line numbers. Sources (configurable priority): `bridge` (agent workspace), `control_plane` (app container), `disk` (local path)
+- **Token auth** — Set `DETRIX_TOKEN` on both daemon and client for secure multi-tenant deployments
+
+See `examples/docker-demo/` for a complete working Docker example.
+
 ## Clean Architecture
 
 Detrix follows **Clean Architecture** principles with strict dependency rules:
@@ -351,6 +375,8 @@ Three-layer validation before expressions are evaluated:
 **System (3):** `get_status`, `get_mcp_usage`, `disconnect_all`
 **Remote (2):** `wake`, `sleep`
 
+> **`wake` / `sleep`** are the primary cloud debugging tools — the agent wakes the app's debugger, sets metrics, and sleeps it again when done. Zero overhead when not actively debugging.
+
 ### REST API Endpoints (Complete)
 
 **Metrics:**
@@ -379,6 +405,11 @@ Three-layer validation before expressions are evaluated:
 - `GET /api/v1/connections/:id` - Get connection details
 - `DELETE /api/v1/connections/:id` - Close connection
 - `POST /api/v1/connections/cleanup` - Remove stale connections
+- `POST /api/v1/connections/touch` - Refresh last-seen timestamp on connections
+- `POST /api/v1/connections/release` - Release reference counts on multiple connections
+- `POST /api/v1/connections/:id/attach` - Attach (increment reference count) to a connection
+- `POST /api/v1/connections/:id/release` - Release (decrement reference count) from a connection
+- `GET /api/v1/connections/:id/references` - List active reference holders for a connection
 
 **Configuration:**
 - `GET /api/v1/config` - Get current configuration
@@ -405,6 +436,15 @@ Three-layer validation before expressions are evaluated:
 - `POST /mcp` - MCP-over-HTTP bridge (JSON-RPC)
 - `POST /mcp/heartbeat` - MCP client heartbeat
 - `POST /mcp/disconnect` - MCP client disconnect
+
+**VFS (Cloud):**
+- `PUT /api/v1/files` - Provide a source file to the daemon (used by MCP bridge)
+- `POST /api/v1/cache/validate` - Validate file cache entries
+- `GET /api/v1/cache/:connection_id` - Get cached file hashes for a connection
+
+**Admin (Cloud):**
+- `POST /api/v1/admin/disconnect-all` - Force disconnect all connections (bypasses reference counts)
+- `POST /api/v1/admin/disable-metrics-by-owner` - Disable all metrics owned by a client identity
 
 ### WebSocket Streaming (Complete)
 
@@ -468,6 +508,8 @@ detrix/
 │   └── rust/                  # Rust client (detrix-rs on crates.io)
 ├── docker/                    # Docker E2E infrastructure
 ├── fixtures/                  # Example apps for testing
+├── examples/
+│   └── docker-demo/           # Cloud debugging example (Go service + Detrix daemon)
 ├── skills/                    # Claude Code skill
 └── docs/
     ├── ARCHITECTURE.md        # This file

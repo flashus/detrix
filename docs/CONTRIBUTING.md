@@ -95,14 +95,16 @@ Detrix follows **Clean Architecture** with strict dependency rules. **Read [ARCH
 
 ```
 detrix-cli        → can depend on ALL crates
-detrix-api        → detrix-application, detrix-ports, detrix-core
+detrix-api        → detrix-application, detrix-core, detrix-config
 detrix-application→ detrix-ports, detrix-core, detrix-config ONLY
 detrix-ports      → detrix-core, detrix-config ONLY
 detrix-storage    → detrix-ports, detrix-core, detrix-application* (implements traits)
 detrix-dap        → detrix-ports, detrix-core, detrix-application* (implements traits)
 detrix-lsp        → detrix-ports, detrix-core, detrix-application* (implements traits)
+detrix-output     → detrix-ports, detrix-core, detrix-application* (implements traits)
 detrix-testing    → detrix-ports, detrix-core, detrix-application (test mocks)
 detrix-core       → NOTHING (pure domain)
+detrix-config     → NOTHING (standalone)
 ```
 
 **Key Rule:** `detrix-ports` defines port traits. `detrix-application` NEVER depends on infrastructure crates like `detrix-storage` or `detrix-dap`. Infrastructure crates implement traits from `detrix-ports`.

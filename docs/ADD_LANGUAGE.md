@@ -2,7 +2,7 @@
 
 This document tracks all places in the codebase that need to be updated when adding support for a new programming language/debugger.
 
-**Last Updated:** 7 February 2026
+**Last Updated:** 26 February 2026
 
 ## Quick Reference: All Code Locations
 
@@ -32,15 +32,15 @@ When adding a new language, you need to update these specific locations:
 |------|---------|-------------|
 | `crates/detrix-config/src/safety/{newlang}.rs` | New file | Safety config + function classification constants |
 | `crates/detrix-config/src/safety/mod.rs` | Re-exports | Add `pub mod newlang; pub use newlang::*;` |
-| `crates/detrix-config/src/lib.rs` | SafetyConfig struct | Add `pub newlang: NewLangSafetyConfig` field |
+| `crates/detrix-config/src/safety/mod.rs` | SafetyConfig struct | Add `pub newlang: NewLangSafetyConfig` field |
 | `crates/detrix-application/src/safety/{newlang}.rs` | New file | Implement `ExpressionValidator` trait |
 | `crates/detrix-application/src/safety/mod.rs` | Module exports | `pub mod newlang; pub use newlang::NewLangValidator;` |
 | `crates/detrix-application/src/safety/mod.rs` | `ValidatorRegistry::new()` | Register validator |
 | `crates/detrix-application/src/safety/treesitter/{newlang}.rs` | New file | Tree-sitter AST analyzer |
 | `crates/detrix-application/src/safety/treesitter/mod.rs` | Module exports | `pub use newlang::analyze_newlang;` |
 | `crates/detrix-application/src/safety/treesitter/node_kinds.rs` | New module | Add node kind constants for the language |
-| `crates/detrix-application/src/safety/treesitter/scope.rs` | `analyze_scope()` dispatch | Add `SourceLanguage::NewLang => analyze_newlang_scope()` |
-| `crates/detrix-application/src/safety/treesitter/comment_stripper.rs` | `strip_comments()` dispatch | Add `SourceLanguage::NewLang => strip_newlang_comments()` |
+| `crates/detrix-application/src/safety/treesitter/scope.rs` | `analyze_scope()` dispatch | Add explicit match arm; `_` catch-all already returns `ScopeResult::default()` for languages without tree-sitter |
+| `crates/detrix-application/src/safety/treesitter/comment_stripper.rs` | `strip_comments()` dispatch | Add explicit match arm; `_` catch-all already returns source unchanged for languages without tree-sitter |
 | `Cargo.toml` (workspace) | Dependencies | Add `tree-sitter-{newlang}` crate |
 
 ### LSP Purity Analysis (Optional - for user-defined function analysis)
@@ -55,7 +55,7 @@ When adding a new language, you need to update these specific locations:
 |------|---------|-------------|
 | `crates/detrix-application/src/services/file_inspection_types.rs` | `capabilities()` match | Add `LanguageCapabilities` for the new language |
 
-### API & Expression Extraction (Required)
+### API & Expression Extraction (Optional — needed for `enable_from_diff` feature)
 | File | Section | What to Add |
 |------|---------|-------------|
 | `crates/detrix-api/src/common/expression_extractor.rs` | New struct | Implement `ExpressionExtractor` trait for the language |
@@ -71,7 +71,7 @@ When adding a new language, you need to update these specific locations:
 | `crates/detrix-dap/tests/{newlang}_tests.rs` | New file | Adapter unit/integration tests |
 | `crates/detrix-application/src/safety/unified_tests/{newlang}_unified.rs` | New file | Safety validation tests |
 | `crates/detrix-testing/src/fixtures.rs` | `sample_metric_for_language()` | Add match arm with language-appropriate defaults |
-| `crates/detrix-testing/src/e2e/dap_scenarios.rs` | `DapLanguageExt` | Add `dap_display_name()` match arm |
+| `crates/detrix-testing/src/e2e/dap_scenarios.rs` | `DapLanguageExt` | Add `dap_display_name()` and `as_api_str()` match arms |
 | `fixtures/{newlang}/` | New directory | Example program for testing |
 
 ### Documentation (Required)
@@ -541,10 +541,18 @@ pub mod javascript;
 pub use javascript::*;
 ```
 
-**Update SafetyConfig in `crates/detrix-config/src/lib.rs`:**
+**Update SafetyConfig in `crates/detrix-config/src/safety/mod.rs`:**
 
 ```rust
 pub struct SafetyConfig {
+    // Global settings (already exist — do not duplicate)
+    pub enable_ast_analysis: bool,
+    pub whitelist_mode: String,
+    pub max_recursion_depth: u32,
+    pub max_memory_mb: u32,
+    pub ast_cache_max_entries: usize,
+
+    // Language-specific configurations — add your language here:
     pub python: PythonSafetyConfig,
     pub go: GoSafetyConfig,
     pub rust: RustSafetyConfig,

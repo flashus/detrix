@@ -7,8 +7,9 @@ Complete installation instructions for Detrix dynamic observability platform.
 1. [Prerequisites](#prerequisites)
 2. [Build Detrix](#build-detrix)
 3. [Configure AI Client](#configure-ai-client)
-4. [Verification](#verification)
-5. [Troubleshooting](#troubleshooting)
+4. [Cloud Debugging](#cloud-debugging)
+5. [Verification](#verification)
+6. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -312,6 +313,130 @@ Choose your AI client:
 
 ---
 
+## Cloud Debugging
+
+Observe code running inside Docker containers or remote hosts. The AI agent connects to a Detrix daemon deployed alongside your service — no VPN, no port forwarding needed.
+
+### How it works
+
+1. **Detrix daemon** runs in Docker alongside your service (set `DETRIX_ADVERTISE_URL` so it knows its public address)
+2. **Detrix client** embedded in your app registers with the daemon on startup and exposes a `/detrix/discover` endpoint
+3. **AI agent** calls `wake` on your app → the app returns its daemon URL → the bridge auto-switches to that cloud daemon and fetches source files via VFS
+4. Register multiple cloud daemons in `~/.detrix/daemons.toml`; the agent can switch between them by alias or automatically via `wake`
+
+### Quick Setup
+
+**1. Add Detrix daemon to your `docker-compose.yml`:**
+
+Build the Detrix server image from source:
+
+```bash
+docker build -f fixtures/docker/Dockerfile.server -t detrix-server .
+```
+
+Then reference it in your `docker-compose.yml`:
+
+```yaml
+services:
+  detrix:
+    image: detrix-server
+    ports:
+      - "8090:8090"
+    environment:
+      DETRIX_TOKEN: your-secret-token
+      DETRIX_ADVERTISE_URL: http://your-host:8090
+    volumes:
+      - detrix-data:/data/detrix
+      - ./detrix.toml:/data/detrix/detrix.toml:ro
+
+  your-service:
+    # ... your service config
+    environment:
+      DETRIX_CLIENT_ENABLED: "1"
+      DETRIX_DAEMON_URL: http://detrix:8090
+      DETRIX_TOKEN: your-secret-token
+      DETRIX_WORKSPACE_ROOT: /path/to/source/in/container
+```
+
+**2. Add `detrix.toml` for the daemon:**
+
+```toml
+[api.rest]
+host = "0.0.0.0"
+port = 8090
+
+[storage]
+path = "/data/detrix/data.db"
+
+[vfs]
+# Source priority for fetching source files for the AI agent.
+# Default: ["control_plane", "disk"]. Add "bridge" to also fetch from the agent's workspace.
+source_priority = ["control_plane", "disk"]
+fetch_timeout_seconds = 10
+```
+
+**3. Embed the Detrix client in your app:**
+
+```go
+// Go
+import detrix "github.com/flashus/detrix/clients/go"
+
+detrix.Init(detrix.Config{
+    Name:      "my-service",
+    DaemonURL: os.Getenv("DETRIX_DAEMON_URL"),
+    Token:     os.Getenv("DETRIX_TOKEN"),
+})
+```
+
+```python
+# Python
+import detrix
+detrix.init(name="my-service")
+```
+
+```rust
+// Rust (Cargo.toml: detrix-rs = "1.1.1")
+detrix_rs::init(detrix_rs::Config {
+    name: "my-service".into(),
+    daemon_url: std::env::var("DETRIX_DAEMON_URL").unwrap_or_default(),
+    token: std::env::var("DETRIX_TOKEN").ok(),
+    ..Default::default()
+});
+```
+
+**4. Register cloud daemons for the AI agent:**
+
+The MCP bridge (`detrix mcp`) runs locally and connects to daemons — local or cloud. **No `--daemon-url` flag needed.** Cloud daemons are registered once in `~/detrix/daemons.toml`:
+
+```toml
+[[daemon]]
+alias = "staging"
+url = "http://staging-host:8090"
+
+[[daemon]]
+alias = "production"
+url = "http://prod-host:8090"
+is_production = true   # requires force=true to switch to
+```
+
+Auth tokens are stored per-host in `~/detrix/credentials.toml` (or set `DETRIX_TOKEN` as a global fallback):
+
+```toml
+[targets."staging-host:8090"]
+token = "staging-secret"
+
+[targets."prod-host:8090"]
+token = "prod-secret"
+```
+
+**Switching daemons:** The agent uses the `switch_daemon` MCP tool (by alias or URL) and `list_known_daemons` to see what's registered. Production daemons require explicit `force=true` to prevent accidental switches.
+
+**Auto-switching via `wake`:** When the agent calls `wake` on an app that has the Detrix client embedded, the app's `/detrix/discover` endpoint returns its daemon URL. The bridge automatically switches to that daemon — no manual `switch_daemon` call needed. This means the agent can work across local and cloud services in the same session just by waking them.
+
+See `examples/docker-demo/` for a complete working example with a Go service.
+
+---
+
 ## Optional: Add to PATH
 
 For CLI usage anywhere:
@@ -361,24 +486,42 @@ detrix --version
 
 ### Test with Debugger
 
-1. **Start a Python debugger:**
+**Python:**
+
+1. Start a Python debugger:
    ```bash
    python -m debugpy --listen 127.0.0.1:5678 --wait-for-client app.py
    ```
 
-2. **Use Detrix via AI:**
+2. Use Detrix via AI:
    ```
    "Create a connection to debugpy at 127.0.0.1:5678"
    "Add a metric to observe user.id at auth.py line 42"
    ```
-   or
+
+**Go:**
+
+1. Start a Go debugger:
+   ```bash
+   dlv debug --headless --listen=127.0.0.1:5678 --api-version=2 ./main.go
    ```
-   "Create a detrix connection to debugpy at 127.0.0.1:5678"
-   "using detrix, debug app.py to find out why <here is a bug description>"
+
+2. Use Detrix via AI:
    ```
-   or
+   "Connect to delve at 127.0.0.1:5678 and observe order.Total at main.go line 55"
    ```
-   "using detrix, debug app.py to find out why <here is a bug description>"
+
+**Rust:**
+
+1. Build with debug symbols and start lldb-dap:
+   ```bash
+   cargo build
+   lldb-dap --port 5678 -- ./target/debug/my-app
+   ```
+
+2. Use Detrix via AI:
+   ```
+   "Connect to lldb-dap at 127.0.0.1:5678 and observe transaction.amount at src/main.rs line 42"
    ```
 ---
 

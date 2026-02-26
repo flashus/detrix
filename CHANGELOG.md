@@ -5,14 +5,54 @@ All notable changes to Detrix will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.0] - 2026-02-10
+## [1.1.0] - 2026-02-26
+
+### Highlights
+- **Cloud debugging** — Observe code running inside Docker containers and remote hosts. No VPN, no port-forwarding. The AI agent connects to a Detrix daemon deployed alongside your service.
+- **Multi-expression metrics** — Single observation point captures multiple variables simultaneously.
 
 ### Added
-- **Multi-expression metrics**: Single metric can observe multiple expressions
-  simultaneously (`expressions: ["symbol", "quantity", "price"]`)
+
+#### Cloud Debugging
+- **Daemon auto-discovery** — Clients register with the daemon at startup; the MCP bridge discovers them automatically via `advertise_url`
+- **Virtual File System (VFS)** — Transparently fetches source files for the agent. Three configurable sources: `bridge` (from AI agent workspace), `control_plane` (from app container), `disk` (local path). Configurable priority order in `[vfs]` config section
+- **Multi-connection MCP** — MCP bridge handles multiple concurrent AI agent sessions with workspace-aware file serving
+- **Connection reference counting** — Shared DAP connections are safely used by multiple concurrent MCP clients
+- **Container restart metric migration** — Metrics and connections survive container restarts automatically
+- **Admin endpoints** — New REST endpoints for daemon administration (`/api/v1/admin/*`)
+- **Docker cloud E2E tests** — Comprehensive test suite for Docker-based cloud debugging workflows
+
+#### Remote App Control
+- **`wake` / `sleep` MCP tools** — Resume or suspend a remote app's debugger on demand. Zero overhead when sleeping; agent wakes the app before adding metrics
+- **MCP bridge fallback** — If daemon forwarding fails during wake, falls back to direct bridge connection and auto-switches daemon
+
+#### Authentication & Security
+- **Secure-by-default daemon** — Authentication enabled by default; set `DETRIX_TOKEN` env var to configure
+- **Per-daemon credential storage** — Each daemon instance stores credentials independently; discovery-first auth flow
+- **Client ID audit trail** — All mutating operations thread a client ID for full audit traceability
+- **Hardened client auth** — Fixed auth bugs in Go and Rust clients; enabled secure-by-default
+
+#### Metrics
+- **Multi-expression metrics** — Single metric can observe multiple expressions simultaneously (`expressions: ["symbol", "quantity", "price"]`)
 - `ExpressionValue` type with typed projections (numeric, string, boolean)
 - GELF output includes per-expression custom fields (`_expr_N_name`, `_expr_N_value`)
 - Configurable `max_expressions_per_metric` limit (default: 20)
+- **Expression merging** — Adding a metric at an existing location merges expressions instead of creating a duplicate
+
+#### MCP Tools
+- `disconnect_all` — Disconnect all adapters and flush state (new tool, total: 29 tools)
+
+#### Developer Experience
+- **Relative path resolution** in `observe` tool — works with paths relative to project workspace root
+- **Smart line suggestion** — `observe` tool suggests the best line when expression is found nearby
+- **Build info auto-detection** in Go and Rust clients
+- **Docker cloud example** — `examples/docker-demo/` shows full cloud debugging setup with Go service, Detrix daemon, and AI agent
+
+#### Clients (v1.1.1)
+- Python client: `detrix-py` v1.1.1 on PyPI
+- Go client: `github.com/flashus/detrix/clients/go` v1.1.1
+- Rust client: `detrix-rs` v1.1.1 on crates.io
+- All clients support build info auto-detection and secure auth
 
 ### Breaking Changes
 - **WebSocket API**: Field names changed from snake_case to camelCase
@@ -23,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Expression safety validation now enforced on config-file metric imports
+- Go/Rust client auth bugs resolved; secure-by-default now works correctly
+- Inspector no longer returns non-executable locations (function signatures, struct fields) for Go/Rust variable search
 
 ## [1.0.0] - 2026-01-27
 
