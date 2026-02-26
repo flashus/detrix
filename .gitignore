@@ -12,3 +12,5 @@ fixtures/go/go
 .mcp.json
 .serena/
 .agents/
+assets/raw/detrix_demo.mov
+assets/detrix_demo.mp4
