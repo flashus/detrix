@@ -364,8 +364,13 @@ tasks:
   # Clean
   # ============================================================================
 
+  bump:
+    desc: "Sync VERSION into all client manifests — commit the result before publishing"
+    cmds:
+      - python3 publish.py --bump-only
+
   publish:
-    desc: Publish client SDKs to registries (PyPI, crates.io, pkg.go.dev)
+    desc: "Verify versions, run checks, publish to registries (run 'task clients:bump' + commit + push first)"
     cmds:
       - python3 publish.py {{.CLI_ARGS}}
 

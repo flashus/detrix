@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Automated publishing for Detrix client SDKs.
 
-Reads the canonical version from clients/VERSION, syncs it into each client's
-version file, runs pre-publish checks, and publishes to PyPI / crates.io / pkg.go.dev.
+Two-step workflow:
+  1. task clients:bump              — sync VERSION into all manifests, then commit + push
+  2. task clients:publish           — verify versions, run checks, publish to registries
 
-Usage:
-    python3 publish.py                   # publish all clients
-    python3 publish.py --dry-run         # preview without publishing
-    python3 publish.py --only python     # publish one client
-    python3 publish.py --skip-checks     # skip pre-publish checks
+Direct usage:
+    python3 publish.py --bump-only           # step 1: sync versions only
+    python3 publish.py                       # step 2: verify + checks + publish all
+    python3 publish.py --dry-run             # preview step 2 without publishing
+    python3 publish.py --only python         # publish one client
+    python3 publish.py --skip-checks         # skip pre-publish checks
 """
 
 from __future__ import annotations
@@ -56,6 +58,31 @@ def header(msg: str) -> None:
 
 # ── Version helpers ─────────────────────────────────────────────────────────
 
+# (path, search pattern, replacement template)
+def _version_targets(version: str) -> list[tuple[Path, str, str]]:
+    return [
+        (
+            CLIENTS_DIR / "python" / "pyproject.toml",
+            r'(version\s*=\s*")[^"]+(")',
+            rf"\g<1>{version}\2",
+        ),
+        (
+            CLIENTS_DIR / "python" / "detrix" / "__init__.py",
+            r'(__version__\s*=\s*")[^"]+(")',
+            rf"\g<1>{version}\2",
+        ),
+        (
+            CLIENTS_DIR / "rust" / "Cargo.toml",
+            r'(version\s*=\s*")[^"]+(")',
+            rf"\g<1>{version}\2",
+        ),
+        (
+            CLIENTS_DIR / "go" / "version.go",
+            r'(Version\s*=\s*")[^"]+(")',
+            rf"\g<1>{version}\2",
+        ),
+    ]
+
 
 def read_version() -> str:
     if not VERSION_FILE.exists():
@@ -81,44 +108,46 @@ def _replace_first(path: Path, pattern: str, replacement: str) -> bool:
     return True
 
 
-def sync_versions(version: str, dry_run: bool) -> None:
-    """Write *version* into every client's version file."""
+def sync_versions(version: str) -> None:
+    """Write *version* into every client's manifest file."""
     header("Syncing versions")
-    targets: list[tuple[Path, str, str]] = [
-        (
-            CLIENTS_DIR / "python" / "pyproject.toml",
-            r'(version\s*=\s*")[^"]+(")',
-            rf"\g<1>{version}\2",
-        ),
-        (
-            CLIENTS_DIR / "python" / "detrix" / "__init__.py",
-            r'(__version__\s*=\s*")[^"]+(")',
-            rf"\g<1>{version}\2",
-        ),
-        (
-            CLIENTS_DIR / "rust" / "Cargo.toml",
-            r'(version\s*=\s*")[^"]+(")',
-            rf"\g<1>{version}\2",
-        ),
-        (
-            CLIENTS_DIR / "go" / "version.go",
-            r'(const Version\s*=\s*")[^"]+(")',
-            rf"\g<1>{version}\2",
-        ),
-    ]
-    for path, pattern, replacement in targets:
+    for path, pattern, replacement in _version_targets(version):
         rel = path.relative_to(CLIENTS_DIR)
         if not path.exists():
             warn(f"  {rel} does not exist, skipping")
             continue
-        if dry_run:
-            info(f"  [dry-run] would sync {rel} → {version}")
+        changed = _replace_first(path, pattern, replacement)
+        if changed:
+            info(f"  Updated {rel} → {version}")
         else:
-            changed = _replace_first(path, pattern, replacement)
-            if changed:
-                info(f"  Updated {rel} → {version}")
-            else:
-                info(f"  {rel} already at {version}")
+            info(f"  {rel} already at {version}")
+
+
+def verify_versions(version: str) -> None:
+    """Check every client manifest is already at *version*. Exit if any is stale."""
+    header("Verifying versions")
+    stale: list[str] = []
+    for path, pattern, replacement in _version_targets(version):
+        rel = str(path.relative_to(CLIENTS_DIR))
+        if not path.exists():
+            warn(f"  {rel}: file not found, skipping")
+            continue
+        text = path.read_text()
+        new_text, count = re.subn(pattern, replacement, text, count=1)
+        if count == 0:
+            error(f"  {rel}: version pattern not found")
+            stale.append(rel)
+        elif new_text != text:
+            error(f"  {rel}: not bumped to {version} yet")
+            stale.append(rel)
+        else:
+            info(f"  {rel}: ok")
+    if stale:
+        error(
+            "\nRun 'task clients:bump', commit the changes, push to main,"
+            " then re-run 'task clients:publish'."
+        )
+        sys.exit(1)
 
 
 # ── Pre-publish checks ─────────────────────────────────────────────────────
@@ -341,14 +370,19 @@ def main() -> None:
         description="Publish Detrix client SDKs to package registries.",
     )
     parser.add_argument(
+        "--bump-only",
+        action="store_true",
+        help="Sync VERSION into all client manifests and exit (commit the result before publishing)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Preview actions without publishing",
+        help="Preview publish actions without touching any registry",
     )
     parser.add_argument(
         "--skip-checks",
         action="store_true",
-        help="Skip pre-publish checks (task clients:{lang}-check)",
+        help="Skip pre-publish checks",
     )
     parser.add_argument(
         "--only",
@@ -358,12 +392,23 @@ def main() -> None:
     args = parser.parse_args()
 
     version = read_version()
-    header(f"Detrix client SDK publish — v{version}")
+    header(f"Detrix client SDK — v{version}")
+
+    # ── Step 1: bump only ───────────────────────────────────────────────────
+    if args.bump_only:
+        sync_versions(version)
+        print(
+            f"\n{BOLD}Next:{RESET} commit the changes above, push to main,"
+            f" then run:  task clients:publish\n"
+        )
+        return
+
+    # ── Step 2: publish ─────────────────────────────────────────────────────
     if args.dry_run:
         warn("Dry-run mode: no changes will be made to registries")
 
-    # 1. Sync versions
-    sync_versions(version, dry_run=args.dry_run)
+    # 1. Verify all manifests are already at the right version
+    verify_versions(version)
 
     # 2. Pre-publish checks
     if not args.skip_checks:

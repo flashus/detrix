@@ -47,7 +47,7 @@ from .errors import (
 
 _logger = logging.getLogger("detrix")
 
-__version__ = "1.0.0"
+__version__ = "1.1.1"
 __all__ = [
     "init",
     "status",
