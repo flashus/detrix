@@ -1,4 +1,4 @@
-<table>
+<table style="border:none;">
 <tr>
 <td width="300">
 <img alt="Detrix" src="assets/logo.png" width="300">
@@ -84,13 +84,13 @@ Detrix talks to your app's debugger via the **Debug Adapter Protocol (DAP)**. It
   AI Agent                 Detrix Server              Your App
   (Claude Code,            (Rust + SQLite)            (Python/Go/Rust)
    Cursor, Windsurf)
-      │                          │                           │
-      │── "observe line 127" ──▶│                           │
-      │                          │── DAP logpoint ─────────▶│
-      │                          │◀─ captured values ───────│
-      │◀── structured events ───│                           │
-      │                          │                           │
-      │   App never pauses. No code changes. No restarts.    │
+      │                         │                          │
+      │── "observe line 127" ──▶│                          │
+      │                         │── DAP logpoint ─────────▶│
+      │                         │◀─ captured values ───────│
+      │◀── structured events ───│                          │
+      │                         │                          │
+      │   App never pauses. No code changes. No restarts.  │
 ```
 
 ---
