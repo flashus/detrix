@@ -10,7 +10,8 @@
 **Observe any line of running code. No changes, no restarts, production-safe.**
 
 - **Zero-code observability** — Add metrics to any line without redeployment
-- **Built for AI agents** — 28 MCP tools for Claude Code, Cursor, Windsurf
+- **Cloud debugging** — Observe code running in Docker containers and remote hosts
+- **Built for AI agents** — 29 MCP tools for Claude Code, Cursor, Windsurf
 - **Production-safe** — DAP logpoints capture values without pausing. Python, Go, Rust
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org/) [![Python](https://img.shields.io/badge/python-debugpy-3776AB.svg)](https://github.com/microsoft/debugpy) [![Go](https://img.shields.io/badge/go-delve-00ADD8.svg)](https://github.com/go-delve/delve) [![Rust](https://img.shields.io/badge/rust-lldb--dap-DEA584.svg)](https://lldb.llvm.org/)
@@ -81,9 +82,9 @@ That's it. The agent handles everything from here: connecting, adding metrics, q
 Detrix talks to your app's debugger via the **Debug Adapter Protocol (DAP)**. It sets **logpoints** — breakpoints that evaluate an expression and log the result instead of pausing. Your application runs at full speed; Detrix captures the values.
 
 ```
-  AI Agent                 Detrix Server              Your App
-  (Claude Code,            (Rust + SQLite)            (Python/Go/Rust)
-   Cursor, Windsurf)
+  AI Agent                 Detrix Daemon              Your App
+  (Claude Code, Cursor,    (local or Docker/cloud)    (Python/Go/Rust, local/cloud)
+    Windsurf, local)
       │                         │                          │
       │── "observe line 127" ──▶│                          │
       │                         │── DAP logpoint ─────────▶│
@@ -92,6 +93,8 @@ Detrix talks to your app's debugger via the **Debug Adapter Protocol (DAP)**. It
       │                         │                          │
       │   App never pauses. No code changes. No restarts.  │
 ```
+
+The daemon runs locally or alongside your service in Docker — same protocol either way. In cloud mode, source files are fetched automatically via VFS so the agent can find the right lines without the source on your machine. See the [Installation Guide](docs/INSTALL.md#cloud-debugging) for cloud setup.
 
 ---
 
@@ -108,7 +111,7 @@ detrix.init(name="my-app")   # That's it. Agent controls the rest.
 |----------|---------|------|
 | Python | `pip install detrix-py` | [Python Client](clients/python/README.md) |
 | Go | `go get github.com/flashus/detrix/clients/go` | [Go Client](clients/go/README.md) |
-| Rust | `detrix-rs = "1.0.0"` in Cargo.toml | [Rust Client](clients/rust/README.md) |
+| Rust | `detrix-rs = "1.1.1"` in Cargo.toml | [Rust Client](clients/rust/README.md) |
 
 Don't want to embed a client? [Start the debugger manually](#2-start-your-app-with-a-debugger) and let the agent attach directly.
 
@@ -121,12 +124,13 @@ See the [Clients Manual](docs/CLIENTS.md) for full documentation.
 | | |
 |---|---|
 | **Zero-downtime instrumentation** | Add metrics without restarting your app |
+| **Cloud debugging** | Observe Docker containers and remote hosts — no VPN, no port forwarding |
 | **Multi-expression metrics** | Capture multiple values per observation point |
 | **Multi-language** | Python (debugpy), Go (delve), Rust (lldb-dap) |
 | **Capture modes** | Stream, sample, throttle, first-hit, time-based |
 | **Runtime introspection** | Stack traces, memory snapshots, TTL |
 | **Safety validation** | Three-layer expression validation prevents unsafe code |
-| **28 MCP tools** | Full AI agent integration via Model Context Protocol |
+| **29 MCP tools** | Full AI agent integration via Model Context Protocol |
 | **4 API protocols** | MCP (stdio), gRPC, REST, WebSocket |
 
 ---

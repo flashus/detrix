@@ -81,7 +81,7 @@ go install github.com/go-delve/delve/cmd/dlv@latest
 Add to your `Cargo.toml`:
 ```toml
 [dependencies]
-detrix-rs = "1.0.0"
+detrix-rs = "1.1.1"
 ```
 
 **Requires:** `lldb-dap` installed (macOS/Linux). On Windows, Detrix uses CodeLLDB which is downloaded automatically. See [Rust Client README](../clients/rust/README.md#requirements) for install instructions per platform.
@@ -170,6 +170,8 @@ All clients accept the same set of environment variables:
 **`DETRIX_DEBUG_PORT`** -- Port the debugger listens on (default: `0` = OS auto-assigns). This is the port the Detrix server connects to via DAP to set logpoints. Use `0` unless you have a specific reason to fix the port.
 
 **`DETRIX_TOKEN`** -- Bearer token for authenticating remote requests to the control plane. Localhost requests (127.0.0.1, ::1) always bypass authentication. If not set, the client reads `~/detrix/auth-token` file as fallback. If neither is configured, remote requests are denied.
+
+**`DETRIX_HOST`** -- Advertise host used when registering with the Detrix daemon. Useful in Docker/cloud deployments where the daemon needs to reach the client on a specific hostname (e.g., the container's service name on the Docker network). If not set, defaults to the control host.
 
 **`DETRIX_HOME`** -- Path to the Detrix home directory (default: `~/detrix`). Used to locate the `auth-token` file and other configuration.
 
@@ -262,6 +264,7 @@ All clients expose the same HTTP endpoints on the control plane:
 | `/detrix/info` | GET | Yes* | Process metadata (name, PID, language, version) |
 | `/detrix/wake` | POST | Yes* | Start debugger, register with server |
 | `/detrix/sleep` | POST | Yes* | Stop debugger, unregister from server |
+| `/detrix/discover` | GET | No | Returns daemon URL and control plane URL for MCP bridge auto-switching |
 
 \* Localhost requests (127.0.0.1, ::1) bypass authentication.
 
