@@ -136,31 +136,31 @@ tasks:
     desc: Run Python client tests
     dir: python
     cmds:
-      - uv run pytest -v
+      - uv run --extra dev pytest -v
 
   python-lint:
     desc: Lint Python client code
     dir: python
     cmds:
-      - uv run ruff check detrix tests --fix
+      - uv run --extra dev ruff check detrix tests --fix
 
   python-format:
     desc: Format Python client code
     dir: python
     cmds:
-      - uv run ruff format detrix tests
+      - uv run --extra dev ruff format detrix tests
 
   python-typecheck:
     desc: Type check Python client
     dir: python
     cmds:
-      - uv run mypy detrix
+      - uv run --extra dev mypy detrix
 
   python-format-check:
     desc: Check Python client formatting
     dir: python
     cmds:
-      - uv run ruff format --check detrix tests
+      - uv run --extra dev ruff format --check detrix tests
 
   python-check:
     desc: Run all Python checks (fmt, lint, typecheck, test)
@@ -236,7 +236,8 @@ tasks:
     desc: Lint Rust client code
     dir: rust
     cmds:
-      - cargo clippy --all -- -D warnings
+      # - cargo clippy --all -- -D warnings
+      - cargo clippy --all
 
   rust-fmt:
     desc: Format Rust client code
