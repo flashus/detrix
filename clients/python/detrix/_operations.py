@@ -25,7 +25,7 @@ def _get_daemon_client(
     ca_bundle: str | None = None,
 ) -> HttpDaemonClient:
     """Get the cached daemon client if URL matches, otherwise create a temporary one."""
-    cached = state.http_client
+    cached: HttpDaemonClient | None = state.http_client
     if cached is not None and cached.base_url == daemon_url.rstrip("/"):
         return cached
     return HttpDaemonClient(daemon_url, verify_ssl=verify_ssl, ca_bundle=ca_bundle)
@@ -60,7 +60,7 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
                     status=WakeStatus.already_awake,
                     debug_port=state.actual_debug_port,
                     connection_id=state.connection_id or "",
-                    daemon_url=state.daemon_advertise_url,
+                    daemon_url=state.daemon_advertise_url,  # type: ignore[arg-type]
                 )
             if state.state == State.WAKING:
                 # Shouldn't happen since we hold wake_lock, but be safe
@@ -169,7 +169,7 @@ def do_wake(daemon_url: str | None = None, validate_url: bool = True) -> WakeRes
             status=WakeStatus.awake,
             debug_port=actual_port,
             connection_id=connection_id,
-            daemon_url=advertise_url,
+            daemon_url=advertise_url,  # type: ignore[arg-type]
         )
 
 

@@ -72,11 +72,14 @@ pub async fn wake_impl(state: &Arc<ApiState>, params: WakeParams) -> Result<Wake
 
     // Set control_plane_url on the connection so VFS can fetch files from the app
     if let Some(ref conn_id) = result.connection_id {
-        let _ = state
+        if let Err(e) = state
             .context
             .connection_service
             .set_control_plane_url(&detrix_core::ConnectionId::new(conn_id), app_url.clone())
-            .await;
+            .await
+        {
+            tracing::warn!("Failed to set control_plane_url for connection {conn_id}: {e}");
+        }
     }
 
     Ok(WakeResult {

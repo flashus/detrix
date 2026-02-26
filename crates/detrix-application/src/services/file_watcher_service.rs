@@ -182,8 +182,13 @@ impl FileWatcher for NotifyFileWatcher {
         {
             let mut debouncer_guard = self.debouncer.write().await;
             if let Some(ref mut debouncer) = *debouncer_guard {
-                // Ignore errors for unwatch (file might be deleted)
-                let _ = debouncer.watcher().unwatch(&canonical_path);
+                // File might already be deleted; unwatch error is non-critical
+                if let Err(e) = debouncer.watcher().unwatch(&canonical_path) {
+                    tracing::warn!(
+                        "Failed to unwatch path {} (file may already be deleted): {e}",
+                        canonical_path.display()
+                    );
+                }
             }
         }
 
@@ -351,6 +356,9 @@ impl FileWatcherOrchestrator {
     ///
     /// Processes file events and triggers metric relocation.
     /// Exits when shutdown signal is received.
+    // Complexity comes from the select! loop handling multiple channels (events, shutdown,
+    // periodic flush), debounce logic, and per-event error handling.
+    #[allow(clippy::cognitive_complexity)]
     pub async fn run_event_loop(
         &self,
         mut event_rx: mpsc::Receiver<FileEvent>,

@@ -45,11 +45,14 @@ pub async fn handle_add_metric(
         );
 
         // Pre-fetch file into VFS cache (transparent remote file fetching for cloud mode)
-        let _ = state
+        if let Err(e) = state
             .context
             .file_source_chain
             .ensure_available(&connection, &location.file)
-            .await;
+            .await
+        {
+            tracing::debug!("Pre-fetch skipped for '{}': {e}", location.file);
+        }
     }
 
     // If language is not provided, derive it from the connection (same pattern as MCP/REST)

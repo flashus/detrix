@@ -411,7 +411,7 @@ impl McpClientTracker {
             // Double-check conditions still hold after grace period
             if no_clients && no_connections {
                 info!("Grace period elapsed, signaling daemon shutdown");
-                let _ = shutdown_tx.send(true);
+                shutdown_tx.send(true).ok(); // ok(): grace-period shutdown signal; receiver (serve loop) may have already exited
             } else if !no_clients {
                 info!("New MCP client connected during grace period, canceling shutdown");
             } else {

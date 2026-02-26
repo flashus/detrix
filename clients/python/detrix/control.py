@@ -181,7 +181,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 control_port=state.actual_control_port,
                 debug_port=state.actual_debug_port,
                 debug_port_active=state.debug_port_active,
-                daemon_url=state.daemon_url,  # type: ignore[arg-type]
+                daemon_url=state.daemon_url,
                 connection_id=state.connection_id,
             )
             self._send_json_response(response.model_dump(mode="json"))
@@ -241,7 +241,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             f"http://{cp_host}:{actual_control_port}" if cp_host and actual_control_port else None
         )
 
-        response: dict = {"daemon_url": daemon_url, "name": name}
+        response: dict[str, Any] = {"daemon_url": daemon_url, "name": name}
         if control_plane_url:
             response["control_plane_url"] = control_plane_url
         self._send_json_response(response)

@@ -127,7 +127,7 @@ impl Supervisor {
 
     /// Stop the supervisor
     pub fn stop(&self) {
-        let _ = self.shutdown_tx.send(true);
+        self.shutdown_tx.send(true).ok(); // ok(): receiver may already be dropped if the run loop already exited
     }
 }
 

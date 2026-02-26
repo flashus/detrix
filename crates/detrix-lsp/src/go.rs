@@ -60,6 +60,9 @@ static DIRECT_INCR_DECR_PATTERN: OnceLock<Regex> = OnceLock::new();
 /// Pattern to match direct variable assignment: var = value (not := which is local)
 static DIRECT_ASSIGN_PATTERN: OnceLock<Regex> = OnceLock::new();
 
+// These static regex initializers use `expect` with a literal pattern — the regex is
+// validated at compile time and can never fail in practice.
+#[allow(clippy::expect_used)]
 fn get_call_pattern() -> &'static Regex {
     CALL_PATTERN.get_or_init(|| {
         Regex::new(r"([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)\s*\(")
@@ -67,6 +70,7 @@ fn get_call_pattern() -> &'static Regex {
     })
 }
 
+#[allow(clippy::expect_used)]
 fn get_method_pattern() -> &'static Regex {
     METHOD_PATTERN.get_or_init(|| {
         Regex::new(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*\.\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
@@ -74,6 +78,7 @@ fn get_method_pattern() -> &'static Regex {
     })
 }
 
+#[allow(clippy::expect_used)]
 fn get_field_assign_pattern() -> &'static Regex {
     FIELD_ASSIGN_PATTERN.get_or_init(|| {
         Regex::new(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*\.\s*[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]*\])?\s*=")
@@ -81,12 +86,14 @@ fn get_field_assign_pattern() -> &'static Regex {
     })
 }
 
+#[allow(clippy::expect_used)]
 fn get_index_assign_pattern() -> &'static Regex {
     INDEX_ASSIGN_PATTERN.get_or_init(|| {
         Regex::new(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*\[[^\]]*\]\s*=").expect("Static regex is valid")
     })
 }
 
+#[allow(clippy::expect_used)]
 fn get_field_incr_decr_pattern() -> &'static Regex {
     FIELD_INCR_DECR_PATTERN.get_or_init(|| {
         Regex::new(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*\.\s*[a-zA-Z_][a-zA-Z0-9_]*\s*(\+\+|--)")
@@ -94,12 +101,14 @@ fn get_field_incr_decr_pattern() -> &'static Regex {
     })
 }
 
+#[allow(clippy::expect_used)]
 fn get_direct_incr_decr_pattern() -> &'static Regex {
     DIRECT_INCR_DECR_PATTERN.get_or_init(|| {
         Regex::new(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*(\+\+|--)").expect("Static regex is valid")
     })
 }
 
+#[allow(clippy::expect_used)]
 fn get_direct_assign_pattern() -> &'static Regex {
     DIRECT_ASSIGN_PATTERN.get_or_init(|| {
         Regex::new(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*[+\-*/]?=\s*[^=]")

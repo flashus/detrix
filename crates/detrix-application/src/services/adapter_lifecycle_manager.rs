@@ -373,7 +373,11 @@ impl AdapterLifecycleManager {
 
                     // The event listener has already exited (that's how we got here),
                     // but we still try to send shutdown signal in case it's still draining
-                    let _ = managed.shutdown_tx.send(true);
+                    if let Err(e) = managed.shutdown_tx.send(true) {
+                        tracing::warn!(
+                            "Failed to send shutdown signal to event listener (receiver may have already exited): {e}"
+                        );
+                    }
 
                     // Wait briefly for the event listener to finish
                     let drain_timeout = Duration::from_millis(drain_timeout_ms);
@@ -450,6 +454,9 @@ impl AdapterLifecycleManager {
     ///
     /// When flush fails, events are saved to the dead-letter queue for later retry.
     /// If DLQ is not configured, events are logged as JSON for manual recovery.
+    // Complexity comes from DLQ fallback logic, per-event error handling, and multiple
+    // save/retry paths — these cannot be simplified without obscuring the recovery flow.
+    #[allow(clippy::cognitive_complexity)]
     async fn flush_buffer_static(
         event_buffer: &Arc<Mutex<VecDeque<MetricEvent>>>,
         event_capture_service: &Arc<EventCaptureService>,
@@ -517,6 +524,9 @@ impl AdapterLifecycleManager {
     /// # Returns
     /// `StartAdapterResult` with degradation info (sync_failed, resume_failed, metrics counts)
     #[instrument(skip(self), fields(connection_id = %connection_id.0, host = %host, port = port, language = %language, safe_mode = safe_mode))]
+    // This function orchestrates adapter startup with multiple phases (create, start, sync, restore,
+    // register, spawn listener) — splitting further would obscure the startup sequence.
+    #[allow(clippy::too_many_lines)]
     pub async fn start_adapter(
         &self,
         connection_id: ConnectionId,
@@ -1045,6 +1055,9 @@ impl AdapterLifecycleManager {
     /// unbounded memory growth under high load.
     /// Events are also sent to external output (Graylog/GELF) if configured.
     #[allow(clippy::too_many_arguments)]
+    // Complexity comes from buffer overflow handling, flush signaling, broadcasting,
+    // and external output dispatch — all essential event processing steps.
+    #[allow(clippy::cognitive_complexity)]
     async fn process_event(
         event: &MetricEvent,
         event_buffer: &Arc<Mutex<VecDeque<MetricEvent>>>,
@@ -1089,7 +1102,12 @@ impl AdapterLifecycleManager {
         if should_flush {
             debug!("Buffer full, triggering flush for connection {}", conn_id.0);
             // Signal the flush task to flush now
-            let _ = flush_tx.send(()).await;
+            if let Err(e) = flush_tx.send(()).await {
+                tracing::warn!(
+                    "Failed to signal flush task for connection {} (receiver may have closed): {e}",
+                    conn_id.0
+                );
+            }
         }
 
         // Broadcast to real-time subscribers (WebSocket, gRPC streams)

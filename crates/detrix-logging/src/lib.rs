@@ -528,10 +528,11 @@ pub fn init_component_file_log(config: LogConfig, component: &str) -> std::io::R
 pub fn init_test() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
 
-    let _ = tracing_subscriber::registry()
+    tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_test_writer())
-        .try_init();
+        .try_init()
+        .ok(); // ok(): the only failure is "global default already set" — expected when multiple tests call init_test(); printing it would spam test output
 }
 
 /// Clean up old log files based on retention policy.

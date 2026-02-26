@@ -193,7 +193,10 @@ impl VirtualFileSystem for CachedFileSystem {
         for key in keys {
             let path = &key.1;
             if let Some(&client_hash) = client_map.get(path.as_str()) {
-                let entry = cache.get_mut(&key).unwrap();
+                #[allow(clippy::expect_used)] // key was just collected from this same lock scope
+                let entry = cache
+                    .get_mut(&key)
+                    .expect("key was collected from cache in the same lock scope");
                 if entry.hash == client_hash {
                     // Match → un-stale, restart TTL
                     entry.stale = false;

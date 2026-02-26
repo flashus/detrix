@@ -167,7 +167,12 @@ impl ConnectionService {
                         ClientIdentity::bridge(client_id),
                         ReferenceKind::Client,
                     );
-                    let _ = self.reference_repo.add_reference(&reference).await;
+                    if let Err(e) = self.reference_repo.add_reference(&reference).await {
+                        tracing::warn!(
+                            "Failed to add connection reference for {}: {e}",
+                            existing.id.0
+                        );
+                    }
                 }
                 info!(
                     "Connection already exists and is connected (UUID={}), returning existing",
@@ -288,7 +293,9 @@ impl ConnectionService {
             connection.port,
             connection.language.as_str(),
         );
-        let _ = self.system_event_tx.send(event);
+        if let Err(e) = self.system_event_tx.send(event) {
+            tracing::warn!("No subscribers for connection_created event: {e}");
+        }
 
         Ok(connection_id)
     }
@@ -323,7 +330,9 @@ impl ConnectionService {
 
         // 4. Emit connection closed event
         let event = SystemEvent::connection_closed(id.clone());
-        let _ = self.system_event_tx.send(event);
+        if let Err(e) = self.system_event_tx.send(event) {
+            tracing::warn!("No subscribers for connection_closed event: {e}");
+        }
 
         Ok(())
     }
@@ -349,14 +358,21 @@ impl ConnectionService {
     #[instrument(skip(self), fields(connection_id = %id.0))]
     pub async fn delete_connection(&self, id: &ConnectionId) -> Result<()> {
         // 1. Stop adapter via lifecycle manager (ignore error if not running)
-        let _ = self.adapter_lifecycle_manager.stop_adapter(id).await;
+        if let Err(e) = self.adapter_lifecycle_manager.stop_adapter(id).await {
+            tracing::warn!(
+                "Failed to stop adapter for connection {} (may not be running): {e}",
+                id.0
+            );
+        }
 
         // 2. Clear VFS cache for this connection (permanent deletion)
         self.vfs.clear_connection(&id.0);
         debug!("VFS cache cleared for connection {}", id.0);
 
         // 3. Remove all connection references (explicit cleanup for mock compatibility)
-        let _ = self.reference_repo.remove_all_by_connection(id).await;
+        if let Err(e) = self.reference_repo.remove_all_by_connection(id).await {
+            tracing::warn!("Failed to remove references for connection {}: {e}", id.0);
+        }
 
         // 4. Delete all associated metrics (cascade delete)
         let deleted_metrics = self.metric_repo.delete_by_connection_id(id).await?;
@@ -372,7 +388,9 @@ impl ConnectionService {
 
         // 6. Emit connection closed event
         let event = SystemEvent::connection_closed(id.clone());
-        let _ = self.system_event_tx.send(event);
+        if let Err(e) = self.system_event_tx.send(event) {
+            tracing::warn!("No subscribers for connection_closed event on delete: {e}");
+        }
 
         info!("Deleted connection {}", id.0);
 
@@ -513,7 +531,9 @@ impl ConnectionService {
                 );
 
                 // Disconnect (kills debuggers) then remove
-                let _ = self.disconnect(&conn.id).await;
+                if let Err(e) = self.disconnect(&conn.id).await {
+                    tracing::warn!("Failed to disconnect stale connection {}: {e}", conn.id.0);
+                }
                 self.connection_repo.delete(&conn.id).await?;
                 removed_count += 1;
             }
@@ -655,7 +675,9 @@ impl ConnectionService {
 
                     // Emit connection restored event
                     let event = SystemEvent::connection_restored(conn_id.clone(), 1);
-                    let _ = self.system_event_tx.send(event);
+                    if let Err(e) = self.system_event_tx.send(event) {
+                        tracing::warn!("No subscribers for connection_restored event: {e}");
+                    }
 
                     info!("✅ Reconnected to {}", conn_id.0);
                     reconnected_count += 1;
@@ -678,7 +700,9 @@ impl ConnectionService {
 
                         // Emit connection closed event
                         let event = SystemEvent::connection_closed(conn_id);
-                        let _ = self.system_event_tx.send(event);
+                        if let Err(e) = self.system_event_tx.send(event) {
+                            tracing::warn!("No subscribers for connection_closed event: {e}");
+                        }
                     }
                 }
             }
@@ -837,7 +861,12 @@ impl ConnectionService {
 
         for conn in &all_connections {
             // Remove all references for this connection
-            let _ = self.reference_repo.remove_all_by_connection(&conn.id).await;
+            if let Err(e) = self.reference_repo.remove_all_by_connection(&conn.id).await {
+                tracing::warn!(
+                    "Failed to remove references for connection {} during admin disconnect: {e}",
+                    conn.id.0
+                );
+            }
             if self.disconnect(&conn.id).await.is_ok() {
                 disconnected_count += 1;
             }

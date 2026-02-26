@@ -325,9 +325,11 @@ impl DapBroker {
             // Clean up on exit - notify all pending requests
             let mut pending = pending_requests.write().await;
             for (_, tx) in pending.drain() {
-                let _ = tx.send(Err(Error::Communication(
+                if let Err(e) = tx.send(Err(Error::Communication(
                     "Adapter disconnected".to_string(),
-                )));
+                ))) {
+                    tracing::debug!("Failed to notify pending request of adapter disconnect (receiver already dropped): {e:?}");
+                }
             }
 
             // Clear event subscribers to close their channels

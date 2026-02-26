@@ -105,8 +105,7 @@ impl TreeSitterCache {
         hash[..16]
             .iter()
             .fold(String::with_capacity(32), |mut s, b| {
-                use std::fmt::Write;
-                let _ = write!(s, "{:02x}", b);
+                s.push_str(&format!("{b:02x}"));
                 s
             })
     }

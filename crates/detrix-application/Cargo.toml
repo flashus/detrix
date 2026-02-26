@@ -52,6 +52,9 @@ notify = "8.2"
 # Debouncing for file change events
 notify-debouncer-mini = "0.7"
 
+# Random number generation (jitter in reconnect backoff)
+rand.workspace = true
+
 # JWT validation for external auth mode (SEC-02)
 jsonwebtoken = "9"
 
