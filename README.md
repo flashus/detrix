@@ -14,8 +14,7 @@
 - **Built for AI agents** — 29 MCP tools for Claude Code, Cursor, Windsurf
 - **Production-safe** — DAP logpoints capture values without pausing. Python, Go, Rust
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org/) [![Python](https://img.shields.io/badge/python-debugpy-3776AB.svg)](https://github.com/microsoft/debugpy) [![Go](https://img.shields.io/badge/go-delve-00ADD8.svg)](https://github.com/go-delve/delve) [![Rust](https://img.shields.io/badge/rust-lldb--dap-DEA584.svg)](https://lldb.llvm.org/)
-
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org/) [![crates.io](https://img.shields.io/crates/v/detrix-rs.svg)](https://crates.io/crates/detrix-rs) [![PyPI](https://img.shields.io/pypi/v/detrix-py.svg)](https://pypi.org/project/detrix-py/) [![Go](https://pkg.go.dev/badge/github.com/flashus/detrix/clients/go.svg)](https://pkg.go.dev/github.com/flashus/detrix/clients/go)
 </td>
 </tr>
 </table>
@@ -132,6 +131,20 @@ See the [Clients Manual](docs/CLIENTS.md) for full documentation.
 | **Safety validation** | Three-layer expression validation prevents unsafe code |
 | **29 MCP tools** | Full AI agent integration via Model Context Protocol |
 | **4 API protocols** | MCP (stdio), gRPC, REST, WebSocket |
+
+---
+
+## Why Detrix?
+
+| | `print()` / `logging` | Detrix |
+|---|---|---|
+| **Add new observation** | Edit code → restart | Ask the agent — no code, no restart¹ |
+| **Production-safe** | Output pollution, perf risk | Non-breaking logpoints |
+| **Events** | Ephemeral stream | Stored, queryable by metric and time |
+| **Capture control** | Every hit, no filtering | Throttle, sample, first-hit, time-window |
+| **Cleanup** | Manual (easy to forget, ships to prod) | One command — or automatic via TTL |
+
+> ¹ Embed `detrix.init()` once (zero restarts forever), or do a one-time restart with your debugger flag attached (`--debugpy`, `dlv`, `lldb-dap`).
 
 ---
 
