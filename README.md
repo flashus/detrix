@@ -50,9 +50,8 @@ No code was modified. No restarts. The agent observed the running process, found
 ### 1. Install Detrix
 
 ```bash
-git clone https://github.com/flashus/detrix.git
-cd detrix && cargo build --release
-./target/release/detrix init
+cargo install --git https://github.com/flashus/detrix detrix-cli
+detrix init
 ```
 
 ### 2. Start your app with a debugger

@@ -102,50 +102,33 @@ Choose based on what you want to monitor:
 ### macOS / Linux
 
 ```bash
-# Clone repository
-git clone https://github.com/flashus/detrix.git
-cd detrix
+# Install
+cargo install --git https://github.com/flashus/detrix detrix-cli
 
-# Build release binary
-cargo build --release
-
-# Verify build
-./target/release/detrix --version
+# Verify
+detrix --version
 
 # Initialize configuration (creates ~/detrix/detrix.toml)
-./target/release/detrix init
-```
-
-Binary location: `./target/release/detrix`
-
-**Get absolute path** (you'll need this for configuration):
-```bash
-echo "$(pwd)/target/release/detrix"
+detrix init
 ```
 
 **Configuration discovery:**
 - Default location: `~/detrix/detrix.toml`
 - Custom location: Use `--config <path>` or set `DETRIX_CONFIG` env var
-- Custom init: `./target/release/detrix init --path /custom/path/detrix.toml`
+- Custom init: `detrix init --path /custom/path/detrix.toml`
 
 ### Windows
 
 ```powershell
-# Clone repository
-git clone https://github.com/flashus/detrix.git
-cd detrix
+# Install
+cargo install --git https://github.com/flashus/detrix detrix-cli
 
-# Build release binary
-cargo build --release
-
-# Verify build
-.\target\release\detrix.exe --version
+# Verify
+detrix --version
 
 # Initialize configuration (creates ~/detrix/detrix.toml)
-.\target\release\detrix.exe init
+detrix init
 ```
-
-Binary location: `.\target\release\detrix.exe`
 
 **Get absolute path** (you'll need this for configuration):
 ```powershell

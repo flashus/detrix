@@ -3,6 +3,7 @@ name = "detrix-testing"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 authors.workspace = true
 license.workspace = true
 description = "Test utilities, mocks, and fixtures for Detrix"

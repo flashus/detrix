@@ -3,6 +3,7 @@ name = "detrix-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 
 # serde is used via serde_json (transitive re-export)
 [package.metadata.cargo-machete]
