@@ -39,7 +39,6 @@ WORKDIR /src
 # Copy workspace manifests only (no src/) so this layer is invalidated only
 # when dependencies change, not when source code changes.
 COPY Cargo.toml Cargo.lock ./
-COPY .cargo .cargo
 COPY crates/detrix-api/Cargo.toml         crates/detrix-api/
 COPY crates/detrix-application/Cargo.toml crates/detrix-application/
 COPY crates/detrix-cli/Cargo.toml         crates/detrix-cli/
