@@ -25,6 +25,8 @@ pub struct CliClient {
     http_port: u16,
     /// gRPC port for daemon communication
     grpc_port: u16,
+    /// Optional config file path — passed as `--config` to every CLI invocation
+    config_path: Option<PathBuf>,
 }
 
 impl CliClient {
@@ -44,6 +46,7 @@ impl CliClient {
             // Note: Default port matches detrix-config::ApiConfig::default().grpc.port
             // For tests, use with_grpc_port() to specify the actual port
             grpc_port: DEFAULT_GRPC_PORT,
+            config_path: None,
         }
     }
 
@@ -58,7 +61,14 @@ impl CliClient {
             detrix_binary,
             http_port,
             grpc_port,
+            config_path: None,
         }
+    }
+
+    /// Set the config file path passed as `--config` to every CLI invocation.
+    pub fn with_config(mut self, config_path: Option<PathBuf>) -> Self {
+        self.config_path = config_path;
+        self
     }
 
     /// Create a CLI client with explicit binary path
@@ -68,14 +78,18 @@ impl CliClient {
             http_port,
             // Note: Default port matches detrix-config::ApiConfig::default().grpc.port
             grpc_port: DEFAULT_GRPC_PORT,
+            config_path: None,
         }
     }
 
     /// Run a detrix CLI command and return JSON output
     async fn run_command(&self, args: &[&str]) -> Result<String, ApiError> {
         let mut cmd = Command::new(&self.detrix_binary);
-        cmd.args(["--format", "json"])
-            .args(args)
+        cmd.args(["--format", "json"]);
+        if let Some(ref cfg) = self.config_path {
+            cmd.args(["--config", cfg.to_str().unwrap_or_default()]);
+        }
+        cmd.args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // Set the gRPC port override so CLI connects to the test daemon

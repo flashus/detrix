@@ -278,8 +278,10 @@ pub async fn create_rest_context(
 /// Create CLI test context
 pub async fn create_cli_context(test_name: &str) -> Result<UnifiedTestContext<CliClient>, String> {
     let (executor, reporter) = start_daemon_context(test_name, "CLI").await?;
-    // Use with_grpc_port so CLI can connect to the test daemon
-    let client = CliClient::with_grpc_port(executor.http_port, executor.grpc_port);
+    // Use with_grpc_port so CLI can connect to the test daemon.
+    // Pass the config path so commands like `validate` can load per-test config.
+    let client = CliClient::with_grpc_port(executor.http_port, executor.grpc_port)
+        .with_config(executor.daemon_config_path.clone());
     Ok(UnifiedTestContext {
         client,
         reporter,

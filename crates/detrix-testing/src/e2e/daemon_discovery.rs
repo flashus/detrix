@@ -88,6 +88,7 @@ impl DaemonDiscoveryTests {
         self.stop_daemon().await;
 
         let db_path = self.temp_dir.path().join("detrix.db");
+        let dlq_db_path = self.temp_dir.path().join("dlq.db");
 
         // Create config file
         let config_content = format!(
@@ -100,6 +101,9 @@ base_path = "{}"
 
 [storage]
 storage_type = "sqlite"
+path = "{}"
+
+[storage.dlq_storage]
 path = "{}"
 
 [daemon]
@@ -126,6 +130,7 @@ enable_ast_analysis = false
 "#,
             self.workspace_root.display(),
             db_path.display(),
+            dlq_db_path.display(),
             self.pid_file_path.display(),
             DEFAULT_API_HOST,
             self.http_port,
@@ -577,7 +582,13 @@ enable_ast_analysis = false
         // This should bypass PID file entirely
         let output = self
             .run_cli_with_timeout(
-                &["status", "--format", "json"],
+                &[
+                    "status",
+                    "--config",
+                    self.config_path.to_str().unwrap(),
+                    "--format",
+                    "json",
+                ],
                 &[("DETRIX_GRPC_PORT_OVERRIDE", self.grpc_port.to_string())],
             )
             .await?;

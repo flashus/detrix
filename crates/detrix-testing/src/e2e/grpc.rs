@@ -280,7 +280,7 @@ impl ApiClient for GrpcClient {
 
         Ok(ApiResponse::new(StatusInfo {
             mode: response.mode,
-            uptime_seconds: response.uptime_seconds as u64,
+            uptime_seconds: response.uptime_seconds,
             active_connections: response.active_connections as usize,
             total_metrics: response.total_metrics as usize,
             enabled_metrics: response.enabled_metrics as usize,

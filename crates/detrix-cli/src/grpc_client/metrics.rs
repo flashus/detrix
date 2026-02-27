@@ -316,13 +316,13 @@ impl MetricsClient {
 
         Ok(StatusInfo {
             mode: response.mode,
-            uptime_seconds: response.uptime_seconds as u64,
+            uptime_seconds: response.uptime_seconds,
             uptime_formatted: response.uptime_formatted,
             started_at: response.started_at,
-            active_connections: response.active_connections as u32,
-            total_metrics: response.total_metrics as u32,
-            enabled_metrics: response.enabled_metrics as u32,
-            total_events: response.total_events as u64,
+            active_connections: response.active_connections,
+            total_metrics: response.total_metrics,
+            enabled_metrics: response.enabled_metrics,
+            total_events: response.total_events,
             daemon,
             mcp_clients,
             config_path: response.config_path,

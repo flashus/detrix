@@ -4,45 +4,85 @@
 # Base: rust:alpine — smallest available (~300MB vs ~900MB for slim Debian variants).
 # Alpine uses musl natively so no musl-tools or cross-compilation setup needed.
 #
-# Caching strategy (BuildKit cache mounts — persist across ALL builds):
-#   /usr/local/cargo/registry  — downloaded crate sources, never re-downloaded
-#   /usr/local/cargo/git       — git-sourced crates
-#   /build/target              — incremental build artifacts; deps survive layer
-#                                invalidation (e.g. rust:alpine updates, source changes)
+# Caching strategy (two-stage for GitHub Actions compatibility):
+#
+#   Stage 1 — deps (no cache mounts):
+#     Copies only Cargo.toml manifests and runs `cargo fetch --locked`.
+#     The crate registry is baked into this Docker layer so it is captured
+#     by GitHub Actions `cache-from: type=gha`. Layer is re-used as long as
+#     Cargo.lock does not change.
+#
+#   Stage 2 — builder (inherits registry from deps):
+#     Copies full source and compiles. Only the target/ dir uses a BuildKit
+#     cache mount for incremental build artifacts across runs.
 #
 # NOTE: cargo-chef is intentionally NOT used. cargo-chef rewrites the workspace
 # Cargo.toml with a stub that strips workspace.lints, causing build failures when
-# crates use `lints.workspace = true`. The target cache mount provides equivalent
-# dep-caching behaviour without this issue.
+# crates use `lints.workspace = true`. The two-stage approach above provides
+# equivalent dep-caching behaviour without this issue.
 
-FROM rust:alpine AS builder
+# ---------- Stage 1: Fetch dependencies (baked into layer for GHA cache) ----------
+FROM rust:alpine AS deps
 
 # build-base: gcc + musl-dev for C FFI crates (e.g. bundled SQLite)
 # protobuf: provides the protoc binary for proto codegen
+# Installed here (not in builder) so the packages are baked into the deps layer
+# and captured by GHA layer cache — no re-download on every build.
 RUN apk add --no-cache build-base protobuf
 
-# Add musl target (may already be default on Alpine, kept for explicitness)
+# Add musl target for static linking
 RUN ARCH=$(uname -m) && rustup target add ${ARCH}-unknown-linux-musl
 
-# Override the repo's .cargo/config.toml which points to a local path
 ENV CARGO_TARGET_DIR=/build/target
 WORKDIR /src
 
-# Copy all workspace files
+# Copy workspace manifests only (no src/) so this layer is invalidated only
+# when dependencies change, not when source code changes.
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo .cargo
+COPY crates/detrix-api/Cargo.toml         crates/detrix-api/
+COPY crates/detrix-application/Cargo.toml crates/detrix-application/
+COPY crates/detrix-cli/Cargo.toml         crates/detrix-cli/
+COPY crates/detrix-config/Cargo.toml      crates/detrix-config/
+COPY crates/detrix-core/Cargo.toml        crates/detrix-core/
+COPY crates/detrix-dap/Cargo.toml         crates/detrix-dap/
+COPY crates/detrix-logging/Cargo.toml     crates/detrix-logging/
+COPY crates/detrix-lsp/Cargo.toml         crates/detrix-lsp/
+COPY crates/detrix-output/Cargo.toml      crates/detrix-output/
+COPY crates/detrix-ports/Cargo.toml       crates/detrix-ports/
+COPY crates/detrix-storage/Cargo.toml     crates/detrix-storage/
+COPY crates/detrix-testing/Cargo.toml     crates/detrix-testing/
+COPY crates/detrix-tui/Cargo.toml         crates/detrix-tui/
+COPY clients/rust/Cargo.toml              clients/rust/
+
+# Cargo auto-detects targets by looking for src/lib.rs or src/main.rs.
+# Without them it refuses to parse the manifest even during `cargo fetch`.
+# Create empty stubs — they are overwritten by the full COPY in the builder stage.
+RUN for dir in crates/*/; do \
+        mkdir -p "${dir}src" && touch "${dir}src/lib.rs" "${dir}src/main.rs"; \
+    done && \
+    mkdir -p clients/rust/src && touch clients/rust/src/lib.rs
+
+# Fetch all crates into /usr/local/cargo/registry — no cache mount so the
+# registry is baked into this layer and captured by Docker layer caching
+# (e.g. `cache-from: type=gha` in GitHub Actions). Re-runs only when Cargo.lock changes.
+RUN ARCH=$(uname -m) && \
+    cargo fetch --locked --target ${ARCH}-unknown-linux-musl
+
+# ---------- Stage 2: Compile (inherits pre-fetched registry from deps) ----------
+FROM deps AS builder
+
+# Copy full source (invalidates on any source change, but registry stays cached)
 COPY crates crates
 COPY clients/rust clients/rust
 COPY detrix.toml detrix.minimal.toml ./
 
 # Build static binary.
-# Registry + git mounts avoid re-downloading crates.
-# Target mount keeps compiled dep artifacts across builds for fast incremental rebuilds.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/target \
+# Only the target/ dir uses a cache mount — incremental artifacts survive
+# source changes without re-downloading crates.
+RUN --mount=type=cache,target=/build/target \
     ARCH=$(uname -m) && \
-    cargo build --release --target ${ARCH}-unknown-linux-musl --bin detrix -p detrix-cli && \
+    cargo build --release --locked --target ${ARCH}-unknown-linux-musl --bin detrix -p detrix-cli && \
     cp /build/target/${ARCH}-unknown-linux-musl/release/detrix /build/detrix
 
 # ---- Runtime Stage (scratch — just the binary + config) ----

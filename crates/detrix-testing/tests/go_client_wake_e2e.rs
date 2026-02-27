@@ -122,6 +122,14 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         .json()
         .await
         .expect("Failed to parse wake response");
+
+    // On wake failure, dump daemon logs to aid root-cause analysis.
+    if let Some(error) = wake_result.get("error") {
+        reporter.step_failed(step, &error.to_string());
+        executor.print_daemon_logs(100);
+        panic!("Wake endpoint returned error: {}", error);
+    }
+
     let debug_port = wake_result["debug_port"]
         .as_u64()
         .expect("No debug_port in response");

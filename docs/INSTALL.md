@@ -311,18 +311,10 @@ Observe code running inside Docker containers or remote hosts. The AI agent conn
 
 **1. Add Detrix daemon to your `docker-compose.yml`:**
 
-Build the Detrix server image from source:
-
-```bash
-docker build -f fixtures/docker/Dockerfile.server -t detrix-server .
-```
-
-Then reference it in your `docker-compose.yml`:
-
 ```yaml
 services:
   detrix:
-    image: detrix-server
+    image: ghcr.io/flashus/detrix:latest   # or pin to a version: :1.1.0
     ports:
       - "8090:8090"
     environment:
