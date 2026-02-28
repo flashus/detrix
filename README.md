@@ -14,10 +14,18 @@
 - **Built for AI agents** — 29 MCP tools for Claude Code, Cursor, Windsurf
 - **Production-safe** — DAP logpoints capture values without pausing. Python, Go, Rust
 
-[![CI](https://github.com/flashus/detrix/actions/workflows/ci.yml/badge.svg)](https://github.com/flashus/detrix/actions/workflows/ci.yml) [![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/flashus/eb80c012d4f6458bb24fb705bdf5ab57/raw/detrix-tests.json)](https://github.com/flashus/detrix/actions/workflows/ci.yml) [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org/) [![crates.io](https://img.shields.io/crates/v/detrix-rs.svg)](https://crates.io/crates/detrix-rs) [![PyPI](https://img.shields.io/pypi/v/detrix-py.svg)](https://pypi.org/project/detrix-py/) [![Go](https://pkg.go.dev/badge/github.com/flashus/detrix/clients/go.svg)](https://pkg.go.dev/github.com/flashus/detrix/clients/go) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 </td>
 </tr>
 </table>
+
+[![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/flashus/eb80c012d4f6458bb24fb705bdf5ab57/raw/detrix-tests.json)](https://github.com/flashus/detrix/actions/workflows/ci.yml)
+[![CI](https://github.com/flashus/detrix/actions/workflows/ci.yml/badge.svg)](https://github.com/flashus/detrix/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org/)
+[![Docker](https://img.shields.io/docker/v/flashus/detrix?registry_url=https%3A%2F%2Fghcr.io&label=ghcr.io&logo=docker&sort=semver)](https://ghcr.io/flashus/detrix)
+[![crates.io](https://img.shields.io/crates/v/detrix-rs.svg)](https://crates.io/crates/detrix-rs)
+[![PyPI](https://img.shields.io/pypi/v/detrix-py.svg)](https://pypi.org/project/detrix-py/)
+[![Go](https://pkg.go.dev/badge/github.com/flashus/detrix/clients/go.svg)](https://pkg.go.dev/github.com/flashus/detrix/clients/go)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ---
 
