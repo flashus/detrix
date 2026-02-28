@@ -947,6 +947,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "detrix"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "comfy-table",
+ "detrix-api",
+ "detrix-application",
+ "detrix-config",
+ "detrix-core",
+ "detrix-dap",
+ "detrix-logging",
+ "detrix-output",
+ "detrix-storage",
+ "detrix-testing",
+ "fs2",
+ "nix 0.30.1",
+ "rand 0.9.2",
+ "regex",
+ "reqwest",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "sha2",
+ "socket2 0.5.10",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
+ "toml",
+ "tonic",
+ "uuid",
+ "wiremock",
+ "zip",
+]
+
+[[package]]
 name = "detrix-api"
 version = "1.1.0"
 dependencies = [
@@ -1023,45 +1062,6 @@ dependencies = [
  "tree-sitter-go",
  "tree-sitter-python",
  "tree-sitter-rust",
-]
-
-[[package]]
-name = "detrix-cli"
-version = "1.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "clap",
- "comfy-table",
- "detrix-api",
- "detrix-application",
- "detrix-config",
- "detrix-core",
- "detrix-dap",
- "detrix-logging",
- "detrix-output",
- "detrix-storage",
- "detrix-testing",
- "fs2",
- "nix 0.30.1",
- "rand 0.9.2",
- "regex",
- "reqwest",
- "rmcp",
- "serde",
- "serde_json",
- "sha2",
- "socket2 0.5.10",
- "sqlx",
- "tempfile",
- "thiserror 2.0.17",
- "tokio",
- "toml",
- "tonic",
- "uuid",
- "wiremock",
- "zip",
 ]
 
 [[package]]

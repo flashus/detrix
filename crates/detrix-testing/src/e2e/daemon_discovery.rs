@@ -62,7 +62,7 @@ impl DaemonDiscoveryTests {
     pub async fn new() -> Result<Self, String> {
         let workspace_root = get_workspace_root();
         let binary_path = find_detrix_binary(&workspace_root)
-            .ok_or("detrix binary not found. Run: cargo build -p detrix-cli")?;
+            .ok_or("detrix binary not found. Run: cargo build -p detrix")?;
 
         let temp_dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
         let pid_file_path = temp_dir.path().join("daemon.pid");

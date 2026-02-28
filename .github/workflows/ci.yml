@@ -86,7 +86,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - name: Build detrix binary
         run: |
-          cargo build --release -p detrix-cli
+          cargo build --release -p detrix
           TARGET=$(cargo metadata --format-version 1 --no-deps | jq -r '.target_directory')
           mkdir -p /tmp/detrix-bin
           cp "$TARGET/release/detrix" /tmp/detrix-bin/detrix

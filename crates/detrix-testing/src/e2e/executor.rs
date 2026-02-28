@@ -2299,12 +2299,10 @@ enable_ast_analysis = false
         // Find binary using standard search paths
         let binary_path = match find_detrix_binary(&self.workspace_root) {
             Some(p) => p,
-            None => {
-                return Err(
-                    "detrix binary not found. Set DETRIX_BIN env var or run `cargo build -p detrix-cli`"
-                        .to_string(),
-                )
-            }
+            None => return Err(
+                "detrix binary not found. Set DETRIX_BIN env var or run `cargo build -p detrix`"
+                    .to_string(),
+            ),
         };
 
         // Log binary path and build time for debugging binary version issues
@@ -2347,7 +2345,7 @@ enable_ast_analysis = false
             .current_dir(&self.workspace_root)
             .env(
                 "RUST_LOG",
-                "detrix_cli=debug,detrix_dap=debug,detrix_application=debug,detrix_api=debug,info",
+                "detrix=debug,detrix_dap=debug,detrix_application=debug,detrix_api=debug,info",
             )
             // Isolate DETRIX_HOME to the per-test temp dir so that any fallback paths
             // (auth-token, credentials.toml, default DB) don't collide across parallel tests.

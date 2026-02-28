@@ -81,7 +81,7 @@ COPY detrix.toml detrix.minimal.toml ./
 # source changes without re-downloading crates.
 RUN --mount=type=cache,target=/build/target \
     ARCH=$(uname -m) && \
-    cargo build --release --locked --target ${ARCH}-unknown-linux-musl --bin detrix -p detrix-cli && \
+    cargo build --release --locked --target ${ARCH}-unknown-linux-musl --bin detrix -p detrix && \
     cp /build/target/${ARCH}-unknown-linux-musl/release/detrix /build/detrix
 
 # ---- Runtime Stage (scratch — just the binary + config) ----
