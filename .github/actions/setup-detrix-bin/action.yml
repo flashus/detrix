@@ -1,0 +1,14 @@
+name: Setup Detrix binary
+description: Downloads the detrix binary artifact and sets DETRIX_BIN in the environment.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: detrix-binary
+        path: /tmp/detrix-bin
+    - shell: bash
+      run: |
+        chmod +x /tmp/detrix-bin/detrix
+        echo "DETRIX_BIN=/tmp/detrix-bin/detrix" >> $GITHUB_ENV

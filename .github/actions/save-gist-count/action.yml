@@ -1,0 +1,32 @@
+name: Save test count to Gist
+description: Saves a job's test count to a named file in the badge Gist.
+
+inputs:
+  gist_token:
+    description: GitHub PAT with gist scope
+    required: true
+  gist_id:
+    description: Gist ID to update
+    required: true
+  job_name:
+    description: Job name suffix used as the Gist filename (e.g. unit, e2e-python)
+    required: true
+  count:
+    description: Test count to save
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gist_token }}
+        GIST_ID: ${{ inputs.gist_id }}
+        COUNT: ${{ inputs.count }}
+        JOB_NAME: ${{ inputs.job_name }}
+      run: |
+        curl -sS -X PATCH \
+          -H "Authorization: token $GH_TOKEN" \
+          -H "Content-Type: application/json" \
+          "https://api.github.com/gists/$GIST_ID" \
+          -d "{\"files\":{\"detrix-count-${JOB_NAME}\":{\"content\":\"$COUNT\"}}}"

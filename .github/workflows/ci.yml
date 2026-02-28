@@ -67,12 +67,9 @@ jobs:
     if: needs.changes.outputs.core == 'true' || needs.changes.outputs.client_rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all
 
@@ -81,15 +78,10 @@ jobs:
     needs: [changes, lint]
     if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      test_count: ${{ steps.count.outputs.count }}
     env:
       DETRIX_SKIP_FRESHNESS_CHECK: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: ./.github/actions/setup-rust
       - name: Build detrix binary
         run: |
           cargo build --release -p detrix-cli
@@ -107,31 +99,25 @@ jobs:
       - name: Count unit tests
         id: count
         run: |
-          echo "count=$(cargo test --lib --all -- --list 2>/dev/null | grep -c ': test$' || echo 0)" >> $GITHUB_OUTPUT
+          echo "count=$(cargo test --lib --all -- --list 2>/dev/null | grep -c ': test$' || true)" >> $GITHUB_OUTPUT
+      - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: ./.github/actions/save-gist-count
+        with:
+          gist_token: ${{ secrets.GIST_SECRET }}
+          gist_id: ${{ vars.BADGE_GIST_ID }}
+          job_name: unit
+          count: ${{ steps.count.outputs.count }}
 
   # ── Core: E2E — Python / debugpy ──────────────────────────────────────────
   test-e2e-python:
     needs: [changes, test-unit]
     if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      test_count: ${{ steps.count.outputs.count }}
     env:
       DETRIX_SKIP_FRESHNESS_CHECK: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - name: Download detrix binary
-        uses: actions/download-artifact@v4
-        with:
-          name: detrix-binary
-          path: /tmp/detrix-bin
-      - name: Set DETRIX_BIN
-        run: |
-          chmod +x /tmp/detrix-bin/detrix
-          echo "DETRIX_BIN=/tmp/detrix-bin/detrix" >> $GITHUB_ENV
+      - uses: ./.github/actions/setup-rust
+      - uses: ./.github/actions/setup-detrix-bin
       - uses: astral-sh/setup-uv@v5
       - uses: actions/setup-python@v5
         with:
@@ -166,42 +152,36 @@ jobs:
         run: |
           C1=$(cargo test -p detrix-lsp --test purity_e2e \
                           -p detrix-dap --test python_tests \
-                          -- --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- --list 2>/dev/null | grep -c ': test$' || true)
           C2=$(cargo test -p detrix-testing --test unified_e2e \
-                          -- python --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- python --list 2>/dev/null | grep -c ': test$' || true)
           C3=$(cargo test -p detrix-testing \
                           --test daemon_restart_e2e --test container_restart_e2e \
                           --test port_cleanup_e2e --test mcp_bridge_e2e \
-                          -- --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- --list 2>/dev/null | grep -c ': test$' || true)
           C4=$(cargo test -p detrix-testing --test multi_expr_e2e --test client_tests_e2e \
-                          -- python --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- python --list 2>/dev/null | grep -c ': test$' || true)
           C5=$(cargo test -p detrix-testing --test uuid_identity_e2e \
-                          -- "python|workspace_isolation" --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- "python|workspace_isolation" --list 2>/dev/null | grep -c ': test$' || true)
           echo "count=$(( C1 + C2 + C3 + C4 + C5 ))" >> $GITHUB_OUTPUT
+      - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: ./.github/actions/save-gist-count
+        with:
+          gist_token: ${{ secrets.GIST_SECRET }}
+          gist_id: ${{ vars.BADGE_GIST_ID }}
+          job_name: e2e-python
+          count: ${{ steps.count.outputs.count }}
 
   # ── Core: E2E — Go / delve ────────────────────────────────────────────────
   test-e2e-go:
     needs: [changes, test-unit]
     if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      test_count: ${{ steps.count.outputs.count }}
     env:
       DETRIX_SKIP_FRESHNESS_CHECK: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - name: Download detrix binary
-        uses: actions/download-artifact@v4
-        with:
-          name: detrix-binary
-          path: /tmp/detrix-bin
-      - name: Set DETRIX_BIN
-        run: |
-          chmod +x /tmp/detrix-bin/detrix
-          echo "DETRIX_BIN=/tmp/detrix-bin/detrix" >> $GITHUB_ENV
+      - uses: ./.github/actions/setup-rust
+      - uses: ./.github/actions/setup-detrix-bin
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
@@ -229,33 +209,35 @@ jobs:
         run: |
           C1=$(cargo test -p detrix-lsp --test go_purity_e2e \
                           -p detrix-dap --test go_tests \
-                          -- --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- --list 2>/dev/null | grep -c ': test$' || true)
           C2=$(cargo test -p detrix-testing --test unified_e2e \
-                          -- go --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- go --list 2>/dev/null | grep -c ': test$' || true)
           C3=$(cargo test -p detrix-testing --test go_client_wake_e2e \
-                          -- --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- --list 2>/dev/null | grep -c ': test$' || true)
           C4=$(cargo test -p detrix-testing --test multi_expr_e2e --test uuid_identity_e2e \
-                          -- go --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- go --list 2>/dev/null | grep -c ': test$' || true)
           echo "count=$(( C1 + C2 + C3 + C4 ))" >> $GITHUB_OUTPUT
+      - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: ./.github/actions/save-gist-count
+        with:
+          gist_token: ${{ secrets.GIST_SECRET }}
+          gist_id: ${{ vars.BADGE_GIST_ID }}
+          job_name: e2e-go
+          count: ${{ steps.count.outputs.count }}
 
   # ── Core: E2E — Rust / lldb-dap ───────────────────────────────────────────
   test-e2e-rust:
     needs: [changes, test-unit]
     if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      test_count: ${{ steps.count.outputs.count }}
     env:
       DETRIX_SKIP_FRESHNESS_CHECK: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           components: rust-analyzer
-      - uses: Swatinem/rust-cache@v2
-      - name: Install tools
+      - name: Install LLDB 21
         run: |
-          sudo apt-get update && sudo apt-get install -y protobuf-compiler
           # Install LLDB 21 from LLVM's official apt repository.
           # Ubuntu's bundled lldb package has a build of lldb-dap that exits
           # immediately with status 0 when --connection listen:// is used,
@@ -287,15 +269,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install debugpy
-      - name: Download detrix binary
-        uses: actions/download-artifact@v4
-        with:
-          name: detrix-binary
-          path: /tmp/detrix-bin
-      - name: Set DETRIX_BIN
-        run: |
-          chmod +x /tmp/detrix-bin/detrix
-          echo "DETRIX_BIN=/tmp/detrix-bin/detrix" >> $GITHUB_ENV
+      - uses: ./.github/actions/setup-detrix-bin
       - name: LSP + DAP + unified E2E (Rust)
         run: |
           cargo test -p detrix-lsp --test rust_purity_e2e \
@@ -318,41 +292,35 @@ jobs:
         run: |
           C1=$(cargo test -p detrix-lsp --test rust_purity_e2e \
                           -p detrix-dap --test rust_tests \
-                          -- --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- --list 2>/dev/null | grep -c ': test$' || true)
           C2=$(cargo test -p detrix-testing --test unified_e2e \
-                          -- rust --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- rust --list 2>/dev/null | grep -c ': test$' || true)
           C3=$(cargo test -p detrix-testing \
                           --test reconnection_e2e --test connection_crash_e2e \
-                          -- --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- --list 2>/dev/null | grep -c ': test$' || true)
           C4=$(cargo test -p detrix-testing --test multi_expr_e2e --test client_tests_e2e \
-                          -- rust --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- rust --list 2>/dev/null | grep -c ': test$' || true)
           C5=$(cargo test -p detrix-testing --test uuid_identity_e2e \
-                          -- "rust|language_isolation" --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- "rust|language_isolation" --list 2>/dev/null | grep -c ': test$' || true)
           echo "count=$(( C1 + C2 + C3 + C4 + C5 ))" >> $GITHUB_OUTPUT
+      - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: ./.github/actions/save-gist-count
+        with:
+          gist_token: ${{ secrets.GIST_SECRET }}
+          gist_id: ${{ vars.BADGE_GIST_ID }}
+          job_name: e2e-rust
+          count: ${{ steps.count.outputs.count }}
 
   # ── Core: daemon-only integration tests (no language debugger needed) ────────
   test-e2e-basic:
     needs: [changes, test-unit]
     if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      test_count: ${{ steps.count.outputs.count }}
     env:
       DETRIX_SKIP_FRESHNESS_CHECK: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - name: Download detrix binary
-        uses: actions/download-artifact@v4
-        with:
-          name: detrix-binary
-          path: /tmp/detrix-bin
-      - name: Set DETRIX_BIN
-        run: |
-          chmod +x /tmp/detrix-bin/detrix
-          echo "DETRIX_BIN=/tmp/detrix-bin/detrix" >> $GITHUB_ENV
+      - uses: ./.github/actions/setup-rust
+      - uses: ./.github/actions/setup-detrix-bin
       - name: Daemon-only integration tests
         run: |
           cargo test -p detrix-testing \
@@ -372,11 +340,18 @@ jobs:
                           --test health_check_e2e --test auth_e2e \
                           --test localhost_exempt_e2e --test rate_limit_e2e \
                           --test anchor_and_comments_e2e \
-                          -- --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          -- --list 2>/dev/null | grep -c ': test$' || true)
           C2=$(cargo test -p detrix-testing --test uuid_identity_e2e \
                           -- "test_same_identity|test_different_workspace|test_different_language|test_different_hostname|test_uuid_determinism|test_connection_id_is_uuid|test_identity_validation" \
-                          --list 2>/dev/null | grep -c ': test$' || echo 0)
+                          --list 2>/dev/null | grep -c ': test$' || true)
           echo "count=$(( C1 + C2 ))" >> $GITHUB_OUTPUT
+      - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: ./.github/actions/save-gist-count
+        with:
+          gist_token: ${{ secrets.GIST_SECRET }}
+          gist_id: ${{ vars.BADGE_GIST_ID }}
+          job_name: e2e-basic
+          count: ${{ steps.count.outputs.count }}
 
   # ── Python client: fmt + lint + typecheck + tests ─────────────────────────
   # Independent of Rust workspace — runs in parallel with core tests.
@@ -387,8 +362,6 @@ jobs:
       needs.changes.outputs.client_python == 'true' ||
       needs.changes.outputs.spec == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      test_count: ${{ steps.count.outputs.count }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -406,7 +379,14 @@ jobs:
       - name: Count tests
         id: count
         working-directory: clients/python
-        run: echo "count=$(uv run --extra dev pytest --collect-only -q 2>/dev/null | grep -c '::' || echo 0)" >> $GITHUB_OUTPUT
+        run: echo "count=$(uv run --extra dev pytest --collect-only -q 2>/dev/null | grep -c '::' || true)" >> $GITHUB_OUTPUT
+      - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: ./.github/actions/save-gist-count
+        with:
+          gist_token: ${{ secrets.GIST_SECRET }}
+          gist_id: ${{ vars.BADGE_GIST_ID }}
+          job_name: client-python
+          count: ${{ steps.count.outputs.count }}
 
   # ── Go client: fmt + build + lint + tests ─────────────────────────────────
   # Independent of Rust workspace — runs in parallel with core tests.
@@ -417,8 +397,6 @@ jobs:
       needs.changes.outputs.client_go == 'true' ||
       needs.changes.outputs.spec == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      test_count: ${{ steps.count.outputs.count }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -439,7 +417,14 @@ jobs:
       - name: Count tests
         id: count
         working-directory: clients/go
-        run: echo "count=$(go test ./... -list '.*' 2>/dev/null | grep -c '^Test' || echo 0)" >> $GITHUB_OUTPUT
+        run: echo "count=$(go test ./... -list '.*' 2>/dev/null | grep -c '^Test' || true)" >> $GITHUB_OUTPUT
+      - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: ./.github/actions/save-gist-count
+        with:
+          gist_token: ${{ secrets.GIST_SECRET }}
+          gist_id: ${{ vars.BADGE_GIST_ID }}
+          job_name: client-go
+          count: ${{ steps.count.outputs.count }}
 
   # ── Rust client: fmt + clippy + tests ─────────────────────────────────────
   # Part of the main Cargo workspace — waits for lint to share compile cache.
@@ -449,15 +434,10 @@ jobs:
       needs.changes.outputs.core == 'true' ||
       needs.changes.outputs.client_rust == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      test_count: ${{ steps.count.outputs.count }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Format check
         working-directory: clients/rust
         run: cargo fmt -- --check
@@ -471,34 +451,49 @@ jobs:
         id: count
         working-directory: clients/rust
         run: |
-          echo "count=$(cargo test -- --list 2>/dev/null | grep -c ': test$' || echo 0)" >> $GITHUB_OUTPUT
+          echo "count=$(cargo test -- --list 2>/dev/null | grep -c ': test$' || true)" >> $GITHUB_OUTPUT
+      - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: ./.github/actions/save-gist-count
+        with:
+          gist_token: ${{ secrets.GIST_SECRET }}
+          gist_id: ${{ vars.BADGE_GIST_ID }}
+          job_name: client-rust
+          count: ${{ steps.count.outputs.count }}
 
   # ── Update test-count badge (main branch only) ─────────────────────────────
-  # Each test job counts its own tests via --list and emits test_count output.
-  # This job just sums the outputs — no compilation, no toolchain setup needed.
+  # Each test job saves its count to a separate Gist file (detrix-count-<job>).
+  # This job reads ALL count files from the Gist and sums them — so the badge
+  # always reflects the full total even when only a subset of jobs ran.
   # Setup: add GIST_SECRET (PAT w/ gist scope) and BADGE_GIST_ID (Gist ID) to repo.
   badge:
     needs: [test-unit, test-e2e-basic, test-e2e-python, test-e2e-go, test-e2e-rust, test-client-python, test-client-go, test-client-rust]
     if: |
       github.ref == 'refs/heads/main' &&
       github.event_name == 'push' &&
+      contains(needs.*.result, 'success') &&
       !contains(needs.*.result, 'failure') &&
       !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     steps:
-      - name: Sum test counts
+      - name: Sum test counts from Gist
         id: count
+        env:
+          GH_TOKEN: ${{ secrets.GIST_SECRET }}
+          GIST_ID: ${{ vars.BADGE_GIST_ID }}
         run: |
+          GIST=$(curl -sS -H "Authorization: token $GH_TOKEN" \
+                      "https://api.github.com/gists/$GIST_ID")
           TOTAL=0
-          for N in \
-            "${{ needs.test-unit.outputs.test_count }}" \
-            "${{ needs.test-e2e-basic.outputs.test_count }}" \
-            "${{ needs.test-e2e-python.outputs.test_count }}" \
-            "${{ needs.test-e2e-go.outputs.test_count }}" \
-            "${{ needs.test-e2e-rust.outputs.test_count }}" \
-            "${{ needs.test-client-python.outputs.test_count }}" \
-            "${{ needs.test-client-go.outputs.test_count }}" \
-            "${{ needs.test-client-rust.outputs.test_count }}"; do
+          for F in \
+            "detrix-count-unit" \
+            "detrix-count-e2e-basic" \
+            "detrix-count-e2e-python" \
+            "detrix-count-e2e-go" \
+            "detrix-count-e2e-rust" \
+            "detrix-count-client-python" \
+            "detrix-count-client-go" \
+            "detrix-count-client-rust"; do
+            N=$(echo "$GIST" | jq -r --arg f "$F" '.files[$f].content // "0"' | tr -d '[:space:]')
             TOTAL=$(( TOTAL + ${N:-0} ))
           done
           echo "count=$TOTAL" >> $GITHUB_OUTPUT
@@ -508,5 +503,5 @@ jobs:
           gistID: ${{ vars.BADGE_GIST_ID }}
           filename: detrix-tests.json
           label: tests
-          message: ${{ steps.count.outputs.count }} passed
+          message: ${{ steps.count.outputs.count }}
           color: brightgreen
