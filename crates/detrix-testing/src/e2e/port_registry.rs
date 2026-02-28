@@ -26,7 +26,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
-use std::net::TcpListener;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::OnceLock;
 use std::time::SystemTime;
@@ -89,6 +88,19 @@ impl TestPortRegistry {
     /// the configured port. For example, `allocate_spaced(200)` ensures 200 ports of
     /// headroom for each allocation.
     pub fn allocate_spaced(&self, spacing: u16) -> u16 {
+        let (port, _listener) = self.allocate_spaced_listener(spacing);
+        port
+    }
+
+    /// Allocate the next available port and return it along with a bound `TcpListener`.
+    ///
+    /// The listener keeps the port reserved until the caller hands it off to a server,
+    /// eliminating the TOCTOU window between availability check and actual bind.
+    pub fn allocate_listener(&self) -> (u16, std::net::TcpListener) {
+        self.allocate_spaced_listener(1)
+    }
+
+    fn allocate_spaced_listener(&self, spacing: u16) -> (u16, std::net::TcpListener) {
         let spacing = spacing.max(1);
         loop {
             let port = self.next_port.fetch_add(spacing, Ordering::SeqCst);
@@ -102,8 +114,9 @@ impl TestPortRegistry {
             if SYSTEM_RESERVED_PORTS.contains(&port) {
                 continue;
             }
-            if is_port_available(port) {
-                return port;
+            match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                Ok(listener) => return (port, listener),
+                Err(_) => continue, // port in use, try next
             }
         }
     }
@@ -112,11 +125,6 @@ impl TestPortRegistry {
     pub fn range(&self) -> (u16, u16) {
         (self.range_start, self.range_end)
     }
-}
-
-/// Check if a port is available for binding.
-fn is_port_available(port: u16) -> bool {
-    TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
 /// Get the current test binary name (for diagnostics).
