@@ -4,10 +4,23 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
+description = "Dynamic observability daemon — add metrics to any running line of code"
+homepage = "https://github.com/flashus/detrix"
+repository.workspace = true
+authors.workspace = true
+
+[package.metadata.dist]
+dist = true
 
 # serde is used via serde_json (transitive re-export)
 [package.metadata.cargo-machete]
 ignored = ["serde"]
+
+[package.metadata.wix]
+upgrade-guid = "A2ED5D02-E76E-4570-96AD-7218F2135396"
+path-guid = "9B7A9A6D-3FB8-4AAD-A71D-9237DF813CF8"
+license = false
+eula = false
 
 [[bin]]
 name = "detrix"

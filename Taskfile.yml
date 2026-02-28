@@ -78,3 +78,8 @@ tasks:
     desc: Run ALL E2E tests (alias to tests:e2e)
     cmds:
       - task: tests:e2e
+
+  release:
+    desc: "Tag and publish current Cargo.toml version (errors if tag already exists)"
+    cmds:
+      - bash scripts/release.sh {{.CLI_ARGS}}
