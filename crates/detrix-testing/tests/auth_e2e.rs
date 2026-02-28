@@ -106,14 +106,15 @@ enable_ast_analysis = false
         let config_path = self.temp_dir.path().join("detrix.toml");
         std::fs::write(&config_path, config_content).map_err(|e| e.to_string())?;
 
-        let binary_path =
-            match find_detrix_binary(&self.workspace_root) {
-                Some(p) => p,
-                None => return Err(
-                    "detrix binary not found. Set DETRIX_BIN or run `cargo build -p detrix-cli`"
+        let binary_path = match find_detrix_binary(&self.workspace_root) {
+            Some(p) => p,
+            None => {
+                return Err(
+                    "detrix binary not found. Set DETRIX_BIN or run `cargo build -p detrix`"
                         .to_string(),
-                ),
-            };
+                )
+            }
+        };
 
         let daemon_log_file =
             std::fs::File::create(&self.daemon_log_path).map_err(|e| e.to_string())?;
@@ -578,14 +579,15 @@ enable_ast_analysis = false
         let config_path = self.temp_dir.path().join("detrix.toml");
         std::fs::write(&config_path, config_content).map_err(|e| e.to_string())?;
 
-        let binary_path =
-            match find_detrix_binary(&self.workspace_root) {
-                Some(p) => p,
-                None => return Err(
-                    "detrix binary not found. Set DETRIX_BIN or run `cargo build -p detrix-cli`"
+        let binary_path = match find_detrix_binary(&self.workspace_root) {
+            Some(p) => p,
+            None => {
+                return Err(
+                    "detrix binary not found. Set DETRIX_BIN or run `cargo build -p detrix`"
                         .to_string(),
-                ),
-            };
+                )
+            }
+        };
 
         let daemon_log_file =
             std::fs::File::create(&self.daemon_log_path).map_err(|e| e.to_string())?;
@@ -1142,14 +1144,15 @@ enable_ast_analysis = false
         let config_path = self.temp_dir.path().join("detrix.toml");
         std::fs::write(&config_path, config_content).map_err(|e| e.to_string())?;
 
-        let binary_path =
-            match find_detrix_binary(&self.workspace_root) {
-                Some(p) => p,
-                None => return Err(
-                    "detrix binary not found. Set DETRIX_BIN or run `cargo build -p detrix-cli`"
+        let binary_path = match find_detrix_binary(&self.workspace_root) {
+            Some(p) => p,
+            None => {
+                return Err(
+                    "detrix binary not found. Set DETRIX_BIN or run `cargo build -p detrix`"
                         .to_string(),
-                ),
-            };
+                )
+            }
+        };
 
         let daemon_log_file =
             std::fs::File::create(&self.daemon_log_path).map_err(|e| e.to_string())?;

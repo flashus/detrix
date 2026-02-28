@@ -119,7 +119,7 @@ async fn test_health_check_real_daemon_vs_mock_service() {
         None => {
             reporter.step_failed(step, "Binary not found");
             reporter.warn("Skipping test: detrix binary not built");
-            reporter.warn("Run `cargo build --release -p detrix-cli` to build");
+            reporter.warn("Run `cargo build --release -p detrix` to build");
             return;
         }
     };

@@ -439,7 +439,7 @@ async fn test_mcp_bridge_spawns_daemon() {
         None => {
             reporter.step_failed(step, "Binary not found");
             reporter.warn("Skipping test: detrix binary not built");
-            reporter.warn("Run `cargo build -p detrix-cli` to build the binary");
+            reporter.warn("Run `cargo build -p detrix` to build the binary");
             return;
         }
     };

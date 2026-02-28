@@ -60,7 +60,7 @@
 
     <Product
         Id='*'
-        Name='detrix-cli'
+        Name='detrix'
         UpgradeCode='A2ED5D02-E76E-4570-96AD-7218F2135396'
         Manufacturer='Ilya Dyachenko'
         Language='1033'
@@ -83,11 +83,11 @@
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
-        <Property Id='DiskPrompt' Value='detrix-cli Installation'/>
+        <Property Id='DiskPrompt' Value='detrix Installation'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
-                <Directory Id='APPLICATIONFOLDER' Name='detrix-cli'>
+                <Directory Id='APPLICATIONFOLDER' Name='detrix'>
                     
                     <!--
                       Enabling the license sidecar file in the installer is a four step process:

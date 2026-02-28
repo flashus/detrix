@@ -36,9 +36,8 @@ impl CliClient {
     pub fn new(http_port: u16) -> Self {
         // Find the detrix binary using shared utility
         let workspace_root = get_workspace_root();
-        let detrix_binary = find_detrix_binary(&workspace_root).expect(
-            "Could not find detrix binary. Build with: cargo build --release -p detrix-cli",
-        );
+        let detrix_binary = find_detrix_binary(&workspace_root)
+            .expect("Could not find detrix binary. Build with: cargo build --release -p detrix");
 
         Self {
             detrix_binary,
@@ -53,9 +52,8 @@ impl CliClient {
     /// Create a CLI client with explicit gRPC port for testing
     pub fn with_grpc_port(http_port: u16, grpc_port: u16) -> Self {
         let workspace_root = get_workspace_root();
-        let detrix_binary = find_detrix_binary(&workspace_root).expect(
-            "Could not find detrix binary. Build with: cargo build --release -p detrix-cli",
-        );
+        let detrix_binary = find_detrix_binary(&workspace_root)
+            .expect("Could not find detrix binary. Build with: cargo build --release -p detrix");
 
         Self {
             detrix_binary,
