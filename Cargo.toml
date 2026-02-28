@@ -171,11 +171,3 @@ publish-prereleases = false
 pr-run-mode = "upload"
 publish-jobs = ["homebrew"]
 
-[workspace.metadata.dist.dependencies.homebrew]
-protobuf = "*"
-
-[workspace.metadata.dist.dependencies.apt]
-protobuf-compiler = "*"
-
-[workspace.metadata.dist.dependencies.chocolatey]
-protoc = "*"

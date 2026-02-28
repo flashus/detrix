@@ -75,6 +75,7 @@ e2e_tests = []
 
 [build-dependencies]
 tonic-prost-build.workspace = true
+protoc-bin-vendored = "3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
