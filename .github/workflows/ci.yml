@@ -67,6 +67,7 @@ jobs:
     if: needs.changes.outputs.core == 'true' || needs.changes.outputs.client_rust == 'true'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt, clippy
@@ -81,6 +82,7 @@ jobs:
     env:
       DETRIX_SKIP_FRESHNESS_CHECK: "1"
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
       - name: Build detrix binary
         run: |
@@ -116,6 +118,7 @@ jobs:
     env:
       DETRIX_SKIP_FRESHNESS_CHECK: "1"
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
       - uses: ./.github/actions/setup-detrix-bin
       - uses: astral-sh/setup-uv@v5
@@ -180,6 +183,7 @@ jobs:
     env:
       DETRIX_SKIP_FRESHNESS_CHECK: "1"
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
       - uses: ./.github/actions/setup-detrix-bin
       - uses: actions/setup-go@v5
@@ -233,6 +237,7 @@ jobs:
     env:
       DETRIX_SKIP_FRESHNESS_CHECK: "1"
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
         with:
           components: rust-analyzer
@@ -319,6 +324,7 @@ jobs:
     env:
       DETRIX_SKIP_FRESHNESS_CHECK: "1"
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
       - uses: ./.github/actions/setup-detrix-bin
       - name: Daemon-only integration tests
@@ -435,6 +441,7 @@ jobs:
       needs.changes.outputs.client_rust == 'true'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt, clippy

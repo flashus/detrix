@@ -1,5 +1,5 @@
 name: Setup Rust
-description: Checkout, install Rust toolchain, restore cache, install protobuf-compiler.
+description: Install Rust toolchain, restore cache, install protobuf-compiler. Requires checkout to already have run.
 
 inputs:
   components:
@@ -10,7 +10,6 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@stable
       with:
         components: ${{ inputs.components }}
