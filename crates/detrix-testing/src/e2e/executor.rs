@@ -638,6 +638,14 @@ pub fn get_grpc_port() -> u16 {
     super::port_registry::TestPortRegistry::get().allocate()
 }
 
+/// Allocate a port and return it pre-bound as a `std::net::TcpListener`.
+///
+/// Eliminates the TOCTOU window between availability check and actual bind:
+/// the socket stays held until the caller hands it off to a server.
+pub fn get_bound_http_port() -> (u16, std::net::TcpListener) {
+    super::port_registry::TestPortRegistry::get().allocate_listener()
+}
+
 /// Get unique debugpy port for tests (ensures port is actually available)
 pub fn get_debugpy_port() -> u16 {
     super::port_registry::TestPortRegistry::get().allocate()

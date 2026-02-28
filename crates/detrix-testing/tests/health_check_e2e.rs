@@ -10,13 +10,12 @@ use axum::{routing::get, Json, Router};
 use detrix_api::http::handlers::HealthResponse;
 use detrix_testing::e2e::{
     cleanup_orphaned_e2e_processes,
-    executor::{find_detrix_binary, get_http_port, get_workspace_root},
+    executor::{find_detrix_binary, get_bound_http_port, get_http_port, get_workspace_root},
     register_e2e_process,
     reporter::TestReporter,
     unregister_e2e_process,
 };
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use std::process::Stdio;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -71,10 +70,14 @@ async fn wait_for_daemon(host: &str, port: u16, max_wait: Duration) -> bool {
     false
 }
 
-/// Start a mock "other service" HTTP server
-async fn start_mock_other_service(port: u16) -> tokio::task::JoinHandle<()> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-
+/// Start a mock "other service" HTTP server.
+///
+/// Takes a pre-bound `std::net::TcpListener` from the port registry to eliminate
+/// the TOCTOU window between port availability check and actual bind.
+/// Returns the task handle.
+async fn start_mock_other_service(
+    std_listener: std::net::TcpListener,
+) -> tokio::task::JoinHandle<()> {
     let app = Router::new().route(
         "/health",
         get(|| async {
@@ -86,7 +89,8 @@ async fn start_mock_other_service(port: u16) -> tokio::task::JoinHandle<()> {
         }),
     );
 
-    let listener = TcpListener::bind(addr).await.unwrap();
+    std_listener.set_nonblocking(true).expect("set_nonblocking");
+    let listener = TcpListener::from_std(std_listener).expect("convert to tokio listener");
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     })
@@ -130,10 +134,10 @@ async fn test_health_check_real_daemon_vs_mock_service() {
     let db_path = temp_dir.path().join("test.db");
     let pid_path = temp_dir.path().join("daemon.pid");
 
-    // Get unique ports
+    // Get unique ports — mock uses pre-bound listener to eliminate TOCTOU race
     let daemon_port = get_http_port();
     let grpc_port = get_http_port();
-    let mock_port = get_http_port();
+    let (mock_port, mock_listener) = get_bound_http_port();
 
     reporter.info(&format!(
         "Daemon HTTP: {}, gRPC: {}, Mock: {}",
@@ -181,7 +185,7 @@ port = {}
     reporter.section("PHASE 1: START MOCK SERVICE");
 
     let step = reporter.step_start("Start mock", "Start mock service without 'service' field");
-    let mock_handle = start_mock_other_service(mock_port).await;
+    let mock_handle = start_mock_other_service(mock_listener).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     reporter.step_success(step, Some(&format!("Mock running on port {}", mock_port)));
 
