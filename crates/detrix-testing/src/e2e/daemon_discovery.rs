@@ -307,6 +307,7 @@ enable_ast_analysis = false
         let child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn CLI: {}", e))?;
+        #[cfg_attr(not(unix), allow(unused_variables))]
         let child_id = child.id();
 
         match tokio::time::timeout(Duration::from_secs(15), child.wait_with_output()).await {

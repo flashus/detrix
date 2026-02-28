@@ -50,6 +50,7 @@ static E2E_CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
 /// becomes 1 (launchd/init). The PPID=1 heuristic in `kill_orphaned_test_daemons()`
 /// cannot distinguish orphaned stale daemons from active daemons owned by other
 /// parallel tests in the same binary.
+#[cfg(unix)]
 static E2E_STALE_CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
 
 /// Get the workspace root directory
