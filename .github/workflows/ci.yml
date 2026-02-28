@@ -228,9 +228,9 @@ jobs:
           sudo ln -sf /usr/bin/lldb-dap-21 /usr/local/bin/lldb-dap
       - name: Install CodeLLDB
         run: |
-          # Download latest CodeLLDB release into Detrix's auto-download location.
+          # Pinned to v1.12.1 — do not bump without testing introspection E2E.
           # is_codelldb_available() checks $XDG_DATA_HOME/detrix/debug_adapters/CodeLLDB/<ver>/extension/adapter/codelldb
-          CODELLDB_VERSION=$(curl -fsSL https://api.github.com/repos/vadimcn/vscode-lldb/releases/latest | jq -r '.tag_name')
+          CODELLDB_VERSION="v1.12.1"
           CODELLDB_DIR="$HOME/.local/share/detrix/debug_adapters/CodeLLDB/${CODELLDB_VERSION}"
           mkdir -p "$CODELLDB_DIR"
           curl -fsSL "https://github.com/vadimcn/vscode-lldb/releases/download/${CODELLDB_VERSION}/codelldb-linux-x64.vsix" \

@@ -315,7 +315,16 @@ pub fn safe_sigterm_for_config(pid: u64, config_path: &str) -> bool {
             if args.contains(config_path) {
                 safe_kill(pid, "-TERM");
                 true
+            } else if !output.status.success() || args.trim().is_empty() {
+                // ps exits non-zero (or produces empty output) when the PID doesn't exist.
+                // This means the process already exited — no SIGTERM needed, not an error.
+                eprintln!(
+                    "[safe_sigterm_for_config] PID {} no longer exists — already exited, skipping SIGTERM",
+                    pid
+                );
+                false
             } else {
+                // Process exists but with a different command line → genuine PID reuse.
                 eprintln!(
                     "[safe_sigterm_for_config] PID {} command line does not contain config path '{}' — \
                      likely PID reuse, skipping SIGTERM. Actual args: {}",

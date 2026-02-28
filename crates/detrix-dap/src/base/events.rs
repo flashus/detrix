@@ -148,13 +148,27 @@ pub async fn handle_stopped_event(
 
     warn!("[{}] Stopped reason: {}", lang, stopped.reason);
 
-    // Only handle breakpoint stops
-    if stopped.reason != stop_reasons::BREAKPOINT {
-        return false;
-    }
-
     // Use default thread ID if not specified (see constants::defaults::THREAD_ID for rationale)
     let thread_id = stopped.thread_id.unwrap_or(defaults::THREAD_ID);
+
+    // Only process introspection for breakpoint stops.
+    // For all other stops (exception, signal, entry, etc.) we must still send `continue`
+    // to prevent the debuggee from staying permanently paused.  This happens in practice
+    // when a breakpoint races with its own removal during metric cleanup: lldb-dap reports
+    // the stale SIGTRAP as reason="exception" rather than reason="breakpoint".  Without
+    // the explicit `continue` here the process freezes and subsequent introspection
+    // breakpoints never fire.
+    if stopped.reason != stop_reasons::BREAKPOINT {
+        warn!(
+            "[{}] Non-breakpoint stop (reason={}, thread={}), resuming process",
+            lang, stopped.reason, thread_id
+        );
+        let Ok(broker) = adapter.broker().await else {
+            return false;
+        };
+        send_continue(&broker, thread_id, lang).await;
+        return false;
+    }
     debug!("[{}] Stopped at breakpoint, thread_id={}", lang, thread_id);
 
     let Ok(broker) = adapter.broker().await else {
