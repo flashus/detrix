@@ -820,9 +820,16 @@ pub async fn wait_for_port(port: u16, timeout_secs: u64) -> bool {
 
 /// Wait for a DAP debugger port (debugpy, delve, lldb-dap) to become active.
 ///
-/// Uses `TcpListener::bind` probe: if bind fails with EADDRINUSE, the debugger is
-/// listening. This avoids connecting to the debugger, which would consume debugpy's
-/// `--wait-for-client` client slot and corrupt its state.
+/// Uses `lsof -sTCP:LISTEN` (Unix) to detect the port entering LISTEN state without
+/// binding to it or connecting to it. This avoids two failure modes:
+///
+/// - `TcpListener::bind` probe: briefly holds the port each poll cycle, racing with
+///   debugpy's `socket.bind()` under concurrent load → EADDRINUSE → empty log and
+///   60-second timeout with a live but never-listening process.
+///
+/// - `TcpStream::connect` probe: connects to debugpy in `--wait-for-client` mode,
+///   consuming its connection slot before the daemon can connect → "Max reconnection
+///   attempts exhausted" inside the daemon.
 ///
 /// The caller must pass an optional process handle so we can exit early if the
 /// debugger process dies (instead of waiting for the full timeout).
@@ -834,6 +841,7 @@ pub async fn wait_for_debugger_port(port: u16, timeout_secs: u64) -> bool {
 }
 
 /// Like `wait_for_debugger_port` but with an optional process handle for early exit.
+#[cfg(unix)]
 pub async fn wait_for_debugger_port_with_process(
     port: u16,
     timeout_secs: u64,
@@ -843,8 +851,11 @@ pub async fn wait_for_debugger_port_with_process(
     let timeout = Duration::from_secs(timeout_secs);
 
     while start.elapsed() < timeout {
-        // Bind probe: fails (EADDRINUSE) when the debugger is listening — desired.
-        if TcpListener::bind(("127.0.0.1", port)).is_err() {
+        // lsof probe: check LISTEN state without binding or connecting.
+        // Safe for debugpy --wait-for-client: no connection slot consumed.
+        // Safe for concurrent tests: no transient port hold that races with
+        // debugpy's socket.bind().
+        if is_tcp_port_listening(port) {
             return true;
         }
 
@@ -862,6 +873,47 @@ pub async fn wait_for_debugger_port_with_process(
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     false
+}
+
+/// Like `wait_for_debugger_port` but with an optional process handle for early exit.
+/// Windows stub — E2E debugger tests are not supported on Windows.
+#[cfg(windows)]
+pub async fn wait_for_debugger_port_with_process(
+    port: u16,
+    timeout_secs: u64,
+    mut process: Option<&mut Child>,
+) -> bool {
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(timeout_secs);
+    let addr: std::net::SocketAddr = ([127u8, 0, 0, 1], port).into();
+
+    while start.elapsed() < timeout {
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
+            return true;
+        }
+        if let Some(ref mut proc) = process {
+            if let Ok(Some(_status)) = proc.try_wait() {
+                return false;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    false
+}
+
+/// Check if a TCP port is in LISTEN state using `lsof`.
+///
+/// Does not bind or connect — safe for DAP debugger ports.
+/// Returns `true` when `lsof` exits 0 (found a matching LISTEN socket).
+#[cfg(unix)]
+fn is_tcp_port_listening(port: u16) -> bool {
+    Command::new("lsof")
+        .args(["-sTCP:LISTEN", "-i", &format!("TCP:{}", port), "-P", "-n"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Wait for TCP port (Windows version - uses TcpStream connection attempt)
