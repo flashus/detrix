@@ -1,315 +1,132 @@
 # Detrix Installation Guide
 
-Complete installation instructions for Detrix dynamic observability platform.
-
-## Table of Contents
-
-1. [Prerequisites](#prerequisites)
-2. [Build Detrix](#build-detrix)
-3. [Configure AI Client](#configure-ai-client)
-4. [Cloud Debugging](#cloud-debugging)
-5. [Verification](#verification)
-6. [Troubleshooting](#troubleshooting)
-
 ---
 
-## Prerequisites
+## 1. Install
 
-### Required
+### Detrix
 
-- **Rust 1.80+** - [Install Rust](https://rustup.rs/)
-- **Git** - For cloning the repository
-- **Protocol Buffers Compiler (protoc)** - Required for gRPC compilation
-
-### Platform-Specific Setup
-
-#### macOS
-
+**macOS** (Homebrew):
 ```bash
-# Install Rust
-brew install rustup
-
-# Install protobuf compiler
-brew install protobuf
-
-# Verify
-protoc --version
+brew install flashus/tap/detrix
 ```
 
-#### Linux (Ubuntu/Debian)
-
+**macOS / Linux** (shell script):
 ```bash
-# Install protobuf compiler
-sudo apt update
-sudo apt install -y protobuf-compiler
-
-# Verify
-protoc --version
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/flashus/detrix/releases/latest/download/detrix-installer.sh | sh
 ```
 
-#### Windows
-
-**Using [Scoop](https://scoop.sh/)**
-
-1. **Install Visual Studio Build Tools:**
-   - Download from [Visual Studio Downloads](https://visualstudio.microsoft.com/downloads/)
-   - Select "Desktop development with C++" workload
-   - This provides MSVC compiler and Windows SDK
-
-2. **Install Rust:**
-   ```powershell
-   # Download and run rustup-init.exe from https://rustup.rs/ or `scoop install rustup`
-   rustup-init.exe
-   ```
-
-3. **Install Protocol Buffers:**
-   ```powershell
-   # Install protobuf via Scoop
-   scoop bucket add extras
-   scoop install protobuf
-   ```
-
-### For Monitoring Different Languages
-
-Choose based on what you want to monitor:
-
-- **Python**: Python 3.8+ with `debugpy`
-  ```bash
-  pip install debugpy
-  ```
-
-- **Go**: Go 1.19+ with `delve`
-  ```bash
-  go install github.com/go-delve/delve/cmd/dlv@latest
-  ```
-
-- **Rust**: Rust toolchain with `lldb-dap`
-  ```bash
-  # macOS
-  brew install llvm
-
-  # Linux
-  apt install lldb
-
-  # Windows (via LLVM installer or Scoop)
-  scoop install llvm
-  ```
-
----
-
-## Build Detrix
-
-### macOS / Linux
-
-```bash
-# Clone repository
-git clone https://github.com/flashus/detrix.git
-cd detrix
-
-# Build release binary
-cargo build --release
-
-# Verify build
-./target/release/detrix --version
-
-# Initialize configuration (creates ~/detrix/detrix.toml)
-./target/release/detrix init
-```
-
-Binary location: `./target/release/detrix`
-
-**Get absolute path** (you'll need this for configuration):
-```bash
-echo "$(pwd)/target/release/detrix"
-```
-
-**Configuration discovery:**
-- Default location: `~/detrix/detrix.toml`
-- Custom location: Use `--config <path>` or set `DETRIX_CONFIG` env var
-- Custom init: `./target/release/detrix init --path /custom/path/detrix.toml`
-
-### Windows
-
+**Windows** (PowerShell):
 ```powershell
-# Clone repository
-git clone https://github.com/flashus/detrix.git
-cd detrix
-
-# Build release binary
-cargo build --release
-
-# Verify build
-.\target\release\detrix.exe --version
-
-# Initialize configuration (creates ~/detrix/detrix.toml)
-.\target\release\detrix.exe init
+irm https://github.com/flashus/detrix/releases/latest/download/detrix-installer.ps1 | iex
 ```
 
-Binary location: `.\target\release\detrix.exe`
-
-**Get absolute path** (you'll need this for configuration):
-```powershell
-Write-Output "$PWD\target\release\detrix.exe"
+**Docker** (linux/amd64, linux/arm64):
+```bash
+docker pull ghcr.io/flashus/detrix:latest
 ```
 
-**Configuration discovery:**
-- Default location: `~/detrix/detrix.toml` (Windows: `%USERPROFILE%\detrix\detrix.toml`)
-- Custom location: Use `--config <path>` or set `DETRIX_CONFIG` env var
-- Custom init: `.\target\release\detrix.exe init --path C:\custom\path\detrix.toml`
+**Build from source:** see [BUILD.md](BUILD.md).
+
+```bash
+detrix init   # creates config and sets up local storage
+```
+
+### Language debugger
+
+Detrix connects to your language's debugger — install the one you need:
+
+**Python** — [debugpy](https://github.com/microsoft/debugpy):
+```bash
+pip install debugpy
+```
+
+**Go** — [Delve](https://github.com/go-delve/delve):
+```bash
+go install github.com/go-delve/delve/cmd/dlv@latest
+```
+
+**Rust** — [lldb-dap](https://lldb.llvm.org/) (part of LLVM):
+```bash
+# macOS
+brew install llvm
+
+# Linux
+apt install lldb
+
+# Windows
+scoop install llvm
+```
 
 ---
 
-## Configure AI Client
+## 2. Start your app with the debugger
 
-Choose your AI client:
+Listens on `127.0.0.1` — local only. See [Cloud Debugging](#cloud-debugging) for remote and Docker.
 
-- [Claude Code](#claude-code-skill--mcp)
-- [Cursor](#cursor)
-- [Windsurf](#windsurf)
+**Python:**
+```bash
+python -m debugpy --listen 127.0.0.1:5678 app.py
+```
 
----
+**Go:**
+```bash
+dlv debug --headless --listen=127.0.0.1:5678 --api-version=2 main.go
+```
 
-### Claude Code (Skill + MCP)
+**Rust:**
+```bash
+lldb-dap --port 5678
+```
 
-**What you're installing:**
-- Skill at `~/.claude/skills/detrix/SKILL.md` (optional)
-- MCP via project `.mcp.json` file
-
-**Steps:**
-
-1. **Create skill directory:**
-   ```bash
-   mkdir -p ~/.claude/skills/detrix
-   ```
-
-2. **Copy skill file:**
-   ```bash
-   cp skills/detrix/* ~/.claude/skills/detrix/
-   ```
-
-3. **Create `.mcp.json` in your project:**
-   ```bash
-   cat > .mcp.json <<EOF
-   {
-     "mcpServers": {
-       "detrix": {
-         "command": "/absolute/path/to/detrix/target/release/detrix",
-         "args": ["mcp"],
-         "env": {
-           "RUST_LOG": "info"
-         }
-       }
-     }
-   }
-   EOF
-   ```
-
-4. **Enable MCP in settings:**
-
-   Edit `~/.claude/settings.json`:
-   ```json
-   {
-     "enabledMcpjsonServers": ["detrix"]
-   }
-   ```
-
-5. **Restart Claude Code**
-
-6. **Verify:**
-   ```
-   /skills    → Should show "detrix"
-   /mcp       → Should show "detrix" server
-   ```
+> **Prefer zero config?** Embed `detrix.init()` once and skip this step entirely — the agent wakes the debugger on demand. See [App Integration](../README.md#app-integration).
 
 ---
+
+## 3. AI Agent Setup
+
+### Claude Code
+
+```bash
+claude mcp add --scope user detrix -- detrix mcp
+```
+
+Restart Claude Code, then verify with `/mcp` — should show `detrix`.
 
 ### Cursor
 
-**Configuration file location:**
-- macOS: `~/Library/Application Support/Cursor/User/settings.json`
-- Linux: `~/.config/Cursor/User/settings.json`
-- Windows: `%APPDATA%\Cursor\User\settings.json`
+Add to your Cursor settings (`~/Library/Application Support/Cursor/User/settings.json` on macOS, `%APPDATA%\Cursor\User\settings.json` on Windows):
 
-**Steps:**
+```json
+{
+  "mcp.servers": {
+    "detrix": {
+      "command": "detrix",
+      "args": ["mcp"]
+    }
+  }
+}
+```
 
-1. **Edit settings:**
-   ```bash
-   # macOS
-   nano ~/Library/Application\ Support/Cursor/User/settings.json
-
-   # Linux
-   nano ~/.config/Cursor/User/settings.json
-   ```
-
-   ```powershell
-   # Windows
-   notepad $env:APPDATA\Cursor\User\settings.json
-   ```
-
-2. **Add MCP server:**
-   ```json
-   {
-     "mcp.servers": {
-          "detrix": {
-            "args": [
-               "mcp"
-            ],
-            "command": "/absolute/path/to/detrix/target/release/detrix",
-            "disabled": false,
-            "env": {
-               "RUST_LOG": "debug"
-            }
-         }
-     }
-   }
-   ```
-
-3. **Restart Cursor**
-
----
+Restart Cursor.
 
 ### Windsurf
 
-**Configuration file location:**
-- macOS: `~/Library/Application Support/Windsurf/User/settings.json`
-- Linux: `~/.config/Windsurf/User/settings.json`
-- Windows: `%APPDATA%\Windsurf\User\settings.json`
+Add to your Windsurf settings (`~/Library/Application Support/Windsurf/User/settings.json` on macOS, `%APPDATA%\Windsurf\User\settings.json` on Windows):
 
-**Steps:**
+```json
+{
+  "mcp.servers": {
+    "detrix": {
+      "command": "detrix",
+      "args": ["mcp"]
+    }
+  }
+}
+```
 
-1. **Edit settings:**
-   ```bash
-   # macOS
-   nano ~/Library/Application\ Support/Windsurf/User/settings.json
-
-   # Linux
-   nano ~/.config/Windsurf/User/settings.json
-   ```
-
-   ```powershell
-   # Windows
-   notepad $env:APPDATA\Windsurf\User\settings.json
-   ```
-
-2. **Add MCP server:**
-   ```json
-   {
-     "mcp.servers": {
-          "detrix": {
-            "args": [
-               "mcp"
-            ],
-            "command": "/absolute/path/to/detrix/target/release/detrix",
-            "disabled": false,
-            "env": {
-               "RUST_LOG": "debug"
-            }
-         }
-     }
-   }
-   ```
-
-3. **Restart Windsurf**
+Restart Windsurf.
 
 ---
 
@@ -321,25 +138,17 @@ Observe code running inside Docker containers or remote hosts. The AI agent conn
 
 1. **Detrix daemon** runs in Docker alongside your service (set `DETRIX_ADVERTISE_URL` so it knows its public address)
 2. **Detrix client** embedded in your app registers with the daemon on startup and exposes a `/detrix/discover` endpoint
-3. **AI agent** calls `wake` on your app → the app returns its daemon URL → the bridge auto-switches to that cloud daemon and fetches source files via VFS
-4. Register multiple cloud daemons in `~/.detrix/daemons.toml`; the agent can switch between them by alias or automatically via `wake`
+3. **AI agent** calls `wake` on your app → the app returns its daemon URL → the bridge auto-switches to that cloud daemon and fetches source files automatically
+4. Register multiple cloud daemons in `~/detrix/daemons.toml`; the agent can switch between them by alias or automatically via `wake`
 
-### Quick Setup
+### Setup
 
 **1. Add Detrix daemon to your `docker-compose.yml`:**
-
-Build the Detrix server image from source:
-
-```bash
-docker build -f fixtures/docker/Dockerfile.server -t detrix-server .
-```
-
-Then reference it in your `docker-compose.yml`:
 
 ```yaml
 services:
   detrix:
-    image: detrix-server
+    image: ghcr.io/flashus/detrix:latest
     ports:
       - "8090:8090"
     environment:
@@ -369,13 +178,17 @@ port = 8090
 path = "/data/detrix/data.db"
 
 [vfs]
-# Source priority for fetching source files for the AI agent.
-# Default: ["control_plane", "disk"]. Add "bridge" to also fetch from the agent's workspace.
 source_priority = ["control_plane", "disk"]
 fetch_timeout_seconds = 10
 ```
 
 **3. Embed the Detrix client in your app:**
+
+```python
+# Python
+import detrix
+detrix.init(name="my-service")
+```
 
 ```go
 // Go
@@ -386,12 +199,6 @@ detrix.Init(detrix.Config{
     DaemonURL: os.Getenv("DETRIX_DAEMON_URL"),
     Token:     os.Getenv("DETRIX_TOKEN"),
 })
-```
-
-```python
-# Python
-import detrix
-detrix.init(name="my-service")
 ```
 
 ```rust
@@ -406,9 +213,8 @@ detrix_rs::init(detrix_rs::Config {
 
 **4. Register cloud daemons for the AI agent:**
 
-The MCP bridge (`detrix mcp`) runs locally and connects to daemons — local or cloud. **No `--daemon-url` flag needed.** Cloud daemons are registered once in `~/detrix/daemons.toml`:
-
 ```toml
+# ~/detrix/daemons.toml
 [[daemon]]
 alias = "staging"
 url = "http://staging-host:8090"
@@ -419,7 +225,7 @@ url = "http://prod-host:8090"
 is_production = true   # requires force=true to switch to
 ```
 
-Auth tokens are stored per-host in `~/detrix/credentials.toml` (or set `DETRIX_TOKEN` as a global fallback):
+Auth tokens in `~/detrix/credentials.toml` (or set `DETRIX_TOKEN` as a global fallback):
 
 ```toml
 [targets."staging-host:8090"]
@@ -429,176 +235,48 @@ token = "staging-secret"
 token = "prod-secret"
 ```
 
-**Switching daemons:** The agent uses the `switch_daemon` MCP tool (by alias or URL) and `list_known_daemons` to see what's registered. Production daemons require explicit `force=true` to prevent accidental switches.
+**Switching daemons:** The agent uses the `switch_daemon` MCP tool (by alias or URL). Production daemons require explicit `force=true` to prevent accidental switches.
 
-**Auto-switching via `wake`:** When the agent calls `wake` on an app that has the Detrix client embedded, the app's `/detrix/discover` endpoint returns its daemon URL. The bridge automatically switches to that daemon — no manual `switch_daemon` call needed. This means the agent can work across local and cloud services in the same session just by waking them.
+**Auto-switching via `wake`:** When the agent calls `wake` on an app with the Detrix client embedded, the app returns its daemon URL and the bridge switches automatically — no manual `switch_daemon` call needed.
 
-See `examples/docker-demo/` for a complete working example with a Go service.
+See `examples/docker-demo/` for a complete working example.
 
----
-
-## Optional: Add to PATH
-
-For CLI usage anywhere:
-
-### macOS / Linux
-
-```bash
-# Option 1: Copy to user bin
-mkdir -p ~/.local/bin
-cp target/release/detrix ~/.local/bin/
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-
-# Verify
-detrix --version
-```
-
-### Windows
-
-```powershell
-# Copy to user bin folder
-mkdir -Force $env:USERPROFILE\.local\bin
-Copy-Item target\release\detrix.exe $env:USERPROFILE\.local\bin\
-
-# Add to PATH (run as Administrator or add manually via System Properties)
-[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:USERPROFILE\.local\bin", "User")
-
-# Verify (restart terminal first)
-detrix --version
-```
-
----
-
-## Verification
-
-### Test Detrix Binary
-
-```bash
-# Check version
-./target/release/detrix --version
-
-# Test MCP server
-./target/release/detrix mcp
-# Type: {"jsonrpc":"2.0","method":"tools/list","id":1}
-# Press Ctrl+C to exit
-```
-
-### Test with Debugger
-
-**Python:**
-
-1. Start a Python debugger:
-   ```bash
-   python -m debugpy --listen 127.0.0.1:5678 --wait-for-client app.py
-   ```
-
-2. Use Detrix via AI:
-   ```
-   "Create a connection to debugpy at 127.0.0.1:5678"
-   "Add a metric to observe user.id at auth.py line 42"
-   ```
-
-**Go:**
-
-1. Start a Go debugger:
-   ```bash
-   dlv debug --headless --listen=127.0.0.1:5678 --api-version=2 ./main.go
-   ```
-
-2. Use Detrix via AI:
-   ```
-   "Connect to delve at 127.0.0.1:5678 and observe order.Total at main.go line 55"
-   ```
-
-**Rust:**
-
-1. Build with debug symbols and start lldb-dap:
-   ```bash
-   cargo build
-   lldb-dap --port 5678 -- ./target/debug/my-app
-   ```
-
-2. Use Detrix via AI:
-   ```
-   "Connect to lldb-dap at 127.0.0.1:5678 and observe transaction.amount at src/main.rs line 42"
-   ```
 ---
 
 ## Troubleshooting
 
-### Build Failures
+### MCP server not showing up
 
-**Error: `protoc` not found (Windows)**
-```powershell
-# Verify protoc is installed and in PATH
-protoc --version
+1. Verify `detrix` is in PATH: `detrix --version`
+2. Restart the AI client completely (quit and reopen)
+3. Check logs:
+   - Claude Code: run `/mcp` to see server status
+   - Cursor: Help → Toggle Developer Tools
+   - Windsurf: Help → Toggle Developer Tools
 
-# If not found, install via Scoop
-scoop bucket add extras
-scoop install protobuf
-```
+### Can't connect to debugger
 
-**Error: linker not found (Windows)**
-Install Visual Studio Build Tools with C++ workload
-
-
-### MCP Not Loading
-
-1. Check binary path is **absolute** (not relative)
-2. Verify config file JSON is valid
-3. Restart AI client completely (quit and reopen)
-4. Check logs:
-   - Claude Desktop (macOS): `~/Library/Logs/Claude/`
-   - Claude Desktop (Windows): `%APPDATA%\Claude\logs\`
-   - Cursor: Developer Tools (Help > Toggle Developer Tools)
-
-### Skill Not Loading (Claude Code)
-
-1. Check skill exists:
-   ```bash
-   ls ~/.claude/skills/detrix/SKILL.md
-   ```
-
-2. Check settings.json:
-   ```bash
-   cat ~/.claude/settings.json
-   # Should contain: "enabledMcpjsonServers": ["detrix"]
-   ```
-
-### Connection Issues
-
-**Can't connect to debugger:**
 ```bash
-# macOS / Linux - Verify debugger is running
-lsof -i :5678
+# Verify debugger is listening
+lsof -i :5678        # macOS / Linux
+netstat -an | findstr 5678   # Windows
 ```
 
-```powershell
-# Windows - Verify debugger is running
-netstat -an | findstr 5678
-   ```
+Make sure the debugger is bound to `127.0.0.1:5678`, not a different port.
 
-**Expression validation fails:**
+### Expression blocked
 
-Detrix blocks unsafe operations. Use simple expressions:
-- ✅ `user.id`, `transaction.amount`, `len(items)`
+Detrix validates expressions before capture. Use simple variable access:
+- ✅ `user.id`, `order.total`, `len(items)`
 - ❌ `eval(code)`, `open('file')`
 
----
-
-## Uninstallation
-
-Remove skill ~/.claude/skills/detrix/
-Remove project MCP config (.mcp.json in project directory)
-Remove binary /path/to/detrix
-
-For Claude Code/Cursor/Windsurf: edit config file and remove the `detrix` entry.
+Configure allowed functions in `detrix.toml` — see [Clients Manual](CLIENTS.md).
 
 ---
 
 ## Links
 
 - [README](../README.md)
-- [Architecture](ARCHITECTURE.md)
-- [GitHub Issues](https://github.com/flashus/detrix/issues)
+- [CLI Reference](CLI.md)
+- [Clients Manual](CLIENTS.md)
+- [Build from Source](BUILD.md)
