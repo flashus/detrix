@@ -3,6 +3,7 @@ use std::io::Result;
 fn main() -> Result<()> {
     // Use bundled protoc so the build doesn't depend on a system-installed version.
     // This avoids Ubuntu 22.04 shipping protoc 3.12 which lacks proto3 optional support.
+    #[allow(clippy::expect_used)]
     let protoc = protoc_bin_vendored::protoc_bin_path().expect("vendored protoc binary");
     std::env::set_var("PROTOC", protoc);
 
