@@ -31,7 +31,7 @@
 
 ## See It in Action
 
-<video src="https://github.com/user-attachments/assets/186b0cd3-86a2-423c-9ba8-642a9e4095f9" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/66b8349d-a1e8-4352-ad6c-e9069029e5f4" controls width="100%"></video>
 
 > **1-minute demo:** An AI agent finds a production bug by observing running code — zero print statements, zero restarts.
 
@@ -57,8 +57,33 @@ No code was modified. No restarts. The agent observed the running process, found
 
 ### 1. Install Detrix
 
+**macOS** (Homebrew):
 ```bash
-cargo install --git https://github.com/flashus/detrix detrix-cli
+brew install flashus/tap/detrix
+```
+
+**macOS / Linux** (shell script):
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/flashus/detrix/releases/latest/download/detrix-installer.sh | sh
+```
+
+**Windows** (PowerShell):
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/flashus/detrix/releases/latest/download/detrix-installer.ps1 | iex"
+```
+
+**Docker** (linux/amd64, linux/arm64):
+```bash
+docker pull ghcr.io/flashus/detrix:latest
+```
+
+**Build from source**:
+```bash
+cargo install --git https://github.com/flashus/detrix detrix
+```
+
+Then initialise:
+```bash
 detrix init
 ```
 
@@ -100,7 +125,7 @@ Detrix talks to your app's debugger via the **Debug Adapter Protocol (DAP)**. It
       │   App never pauses. No code changes. No restarts.  │
 ```
 
-The daemon runs locally or alongside your service in Docker — same protocol either way. In cloud mode, source files are fetched automatically via VFS so the agent can find the right lines without the source on your machine. See the [Installation Guide](docs/INSTALL.md#cloud-debugging) for cloud setup.
+The daemon runs locally or alongside your service in Docker — same protocol either way. In cloud mode, source files are fetched automatically via VFS (virtual filesystem) so the agent can find the right lines without the source on your machine. See the [Installation Guide](docs/INSTALL.md#cloud-debugging) for cloud setup.
 
 ---
 
@@ -134,8 +159,8 @@ See the [Clients Manual](docs/CLIENTS.md) for full documentation.
 | **Multi-expression metrics** | Capture multiple values per observation point |
 | **Multi-language** | Python (debugpy), Go (delve), Rust (lldb-dap) |
 | **Capture modes** | Stream, sample, throttle, first-hit, time-based |
-| **Runtime introspection** | Stack traces, memory snapshots, TTL |
-| **Safety validation** | Three-layer expression validation prevents unsafe code |
+| **Runtime introspection** | Stack traces, memory snapshots, variable inspection, expression evaluation |
+| **Safety validation** | Expressions referencing sensitive variable names (`password`, `api_key`, `token`, `secret`, `private_key`, personal data, etc.) are rejected before capture — blacklist/whitelist is user-configurable in `detrix.toml`. Function calls validated against a whitelist/blacklist (also configurable). |
 | **29 MCP tools** | Full AI agent integration via Model Context Protocol |
 | **4 API protocols** | MCP (stdio), gRPC, REST, WebSocket |
 
@@ -150,8 +175,9 @@ See the [Clients Manual](docs/CLIENTS.md) for full documentation.
 | **Events** | Ephemeral stream | Stored, queryable by metric and time |
 | **Capture control** | Every hit, no filtering | Throttle, sample, first-hit, time-window |
 | **Cleanup** | Manual (easy to forget, ships to prod) | One command — or automatic via TTL |
+| **Sensitive data** | Secrets can leak via log output | Sensitive-named vars (`password`, `token`, `api_key`, …) blocked by default; add your own patterns to the blacklist in `detrix.toml` |
 
-> ¹ Embed `detrix.init()` once (zero restarts forever), or do a one-time restart with your debugger flag attached (`--debugpy`, `dlv`, `lldb-dap`).
+> ¹ Embed `detrix.init()` once (zero restarts forever), or do a one-time restart with your app launched in debug mode (`--debugpy`, `dlv`, `lldb-dap`).
 
 ---
 

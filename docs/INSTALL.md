@@ -156,52 +156,25 @@ Choose your AI client:
 
 **What you're installing:**
 - Skill at `~/.claude/skills/detrix/SKILL.md` (optional)
-- MCP via project `.mcp.json` file
+- MCP via `claude mcp add` (user-scoped, works in all projects)
 
 **Steps:**
 
-1. **Create skill directory:**
+1. **Add MCP server:**
+   ```bash
+   claude mcp add --scope user detrix -- /absolute/path/to/detrix mcp
+   ```
+
+2. **Install skill (optional but recommended):**
    ```bash
    mkdir -p ~/.claude/skills/detrix
+   cp /path/to/detrix-repo/skills/detrix/* ~/.claude/skills/detrix/
    ```
 
-2. **Copy skill file:**
-   ```bash
-   cp skills/detrix/* ~/.claude/skills/detrix/
+3. **Verify:**
    ```
-
-3. **Create `.mcp.json` in your project:**
-   ```bash
-   cat > .mcp.json <<EOF
-   {
-     "mcpServers": {
-       "detrix": {
-         "command": "/absolute/path/to/detrix/target/release/detrix",
-         "args": ["mcp"],
-         "env": {
-           "RUST_LOG": "info"
-         }
-       }
-     }
-   }
-   EOF
-   ```
-
-4. **Enable MCP in settings:**
-
-   Edit `~/.claude/settings.json`:
-   ```json
-   {
-     "enabledMcpjsonServers": ["detrix"]
-   }
-   ```
-
-5. **Restart Claude Code**
-
-6. **Verify:**
-   ```
-   /skills    → Should show "detrix"
    /mcp       → Should show "detrix" server
+   /skills    → Should show "detrix" (if skill installed)
    ```
 
 ---

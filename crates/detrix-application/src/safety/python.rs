@@ -30,6 +30,7 @@ impl PythonValidator {
                 config.allowed_set(),
                 config.prohibited_set(),
                 config.sensitive_patterns().clone(),
+                config.variable_whitelist.clone(),
             ),
         }
     }
@@ -51,6 +52,10 @@ impl BaseValidator for PythonValidator {
 
     fn sensitive_patterns(&self) -> &[String] {
         &self.data.sensitive_patterns
+    }
+
+    fn variable_whitelist(&self) -> &[String] {
+        &self.data.variable_whitelist
     }
 }
 
@@ -465,5 +470,74 @@ mod tests {
         assert_eq!(result.purity, PurityLevel::Pure);
         assert!(result.function_calls.is_empty());
         assert!(result.unknown_functions.is_empty());
+    }
+
+    // Variable whitelist tests
+
+    fn whitelist_validator(vars: &[&str]) -> PythonValidator {
+        PythonValidator::new(&PythonSafetyConfig {
+            variable_whitelist: vars.iter().map(|s| s.to_string()).collect(),
+            ..PythonSafetyConfig::default()
+        })
+    }
+
+    #[test]
+    fn test_variable_whitelist_blocks_non_listed_vars() {
+        let validator = whitelist_validator(&["order_id", "status"]);
+
+        // Variable not in whitelist should be blocked
+        let result = validator
+            .validate("user.name", SafetyLevel::Trusted)
+            .unwrap();
+        assert!(!result.is_safe);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("not in the allowed variable whitelist")));
+    }
+
+    #[test]
+    fn test_variable_whitelist_allows_listed_vars() {
+        let validator = whitelist_validator(&["order_id", "status"]);
+
+        // Whitelisted variable should be allowed
+        let result = validator
+            .validate("order_id", SafetyLevel::Trusted)
+            .unwrap();
+        assert!(result.is_safe);
+    }
+
+    #[test]
+    fn test_variable_whitelist_case_insensitive() {
+        let validator = whitelist_validator(&["OrderId"]);
+
+        // Case-insensitive match
+        let result = validator.validate("orderid", SafetyLevel::Trusted).unwrap();
+        assert!(result.is_safe);
+    }
+
+    #[test]
+    fn test_variable_whitelist_overrides_sensitive_patterns() {
+        // Even a normally-sensitive variable is allowed if in the whitelist
+        let validator = whitelist_validator(&["password"]);
+
+        let result = validator
+            .validate("password", SafetyLevel::Trusted)
+            .unwrap();
+        assert!(result.is_safe, "Whitelisted 'password' should be allowed");
+    }
+
+    #[test]
+    fn test_variable_whitelist_empty_uses_sensitive_patterns() {
+        // When whitelist is empty, fall back to sensitive_patterns behavior
+        let validator = default_validator();
+
+        let result = validator
+            .validate("password", SafetyLevel::Trusted)
+            .unwrap();
+        assert!(
+            !result.is_safe,
+            "password should be blocked by sensitive_patterns"
+        );
     }
 }

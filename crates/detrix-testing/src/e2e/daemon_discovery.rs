@@ -431,7 +431,7 @@ enable_ast_analysis = false
 
         // Corrupt the PID file with a wrong PID (use PID 1 which exists but isn't our daemon,
         // or a very high PID that likely doesn't exist)
-        let fake_pid = 999999; // Very high PID unlikely to exist
+        let fake_pid = 999_999; // Very high PID unlikely to exist
         let corrupted_content = json!({
             "pid": fake_pid,
             "ports": {
@@ -515,7 +515,7 @@ enable_ast_analysis = false
 
         // Don't start daemon - just create a stale PID file
         let stale_content = json!({
-            "pid": 999999, // Non-existent process
+            "pid": 999_999, // Non-existent process
             "ports": {
                 "http": self.http_port,
                 "grpc": self.grpc_port

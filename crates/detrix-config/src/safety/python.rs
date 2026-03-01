@@ -27,6 +27,12 @@ pub struct PythonSafetyConfig {
     #[serde(default = "default_python_sensitive_patterns")]
     pub sensitive_patterns: Vec<String>,
 
+    /// Variable whitelist — when non-empty, only these variable names can be observed.
+    /// Case-insensitive exact match. Takes precedence over `sensitive_patterns`.
+    /// Use in high-security environments to restrict what the agent can see.
+    #[serde(default)]
+    pub variable_whitelist: Vec<String>,
+
     /// LSP-based purity analysis settings for Python
     #[serde(default = "default_python_lsp_config")]
     pub lsp: LspConfig,
@@ -38,6 +44,7 @@ impl Default for PythonSafetyConfig {
             user_allowed_functions: Vec::new(),
             user_prohibited_functions: Vec::new(),
             sensitive_patterns: default_python_sensitive_patterns(),
+            variable_whitelist: Vec::new(),
             lsp: default_python_lsp_config(),
         }
     }

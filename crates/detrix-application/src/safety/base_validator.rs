@@ -21,6 +21,13 @@ pub trait BaseValidator {
     /// Get the list of sensitive variable patterns
     fn sensitive_patterns(&self) -> &[String];
 
+    /// Get the variable whitelist.
+    ///
+    /// When non-empty, only variables whose names match an entry (case-insensitive exact match)
+    /// may be observed. Variables not in the list are blocked regardless of `sensitive_patterns`.
+    /// When empty, the whitelist is inactive and only `sensitive_patterns` applies.
+    fn variable_whitelist(&self) -> &[String];
+
     /// Check if a function is allowed at the given safety level
     ///
     /// Precedence order:
@@ -200,9 +207,23 @@ pub trait BaseValidator {
             }
         }
 
-        // Check variable/attribute accesses against sensitive patterns
+        // Check variable/attribute accesses against sensitive patterns and whitelist
         for var in &variable_accesses {
-            if let Some(pattern) = self.check_sensitive_pattern(var) {
+            if !self.variable_whitelist().is_empty() {
+                // Whitelist mode: only explicitly approved variable names are allowed
+                let var_lower = var.to_lowercase();
+                let in_whitelist = self
+                    .variable_whitelist()
+                    .iter()
+                    .any(|w| w.to_lowercase() == var_lower);
+                if !in_whitelist {
+                    warnings.push(format!(
+                        "Variable '{}' is not in the allowed variable whitelist",
+                        var
+                    ));
+                }
+                // Whitelist takes full precedence — skip sensitive_patterns for this var
+            } else if let Some(pattern) = self.check_sensitive_pattern(var) {
                 warnings.push(format!(
                     "Sensitive variable '{}' detected (matches pattern '{}')",
                     var, pattern
@@ -210,8 +231,10 @@ pub trait BaseValidator {
             }
         }
 
-        // Sensitive variables cause the expression to be unsafe
-        let has_sensitive_vars = warnings.iter().any(|w| w.contains("Sensitive variable"));
+        // Sensitive variables (or non-whitelisted variables) cause the expression to be unsafe
+        let has_sensitive_vars = warnings.iter().any(|w| {
+            w.contains("Sensitive variable") || w.contains("not in the allowed variable whitelist")
+        });
 
         // Final safety determination
         let is_safe = errors.is_empty() && ast_result.is_safe && !has_sensitive_vars;
@@ -412,6 +435,10 @@ mod tests {
         fn sensitive_patterns(&self) -> &[String] {
             &self.patterns
         }
+
+        fn variable_whitelist(&self) -> &[String] {
+            &[]
+        }
     }
 
     #[test]
@@ -469,6 +496,9 @@ mod tests {
                 &self.prohibited
             }
             fn sensitive_patterns(&self) -> &[String] {
+                &[]
+            }
+            fn variable_whitelist(&self) -> &[String] {
                 &[]
             }
         }
@@ -624,6 +654,10 @@ mod proptest_tests {
 
         fn sensitive_patterns(&self) -> &[String] {
             &self.patterns
+        }
+
+        fn variable_whitelist(&self) -> &[String] {
+            &[]
         }
     }
 
