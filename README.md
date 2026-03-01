@@ -21,7 +21,7 @@
 [![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/flashus/eb80c012d4f6458bb24fb705bdf5ab57/raw/detrix-tests.json)](https://github.com/flashus/detrix/actions/workflows/ci.yml)
 [![CI](https://github.com/flashus/detrix/actions/workflows/ci.yml/badge.svg)](https://github.com/flashus/detrix/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org/)
-[![Docker](https://img.shields.io/docker/v/flashus/detrix?registry_url=https%3A%2F%2Fghcr.io&label=ghcr.io&logo=docker&sort=semver)](https://ghcr.io/flashus/detrix)
+[![Docker](https://img.shields.io/badge/ghcr.io-flashus%2Fdetrix-blue?logo=docker)](https://ghcr.io/flashus/detrix)
 [![crates.io](https://img.shields.io/crates/v/detrix-rs.svg)](https://crates.io/crates/detrix-rs)
 [![PyPI](https://img.shields.io/pypi/v/detrix-py.svg)](https://pypi.org/project/detrix-py/)
 [![Go](https://pkg.go.dev/badge/github.com/flashus/detrix/clients/go.svg)](https://pkg.go.dev/github.com/flashus/detrix/clients/go)
@@ -64,12 +64,13 @@ brew install flashus/tap/detrix
 
 **macOS / Linux** (shell script):
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/flashus/detrix/releases/latest/download/detrix-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/flashus/detrix/releases/latest/download/detrix-installer.sh | sh
 ```
 
 **Windows** (PowerShell):
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/flashus/detrix/releases/latest/download/detrix-installer.ps1 | iex"
+irm https://github.com/flashus/detrix/releases/latest/download/detrix-installer.ps1 | iex
 ```
 
 **Docker** (linux/amd64, linux/arm64):
@@ -113,16 +114,17 @@ That's it. The agent handles everything from here: connecting, adding metrics, q
 Detrix talks to your app's debugger via the **Debug Adapter Protocol (DAP)**. It sets **logpoints** — breakpoints that evaluate an expression and log the result instead of pausing. Your application runs at full speed; Detrix captures the values.
 
 ```
-  AI Agent                 Detrix Daemon              Your App
-  (Claude Code, Cursor,    (local or Docker/cloud)    (Python/Go/Rust, local/cloud)
-    Windsurf, local)
-      │                         │                          │
-      │── "observe line 127" ──▶│                          │
-      │                         │── DAP logpoint ─────────▶│
-      │                         │◀─ captured values ───────│
-      │◀── structured events ───│                          │
-      │                         │                          │
-      │   App never pauses. No code changes. No restarts.  │
+  AI Agent                 Detrix Daemon              Debugger (DAP)         Your App
+  (Claude Code, Cursor,    (local or Docker/cloud)    debugpy / dlv /        (Python/Go/Rust,
+    Windsurf, local)                                  lldb-dap               local/cloud)
+      │                         │                          │                      │
+      │── "observe line 127" ──▶│                          │                      │
+      │                         │── set logpoint ─────────▶│                      │
+      │                         │                          │── captures value ───▶│
+      │                         │◀────────────── captured values ─────────────────│
+      │◀── structured events ───│                          │                      │
+      │                         │                          │                      │
+      │         App never pauses. No code changes. No restarts.                   │
 ```
 
 The daemon runs locally or alongside your service in Docker — same protocol either way. In cloud mode, source files are fetched automatically via VFS (virtual filesystem) so the agent can find the right lines without the source on your machine. See the [Installation Guide](docs/INSTALL.md#cloud-debugging) for cloud setup.
@@ -158,9 +160,9 @@ See the [Clients Manual](docs/CLIENTS.md) for full documentation.
 | **Cloud debugging** | Observe Docker containers and remote hosts — no VPN, no port forwarding |
 | **Multi-expression metrics** | Capture multiple values per observation point |
 | **Multi-language** | Python (debugpy), Go (delve), Rust (lldb-dap) |
-| **Capture modes** | Stream, sample, throttle, first-hit, time-based |
+| **Capture modes** | Stream, sample, throttle, first-hit, sample_interval (every N sec) |
 | **Runtime introspection** | Stack traces, memory snapshots, variable inspection, expression evaluation |
-| **Safety validation** | Expressions referencing sensitive variable names (`password`, `api_key`, `token`, `secret`, `private_key`, personal data, etc.) are rejected before capture — blacklist/whitelist is user-configurable in `detrix.toml`. Function calls validated against a whitelist/blacklist (also configurable). |
+| **Safety validation** | Sensitive variable names (`password`, `api_key`, `token`, `secret`, `private_key`, etc.) blocked before capture. Configurable blacklist + whitelist for variable names and functions in `detrix.toml`. |
 | **29 MCP tools** | Full AI agent integration via Model Context Protocol |
 | **4 API protocols** | MCP (stdio), gRPC, REST, WebSocket |
 
@@ -173,9 +175,9 @@ See the [Clients Manual](docs/CLIENTS.md) for full documentation.
 | **Add new observation** | Edit code → restart | Ask the agent — no code, no restart¹ |
 | **Production-safe** | Output pollution, perf risk | Non-breaking logpoints |
 | **Events** | Ephemeral stream | Stored, queryable by metric and time |
-| **Capture control** | Every hit, no filtering | Throttle, sample, first-hit, time-window |
+| **Capture control** | Every hit, no filtering | Throttle, sample, first-hit, interval |
 | **Cleanup** | Manual (easy to forget, ships to prod) | One command — or automatic via TTL |
-| **Sensitive data** | Secrets can leak via log output | Sensitive-named vars (`password`, `token`, `api_key`, …) blocked by default; add your own patterns to the blacklist in `detrix.toml` |
+| **Sensitive data** | Secrets can leak via log output | Sensitive-named vars blocked by default; configurable blacklist + whitelist in `detrix.toml` |
 
 > ¹ Embed `detrix.init()` once (zero restarts forever), or do a one-time restart with your app launched in debug mode (`--debugpy`, `dlv`, `lldb-dap`).
 
