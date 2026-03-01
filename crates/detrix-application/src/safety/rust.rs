@@ -43,6 +43,7 @@ impl RustValidator {
                 config.allowed_set(),
                 config.prohibited_set(),
                 config.sensitive_patterns().clone(),
+                config.variable_whitelist.clone(),
             ),
         }
     }
@@ -64,6 +65,10 @@ impl BaseValidator for RustValidator {
 
     fn sensitive_patterns(&self) -> &[String] {
         &self.data.sensitive_patterns
+    }
+
+    fn variable_whitelist(&self) -> &[String] {
+        &self.data.variable_whitelist
     }
 
     /// Rust-specific base name extraction for `::` and `.` separators.

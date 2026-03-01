@@ -30,6 +30,7 @@ impl GoValidator {
                 config.allowed_set(),
                 config.prohibited_set(),
                 config.sensitive_patterns().clone(),
+                config.variable_whitelist.clone(),
             ),
         }
     }
@@ -51,6 +52,10 @@ impl BaseValidator for GoValidator {
 
     fn sensitive_patterns(&self) -> &[String] {
         &self.data.sensitive_patterns
+    }
+
+    fn variable_whitelist(&self) -> &[String] {
+        &self.data.variable_whitelist
     }
 
     /// Go-specific sensitive pattern matching with camelCase support.
