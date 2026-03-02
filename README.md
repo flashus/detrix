@@ -32,27 +32,38 @@
 ## See It in Action
 <video src="https://github.com/user-attachments/assets/2f6cc317-e09b-48ae-a098-d553d59a26e4" controls width="100%"></video>
 
-> **1-minute demo:** An AI agent finds a production bug by observing running code — zero print statements, zero restarts.
+> **1-minute demo:** A Go service in Docker starts reporting wrong numbers. Nothing in the client code changed. Claude watches it live and finds the cause.
 
-Here's what a real debugging session looks like:
+Here's what the session looks like:
 
 ```
-You:   "My checkout flow is dropping orders. Can you look at what's
-        happening around checkout.py line 127?"
+You:    "The order-service in Docker is reporting wildly inflated revenue.
+         Daily total is in the thousands when transactions should be $20-200."
 
-Agent:  → connects to your running app
-        → adds an observation point at checkout.py:127
-        → captures order.total, order.currency, len(order.items)
+Agent:  → reads the source, spots dead unit-conversion code
+        → wakes the service via Detrix
+        → observes txn.Amount, txn.Unit, total
+          (no line number — find_variable locates it in the running container)
 
-        I see 47 events in the last minute. 3 have negative totals —
-        all with currency="JPY". The discount is calculated on the
-        USD-converted amount but applied to the original JPY amount.
-        That's the bug.
+        "Found it. The pricing API changed what it's returning.
+
+        txn.Amount = 8957, txn.Unit = "cents" → should be $89.57, summed as $8957
+
+        In calculateRevenue, the unit field is fetched and discarded:
+
+        unit := txn.Unit
+        _ = unit          // ← conversion was intended, never implemented
+        total += amount   // ← adds cents as if they were dollars
+
+        This didn't matter before. It matters now."
+
+        → fixed the client code
+        → reported the API contract change upstream
 ```
 
-No code was modified. No restarts. What used to mean edit → rebuild → redeploy → reproduce is now a single conversation — typically 2–3× faster, often more.
+No code was modified to instrument. No restarts. The old workflow — add a log line, rebuild, redeploy, wait for the bug to reproduce — replaced by watching it live.
 
-You don't need to know the exact line number either — describe the behavior and the agent finds where to look.
+You don't need to know the line number either — describe the behavior and the agent finds where to look.
 
 ---
 
