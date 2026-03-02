@@ -189,8 +189,15 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         .json()
         .await
         .expect("Failed to parse response");
-    let metric1_id = metric1_response["metricId"].as_u64().expect("No metricId");
+    let metric1_id = metric1_response["metricId"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("No metricId in metric1 response: {}", metric1_response));
     reporter.step_success(step, Some(&format!("ID={}", metric1_id)));
+
+    // Small delay: give delve time to register the logpoint before sending the next request.
+    // Under heavy CI load, delve can be briefly in a "processing breakpoints" state and
+    // return an error for rapid back-to-back metric additions.
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Metric 2: LOGPOINT - simple variable 'pnl' at OFFSET_TOTAL_PNL line
     let step = reporter.step_start(
@@ -226,8 +233,12 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         .json()
         .await
         .expect("Failed to parse response");
-    let metric2_id = metric2_response["metricId"].as_u64().expect("No metricId");
+    let metric2_id = metric2_response["metricId"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("No metricId in metric2 response: {}", metric2_response));
     reporter.step_success(step, Some(&format!("ID={}", metric2_id)));
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Metric 3: BREAKPOINT - function call 'len(symbol)' at OFFSET_ORDER_ID line
     let step = reporter.step_start(
@@ -263,8 +274,12 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         .json()
         .await
         .expect("Failed to parse response");
-    let metric3_id = metric3_response["metricId"].as_u64().expect("No metricId");
+    let metric3_id = metric3_response["metricId"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("No metricId in metric3 response: {}", metric3_response));
     reporter.step_success(step, Some(&format!("ID={}", metric3_id)));
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Metric 4: BREAKPOINT - with stack trace at OFFSET_CURRENT_PRICE line
     let step = reporter.step_start(
@@ -301,7 +316,9 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         .json()
         .await
         .expect("Failed to parse response");
-    let metric4_id = metric4_response["metricId"].as_u64().expect("No metricId");
+    let metric4_id = metric4_response["metricId"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("No metricId in metric4 response: {}", metric4_response));
     reporter.step_success(step, Some(&format!("ID={}", metric4_id)));
 
     // ====================================================================

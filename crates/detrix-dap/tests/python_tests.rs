@@ -368,9 +368,12 @@ async fn test_debugpy_reconnection() {
 
     let port = common::get_test_port();
 
+    // Use an infinite loop so debugpy doesn't exit before we finish the
+    // stop/start cycle. The process is explicitly killed at the end of the test.
     let script_content = r#"
 import time
-time.sleep(10)
+while True:
+    time.sleep(1)
 "#;
 
     let script_path = std::env::temp_dir().join("detrix_reconnect_test.py");

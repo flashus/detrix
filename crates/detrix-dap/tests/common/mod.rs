@@ -104,25 +104,33 @@ pub fn get_test_port() -> u16 {
     PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
 }
 
-/// Wait for a port to be listening
-/// Uses lsof instead of TcpStream::connect to avoid consuming single-connection debuggers
+/// Wait for a port to be listening.
+///
+/// Uses lsof instead of TcpStream::connect to avoid consuming single-connection debuggers.
+/// Requires two consecutive positive readings 100ms apart to avoid false positives from
+/// transient sockets (e.g., port-registry TcpListeners during port allocation).
 pub async fn wait_for_port(port: u16, timeout_secs: u64) -> bool {
     let start = std::time::Instant::now();
     let timeout_duration = Duration::from_secs(timeout_secs);
 
     while start.elapsed() < timeout_duration {
-        let output = std::process::Command::new("lsof")
-            .args(["-i", &format!(":{}", port), "-sTCP:LISTEN"])
-            .output();
-
-        if let Ok(out) = output {
-            if out.status.success() && !out.stdout.is_empty() {
+        if is_listening(port) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if is_listening(port) {
                 return true;
             }
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     false
+}
+
+fn is_listening(port: u16) -> bool {
+    std::process::Command::new("lsof")
+        .args(["-i", &format!(":{}", port), "-sTCP:LISTEN", "-P", "-n"])
+        .output()
+        .map(|out| out.status.success() && !out.stdout.is_empty())
+        .unwrap_or(false)
 }
 
 /// Trait for language-specific DAP test fixtures

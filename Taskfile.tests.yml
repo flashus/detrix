@@ -34,7 +34,14 @@ tasks:
   test:
     desc: Run all tests (skips gracefully when tools unavailable)
     cmds:
-      - cargo test --all -- --test-threads=6
+      # Run all tests except daemon_restart_e2e.
+      # daemon_restart_e2e starts Python/debugpy and needs exclusive CPU budget — if it runs
+      # concurrently with unified_e2e (which also starts many Python processes at 6 threads),
+      # Python module loading contention can push startup well past the 120s timeout.
+      - cargo test --all -- --test-threads=6 --skip daemon_restart
+      # Run daemon_restart_e2e alone, after unified_e2e has finished, so there is no
+      # concurrent Python process competition.
+      - cargo test -p detrix-testing --test daemon_restart_e2e -- --test-threads=3
       - task: check-orphans
 
   test-unit:
