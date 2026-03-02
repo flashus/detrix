@@ -30,8 +30,7 @@
 ---
 
 ## See It in Action
-
-<video src="https://github.com/user-attachments/assets/66b8349d-a1e8-4352-ad6c-e9069029e5f4" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/2f6cc317-e09b-48ae-a098-d553d59a26e4" controls width="100%"></video>
 
 > **1-minute demo:** An AI agent finds a production bug by observing running code — zero print statements, zero restarts.
 
