@@ -7,9 +7,10 @@
 //!
 //! The detrix binary is searched for in this order:
 //! 1. `DETRIX_BIN` env var (explicit path to binary)
-//! 2. `CARGO_TARGET_DIR` env var (set by Cargo)
-//! 3. `~/detrix/target` (from .cargo/config.toml convention)
-//! 4. `workspace_root/target` (default Cargo location)
+//! 2. `CARGO_TARGET_DIR` env var (explicit override)
+//! 3. `target-dir` from `<workspace>/.cargo/config.toml` (per-worktree config)
+//! 4. `~/detrix/target` (legacy convention for the main workspace)
+//! 5. `workspace_root/target` (default Cargo location)
 //!
 //! # Workspace Root
 //!
@@ -31,8 +32,13 @@ use std::time::Duration;
 /// Directory for storing test process PID files
 const E2E_PID_DIR: &str = "/tmp/detrix_e2e_pids";
 
-/// Default startup timeout for Python/debugpy (Python interpreter + module loading is slow)
-pub const DEBUGPY_STARTUP_TIMEOUT_SECS: u64 = 60;
+/// Default startup timeout for Python/debugpy (Python interpreter + module loading is slow).
+///
+/// Under heavy concurrent load (cargo test --all with multiple binaries running simultaneously),
+/// debugpy's adapter subprocess can take >60s to start — each of many concurrent Python
+/// processes must import debugpy, compile .pyc files, and spawn the adapter. 120s gives
+/// sufficient headroom while still catching genuine failures within a reasonable window.
+pub const DEBUGPY_STARTUP_TIMEOUT_SECS: u64 = 120;
 
 /// Default startup timeout for native compiled debuggers (delve, lldb-dap, codelldb)
 pub const NATIVE_DEBUGGER_STARTUP_TIMEOUT_SECS: u64 = 15;
@@ -361,26 +367,77 @@ pub fn kill_and_unregister_pid(name: &str, pid: u64) {
 /// Get candidate target directories for finding binaries
 ///
 /// Returns a list of potential target directories in priority order:
-/// 1. `CARGO_TARGET_DIR` env var (set by Cargo itself)
-/// 2. `~/detrix/target` (from .cargo/config.toml convention)
-/// 3. `workspace_root/target` (default Cargo location)
+/// 1. `CARGO_TARGET_DIR` env var (explicit override)
+/// 2. `target-dir` from `<workspace>/.cargo/config.toml` (respects per-worktree config)
+/// 3. `~/detrix/target` (legacy convention for the main workspace)
+/// 4. `workspace_root/target` (default Cargo location)
 pub fn get_target_candidates(workspace_root: &std::path::Path) -> Vec<PathBuf> {
-    let mut candidates = Vec::with_capacity(3);
+    let mut candidates: Vec<PathBuf> = Vec::with_capacity(4);
 
-    // 1. Check CARGO_TARGET_DIR env var (Cargo sets this)
+    // Helper: push only if not already present (avoids duplicate searches).
+    macro_rules! push_unique {
+        ($p:expr) => {{
+            let p: PathBuf = $p;
+            if !candidates.contains(&p) {
+                candidates.push(p);
+            }
+        }};
+    }
+
+    // 1. Explicit CARGO_TARGET_DIR override.
     if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
-        candidates.push(PathBuf::from(target_dir));
+        push_unique!(PathBuf::from(target_dir));
     }
 
-    // 2. Expand ~/detrix/target (from .cargo/config.toml)
+    // 2. Read target-dir from .cargo/config.toml (handles per-worktree paths like
+    //    `../../../../../detrix-docs/target`).
+    if let Some(configured) = read_cargo_config_target_dir(workspace_root) {
+        push_unique!(configured);
+    }
+
+    // 3. Legacy convention: ~/detrix/target (used by the main dev workspace).
     if let Some(home) = dirs::home_dir() {
-        candidates.push(home.join("detrix/target"));
+        push_unique!(home.join("detrix/target"));
     }
 
-    // 3. Fallback to workspace_root/target
-    candidates.push(workspace_root.join("target"));
+    // 4. Fallback to workspace_root/target (default Cargo location).
+    push_unique!(workspace_root.join("target"));
 
     candidates
+}
+
+/// Read `target-dir` from `<workspace_root>/.cargo/config.toml`.
+///
+/// Cargo interprets `target-dir` relative to the workspace root, so we resolve
+/// any relative path against `workspace_root` before returning it.
+fn read_cargo_config_target_dir(workspace_root: &std::path::Path) -> Option<PathBuf> {
+    let config_path = workspace_root.join(".cargo/config.toml");
+    let content = std::fs::read_to_string(&config_path).ok()?;
+
+    let mut in_build = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Section headers
+        if trimmed.starts_with('[') {
+            in_build = trimmed == "[build]";
+            continue;
+        }
+        if !in_build {
+            continue;
+        }
+        // Match: target-dir = "some/path"
+        if let Some(rest) = trimmed.strip_prefix("target-dir") {
+            let rest = rest.trim().strip_prefix('=')?;
+            let raw = rest.trim().trim_matches('"');
+            let path = std::path::Path::new(raw);
+            return Some(if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                workspace_root.join(path)
+            });
+        }
+    }
+    None
 }
 
 /// Find the detrix binary in candidate target directories
@@ -841,6 +898,11 @@ pub async fn wait_for_debugger_port(port: u16, timeout_secs: u64) -> bool {
 }
 
 /// Like `wait_for_debugger_port` but with an optional process handle for early exit.
+///
+/// When a process handle is supplied, the function exits early if the process dies
+/// before the port becomes available. Port uniqueness is guaranteed by the port registry
+/// (each test binary claims an exclusive range), so any LISTEN socket on our port
+/// belongs to our process tree.
 #[cfg(unix)]
 pub async fn wait_for_debugger_port_with_process(
     port: u16,
@@ -852,11 +914,21 @@ pub async fn wait_for_debugger_port_with_process(
 
     while start.elapsed() < timeout {
         // lsof probe: check LISTEN state without binding or connecting.
-        // Safe for debugpy --wait-for-client: no connection slot consumed.
-        // Safe for concurrent tests: no transient port hold that races with
-        // debugpy's socket.bind().
+        //
+        // We use any-PID detection here: debugpy daemonizes its adapter subprocess via
+        // double-fork, so the adapter always has PPID=1 — it cannot be identified by
+        // its parent PID or PGID relationship. The port registry guarantees port
+        // uniqueness per test binary, so any LISTEN socket on this port belongs to
+        // our process tree.
+        //
+        // To avoid false-positives from transient sockets (e.g., brief TcpListeners
+        // from port-registry allocations), we require two consecutive "found" readings
+        // 100ms apart before declaring the port ready.
         if is_tcp_port_listening(port) {
-            return true;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if is_tcp_port_listening(port) {
+                return true;
+            }
         }
 
         // Early exit: if the debugger process has died, stop waiting.
@@ -901,7 +973,7 @@ pub async fn wait_for_debugger_port_with_process(
     false
 }
 
-/// Check if a TCP port is in LISTEN state using `lsof`.
+/// Check if a TCP port is in LISTEN state using `lsof` (any process).
 ///
 /// Does not bind or connect — safe for DAP debugger ports.
 /// Returns `true` when `lsof` exits 0 (found a matching LISTEN socket).
