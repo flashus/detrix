@@ -168,15 +168,11 @@ impl McpBridge {
     /// If the daemon is not responding and config is available, attempts to
     /// restart the daemon automatically.
     pub async fn forward_request(&self, request: Value) -> Result<Value> {
-        // First attempt
-        let result = self.try_forward_request(&request).await;
-
-        // If successful, return immediately
-        if result.is_ok() {
-            return result;
-        }
-
-        let e = result.unwrap_err();
+        // First attempt; short-circuit on success.
+        let e = match self.try_forward_request(&request).await {
+            Ok(val) => return Ok(val),
+            Err(e) => e,
+        };
 
         // Check if this looks like a connection error using proper error type detection
         if !is_connection_error(&e) {
@@ -639,40 +635,39 @@ impl McpBridge {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // Validate parameters
-        if url.is_none() && alias.is_none() {
-            return jsonrpc_error(id, -32602, "Must specify either 'url' or 'alias'");
-        }
-        if url.is_some() && alias.is_some() {
-            return jsonrpc_error(id, -32602, "Cannot specify both 'url' and 'alias'");
-        }
-
-        // Resolve daemon config
-        let (target_url, is_production) = if let Some(alias_val) = alias {
-            match detrix_config::daemons::DaemonsConfig::load_from_home() {
-                Ok(config) => match config.find_by_alias(alias_val) {
-                    Some(daemon) => (daemon.url.clone(), daemon.is_production),
-                    None => {
-                        return jsonrpc_error(
-                            id,
-                            -32602,
-                            format!("Daemon alias '{}' not found", alias_val),
-                        );
+        // Validate and resolve daemon config — all four (url, alias) combinations handled.
+        let (target_url, is_production) = match (url, alias) {
+            (None, None) => {
+                return jsonrpc_error(id, -32602, "Must specify either 'url' or 'alias'")
+            }
+            (Some(_), Some(_)) => {
+                return jsonrpc_error(id, -32602, "Cannot specify both 'url' and 'alias'")
+            }
+            (Some(url_val), None) => (url_val.to_string(), false),
+            (None, Some(alias_val)) => {
+                match detrix_config::daemons::DaemonsConfig::load_from_home() {
+                    Ok(config) => match config.find_by_alias(alias_val) {
+                        Some(daemon) => (daemon.url.clone(), daemon.is_production),
+                        None => {
+                            return jsonrpc_error(
+                                id,
+                                -32602,
+                                format!("Daemon alias '{}' not found", alias_val),
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        return serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "error": {
+                                "code": -32603,
+                                "message": format!("Failed to load daemons config: {}", e)
+                            },
+                            "id": id
+                        });
                     }
-                },
-                Err(e) => {
-                    return serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "error": {
-                            "code": -32603,
-                            "message": format!("Failed to load daemons config: {}", e)
-                        },
-                        "id": id
-                    });
                 }
             }
-        } else {
-            (url.unwrap().to_string(), false) // Direct URL, assume non-production
         };
 
         // Production confirmation
@@ -1375,11 +1370,8 @@ impl McpBridge {
         //      switch first, then let the remote daemon call control_plane_url.
         //    - Otherwise, wake through the CURRENT daemon (host-reachable app_url),
         //      then switch so the connection appears on the right daemon.
-        let switch_before_wake = control_plane_url.is_some();
-
-        if switch_before_wake {
+        if let Some(cp_url) = control_plane_url {
             // Daemon knows how to reach the app (control_plane_url supplied)
-            let cp_url = control_plane_url.unwrap();
             if let Some((daemon_url, app_name, _)) = &discovery {
                 let current = self.get_current_daemon_url().await;
                 if daemon_url.trim_end_matches('/') != current.trim_end_matches('/') {
