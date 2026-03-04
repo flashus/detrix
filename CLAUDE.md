@@ -430,6 +430,7 @@ When working on Detrix:
 ## Resources
 
 - **Architecture Guide:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- **Authentication:** [docs/AUTH.md](docs/AUTH.md)
 - **Installation:** [docs/INSTALL.md](docs/INSTALL.md)
 - **Adding Languages:** [docs/ADD_LANGUAGE.md](docs/ADD_LANGUAGE.md)
 - **GitHub:** [https://github.com/flashus/detrix](https://github.com/flashus/detrix)

@@ -5,4 +5,4 @@
 
 mod auth;
 
-pub use auth::{auth_middleware, AuthState};
+pub use auth::{auth_middleware, resolve_jwt_role, AuthState, AuthenticatedUser};

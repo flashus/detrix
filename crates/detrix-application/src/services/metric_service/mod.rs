@@ -17,10 +17,12 @@ pub use relocation::FileChangeResult;
 
 use crate::ports::{AnchorServiceRef, MetricRepositoryRef};
 use crate::safety::ValidatorRegistry;
+use crate::scope::MetricScope;
 use crate::services::{AdapterLifecycleManager, FileInspectionService};
 use crate::Result;
 use detrix_config::{AdapterConnectionConfig, LimitsConfig};
-use detrix_core::{ConnectionId, SystemEvent};
+use detrix_core::{ConnectionId, Metric, SystemEvent};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -101,5 +103,96 @@ impl MetricService {
                     connection_id.0
                 ))
             })
+    }
+
+    /// Sync the DAP logpoint at a given location after a metric change.
+    ///
+    /// In multi-tenant mode, multiple users can have metrics at the same location.
+    /// DAP only supports one logpoint per (file, line, connection_id), so we merge
+    /// all enabled metrics' expressions into a single logpoint.
+    ///
+    /// - If enabled metrics remain: set logpoint with unioned expressions (single adapter call)
+    /// - If no enabled metrics: remove the logpoint using `fallback_metric` as reference
+    ///
+    /// `fallback_metric` should be the metric that was just deleted/disabled — it is used
+    /// as the location reference for `adapter.remove_metric()` when no storage metric can
+    /// serve that role (e.g. after `storage.delete()`).
+    pub(super) async fn sync_logpoint(
+        &self,
+        connection_id: &ConnectionId,
+        file: &str,
+        line: u32,
+        fallback_metric: Option<&Metric>,
+    ) -> Result<()> {
+        let all_metrics = self
+            .storage
+            .find_all_at_location(connection_id, file, line)
+            .await?;
+
+        let enabled: Vec<&Metric> = all_metrics.iter().filter(|m| m.enabled).collect();
+
+        // Union + deduplicate expressions (BTreeSet preserves sorted order)
+        let merged_exprs: Vec<String> = enabled
+            .iter()
+            .flat_map(|m| m.expressions.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
+        let adapter = match self.get_adapter_for_connection(connection_id).await {
+            Ok(a) => a,
+            Err(_) => {
+                // No adapter connected — logpoint will be synced when adapter reconnects
+                return Ok(());
+            }
+        };
+
+        if merged_exprs.is_empty() {
+            // No enabled metrics remain — remove the DAP logpoint.
+            // Prefer fallback_metric (the just-deleted/disabled metric) since it may no
+            // longer be in storage; fall back to any remaining storage metric as reference.
+            let reference = fallback_metric.or_else(|| all_metrics.first());
+            if let Some(m) = reference {
+                if let Err(e) = adapter.remove_metric(m).await {
+                    tracing::warn!(
+                        file = %file,
+                        line = line,
+                        error = %e,
+                        "Failed to remove logpoint during sync"
+                    );
+                }
+            }
+        } else {
+            // Other users' metrics still enabled at this location — update the merged logpoint.
+            // This is a single adapter call: no remove+re-add gap, logpoint captures continuously.
+            let template = enabled[0];
+            let mut merged = template.clone();
+            merged.expressions = merged_exprs;
+
+            if let Err(e) = adapter.set_metric(&merged).await {
+                tracing::warn!(
+                    file = %file,
+                    line = line,
+                    error = %e,
+                    "Failed to set merged logpoint during sync"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check that the given scope allows mutation of the given metric.
+    ///
+    /// Returns `Err(AccessDenied)` if the scope does not permit the operation.
+    pub(super) fn check_mutate_access(scope: &MetricScope, metric: &Metric) -> Result<()> {
+        if !scope.can_mutate(metric) {
+            return Err(crate::Error::AccessDenied(format!(
+                "Cannot mutate metric '{}' (id={:?})",
+                metric.name,
+                metric.id.map(|id| id.0)
+            )));
+        }
+        Ok(())
     }
 }

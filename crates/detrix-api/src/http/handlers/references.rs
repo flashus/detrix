@@ -257,7 +257,7 @@ pub struct DisableMetricsByOwnerResponse {
 
 /// Admin: Disable all enabled metrics owned by a client identity.
 ///
-/// Bulk-disables metrics whose `created_by` matches the given client identity.
+/// Bulk-disables metrics whose `user_id` matches the given client identity.
 /// Used for user-scoped cleanup when a bridge session ends.
 /// Gated by `api.rest.admin_endpoints_enabled` config.
 #[instrument(skip(state))]

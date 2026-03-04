@@ -863,8 +863,8 @@ impl McpBridge {
         // Disable only metrics created by this bridge
         let mut disabled_count = 0;
         for metric in metrics {
-            let created_by = metric.get("createdBy").and_then(|v| v.as_str());
-            if created_by != Some(&self.client_id) {
+            let user_id = metric.get("userId").and_then(|v| v.as_str());
+            if user_id != Some(&self.client_id) {
                 continue;
             }
             if let Some(metric_id) = metric.get("metricId").and_then(|v| v.as_str()) {

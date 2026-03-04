@@ -33,11 +33,12 @@ impl EnableGroupResult {
 pub async fn enable_group_impl(
     state: &Arc<ApiState>,
     params: GroupParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<EnableGroupResult, McpError> {
     let result = state
         .context
         .metric_service
-        .enable_group(&params.group)
+        .enable_group(&params.group, scope)
         .await
         .mcp_context("Failed to enable group")?;
 
@@ -71,11 +72,12 @@ impl DisableGroupResult {
 pub async fn disable_group_impl(
     state: &Arc<ApiState>,
     params: GroupParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<DisableGroupResult, McpError> {
     let result = state
         .context
         .metric_service
-        .disable_group(&params.group)
+        .disable_group(&params.group, scope)
         .await
         .mcp_context("Failed to disable group")?;
 

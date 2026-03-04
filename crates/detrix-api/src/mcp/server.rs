@@ -49,6 +49,9 @@ pub struct DetrixServer {
     /// Client identity for traceability. Per-session UUID for MCP bridges,
     /// ephemeral UUID for direct stdio mode.
     client_id: Option<String>,
+    /// Authenticated user identity (resolved from token on session creation).
+    /// None when auth is disabled — treated as Admin.
+    user_id: Option<String>,
 }
 
 #[tool_router]
@@ -57,11 +60,20 @@ impl DetrixServer {
     pub fn new(state: Arc<ApiState>) -> Self {
         let client_id = uuid::Uuid::new_v4().to_string();
         tracing::info!(client_id = %client_id, "MCP stdio: generated ephemeral client_id");
-        Self::with_client_id(state, Some(client_id))
+        Self::with_identity(state, Some(client_id), None)
     }
 
     /// Create a new MCP server with an explicit client identity (for HTTP bridge path).
     pub fn with_client_id(state: Arc<ApiState>, client_id: Option<String>) -> Self {
+        Self::with_identity(state, client_id, None)
+    }
+
+    /// Create a new MCP server with full identity (client_id + user_id).
+    pub fn with_identity(
+        state: Arc<ApiState>,
+        client_id: Option<String>,
+        user_id: Option<String>,
+    ) -> Self {
         let instrumentation = McpInstrumentation::new(
             state.context.mcp_usage.clone(),
             state.mcp_usage_repository.clone(),
@@ -72,6 +84,23 @@ impl DetrixServer {
             tool_router: Self::tool_router(),
             instrumentation,
             client_id,
+            user_id,
+        }
+    }
+
+    /// Build MetricScope from server's identity.
+    ///
+    /// - If user_id is set: scope based on user + agent (client_id)
+    /// - If user_id is None (auth disabled): Admin scope
+    fn scope(&self) -> detrix_application::MetricScope {
+        match &self.user_id {
+            Some(uid) => crate::common::build_scope(
+                uid,
+                // MCP doesn't carry role info yet — use User role (conservative)
+                &detrix_config::UserRole::User,
+                self.client_id.clone(),
+            ),
+            None => detrix_application::MetricScope::Admin,
         }
     }
 
@@ -164,7 +193,14 @@ impl DetrixServer {
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("add_metric");
 
-        match tools::add_metric_impl(&self.state, params, self.client_id.clone()).await {
+        match tools::add_metric_impl(
+            &self.state,
+            params,
+            self.user_id.clone(),
+            self.client_id.clone(),
+        )
+        .await
+        {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 let message = result.build_message();
@@ -210,7 +246,15 @@ impl DetrixServer {
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("observe");
 
-        match tools::observe_impl(&self.state, params, None, self.client_id.clone()).await {
+        match tools::observe_impl(
+            &self.state,
+            params,
+            None,
+            self.user_id.clone(),
+            self.client_id.clone(),
+        )
+        .await
+        {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 let message = result.build_message();
@@ -241,7 +285,14 @@ impl DetrixServer {
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("enable_from_diff");
 
-        match tools::enable_from_diff_impl(&self.state, params, self.client_id.clone()).await {
+        match tools::enable_from_diff_impl(
+            &self.state,
+            params,
+            self.user_id.clone(),
+            self.client_id.clone(),
+        )
+        .await
+        {
             Ok(Ok(result)) => {
                 self.finish_tool_success(timer);
                 let message = result.build_message();
@@ -278,7 +329,7 @@ impl DetrixServer {
         Parameters(params): Parameters<RemoveMetricParams>,
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("remove_metric");
-        match tools::remove_metric_impl(&self.state, params).await {
+        match tools::remove_metric_impl(&self.state, params, &self.scope()).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 Ok(CallToolResult::success(vec![Content::text(
@@ -299,7 +350,7 @@ impl DetrixServer {
         Parameters(params): Parameters<ToggleMetricParams>,
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("toggle_metric");
-        match tools::toggle_metric_impl(&self.state, params).await {
+        match tools::toggle_metric_impl(&self.state, params, &self.scope()).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 Ok(CallToolResult::success(vec![Content::text(
@@ -624,7 +675,7 @@ Language-specific setup:
         Parameters(params): Parameters<UpdateMetricParams>,
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("update_metric");
-        match tools::update_metric_impl(&self.state, params).await {
+        match tools::update_metric_impl(&self.state, params, &self.scope()).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 Ok(CallToolResult::success(vec![Content::text(
@@ -649,7 +700,7 @@ Language-specific setup:
         Parameters(params): Parameters<GroupParams>,
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("enable_group");
-        match tools::enable_group_impl(&self.state, params).await {
+        match tools::enable_group_impl(&self.state, params, &self.scope()).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 Ok(CallToolResult::success(vec![Content::text(
@@ -670,7 +721,7 @@ Language-specific setup:
         Parameters(params): Parameters<GroupParams>,
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("disable_group");
-        match tools::disable_group_impl(&self.state, params).await {
+        match tools::disable_group_impl(&self.state, params, &self.scope()).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 Ok(CallToolResult::success(vec![Content::text(

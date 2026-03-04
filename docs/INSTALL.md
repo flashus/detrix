@@ -243,6 +243,42 @@ See `examples/docker-demo/` for a complete working example.
 
 ---
 
+## Authentication
+
+By default, auth is disabled for local development. For cloud and multi-user deployments, enable authentication in `detrix.toml`:
+
+```toml
+[api.auth]
+mode = "simple"
+
+[[api.auth.users]]
+token = "dtx_alice_secret"
+user_id = "alice"
+role = "user"
+
+[[api.auth.users]]
+token = "dtx_admin_secret"
+user_id = "admin"
+role = "admin"
+```
+
+Each developer sets their token via `DETRIX_TOKEN`:
+
+```bash
+DETRIX_TOKEN=dtx_alice_secret detrix mcp
+```
+
+Or per-daemon in `~/detrix/credentials.toml`:
+
+```toml
+[targets."your-host:8090"]
+token = "dtx_alice_secret"
+```
+
+Detrix also supports JWT/JWKS for enterprise SSO. See the full [Authentication Guide](AUTH.md) for details on auth modes, access control, and multi-tenant configuration.
+
+---
+
 ## Troubleshooting
 
 ### MCP server not showing up
@@ -277,6 +313,7 @@ Configure allowed functions in `detrix.toml` — see [Clients Manual](CLIENTS.md
 ## Links
 
 - [README](../README.md)
+- [Authentication Guide](AUTH.md)
 - [CLI Reference](CLI.md)
 - [Clients Manual](CLIENTS.md)
 - [Build from Source](BUILD.md)

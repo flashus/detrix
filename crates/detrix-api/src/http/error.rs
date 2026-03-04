@@ -183,6 +183,9 @@ fn sanitize_error_message(err: &detrix_application::Error) -> String {
         // Auth errors - provide generic message
         Error::Auth(_) => "Authentication error".to_string(),
 
+        // Access denied - safe to expose reason
+        Error::AccessDenied(reason) => format!("Access denied: {}", reason),
+
         // Core domain errors - delegate to core error handling
         Error::Core(core_err) => sanitize_core_error(core_err),
     }
@@ -258,6 +261,9 @@ impl From<detrix_application::Error> for HttpError {
 
             // 401 Unauthorized
             Error::Auth(_) => StatusCode::UNAUTHORIZED,
+
+            // 403 Forbidden
+            Error::AccessDenied(_) => StatusCode::FORBIDDEN,
 
             // 500 Internal Server Error (default)
             _ => StatusCode::INTERNAL_SERVER_ERROR,

@@ -2,7 +2,7 @@
 //!
 //! Bearer token authentication for API endpoints.
 //! Supports two authentication modes:
-//! - Simple: Static bearer token from config (like Prometheus)
+//! - Simple: Per-user static tokens from config
 //! - External: JWT validation via JWKS endpoint (for enterprise SSO)
 
 use axum::{
@@ -13,7 +13,7 @@ use axum::{
     response::Response,
 };
 use detrix_application::JwksValidator;
-use detrix_config::{AuthConfig, AuthMode};
+use detrix_config::{AuthConfig, AuthMode, UserRole};
 use std::sync::Arc;
 use tracing::{debug, error, warn};
 
@@ -21,24 +21,16 @@ use tracing::{debug, error, warn};
 use detrix_config::constants::AUTHORIZATION_HEADER;
 use detrix_config::constants::BEARER_PREFIX;
 
-/// Authenticated user claims extracted from JWT
+/// Authenticated user identity extracted from token or JWT.
 ///
-/// Injected into request extensions after successful JWT validation.
-/// Handlers can extract this using `Extension<AuthClaims>`.
-///
-/// Note: Fields are intentionally public for handler access via request extensions,
-/// even though they're not read directly in this module.
+/// Injected into request extensions after successful authentication.
+/// Handlers can extract this using `Extension<AuthenticatedUser>`.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
-pub struct AuthClaims {
-    /// Subject (user ID)
-    pub sub: Option<String>,
-    /// User email
-    pub email: Option<String>,
-    /// User display name
-    pub name: Option<String>,
-    /// User roles for authorization
-    pub roles: Vec<String>,
+pub struct AuthenticatedUser {
+    /// User identity (from StaticUser.user_id or JWT sub claim)
+    pub user_id: String,
+    /// User role (Admin or User)
+    pub role: UserRole,
 }
 
 /// Authentication middleware state
@@ -72,9 +64,10 @@ impl AuthState {
 /// When authentication is enabled:
 /// - Checks if the endpoint is public (no auth required)
 /// - Validates the Authorization header contains a valid Bearer token
-/// - For Simple mode: validates against static bearer_token from config
+/// - For Simple mode: looks up token in configured users list
 /// - For External mode: validates JWT via JWKS
 /// - Returns 401 Unauthorized if token is missing or invalid
+/// - Injects `AuthenticatedUser` into request extensions on success
 ///
 /// When authentication is disabled:
 /// - All requests pass through without validation
@@ -85,8 +78,13 @@ pub async fn auth_middleware(
 ) -> Result<Response, StatusCode> {
     let config = &auth_state.config;
 
-    // Skip auth if disabled or not configured
+    // When auth is disabled: inject default Admin user so handlers always have scope
     if config.effective_mode() == AuthMode::Disabled {
+        let mut request = request;
+        request.extensions_mut().insert(AuthenticatedUser {
+            user_id: "default".to_string(),
+            role: UserRole::Admin,
+        });
         return Ok(next.run(request).await);
     }
 
@@ -117,12 +115,16 @@ pub async fn auth_middleware(
 
             match config.effective_mode() {
                 AuthMode::Simple => {
-                    // Validate against static bearer_token
-                    if let Some(expected_token) = config.bearer_token.as_deref() {
-                        if token == expected_token {
-                            debug!(path = %path, "Bearer token authentication successful");
-                            return Ok(next.run(request).await);
-                        }
+                    // Look up token in configured users list
+                    if let Some(user) = config.find_user_by_token(token) {
+                        debug!(path = %path, user_id = %user.user_id, "Bearer token authentication successful");
+                        let authenticated = AuthenticatedUser {
+                            user_id: user.user_id.clone(),
+                            role: user.role.clone(),
+                        };
+                        let mut request = request;
+                        request.extensions_mut().insert(authenticated);
+                        return Ok(next.run(request).await);
                     }
                     warn!(path = %path, "Invalid bearer token");
                     Err(StatusCode::UNAUTHORIZED)
@@ -143,16 +145,19 @@ pub async fn auth_middleware(
                                 "JWT authentication successful"
                             );
 
-                            // Inject claims into request extensions for use by handlers
-                            let auth_claims = AuthClaims {
-                                sub: claims.sub.clone(),
-                                email: claims.email.clone(),
-                                name: claims.name.clone(),
-                                roles: claims.roles.clone(),
+                            // Determine role from JWT claims
+                            let role = resolve_jwt_role(&claims, &config.jwt);
+
+                            let authenticated = AuthenticatedUser {
+                                user_id: claims
+                                    .sub
+                                    .clone()
+                                    .unwrap_or_else(|| "anonymous".to_string()),
+                                role,
                             };
 
                             let mut request = request;
-                            request.extensions_mut().insert(auth_claims);
+                            request.extensions_mut().insert(authenticated);
 
                             Ok(next.run(request).await)
                         }
@@ -175,10 +180,27 @@ pub async fn auth_middleware(
     }
 }
 
+/// Determine user role from JWT claims based on config
+pub fn resolve_jwt_role(
+    claims: &detrix_application::JwtClaims,
+    jwt_config: &detrix_config::JwtConfig,
+) -> UserRole {
+    if let (Some(ref claim_name), Some(ref claim_value)) =
+        (&jwt_config.admin_role_claim, &jwt_config.admin_role_value)
+    {
+        // Check the standard "roles" field if claim_name is "roles"
+        if claim_name == "roles" && claims.roles.iter().any(|r| r == claim_value) {
+            return UserRole::Admin;
+        }
+    }
+    UserRole::User
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::{body::Body, routing::get, Router};
+    use detrix_config::StaticUser;
     use tower::ServiceExt;
 
     async fn test_handler() -> &'static str {
@@ -198,7 +220,11 @@ mod tests {
     fn test_config_simple(token: &str) -> AuthConfig {
         AuthConfig {
             mode: Some(AuthMode::Simple),
-            bearer_token: Some(token.to_string()),
+            users: vec![StaticUser {
+                token: token.to_string(),
+                user_id: "test-user".to_string(),
+                role: UserRole::User,
+            }],
             public_endpoints: vec!["/health".to_string()],
             ..Default::default()
         }
@@ -232,7 +258,6 @@ mod tests {
         let auth_state = AuthState::new(config);
         let router = create_test_router(auth_state);
 
-        // Explicit Some(Disabled) should also allow all requests
         let response = router
             .oneshot(
                 Request::builder()
@@ -252,7 +277,6 @@ mod tests {
         let auth_state = AuthState::new(config);
         let router = create_test_router(auth_state);
 
-        // Public endpoint should work without auth
         let response = router
             .oneshot(
                 Request::builder()
@@ -272,7 +296,6 @@ mod tests {
         let auth_state = AuthState::new(config);
         let router = create_test_router(auth_state);
 
-        // Protected endpoint without token should fail
         let response = router
             .oneshot(
                 Request::builder()
@@ -292,7 +315,6 @@ mod tests {
         let auth_state = AuthState::new(config);
         let router = create_test_router(auth_state);
 
-        // Protected endpoint with valid token should succeed
         let response = router
             .oneshot(
                 Request::builder()
@@ -313,7 +335,6 @@ mod tests {
         let auth_state = AuthState::new(config);
         let router = create_test_router(auth_state);
 
-        // Protected endpoint with invalid token should fail
         let response = router
             .oneshot(
                 Request::builder()
@@ -337,7 +358,6 @@ mod tests {
         let auth_state = AuthState::new(config);
         let router = create_test_router(auth_state);
 
-        // Using Basic auth instead of Bearer should fail
         let response = router
             .oneshot(
                 Request::builder()
@@ -358,7 +378,6 @@ mod tests {
             mode: Some(AuthMode::External),
             ..Default::default()
         };
-        // Create without validator - should return 500 for external mode
         let auth_state = AuthState::new(config);
         let router = create_test_router(auth_state);
 
@@ -376,7 +395,79 @@ mod tests {
             .await
             .unwrap();
 
-        // Should return 500 because validator is not configured
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_simple_mode_multi_user_lookup() {
+        let config = AuthConfig {
+            mode: Some(AuthMode::Simple),
+            users: vec![
+                StaticUser {
+                    token: "alice-token".to_string(),
+                    user_id: "alice".to_string(),
+                    role: UserRole::User,
+                },
+                StaticUser {
+                    token: "admin-token".to_string(),
+                    user_id: "admin".to_string(),
+                    role: UserRole::Admin,
+                },
+            ],
+            public_endpoints: vec!["/health".to_string()],
+            ..Default::default()
+        };
+        let auth_state = AuthState::new(config);
+        let router = create_test_router(auth_state);
+
+        // Alice's token should work
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header(
+                        AUTHORIZATION_HEADER,
+                        format!("{}alice-token", BEARER_PREFIX),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Admin token should work
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header(
+                        AUTHORIZATION_HEADER,
+                        format!("{}admin-token", BEARER_PREFIX),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Unknown token should fail
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header(
+                        AUTHORIZATION_HEADER,
+                        format!("{}unknown-token", BEARER_PREFIX),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

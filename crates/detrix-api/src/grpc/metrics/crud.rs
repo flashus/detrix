@@ -7,15 +7,27 @@ use crate::generated::detrix::v1::{
     RemoveMetricRequest, RemoveMetricResponse, UpdateMetricRequest,
 };
 use crate::grpc::conversions::{add_request_to_metric, core_to_proto_location};
+use crate::grpc::interceptor::AuthenticatedUser;
 use crate::state::ApiState;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
+
+/// Extract AuthenticatedUser from gRPC request extensions.
+/// Always present — the interceptor injects a default Admin when auth is disabled.
+fn extract_user<T>(request: &Request<T>) -> Result<AuthenticatedUser, Status> {
+    request
+        .extensions()
+        .get::<AuthenticatedUser>()
+        .cloned()
+        .ok_or_else(|| Status::unauthenticated("Missing authentication"))
+}
 
 /// Handle add_metric request
 pub async fn handle_add_metric(
     state: &Arc<ApiState>,
     request: Request<AddMetricRequest>,
 ) -> Result<Response<MetricResponse>, Status> {
+    let user = extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
     let mut req = request.into_inner();
 
@@ -63,7 +75,9 @@ pub async fn handle_add_metric(
     // Convert proto DTO to domain type
     let mut metric =
         add_request_to_metric(&req).map_err(|e| Status::invalid_argument(e.to_string()))?;
-    metric.created_by = client_id;
+    // Stamp identity from authenticated user + client header
+    metric.user_id = Some(user.user_id.clone());
+    metric.agent_id = client_id;
 
     // Call service (ALL business logic happens here)
     // Pass replace flag (default to false if not specified)
@@ -98,7 +112,9 @@ pub async fn handle_remove_metric(
     state: &Arc<ApiState>,
     request: Request<RemoveMetricRequest>,
 ) -> Result<Response<RemoveMetricResponse>, Status> {
+    let user = extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
+    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
     let req = request.into_inner();
     tracing::info!(?client_id, "gRPC: remove_metric");
 
@@ -125,7 +141,7 @@ pub async fn handle_remove_metric(
     state
         .context
         .metric_service
-        .remove_metric(metric_id)
+        .remove_metric(metric_id, &scope)
         .await
         .to_status()?;
 
@@ -141,7 +157,9 @@ pub async fn handle_update_metric(
     state: &Arc<ApiState>,
     request: Request<UpdateMetricRequest>,
 ) -> Result<Response<MetricResponse>, Status> {
+    let user = extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
+    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
     let req = request.into_inner();
     tracing::info!(metric_id = req.metric_id, ?client_id, "gRPC: update_metric");
     let metric_id = detrix_core::MetricId(req.metric_id);
@@ -173,7 +191,7 @@ pub async fn handle_update_metric(
     let outcome = state
         .context
         .metric_service
-        .update_metric(&metric)
+        .update_metric(&metric, &scope)
         .await
         .to_status()?;
 

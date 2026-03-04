@@ -22,7 +22,8 @@ pub struct MetricBuilder {
     pub capture_stack_trace: bool,
     pub capture_memory_snapshot: bool,
     pub ttl_seconds: Option<i64>,
-    pub created_by: Option<String>,
+    pub user_id: Option<String>,
+    pub agent_id: Option<String>,
     // Configurable via DefaultsConfig
     pub mode: MetricMode,
     pub enabled: bool,
@@ -49,7 +50,8 @@ impl MetricBuilder {
             capture_stack_trace: false,
             capture_memory_snapshot: false,
             ttl_seconds: None,
-            created_by: None,
+            user_id: None,
+            agent_id: None,
             // Hardcoded defaults (overridden by with_defaults())
             mode: MetricMode::Stream,
             enabled: true,
@@ -88,8 +90,13 @@ impl MetricBuilder {
         self
     }
 
-    pub fn with_created_by(mut self, created_by: Option<String>) -> Self {
-        self.created_by = created_by;
+    pub fn with_user_id(mut self, user_id: Option<String>) -> Self {
+        self.user_id = user_id;
+        self
+    }
+
+    pub fn with_agent_id(mut self, agent_id: Option<String>) -> Self {
+        self.agent_id = agent_id;
         self
     }
 
@@ -113,7 +120,8 @@ impl MetricBuilder {
             condition: None,
             safety_level: self.safety_level,
             created_at: None,
-            created_by: self.created_by,
+            user_id: self.user_id,
+            agent_id: self.agent_id,
             capture_stack_trace: self.capture_stack_trace,
             stack_trace_ttl: ttl,
             stack_trace_slice: None,

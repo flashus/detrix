@@ -1,6 +1,7 @@
 //! Toggle and group operations for MetricService
 
 use crate::ports::{GroupSummary, ToggleMetricResult};
+use crate::scope::MetricScope;
 use crate::{GroupOperationResult, Result};
 use detrix_core::{GroupInfo, MetricId, SystemEvent};
 use std::collections::HashMap;
@@ -10,17 +11,21 @@ use super::MetricService;
 impl MetricService {
     /// Toggle metric enabled status
     ///
-    /// Updates storage first, then adapter. If adapter fails, storage is rolled back.
+    /// Checks scope permission, updates storage, then syncs the DAP logpoint.
     /// Returns rich result with both storage and DAP confirmation status.
     pub async fn toggle_metric(
         &self,
         metric_id: MetricId,
         enabled: bool,
+        scope: &MetricScope,
     ) -> Result<ToggleMetricResult> {
         let mut metric =
             self.storage.find_by_id(metric_id).await?.ok_or_else(|| {
                 detrix_core::Error::MetricNotFound(format!("Metric {}", metric_id))
             })?;
+
+        // Scope check
+        Self::check_mutate_access(scope, &metric)?;
 
         let was_enabled = metric.enabled;
         if was_enabled == enabled {
@@ -91,7 +96,11 @@ impl MetricService {
     /// let result = service.enable_group("trading").await?;
     /// result.ensure_complete()?;  // Err if any metrics failed
     /// ```
-    pub async fn enable_group(&self, group: &str) -> Result<GroupOperationResult> {
+    pub async fn enable_group(
+        &self,
+        group: &str,
+        scope: &MetricScope,
+    ) -> Result<GroupOperationResult> {
         let metrics = self.storage.find_by_group(group).await?;
         let mut succeeded = 0;
         let mut failed: Vec<(String, String)> = Vec::new();
@@ -105,6 +114,10 @@ impl MetricService {
         let mut by_connection: HashMap<detrix_core::ConnectionId, Vec<detrix_core::Metric>> =
             HashMap::new();
         for mut metric in metrics {
+            // Scope check: skip metrics the caller can't mutate
+            if !scope.can_mutate(&metric) {
+                continue;
+            }
             if !metric.enabled {
                 metric.enabled = true;
 
@@ -199,7 +212,11 @@ impl MetricService {
     /// let result = service.disable_group("trading").await?;
     /// result.ensure_complete()?;  // Err if any metrics failed
     /// ```
-    pub async fn disable_group(&self, group: &str) -> Result<GroupOperationResult> {
+    pub async fn disable_group(
+        &self,
+        group: &str,
+        scope: &MetricScope,
+    ) -> Result<GroupOperationResult> {
         let metrics = self.storage.find_by_group(group).await?;
         let mut succeeded = 0;
         let mut failed: Vec<(String, String)> = Vec::new();
@@ -212,6 +229,10 @@ impl MetricService {
         let mut by_connection: HashMap<detrix_core::ConnectionId, Vec<detrix_core::Metric>> =
             HashMap::new();
         for mut metric in metrics {
+            // Scope check: skip metrics the caller can't mutate
+            if !scope.can_mutate(&metric) {
+                continue;
+            }
             if metric.enabled {
                 metric.enabled = false;
 
@@ -331,7 +352,7 @@ impl MetricService {
     /// Disable all metrics created by a specific client.
     ///
     /// Used by switch_daemon(disable_metrics=true) for user-scoped cleanup.
-    /// Only disables metrics where `created_by` matches the given client identity.
+    /// Only disables metrics where `user_id` matches the given client identity.
     ///
     /// # Returns
     /// Number of metrics that were disabled.
@@ -339,10 +360,13 @@ impl MetricService {
         let all_metrics = self.list_metrics().await?;
         let mut disabled = 0u64;
 
+        // Use Admin scope — this is an internal operation triggered by disconnect
+        let scope = MetricScope::Admin;
+
         for metric in all_metrics {
-            if metric.created_by.as_deref() == Some(client_identity) && metric.enabled {
+            if metric.user_id.as_deref() == Some(client_identity) && metric.enabled {
                 if let Some(metric_id) = metric.id {
-                    if let Err(e) = self.toggle_metric(metric_id, false).await {
+                    if let Err(e) = self.toggle_metric(metric_id, false, &scope).await {
                         tracing::warn!(
                             "Failed to disable metric {} for client {}: {e}",
                             metric_id,

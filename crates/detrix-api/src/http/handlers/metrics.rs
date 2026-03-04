@@ -7,12 +7,13 @@ use crate::constants::status;
 use crate::generated::detrix::v1::Location;
 use crate::grpc::conversions::core_event_to_proto;
 use crate::http::error::{HttpError, ToHttpOption, ToHttpResult};
+use crate::http::middleware::AuthenticatedUser;
 use crate::state::ApiState;
 use crate::types::{MetricInfo, ProtoMetricEvent};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 use detrix_application::MetricFilter;
 use detrix_config::DEFAULT_QUERY_LIMIT;
@@ -264,6 +265,7 @@ pub async fn get_metric(
 /// - 409 Conflict: Metric already exists at location (when `replace=false`)
 pub async fn add_metric(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: axum::http::HeaderMap,
     Json(mut payload): Json<CreateMetricRequest>,
 ) -> Result<(StatusCode, Json<CreateMetricResponse>), HttpError> {
@@ -318,7 +320,8 @@ pub async fn add_metric(
 
     // 2. Convert Proto → Core Metric (shared conversion from grpc/conversions.rs)
     let mut metric = add_request_to_metric(&proto_request).http_bad_request()?;
-    metric.created_by = client_id;
+    metric.user_id = Some(user.user_id.clone());
+    metric.agent_id = client_id;
 
     // Call service (ALL business logic happens here)
     let outcome = state
@@ -370,16 +373,18 @@ pub async fn add_metric(
 /// - 404 Not Found: Metric with given ID does not exist
 pub async fn delete_metric(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: axum::http::HeaderMap,
     Path(id): Path<u64>,
 ) -> Result<StatusCode, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
+    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
     info!("REST: delete_metric (id={}, client_id={:?})", id, client_id);
 
     state
         .context
         .metric_service
-        .remove_metric(MetricId(id))
+        .remove_metric(MetricId(id), &scope)
         .await
         .http_context("Failed to delete metric")?;
 

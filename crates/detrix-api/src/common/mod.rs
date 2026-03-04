@@ -15,6 +15,22 @@ pub use parsing::{
     ParsedLocationWithExpression,
 };
 
+/// Build a `MetricScope` from user identity and optional agent/client ID.
+///
+/// Maps: `(user_id, role, agent_id)` → `MetricScope`.
+/// - Admin role → `MetricScope::Admin` (full access)
+/// - User role + agent_id → `MetricScope::Agent { user_id, agent_id }`
+/// - User role + no agent → `MetricScope::User(user_id)`
+///
+/// The `agent_id` parameter typically comes from `X-Detrix-Client-Id` header.
+pub fn build_scope(
+    user_id: &str,
+    role: &detrix_config::UserRole,
+    agent_id: Option<String>,
+) -> detrix_application::MetricScope {
+    detrix_application::extract_scope(user_id, role, agent_id)
+}
+
 /// HTTP header / gRPC metadata key for client identity.
 ///
 /// Used across REST, gRPC, and MCP to identify the originator of mutations.

@@ -6,12 +6,13 @@
 
 use super::metric_to_rest_response;
 use crate::http::error::{HttpError, ToHttpResult};
+use crate::http::middleware::AuthenticatedUser;
 use crate::state::ApiState;
 use crate::types::{GroupInfo, MetricInfo};
 use axum::{
     extract::{Path, State},
     http::HeaderMap,
-    Json,
+    Extension, Json,
 };
 use detrix_application::{GroupOperationResult, GroupSummary};
 use serde::{Deserialize, Serialize};
@@ -140,10 +141,12 @@ pub async fn list_group_metrics(
 /// Returns `GroupOperationResponse` with success/failure counts and any errors.
 pub async fn enable_group(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(group_name): Path<String>,
 ) -> Result<Json<GroupOperationResponse>, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
+    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
     info!(
         "REST: enable_group (group={}, client_id={:?})",
         group_name, client_id
@@ -152,7 +155,7 @@ pub async fn enable_group(
     let result = state
         .context
         .metric_service
-        .enable_group(&group_name)
+        .enable_group(&group_name, &scope)
         .await
         .http_context("Failed to enable group")?;
 
@@ -173,10 +176,12 @@ pub async fn enable_group(
 /// Returns `GroupOperationResponse` with success/failure counts and any errors.
 pub async fn disable_group(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(group_name): Path<String>,
 ) -> Result<Json<GroupOperationResponse>, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
+    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
     info!(
         "REST: disable_group (group={}, client_id={:?})",
         group_name, client_id
@@ -185,7 +190,7 @@ pub async fn disable_group(
     let result = state
         .context
         .metric_service
-        .disable_group(&group_name)
+        .disable_group(&group_name, &scope)
         .await
         .http_context("Failed to disable group")?;
 

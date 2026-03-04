@@ -641,6 +641,11 @@ pub struct MetricInfo {
     #[prost(bool, tag = "14")]
     #[serde(default)]
     pub capture_memory_snapshot: bool,
+    /// Multi-tenant identity
+    #[prost(string, tag = "15")]
+    pub user_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "16")]
+    pub agent_id: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -253,6 +253,10 @@ pub enum Error {
     /// Authentication/authorization error
     #[error("Auth error: {0}")]
     Auth(String),
+
+    /// Access denied (scope violation)
+    #[error("Access denied: {0}")]
+    AccessDenied(String),
 }
 
 impl Error {
@@ -273,6 +277,7 @@ impl Error {
             Error::OperationWithRollbackFailure { .. } => ErrorCode::RollbackFailure,
             Error::SubprocessTimeout { .. } => ErrorCode::SubprocessTimeout,
             Error::Auth(_) => ErrorCode::Unauthorized,
+            Error::AccessDenied(_) => ErrorCode::Forbidden,
         }
     }
 

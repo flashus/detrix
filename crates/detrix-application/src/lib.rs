@@ -54,6 +54,9 @@ pub mod middleware;
 // Re-export for convenience
 pub use detrix_ports as ports;
 
+// Multi-tenant access scope
+pub mod scope;
+
 // Safety validation (expression validators)
 pub mod safety;
 
@@ -107,6 +110,7 @@ pub use detrix_ports::{
 // Thread-safe reference to expression validator (defined here since ExpressionValidator is in this crate)
 pub type ExpressionValidatorRef = std::sync::Arc<dyn safety::ExpressionValidator + Send + Sync>;
 pub use safety::{ExpressionValidator, PythonValidator, ValidationResult, ValidatorRegistry};
+pub use scope::{extract_scope, MetricScope};
 pub use services::{
     resolve_file_path, AdapterLifecycleManager, AnchorServiceConfig, Audience, CallTimer,
     CodeContext, CodeLine, ConfigService, ConfigUpdateResult, ConnectionService,

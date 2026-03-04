@@ -36,6 +36,7 @@ impl RemoveMetricResult {
 pub async fn remove_metric_impl(
     state: &Arc<ApiState>,
     params: RemoveMetricParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<RemoveMetricResult, McpError> {
     // First check if metric exists
     let metric = match state
@@ -63,7 +64,12 @@ pub async fn remove_metric_impl(
     helpers::connection::require_debugger_connected(state).await?;
 
     if let Some(metric_id) = metric.id {
-        match state.context.metric_service.remove_metric(metric_id).await {
+        match state
+            .context
+            .metric_service
+            .remove_metric(metric_id, scope)
+            .await
+        {
             Ok(_) => Ok(RemoveMetricResult { name: params.name }),
             Err(e) => Err(McpError::internal_error(
                 format!("Failed to remove metric: {}", e),
@@ -118,6 +124,7 @@ impl ToggleMetricResult {
 pub async fn toggle_metric_impl(
     state: &Arc<ApiState>,
     params: ToggleMetricParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<ToggleMetricResult, McpError> {
     // First check if metric exists
     let metric = match state
@@ -148,7 +155,7 @@ pub async fn toggle_metric_impl(
         match state
             .context
             .metric_service
-            .toggle_metric(metric_id, params.enabled)
+            .toggle_metric(metric_id, params.enabled, scope)
             .await
         {
             Ok(result) => Ok(ToggleMetricResult {
@@ -256,6 +263,7 @@ impl UpdateMetricResult {
 pub async fn update_metric_impl(
     state: &Arc<ApiState>,
     params: UpdateMetricParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<UpdateMetricResult, McpError> {
     // Get the current metric first
     let mut metric = state
@@ -281,7 +289,7 @@ pub async fn update_metric_impl(
     state
         .context
         .metric_service
-        .update_metric(&metric)
+        .update_metric(&metric, scope)
         .await
         .mcp_context("Failed to update metric")?;
 

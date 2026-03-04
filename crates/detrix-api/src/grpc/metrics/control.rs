@@ -4,16 +4,29 @@ use crate::error::ToStatusResult;
 use crate::generated::detrix::v1::{
     GroupRequest, GroupResponse, ToggleMetricRequest, ToggleMetricResponse,
 };
+use crate::grpc::interceptor::AuthenticatedUser;
 use crate::state::ApiState;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
+
+/// Extract AuthenticatedUser from gRPC request extensions.
+/// Always present — the interceptor injects a default Admin when auth is disabled.
+fn extract_user<T>(request: &Request<T>) -> Result<AuthenticatedUser, Status> {
+    request
+        .extensions()
+        .get::<AuthenticatedUser>()
+        .cloned()
+        .ok_or_else(|| Status::unauthenticated("Missing authentication"))
+}
 
 /// Handle toggle_metric request
 pub async fn handle_toggle_metric(
     state: &Arc<ApiState>,
     request: Request<ToggleMetricRequest>,
 ) -> Result<Response<ToggleMetricResponse>, Status> {
+    let user = extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
+    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
     let req = request.into_inner();
     tracing::info!(
         metric_id = req.metric_id,
@@ -36,7 +49,7 @@ pub async fn handle_toggle_metric(
     let result = state
         .context
         .metric_service
-        .toggle_metric(metric_id, req.enabled)
+        .toggle_metric(metric_id, req.enabled, &scope)
         .await
         .to_status()?;
 
@@ -58,7 +71,9 @@ pub async fn handle_enable_group(
     state: &Arc<ApiState>,
     request: Request<GroupRequest>,
 ) -> Result<Response<GroupResponse>, Status> {
+    let user = extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
+    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
     let req = request.into_inner();
     tracing::info!(group = %req.group_name, ?client_id, "gRPC: enable_group");
 
@@ -66,7 +81,7 @@ pub async fn handle_enable_group(
     let result = state
         .context
         .metric_service
-        .enable_group(&req.group_name)
+        .enable_group(&req.group_name, &scope)
         .await
         .to_status()?;
 
@@ -93,7 +108,9 @@ pub async fn handle_disable_group(
     state: &Arc<ApiState>,
     request: Request<GroupRequest>,
 ) -> Result<Response<GroupResponse>, Status> {
+    let user = extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
+    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
     let req = request.into_inner();
     tracing::info!(group = %req.group_name, ?client_id, "gRPC: disable_group");
 
@@ -101,7 +118,7 @@ pub async fn handle_disable_group(
     let result = state
         .context
         .metric_service
-        .disable_group(&req.group_name)
+        .disable_group(&req.group_name, &scope)
         .await
         .to_status()?;
 
