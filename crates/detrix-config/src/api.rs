@@ -370,27 +370,46 @@ pub enum AuthMode {
     External,
 }
 
+/// Role for a static user
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UserRole {
+    Admin,
+    User,
+}
+
+/// A statically configured user with a bearer token
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StaticUser {
+    /// Bearer token (constant-time compared)
+    pub token: String,
+    /// User identity — becomes `metric.user_id`
+    pub user_id: String,
+    /// Role: admin or user
+    pub role: UserRole,
+}
+
 /// Authentication configuration for API endpoints
 ///
 /// Supports two modes:
-/// 1. **Simple mode**: Static bearer token from config (like Prometheus)
+/// 1. **Simple mode**: Per-user static tokens from config
 /// 2. **External mode**: JWT validation via JWKS endpoint (for enterprise SSO)
 ///
 /// When `mode` is `None` (no `[api.auth]` section in config), the daemon
-/// auto-generates a bearer token for secure-by-default operation.
+/// auto-generates a token for secure-by-default operation.
 /// When `mode` is `Some(Disabled)`, auth is explicitly disabled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     /// Authentication mode.
     /// - `None`: not configured (daemon auto-enables auth)
     /// - `Some(Disabled)`: explicitly disabled
-    /// - `Some(Simple)`: static bearer token
+    /// - `Some(Simple)`: per-user static tokens
     /// - `Some(External)`: JWT via JWKS
     #[serde(default)]
     pub mode: Option<AuthMode>,
-    /// Bearer token for simple mode
+    /// Per-user static tokens for simple mode (replaces bearer_token)
     #[serde(default)]
-    pub bearer_token: Option<String>,
+    pub users: Vec<StaticUser>,
     /// JWT configuration for external mode
     #[serde(default)]
     pub jwt: JwtConfig,
@@ -420,6 +439,12 @@ pub struct JwtConfig {
     /// JWKS cache TTL in seconds (default: 300 = 5 minutes)
     #[serde(default = "default_jwks_cache_ttl")]
     pub cache_ttl_seconds: u64,
+    /// JWT claim name containing user roles (e.g. "roles", "realm_access.roles")
+    #[serde(default)]
+    pub admin_role_claim: Option<String>,
+    /// Value within the role claim that grants admin access (e.g. "detrix-admin")
+    #[serde(default)]
+    pub admin_role_value: Option<String>,
 }
 
 impl Default for JwtConfig {
@@ -429,6 +454,8 @@ impl Default for JwtConfig {
             issuer: None,
             audience: None,
             cache_ttl_seconds: DEFAULT_JWKS_CACHE_TTL_SECONDS,
+            admin_role_claim: None,
+            admin_role_value: None,
         }
     }
 }
@@ -463,11 +490,22 @@ impl AuthConfig {
     pub fn validate(&self) -> Result<(), String> {
         match self.effective_mode() {
             AuthMode::Disabled => Ok(()),
-            AuthMode::Simple => match &self.bearer_token {
-                Some(token) if !token.is_empty() => Ok(()),
-                Some(_) => Err("api.auth.bearer_token cannot be empty in simple mode".to_string()),
-                None => Err("api.auth.bearer_token is required in simple mode".to_string()),
-            },
+            AuthMode::Simple => {
+                if self.users.is_empty() {
+                    return Err(
+                        "api.auth.users must contain at least one user in simple mode".to_string(),
+                    );
+                }
+                for (i, user) in self.users.iter().enumerate() {
+                    if user.token.is_empty() {
+                        return Err(format!("api.auth.users[{}].token cannot be empty", i));
+                    }
+                    if user.user_id.is_empty() {
+                        return Err(format!("api.auth.users[{}].user_id cannot be empty", i));
+                    }
+                }
+                Ok(())
+            }
             AuthMode::External => {
                 if self.jwt.jwks_url.is_none() {
                     return Err("api.auth.jwt.jwks_url is required in external mode".to_string());
@@ -475,6 +513,12 @@ impl AuthConfig {
                 Ok(())
             }
         }
+    }
+
+    /// Look up a static user by token.
+    /// Returns `None` if no user matches.
+    pub fn find_user_by_token(&self, token: &str) -> Option<&StaticUser> {
+        self.users.iter().find(|u| u.token == token)
     }
 
     /// Check if a path is a public endpoint (no auth required)
@@ -502,7 +546,7 @@ impl Default for AuthConfig {
     fn default() -> Self {
         AuthConfig {
             mode: None,
-            bearer_token: None,
+            users: Vec::new(),
             jwt: JwtConfig::default(),
             public_endpoints: default_public_endpoints(),
             grpc_public_methods: default_grpc_public_methods(),
@@ -741,11 +785,27 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
+    fn alice_user() -> StaticUser {
+        StaticUser {
+            token: "dtx_alice_secret".to_string(),
+            user_id: "alice".to_string(),
+            role: UserRole::User,
+        }
+    }
+
+    fn admin_user() -> StaticUser {
+        StaticUser {
+            token: "dtx_admin_secret".to_string(),
+            user_id: "admin".to_string(),
+            role: UserRole::Admin,
+        }
+    }
+
     #[test]
-    fn test_auth_config_simple_mode() {
+    fn test_auth_config_simple_mode_with_users() {
         let config = AuthConfig {
             mode: Some(AuthMode::Simple),
-            bearer_token: Some("my-secret-token".to_string()),
+            users: vec![alice_user(), admin_user()],
             ..Default::default()
         };
         assert!(config.validate().is_ok());
@@ -753,10 +813,10 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_config_simple_mode_missing_token() {
+    fn test_auth_config_simple_mode_no_users() {
         let config = AuthConfig {
             mode: Some(AuthMode::Simple),
-            bearer_token: None,
+            users: vec![],
             ..Default::default()
         };
         assert!(config.validate().is_err());
@@ -766,10 +826,47 @@ mod tests {
     fn test_auth_config_simple_mode_empty_token() {
         let config = AuthConfig {
             mode: Some(AuthMode::Simple),
-            bearer_token: Some("".to_string()),
+            users: vec![StaticUser {
+                token: "".to_string(),
+                user_id: "alice".to_string(),
+                role: UserRole::User,
+            }],
             ..Default::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_auth_config_simple_mode_empty_user_id() {
+        let config = AuthConfig {
+            mode: Some(AuthMode::Simple),
+            users: vec![StaticUser {
+                token: "dtx_token".to_string(),
+                user_id: "".to_string(),
+                role: UserRole::User,
+            }],
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_auth_config_find_user_by_token() {
+        let config = AuthConfig {
+            mode: Some(AuthMode::Simple),
+            users: vec![alice_user(), admin_user()],
+            ..Default::default()
+        };
+        let found = config.find_user_by_token("dtx_alice_secret");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().user_id, "alice");
+        assert_eq!(found.unwrap().role, UserRole::User);
+
+        let admin = config.find_user_by_token("dtx_admin_secret");
+        assert!(admin.is_some());
+        assert_eq!(admin.unwrap().role, UserRole::Admin);
+
+        assert!(config.find_user_by_token("unknown").is_none());
     }
 
     #[test]
@@ -781,11 +878,18 @@ mod tests {
                 issuer: Some("https://auth.example.com".to_string()),
                 audience: Some("detrix".to_string()),
                 cache_ttl_seconds: 300,
+                admin_role_claim: Some("roles".to_string()),
+                admin_role_value: Some("detrix-admin".to_string()),
             },
             ..Default::default()
         };
         assert!(config.validate().is_ok());
         assert!(config.is_enabled());
+        assert_eq!(config.jwt.admin_role_claim, Some("roles".to_string()));
+        assert_eq!(
+            config.jwt.admin_role_value,
+            Some("detrix-admin".to_string())
+        );
     }
 
     #[test]
@@ -801,14 +905,11 @@ mod tests {
     #[test]
     fn test_auth_config_default_mode_is_none() {
         let config = AuthConfig::default();
-        // Default mode is None (not configured), NOT Some(Disabled)
         assert_eq!(config.mode, None);
-        // effective_mode() normalizes None to Disabled
         assert_eq!(config.effective_mode(), AuthMode::Disabled);
-        // Not enabled (None is not Simple or External)
         assert!(!config.is_enabled());
-        // Validates OK (None = auto-handled by daemon)
         assert!(config.validate().is_ok());
+        assert!(config.users.is_empty());
     }
 
     #[test]
@@ -819,31 +920,22 @@ mod tests {
             ..Default::default()
         };
 
-        // Both behave the same for validation and middleware
         assert_eq!(
             none_config.effective_mode(),
             disabled_config.effective_mode()
         );
         assert_eq!(none_config.is_enabled(), disabled_config.is_enabled());
 
-        // But they differ in mode — daemon uses this to decide auto-auth
         assert_eq!(none_config.mode, None);
         assert_eq!(disabled_config.mode, Some(AuthMode::Disabled));
     }
 
     #[test]
     fn test_auth_config_toml_parsing_absent_mode() {
-        // When mode key is absent (even if other keys are present), mode should be None
-        let config_toml = r#"
-bearer_token = "ignored-since-no-mode"
-"#;
-        let config: AuthConfig = toml::from_str(config_toml).expect("Failed to parse TOML");
-        assert_eq!(config.mode, None);
-        assert!(!config.is_enabled());
-
-        // Empty TOML also yields None mode
+        // Empty TOML yields None mode
         let config: AuthConfig = toml::from_str("").expect("Failed to parse empty TOML");
         assert_eq!(config.mode, None);
+        assert!(!config.is_enabled());
     }
 
     #[test]
@@ -860,17 +952,31 @@ bearer_token = "ignored-since-no-mode"
     }
 
     #[test]
-    fn test_auth_config_toml_parsing_simple() {
+    fn test_auth_config_toml_parsing_simple_with_users() {
         let config_toml = r#"
 mode = "simple"
-bearer_token = "my-test-token"
+
+[[users]]
+token = "dtx_alice_3f9a"
+user_id = "alice"
+role = "user"
+
+[[users]]
+token = "dtx_admin_7c2b"
+user_id = "admin"
+role = "admin"
 "#;
 
         let config: AuthConfig = toml::from_str(config_toml).expect("Failed to parse TOML");
 
         assert_eq!(config.mode, Some(AuthMode::Simple));
-        assert_eq!(config.bearer_token, Some("my-test-token".to_string()));
+        assert_eq!(config.users.len(), 2);
+        assert_eq!(config.users[0].user_id, "alice");
+        assert_eq!(config.users[0].role, UserRole::User);
+        assert_eq!(config.users[1].user_id, "admin");
+        assert_eq!(config.users[1].role, UserRole::Admin);
         assert!(config.is_enabled());
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -893,6 +999,8 @@ mode = "external"
 [jwt]
 jwks_url = "https://auth.example.com/.well-known/jwks.json"
 issuer = "https://auth.example.com"
+admin_role_claim = "roles"
+admin_role_value = "detrix-admin"
 "#;
 
         let config: AuthConfig = toml::from_str(config_toml).expect("Failed to parse TOML");
@@ -902,6 +1010,11 @@ issuer = "https://auth.example.com"
         assert_eq!(
             config.jwt.jwks_url,
             Some("https://auth.example.com/.well-known/jwks.json".to_string())
+        );
+        assert_eq!(config.jwt.admin_role_claim, Some("roles".to_string()));
+        assert_eq!(
+            config.jwt.admin_role_value,
+            Some("detrix-admin".to_string())
         );
     }
 

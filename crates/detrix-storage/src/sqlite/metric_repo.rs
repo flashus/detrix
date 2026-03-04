@@ -88,15 +88,15 @@ impl MetricRepository for SqliteStorage {
             INSERT INTO metrics (
                 name, connection_id, group_name, location, expressions_json, expression_hash, language,
                 enabled, mode_type, mode_config, condition_expr, safety_level,
-                created_at, updated_at, created_by,
+                created_at, updated_at, user_id, agent_id,
                 capture_stack_trace, stack_trace_ttl, stack_trace_slice,
                 capture_memory_snapshot, snapshot_scope, snapshot_ttl,
                 anchor_symbol, anchor_symbol_kind, anchor_symbol_range, anchor_offset,
                 anchor_fingerprint, anchor_context_before, anchor_source_line, anchor_context_after,
                 anchor_last_verified, anchor_original_location, anchor_status
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-                    ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
+                    ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)
             ON CONFLICT(location, connection_id) DO UPDATE SET
                 name = excluded.name,
                 group_name = excluded.group_name,
@@ -144,7 +144,8 @@ impl MetricRepository for SqliteStorage {
                 .bind(safety_level)
                 .bind(now)
                 .bind(now)
-                .bind(metric.created_by.as_deref().unwrap_or("system"))
+                .bind(metric.user_id.as_deref().unwrap_or("system"))
+                .bind(metric.agent_id.as_deref())
                 .bind(metric.capture_stack_trace)
                 .bind(metric.stack_trace_ttl.map(|t| t as i64))
                 .bind(&stack_trace_slice_json)
@@ -172,15 +173,15 @@ impl MetricRepository for SqliteStorage {
             INSERT INTO metrics (
                 name, connection_id, group_name, location, expressions_json, expression_hash, language,
                 enabled, mode_type, mode_config, condition_expr, safety_level,
-                created_at, updated_at, created_by,
+                created_at, updated_at, user_id, agent_id,
                 capture_stack_trace, stack_trace_ttl, stack_trace_slice,
                 capture_memory_snapshot, snapshot_scope, snapshot_ttl,
                 anchor_symbol, anchor_symbol_kind, anchor_symbol_range, anchor_offset,
                 anchor_fingerprint, anchor_context_before, anchor_source_line, anchor_context_after,
                 anchor_last_verified, anchor_original_location, anchor_status
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-                    ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
+                    ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)
             "#;
 
             sqlx::query(query)
@@ -198,7 +199,8 @@ impl MetricRepository for SqliteStorage {
                 .bind(safety_level)
                 .bind(now)
                 .bind(now)
-                .bind(metric.created_by.as_deref().unwrap_or("system"))
+                .bind(metric.user_id.as_deref().unwrap_or("system"))
+                .bind(metric.agent_id.as_deref())
                 .bind(metric.capture_stack_trace)
                 .bind(metric.stack_trace_ttl.map(|t| t as i64))
                 .bind(&stack_trace_slice_json)
@@ -463,21 +465,54 @@ impl MetricRepository for SqliteStorage {
         connection_id: &ConnectionId,
         file: &str,
         line: u32,
+        user_id: Option<&str>,
     ) -> Result<Option<Metric>> {
         // Location is stored as "@file#line" format
         let location_pattern = format!("@{}#{}", file, line);
 
-        let row =
-            sqlx::query("SELECT * FROM metrics WHERE connection_id = ? AND location = ? LIMIT 1")
+        let row = match user_id {
+            Some(uid) => {
+                sqlx::query(
+                    "SELECT * FROM metrics WHERE connection_id = ? AND location = ? AND user_id = ? LIMIT 1",
+                )
+                .bind(&connection_id.0)
+                .bind(&location_pattern)
+                .bind(uid)
+                .fetch_optional(self.pool())
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "SELECT * FROM metrics WHERE connection_id = ? AND location = ? LIMIT 1",
+                )
                 .bind(&connection_id.0)
                 .bind(&location_pattern)
                 .fetch_optional(self.pool())
-                .await?;
+                .await?
+            }
+        };
 
         match row {
             Some(ref r) => Ok(Some(row_to_metric(r)?)),
             None => Ok(None),
         }
+    }
+
+    async fn find_all_at_location(
+        &self,
+        connection_id: &ConnectionId,
+        file: &str,
+        line: u32,
+    ) -> Result<Vec<Metric>> {
+        let location_pattern = format!("@{}#{}", file, line);
+
+        let rows = sqlx::query("SELECT * FROM metrics WHERE connection_id = ? AND location = ?")
+            .bind(&connection_id.0)
+            .bind(&location_pattern)
+            .fetch_all(self.pool())
+            .await?;
+
+        rows.iter().map(row_to_metric).collect()
     }
 
     async fn find_filtered(
@@ -822,7 +857,12 @@ pub(crate) fn row_to_metric(row: &sqlx::sqlite::SqliteRow) -> Result<Metric> {
         condition: condition_expr,
         safety_level,
         created_at: Some(created_at),
-        created_by: row.try_get("created_by").unwrap_or(None),
+        user_id: row
+            .try_get("user_id")
+            .ok()
+            .flatten()
+            .or_else(|| row.try_get("created_by").unwrap_or(None)),
+        agent_id: row.try_get("agent_id").unwrap_or(None),
         // Introspection fields
         capture_stack_trace,
         stack_trace_ttl: stack_trace_ttl.map(|t| t as u64),

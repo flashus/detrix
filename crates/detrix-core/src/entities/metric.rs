@@ -164,10 +164,15 @@ pub struct Metric {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>, // Microseconds since epoch
 
-    /// Client identity of the creator (from X-Detrix-Client-Id header).
-    /// Used for user-scoped disable_metrics on daemon switch.
+    /// Authenticated user identity (from token or JWT sub claim).
+    /// Used for multi-tenant metric ownership and access control.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_by: Option<String>,
+    pub user_id: Option<String>,
+
+    /// Agent/session identity (from MCP client_id or X-Detrix-Agent-Id header).
+    /// Identifies which agent/session created this metric within a user's scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 
     // Stack trace capture options
     #[serde(default)]
@@ -290,7 +295,8 @@ impl Metric {
             condition: None,
             safety_level: SafetyLevel::default(),
             created_at: None,
-            created_by: None,
+            user_id: None,
+            agent_id: None,
             // Stack trace defaults
             capture_stack_trace: false,
             stack_trace_ttl: None,

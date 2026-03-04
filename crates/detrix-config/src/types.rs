@@ -121,7 +121,7 @@ impl Config {
     ///
     /// Sensitive fields are replaced with "***REDACTED***":
     /// - `output.gelf.http.auth_token`
-    /// - `api.auth.bearer_token`
+    /// - `api.auth.users[*].token`
     ///
     /// Use this method before serializing config for external consumption.
     pub fn redacted(&self) -> Self {
@@ -132,9 +132,9 @@ impl Config {
             config.output.gelf.http.auth_token = Some("***REDACTED***".to_string());
         }
 
-        // Redact API auth bearer token
-        if config.api.auth.bearer_token.is_some() {
-            config.api.auth.bearer_token = Some("***REDACTED***".to_string());
+        // Redact API auth user tokens
+        for user in &mut config.api.auth.users {
+            user.token = "***REDACTED***".to_string();
         }
 
         config

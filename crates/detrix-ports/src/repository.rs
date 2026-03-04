@@ -80,14 +80,29 @@ pub trait MetricRepository: Send + Sync {
     /// Find metrics by connection ID
     async fn find_by_connection_id(&self, connection_id: &ConnectionId) -> Result<Vec<Metric>>;
 
-    /// Find metric by location (file:line) and connection ID
-    /// Used to detect duplicate metrics at the same breakpoint location
+    /// Find metric by location (file:line), connection ID, and user ID
+    ///
+    /// Used to detect duplicate metrics at the same breakpoint location for a specific user.
+    /// In multi-tenant mode, each user owns their own metric at a location.
+    /// Pass `None` for `user_id` to find any metric at this location (legacy/admin).
     async fn find_by_location(
         &self,
         connection_id: &ConnectionId,
         file: &str,
         line: u32,
+        user_id: Option<&str>,
     ) -> Result<Option<Metric>>;
+
+    /// Find ALL metrics at a location across all users
+    ///
+    /// Used by logpoint merging: DAP has one logpoint per (file, line, connection_id),
+    /// so we need to union expressions from all users' metrics at that location.
+    async fn find_all_at_location(
+        &self,
+        connection_id: &ConnectionId,
+        file: &str,
+        line: u32,
+    ) -> Result<Vec<Metric>>;
 
     /// Update existing metric
     async fn update(&self, metric: &Metric) -> Result<()>;
