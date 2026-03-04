@@ -91,7 +91,11 @@ port = {}
 
 [api.auth]
 mode = "simple"
-bearer_token = "{}"
+
+[[api.auth.users]]
+token = "{}"
+user_id = "test-user"
+role = "admin"
 
 [safety]
 enable_ast_analysis = false

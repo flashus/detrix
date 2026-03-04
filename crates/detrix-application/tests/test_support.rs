@@ -310,8 +310,18 @@ impl MetricRepository for MockMetricRepository {
         _connection_id: &ConnectionId,
         _file: &str,
         _line: u32,
+        _user_id: Option<&str>,
     ) -> Result<Option<Metric>> {
         Ok(None)
+    }
+
+    async fn find_all_at_location(
+        &self,
+        _connection_id: &ConnectionId,
+        _file: &str,
+        _line: u32,
+    ) -> Result<Vec<Metric>> {
+        Ok(Vec::new())
     }
 
     async fn find_filtered(

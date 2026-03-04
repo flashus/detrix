@@ -8,7 +8,7 @@ mod tests {
     use crate::services::AdapterLifecycleManager;
     use crate::{
         ConnectionRepositoryRef, DapAdapter, DapAdapterFactory, DapAdapterFactoryRef,
-        DapAdapterRef, MetricRepositoryRef, RemoveMetricResult, SetMetricResult,
+        DapAdapterRef, MetricRepositoryRef, MetricScope, RemoveMetricResult, SetMetricResult,
     };
     use async_trait::async_trait;
     use detrix_core::{
@@ -424,7 +424,8 @@ mod tests {
             condition: None,
             safety_level: SafetyLevel::Strict,
             created_at: None,
-            created_by: None,
+            user_id: None,
+            agent_id: None,
             // Default values for introspection fields
             capture_stack_trace: false,
             stack_trace_ttl: None,
@@ -628,7 +629,10 @@ mod tests {
         metric.expressions = vec!["updated_expression.value".to_string()];
         metric.enabled = false;
 
-        service.update_metric(&metric).await.unwrap();
+        service
+            .update_metric(&metric, &MetricScope::Admin)
+            .await
+            .unwrap();
 
         // Verify update
         let retrieved = service.get_metric(metric_id).await.unwrap().unwrap();
@@ -647,7 +651,10 @@ mod tests {
         assert!(service.get_metric(metric_id).await.unwrap().is_some());
 
         // Remove it
-        service.remove_metric(metric_id).await.unwrap();
+        service
+            .remove_metric(metric_id, &MetricScope::Admin)
+            .await
+            .unwrap();
 
         // Verify it's gone
         assert!(service.get_metric(metric_id).await.unwrap().is_none());
@@ -665,12 +672,18 @@ mod tests {
         assert!(retrieved.enabled);
 
         // Disable
-        service.toggle_metric(metric_id, false).await.unwrap();
+        service
+            .toggle_metric(metric_id, false, &MetricScope::Admin)
+            .await
+            .unwrap();
         let retrieved = service.get_metric(metric_id).await.unwrap().unwrap();
         assert!(!retrieved.enabled);
 
         // Enable
-        service.toggle_metric(metric_id, true).await.unwrap();
+        service
+            .toggle_metric(metric_id, true, &MetricScope::Admin)
+            .await
+            .unwrap();
         let retrieved = service.get_metric(metric_id).await.unwrap().unwrap();
         assert!(retrieved.enabled);
     }
@@ -699,7 +712,10 @@ mod tests {
             .unwrap()
             .value;
 
-        let result = service.enable_group("test_group").await.unwrap();
+        let result = service
+            .enable_group("test_group", &MetricScope::Admin)
+            .await
+            .unwrap();
         assert_eq!(result.succeeded, 2);
         assert!(result.is_complete());
 
@@ -732,7 +748,10 @@ mod tests {
             .unwrap()
             .value;
 
-        let result = service.disable_group("test_group").await.unwrap();
+        let result = service
+            .disable_group("test_group", &MetricScope::Admin)
+            .await
+            .unwrap();
         assert_eq!(result.succeeded, 2);
         assert!(result.is_complete());
 
@@ -789,7 +808,10 @@ mod tests {
         adapter.fail_on_set_metric("metric_fail").await;
 
         // Enable group - should partially succeed
-        let result = service.enable_group("partial_group").await.unwrap();
+        let result = service
+            .enable_group("partial_group", &MetricScope::Admin)
+            .await
+            .unwrap();
 
         // Verify partial success
         assert_eq!(result.succeeded, 2, "Should have 2 successful enables");
@@ -860,7 +882,10 @@ mod tests {
         adapter.fail_on_remove_metric("metric_fail").await;
 
         // Disable group - should partially succeed
-        let result = service.disable_group("partial_group").await.unwrap();
+        let result = service
+            .disable_group("partial_group", &MetricScope::Admin)
+            .await
+            .unwrap();
 
         // Verify partial success
         assert_eq!(result.succeeded, 2, "Should have 2 successful disables");
@@ -913,7 +938,10 @@ mod tests {
         adapter.fail_on_set_metric("fail_metric").await;
 
         // Get result and try ensure_complete
-        let result = service.enable_group("test").await.unwrap();
+        let result = service
+            .enable_group("test", &MetricScope::Admin)
+            .await
+            .unwrap();
         let ensure_result = result.ensure_complete();
 
         // Should be an error
@@ -990,7 +1018,9 @@ mod tests {
         adapter.set_disconnected(true).await;
 
         // Try to enable - should fail
-        let result = service.toggle_metric(metric_id, true).await;
+        let result = service
+            .toggle_metric(metric_id, true, &MetricScope::Admin)
+            .await;
         assert!(result.is_err(), "Should fail when adapter is disconnected");
 
         // Verify metric is still disabled (rolled back)
@@ -1026,7 +1056,10 @@ mod tests {
         adapter.set_disconnected(true).await;
 
         // Enable group - all should fail
-        let result = service.enable_group("test").await.unwrap();
+        let result = service
+            .enable_group("test", &MetricScope::Admin)
+            .await
+            .unwrap();
 
         assert_eq!(result.succeeded, 0, "No metrics should succeed");
         assert_eq!(result.failed.len(), 2, "All metrics should fail");
@@ -1041,7 +1074,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remove_metric_fails_when_adapter_disconnected() {
+    async fn test_remove_metric_succeeds_when_adapter_disconnected() {
         let (service, adapter) = create_test_service_with_failing_adapter().await;
 
         // Add an enabled metric
@@ -1051,13 +1084,17 @@ mod tests {
         // Disconnect adapter
         adapter.set_disconnected(true).await;
 
-        // Try to remove - should fail (adapter needs to remove logpoint first)
-        let result = service.remove_metric(metric_id).await;
-        assert!(result.is_err(), "Should fail when adapter is disconnected");
+        // Remove should succeed — storage deletion happens, DAP cleanup is deferred
+        // (sync_logpoint gracefully handles missing adapter)
+        let result = service.remove_metric(metric_id, &MetricScope::Admin).await;
+        assert!(
+            result.is_ok(),
+            "Remove should succeed even when adapter is disconnected"
+        );
 
-        // Verify metric still exists
+        // Verify metric is gone from storage
         let metric = service.get_metric(metric_id).await.unwrap();
-        assert!(metric.is_some(), "Metric should still exist");
+        assert!(metric.is_none(), "Metric should be removed from storage");
     }
 
     // ==================== SafeMode Enforcement Tests ====================
@@ -1121,7 +1158,8 @@ mod tests {
             condition: None,
             safety_level: SafetyLevel::Strict,
             created_at: None,
-            created_by: None,
+            user_id: None,
+            agent_id: None,
             capture_stack_trace: false,
             stack_trace_ttl: None,
             stack_trace_slice: None,
@@ -1248,7 +1286,9 @@ mod tests {
         updated_metric.id = Some(metric_id);
         updated_metric.capture_stack_trace = true;
 
-        let result = service.update_metric(&updated_metric).await;
+        let result = service
+            .update_metric(&updated_metric, &MetricScope::Admin)
+            .await;
 
         assert!(
             result.is_err(),

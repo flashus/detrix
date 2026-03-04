@@ -14,7 +14,7 @@ use detrix_api::mcp::DetrixServer;
 use detrix_api::ApiState;
 use detrix_application::{
     AppContext, ConnectionReferenceRepositoryRef, ConnectionRepositoryRef, DapAdapterFactoryRef,
-    EventRepositoryRef, MetricRepositoryRef,
+    EventRepositoryRef, MetricRepositoryRef, MetricScope,
 };
 use detrix_config::ApiConfig;
 use detrix_core::{
@@ -144,7 +144,8 @@ impl McpE2eFixture {
             condition: None,
             safety_level: SafetyLevel::Strict,
             created_at: None,
-            created_by: None,
+            user_id: None,
+            agent_id: None,
             capture_stack_trace: false,
             stack_trace_ttl: None,
             stack_trace_slice: None,
@@ -235,7 +236,7 @@ async fn test_e2e_toggle_metric() {
         .state
         .context
         .metric_service
-        .toggle_metric(metric_id, false)
+        .toggle_metric(metric_id, false, &MetricScope::Admin)
         .await
         .unwrap();
 
@@ -254,7 +255,7 @@ async fn test_e2e_toggle_metric() {
         .state
         .context
         .metric_service
-        .toggle_metric(metric_id, true)
+        .toggle_metric(metric_id, true, &MetricScope::Admin)
         .await
         .unwrap();
 
@@ -343,7 +344,8 @@ async fn test_e2e_full_metric_lifecycle() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -379,7 +381,7 @@ async fn test_e2e_full_metric_lifecycle() {
         .state
         .context
         .metric_service
-        .toggle_metric(metric_id, false)
+        .toggle_metric(metric_id, false, &MetricScope::Admin)
         .await
         .unwrap();
 
@@ -388,7 +390,7 @@ async fn test_e2e_full_metric_lifecycle() {
         .state
         .context
         .metric_service
-        .toggle_metric(metric_id, true)
+        .toggle_metric(metric_id, true, &MetricScope::Admin)
         .await
         .unwrap();
 
@@ -397,7 +399,7 @@ async fn test_e2e_full_metric_lifecycle() {
         .state
         .context
         .metric_service
-        .remove_metric(metric_id)
+        .remove_metric(metric_id, &MetricScope::Admin)
         .await
         .unwrap();
 
@@ -438,7 +440,8 @@ async fn test_e2e_multi_expression_metric() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -557,7 +560,8 @@ async fn test_concurrent_tool_calls_no_deadlock() {
                 condition: None,
                 safety_level: SafetyLevel::Strict,
                 created_at: None,
-                created_by: None,
+                user_id: None,
+                agent_id: None,
                 capture_stack_trace: false,
                 stack_trace_ttl: None,
                 stack_trace_slice: None,
@@ -747,7 +751,8 @@ async fn test_e2e_observe_workflow_with_introspection() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: true,
         stack_trace_ttl: Some(600), // TTL like observe would set
         stack_trace_slice: None,
@@ -810,7 +815,8 @@ async fn test_e2e_observe_workflow_connection_binding() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -870,7 +876,8 @@ async fn test_e2e_observe_workflow_with_group() {
             condition: None,
             safety_level: SafetyLevel::Strict,
             created_at: None,
-            created_by: None,
+            user_id: None,
+            agent_id: None,
             capture_stack_trace: false,
             stack_trace_ttl: None,
             stack_trace_slice: None,
@@ -905,7 +912,7 @@ async fn test_e2e_observe_workflow_with_group() {
         .state
         .context
         .metric_service
-        .disable_group("auth_group")
+        .disable_group("auth_group", &MetricScope::Admin)
         .await
         .unwrap();
     assert_eq!(result.succeeded, 3);

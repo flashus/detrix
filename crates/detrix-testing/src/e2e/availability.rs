@@ -198,8 +198,8 @@ pub async fn require_tool(tool: ToolDependency) -> bool {
 
 /// Check if debugpy (Python debugger) is available.
 ///
-/// Checks `DETRIX_PYTHON` first (e.g. a uv-managed venv), then falls back to
-/// `python3` and `python` in PATH.
+/// Checks `DETRIX_PYTHON` first, then `python3`, `python`, and finally the
+/// uv-managed Python from `uv tool install debugpy` (`~/.local/share/uv/tools/debugpy/bin/python`).
 pub async fn is_debugpy_available() -> bool {
     let candidates: Vec<String> = {
         let mut v = Vec::new();
@@ -208,6 +208,10 @@ pub async fn is_debugpy_available() -> bool {
         }
         v.push("python3".to_string());
         v.push("python".to_string());
+        // uv tool install debugpy puts Python at a well-known path
+        if let Ok(home) = std::env::var("HOME") {
+            v.push(format!("{home}/.local/share/uv/tools/debugpy/bin/python"));
+        }
         v
     };
 

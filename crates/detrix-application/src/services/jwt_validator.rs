@@ -419,6 +419,8 @@ mod tests {
             issuer: Some("https://example.com".to_string()),
             audience: Some("detrix".to_string()),
             cache_ttl_seconds: 300,
+            admin_role_claim: None,
+            admin_role_value: None,
         };
         let result = JwksValidator::new(&config);
         assert!(result.is_ok());

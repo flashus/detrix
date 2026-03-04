@@ -36,6 +36,7 @@ use detrix_api::generated::detrix::v1::{
     streaming_service_server::StreamingServiceServer, AddMetricRequest, GetMetricRequest,
     ListMetricsRequest, Location, MetricMode, StreamMode,
 };
+use detrix_api::grpc::interceptor::{create_auth_interceptor, AuthInterceptorState};
 use detrix_api::grpc::{MetricsServiceImpl, StreamingServiceImpl};
 use detrix_api::ApiState;
 use detrix_application::{
@@ -191,6 +192,10 @@ impl E2ETestServer {
         let metrics_service = MetricsServiceImpl::new(Arc::clone(&state));
         let streaming_service = StreamingServiceImpl::new(Arc::clone(&state));
 
+        // Auth interceptor (disabled mode → injects default Admin user)
+        let auth_state = AuthInterceptorState::new(detrix_config::AuthConfig::default());
+        let auth_interceptor = create_auth_interceptor(auth_state);
+
         // Find available port for gRPC
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let grpc_addr = listener.local_addr()?;
@@ -202,8 +207,14 @@ impl E2ETestServer {
         // Spawn gRPC server
         tokio::spawn(async move {
             Server::builder()
-                .add_service(MetricsServiceServer::new(metrics_service))
-                .add_service(StreamingServiceServer::new(streaming_service))
+                .add_service(MetricsServiceServer::with_interceptor(
+                    metrics_service,
+                    auth_interceptor.clone(),
+                ))
+                .add_service(StreamingServiceServer::with_interceptor(
+                    streaming_service,
+                    auth_interceptor,
+                ))
                 .serve_with_incoming_shutdown(incoming, async {
                     let _ = shutdown_rx.await;
                 })

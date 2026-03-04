@@ -1005,13 +1005,22 @@ pub async fn wait_for_port(port: u16, timeout_secs: u64) -> bool {
 
 /// Find a Python executable that has debugpy available.
 ///
-/// Checks `DETRIX_PYTHON` env var first, then tries `python` and `python3` in order.
+/// Checks `DETRIX_PYTHON` env var first, then tries `python`, `python3`, and the
+/// uv-managed Python from `uv tool install debugpy` (`~/.local/share/uv/tools/debugpy/bin/python`).
 #[cfg(unix)]
 fn find_python() -> String {
     if let Ok(py) = std::env::var("DETRIX_PYTHON") {
         return py;
     }
-    for candidate in &["python", "python3"] {
+
+    // Standard names + uv-managed Python (installed via `uv tool install debugpy`).
+    // Use python3 before python to match the check order in is_debugpy_available().
+    let mut candidates = vec!["python3".to_string(), "python".to_string()];
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(format!("{home}/.local/share/uv/tools/debugpy/bin/python"));
+    }
+
+    for candidate in &candidates {
         let ok = std::process::Command::new(candidate)
             .args(["-c", "import debugpy"])
             .stdout(Stdio::null())
@@ -1020,7 +1029,7 @@ fn find_python() -> String {
             .map(|s| s.success())
             .unwrap_or(false);
         if ok {
-            return candidate.to_string();
+            return candidate.clone();
         }
     }
     "python".to_string() // last resort, will fail with a clear error

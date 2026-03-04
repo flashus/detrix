@@ -144,6 +144,7 @@ impl MetricRepository for MockMetricRepository {
         connection_id: &ConnectionId,
         file: &str,
         line: u32,
+        user_id: Option<&str>,
     ) -> Result<Option<Metric>> {
         Ok(self
             .metrics
@@ -154,8 +155,32 @@ impl MetricRepository for MockMetricRepository {
                 m.connection_id == *connection_id
                     && m.location.file == file
                     && m.location.line == line
+                    && match user_id {
+                        Some(uid) => m.user_id.as_deref() == Some(uid),
+                        None => true,
+                    }
             })
             .cloned())
+    }
+
+    async fn find_all_at_location(
+        &self,
+        connection_id: &ConnectionId,
+        file: &str,
+        line: u32,
+    ) -> Result<Vec<Metric>> {
+        Ok(self
+            .metrics
+            .read()
+            .unwrap()
+            .values()
+            .filter(|m| {
+                m.connection_id == *connection_id
+                    && m.location.file == file
+                    && m.location.line == line
+            })
+            .cloned()
+            .collect())
     }
 
     async fn find_filtered(
