@@ -29,6 +29,8 @@ pub struct MetricFilter {
     pub enabled: Option<bool>,
     /// Filter by group name
     pub group: Option<String>,
+    /// Filter by user ID (None = return all users, Some(uid) = only that user's metrics)
+    pub user_id: Option<String>,
 }
 
 /// Repository for metric entities

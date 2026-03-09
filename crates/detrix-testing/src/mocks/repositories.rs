@@ -211,6 +211,11 @@ impl MetricRepository for MockMetricRepository {
                         return false;
                     }
                 }
+                if let Some(ref uid) = filter.user_id {
+                    if m.user_id.as_deref() != Some(uid.as_str()) {
+                        return false;
+                    }
+                }
                 true
             })
             .cloned()

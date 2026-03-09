@@ -525,6 +525,7 @@ async fn test_find_filtered_by_connection_id() {
         connection_id: Some(ConnectionId::from("conn-alpha")),
         enabled: None,
         group: None,
+        user_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -539,6 +540,7 @@ async fn test_find_filtered_by_connection_id() {
         connection_id: Some(ConnectionId::from("conn-beta")),
         enabled: None,
         group: None,
+        user_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -575,6 +577,7 @@ async fn test_find_filtered_by_enabled() {
         connection_id: None,
         enabled: Some(true),
         group: None,
+        user_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -589,6 +592,7 @@ async fn test_find_filtered_by_enabled() {
         connection_id: None,
         enabled: Some(false),
         group: None,
+        user_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -626,6 +630,7 @@ async fn test_find_filtered_by_group() {
         connection_id: None,
         enabled: None,
         group: Some("authentication".to_string()),
+        user_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -642,6 +647,7 @@ async fn test_find_filtered_by_group() {
         connection_id: None,
         enabled: None,
         group: Some("payments".to_string()),
+        user_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -690,6 +696,7 @@ async fn test_find_filtered_combined_filters() {
         connection_id: Some(ConnectionId::from("conn-1")),
         enabled: Some(true),
         group: Some("group-a".to_string()),
+        user_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await

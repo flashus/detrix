@@ -97,7 +97,7 @@ impl MetricRepository for SqliteStorage {
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
                     ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)
-            ON CONFLICT(location, connection_id) DO UPDATE SET
+            ON CONFLICT(location, connection_id, user_id) DO UPDATE SET
                 name = excluded.name,
                 group_name = excluded.group_name,
                 expressions_json = excluded.expressions_json,
@@ -545,6 +545,11 @@ impl MetricRepository for SqliteStorage {
                 conditions.push("group_name = ?");
                 bind_values.push(group.clone());
             }
+        }
+
+        if let Some(ref uid) = filter.user_id {
+            conditions.push("user_id = ?");
+            bind_values.push(uid.clone());
         }
 
         let where_clause = if conditions.is_empty() {
