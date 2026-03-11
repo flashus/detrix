@@ -173,8 +173,32 @@ async fn connect_with_retry(
     let mut attempt = 0u32;
     let mut connection_refused_count = 0u32;
 
+    // Per-attempt timeout: cap each individual connect() call so OS-level TCP
+    // handshake timeouts (macOS default ~75 s) cannot block the entire loop.
+    // We use 10 s as a reasonable upper bound; fast-fail (ECONNREFUSED) returns
+    // immediately, so this only matters when the port is not yet open.
+    let per_attempt_timeout = Duration::from_secs(10);
+
     loop {
-        match TcpStream::connect(&address).await {
+        let connect_result =
+            tokio::time::timeout(per_attempt_timeout, TcpStream::connect(&address)).await;
+
+        let io_result = match connect_result {
+            Ok(r) => r,
+            Err(_) => {
+                // Per-attempt TCP timeout (not connection refused)
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "TCP connect to {} timed out after {}s",
+                        address,
+                        per_attempt_timeout.as_secs()
+                    ),
+                ))
+            }
+        };
+
+        match io_result {
             Ok(stream) => return Ok(stream),
             Err(e) => {
                 attempt += 1;

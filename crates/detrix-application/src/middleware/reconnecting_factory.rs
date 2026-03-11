@@ -106,7 +106,19 @@ impl DapAdapterFactory for ReconnectingAdapterFactory {
             .create_rust_adapter(host, port, program, pid)
             .await?;
 
-        // Wrap with reconnection middleware if enabled
+        // AttachPid mode (Rust client library): do NOT wrap with reconnection middleware.
+        //
+        // AttachPid sends a DAP "attach" request that triggers ptrace(PTRACE_ATTACH) on macOS,
+        // which can take 60-180 s while lldb-dap enumerates system dylibs. If the attach times
+        // out, retrying just re-attaches to the same (broken) state and wastes another 180 s.
+        // The outer 280 s safety limit in connection_service.rs would fire during a retry,
+        // preventing the connection from ever reaching "Failed" status within the 300 s test
+        // window. Skip the wrapper so a timeout propagates immediately.
+        if pid.is_some() {
+            return Ok(base_adapter);
+        }
+
+        // Wrap with reconnection middleware if enabled (Attach / LaunchProgram modes)
         if self.config.enabled {
             let reconnecting = ReconnectingAdapter::new(base_adapter, self.config.clone());
             Ok(Arc::new(reconnecting))

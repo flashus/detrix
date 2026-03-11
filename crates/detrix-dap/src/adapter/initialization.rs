@@ -5,6 +5,7 @@
 use super::config::{AdapterConfig, ConnectionMode};
 use crate::{Capabilities, DapBroker, Error, InitializeRequestArguments, Result};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -154,21 +155,32 @@ pub async fn initialize_dap(
                 host, port, program
             );
 
-            // Send launch request and wait for response
-            let response = broker.send_request("launch", Some(launch_args)).await?;
-
-            if !response.success {
-                return Err(Error::InitializationFailed(
-                    response
-                        .message
-                        .unwrap_or_else(|| "Launch failed".to_string()),
-                ));
-            }
-            debug!("Launch successful");
+            // Send launch WITHOUT waiting for a response.
+            //
+            // lldb-dap 21.x sent a `launch` response before the `initialized` event.
+            // lldb-dap 22.x emits events (`output`, `initialized`, `module`, …) instead
+            // and never sends a `launch` response at all.  Waiting for the response would
+            // block until the 30 s broker timeout.
+            //
+            // The broker's reader loop drains incoming events while we wait for the
+            // subsequent `configurationDone` response, so no events are lost.
+            let seq = broker.next_sequence().await;
+            let request = crate::Request {
+                seq,
+                command: "launch".to_string(),
+                arguments: Some(launch_args),
+            };
+            broker
+                .send_message_no_wait(crate::ProtocolMessage::Request(request))
+                .await?;
+            debug!(
+                "Launch request sent (seq={}), not waiting for response (lldb-dap 22+ emits events instead)",
+                seq
+            );
         }
         ConnectionMode::AttachPid {
-            host,
-            port,
+            host: _,
+            port: _,
             pid,
             program,
             wait_for,
@@ -201,27 +213,60 @@ pub async fn initialize_dap(
                 attach_args["initCommands"] = serde_json::json!(init_commands);
             }
 
-            debug!(
-                "Sending attach request to {}:{} with pid={:?}, program={:?}, waitFor={}, init_commands={}",
-                host, port, pid, program, wait_for, init_commands.len()
+            // Send attach WITHOUT waiting for a response.
+            //
+            // lldb-dap 22.x does not send an `attach` response — the same behavior
+            // change as `launch` mode (see ConnectionMode::LaunchProgram comments).
+            // It processes the attach, emits `module` events for each loaded library,
+            // and eventually handles `configurationDone`.  Waiting for the attach
+            // response would block indefinitely.
+            //
+            // On lldb-dap 21.x, the response IS sent but we don't need it — the
+            // configurationDone response (below) is sufficient to confirm success.
+            // The orphaned response triggers a harmless "unknown request seq" warning.
+            let seq = broker.next_sequence().await;
+            let request = crate::Request {
+                seq,
+                command: "attach".to_string(),
+                arguments: Some(attach_args),
+            };
+            broker
+                .send_message_no_wait(crate::ProtocolMessage::Request(request))
+                .await?;
+            info!(
+                "AttachPid: attach request sent (seq={}, not waiting for response — \
+                 lldb-dap 22+ behavior), pid={:?} init_commands={}",
+                seq,
+                pid,
+                init_commands.len()
             );
-
-            // Send attach request and wait for response
-            let response = broker.send_request("attach", Some(attach_args)).await?;
-
-            if !response.success {
-                return Err(Error::InitializationFailed(
-                    response
-                        .message
-                        .unwrap_or_else(|| "Attach failed".to_string()),
-                ));
-            }
-            debug!("Attach successful");
         }
     }
 
-    // Send configurationDone request to signal we're ready
-    let config_done_response = broker.send_request("configurationDone", None).await?;
+    // Send configurationDone request to signal we're ready.
+    //
+    // For AttachPid mode, configurationDone is queued behind the (potentially slow)
+    // attach processing inside lldb-dap.  On macOS Sequoia, lldb must enumerate
+    // 400+ system dylibs from the dyld shared cache before it can process
+    // configurationDone; this can take 60–300+ s even with all symbol-lookup
+    // optimizations disabled.  Use a long timeout to cover the full cycle.
+    let config_done_response = if matches!(config.connection_mode, ConnectionMode::AttachPid { .. })
+    {
+        let timeout = if cfg!(target_os = "macos") {
+            Duration::from_secs(420)
+        } else {
+            Duration::from_secs(120)
+        };
+        info!(
+            "AttachPid: waiting for configurationDone (timeout={}s, covers attach processing)",
+            timeout.as_secs()
+        );
+        broker
+            .send_request_with_timeout("configurationDone", None, timeout)
+            .await?
+    } else {
+        broker.send_request("configurationDone", None).await?
+    };
     if !config_done_response.success {
         return Err(Error::InitializationFailed(
             config_done_response

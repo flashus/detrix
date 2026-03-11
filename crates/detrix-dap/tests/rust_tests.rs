@@ -733,10 +733,17 @@ async fn test_lldb_full_connection() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("Failed to start lldb-dap");
+    let lldb_pid = lldb_process.id().unwrap_or(0);
+    if lldb_pid > 0 {
+        common::register_test_process("lldb-dap", lldb_pid);
+    }
 
     if !common::wait_for_port(port, 15).await {
         if let Ok(Some(status)) = lldb_process.try_wait() {
             eprintln!("lldb-dap process exited with status: {:?}", status);
+        }
+        if lldb_pid > 0 {
+            common::unregister_test_process("lldb-dap", lldb_pid);
         }
         lldb_process.kill().await.ok();
         RustFixture::cleanup(&script_path);
@@ -752,6 +759,9 @@ async fn test_lldb_full_connection() {
     let result = adapter.start().await;
 
     adapter.stop().await.ok();
+    if lldb_pid > 0 {
+        common::unregister_test_process("lldb-dap", lldb_pid);
+    }
     lldb_process.kill().await.ok();
     RustFixture::cleanup(&script_path);
     std::fs::remove_file(&binary_path).ok();
@@ -815,8 +825,15 @@ async fn test_lldb_launch_mode() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("Failed to start lldb-dap");
+    let lldb_pid = lldb_process.id().unwrap_or(0);
+    if lldb_pid > 0 {
+        common::register_test_process("lldb-dap", lldb_pid);
+    }
 
     if !common::wait_for_port(port, 15).await {
+        if lldb_pid > 0 {
+            common::unregister_test_process("lldb-dap", lldb_pid);
+        }
         lldb_process.kill().await.ok();
         std::fs::remove_file(&script_path).ok();
         std::fs::remove_file(&binary_path).ok();
@@ -845,6 +862,9 @@ async fn test_lldb_launch_mode() {
 
     // Cleanup
     adapter.stop().await.ok();
+    if lldb_pid > 0 {
+        common::unregister_test_process("lldb-dap", lldb_pid);
+    }
     lldb_process.kill().await.ok();
     std::fs::remove_file(&script_path).ok();
     std::fs::remove_file(&binary_path).ok();
@@ -891,8 +911,15 @@ async fn test_lldb_logpoint_setting() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("Failed to start lldb-dap");
+    let lldb_pid = lldb_process.id().unwrap_or(0);
+    if lldb_pid > 0 {
+        common::register_test_process("lldb-dap", lldb_pid);
+    }
 
     if !common::wait_for_port(port, 15).await {
+        if lldb_pid > 0 {
+            common::unregister_test_process("lldb-dap", lldb_pid);
+        }
         lldb_process.kill().await.ok();
         std::fs::remove_file(&script_path).ok();
         std::fs::remove_file(&binary_path).ok();
@@ -957,6 +984,9 @@ async fn test_lldb_logpoint_setting() {
 
     // Cleanup
     adapter.stop().await.ok();
+    if lldb_pid > 0 {
+        common::unregister_test_process("lldb-dap", lldb_pid);
+    }
     lldb_process.kill().await.ok();
     std::fs::remove_file(&script_path).ok();
     std::fs::remove_file(&binary_path).ok();
@@ -975,10 +1005,12 @@ async fn test_lldb_program_exit() {
     let port = common::get_test_port();
     eprintln!("Using port {} for lldb-dap exit test", port);
 
-    // Create a very short-running program (1 second)
+    // Program must run long enough for the DAP handshake (initialize + launch + configurationDone)
+    // to complete before the program exits. lldb-dap 22.x can take several seconds loading
+    // system dylibs on macOS. 5 s gives ample headroom while keeping the test reasonably fast.
     let script_path = std::env::temp_dir().join(format!("detrix_rust_exit_{}.rs", port));
     let binary_path = format!("/tmp/detrix_rust_exit_{}", port);
-    std::fs::write(&script_path, rust_program_with_logpoint_line(1)).unwrap();
+    std::fs::write(&script_path, rust_program_with_logpoint_line(5)).unwrap();
 
     let build_output = Command::new("rustc")
         .args(["-g", "-o", &binary_path, script_path.to_str().unwrap()])
@@ -1000,8 +1032,15 @@ async fn test_lldb_program_exit() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("Failed to start lldb-dap");
+    let lldb_pid = lldb_process.id().unwrap_or(0);
+    if lldb_pid > 0 {
+        common::register_test_process("lldb-dap", lldb_pid);
+    }
 
     if !common::wait_for_port(port, 15).await {
+        if lldb_pid > 0 {
+            common::unregister_test_process("lldb-dap", lldb_pid);
+        }
         lldb_process.kill().await.ok();
         std::fs::remove_file(&script_path).ok();
         std::fs::remove_file(&binary_path).ok();
@@ -1028,6 +1067,9 @@ async fn test_lldb_program_exit() {
 
     // Cleanup
     adapter.stop().await.ok();
+    if lldb_pid > 0 {
+        common::unregister_test_process("lldb-dap", lldb_pid);
+    }
     lldb_process.kill().await.ok();
     std::fs::remove_file(&script_path).ok();
     std::fs::remove_file(&binary_path).ok();

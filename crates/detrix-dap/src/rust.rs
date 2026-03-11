@@ -525,8 +525,51 @@ impl RustAdapter {
     ///
     /// Loads Rust's built-in LLDB formatters from the Rust sysroot.
     /// Falls back to simple formatters if Rust sysroot cannot be found.
+    ///
+    /// Also disables expensive dylib preloading that causes lldb-dap to emit
+    /// hundreds of `module` events on macOS (one per system dylib), which can
+    /// pause the target process for 30+ seconds via ptrace.
     fn build_init_commands_for_attach() -> Vec<String> {
-        let mut commands: Vec<String> = Vec::new();
+        // ── macOS attach performance ─────────────────────────────────────────────
+        //
+        // When lldb attaches to a running process on macOS it enumerates every
+        // loaded Mach-O image (400+ system dylibs on a typical Rust binary).  For
+        // each image it may attempt to:
+        //   1. Read the image's Mach-O headers via task_read_memory (ptrace).
+        //   2. Fetch a matching dSYM from Apple's dsymForUUID symbol server (network).
+        //   3. Load line tables and full symbol info.
+        //
+        // Step 2 is the main culprit: without the external-lookup disable, lldb
+        // sends a network request to dsymForUUID for every system dylib.  With 400+
+        // libraries and typical network latency each request adds up easily beyond
+        // 180 s.  Step 3 is also expensive but deferrable.
+        //
+        // The settings below eliminate those costs:
+        //
+        //  symbols.enable-external-lookup false
+        //      Do NOT contact Apple's symbol server (dsymForUUID) for any module.
+        //      This is the single most impactful setting; it eliminates the per-dylib
+        //      network round-trips entirely.
+        //
+        //  plugin.symbol-locator.debugsymbols.enable-background-lookup false
+        //      Suppress the Spotlight-based background dSYM lookup that can also
+        //      trigger slow filesystem/metadata scans after attach.
+        //
+        //  target.process.stop-on-sharedlibrary-events false
+        //      Do not halt the process at each shared-library load/unload event.
+        //
+        //  symbols.load-on-demand true  +  target.preload-symbols false
+        //      Defer symbol table loading until actually needed (e.g., a logpoint
+        //      expression is evaluated); avoid eager loading during the scan.
+        let mut commands = vec![
+            "settings set symbols.enable-external-lookup false".to_string(),
+            "settings set plugin.symbol-locator.debugsymbols.enable-background-lookup false"
+                .to_string(),
+            "settings set target.process.stop-on-sharedlibrary-events false".to_string(),
+            "settings set symbols.load-on-demand true".to_string(),
+            "settings set target.preload-symbols false".to_string(),
+        ];
+
         Self::load_sysroot_formatters(&mut commands);
         commands
     }

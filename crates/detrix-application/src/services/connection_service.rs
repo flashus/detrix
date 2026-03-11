@@ -154,13 +154,17 @@ impl ConnectionService {
         //    UUID is deterministic from identity, so find_by_id is equivalent to find_by_identity
         //    This handles idempotency and the case where restore_connections is running
         if let Ok(Some(existing)) = self.connection_repo.find_by_id(&connection_id).await {
-            if existing.status == ConnectionStatus::Connected
+            let is_connected = existing.status == ConnectionStatus::Connected
                 && self
                     .adapter_lifecycle_manager
                     .has_adapter(&existing.id)
-                    .await
-            {
-                // Even if already connected, ensure the caller holds a reference
+                    .await;
+            // Connecting = background start_adapter task is still running; return early to
+            // avoid spawning a second concurrent task for the same connection.
+            let is_starting = existing.status == ConnectionStatus::Connecting;
+
+            if is_connected || is_starting {
+                // Even if already connected/starting, ensure the caller holds a reference
                 if let Some(ref client_id) = created_by {
                     let reference = ConnectionReference::new(
                         existing.id.clone(),
@@ -175,12 +179,12 @@ impl ConnectionService {
                     }
                 }
                 info!(
-                    "Connection already exists and is connected (UUID={}), returning existing",
-                    connection_id.0
+                    "Connection already exists (status={}, UUID={}), returning existing",
+                    existing.status, connection_id.0
                 );
                 return Ok(existing.id);
             }
-            // Connection exists but not connected - will be restarted below
+            // Connection exists but not connected/starting - will be restarted below
             info!(
                 "Connection exists but not connected (UUID={}), will restart adapter",
                 connection_id.0
@@ -249,52 +253,189 @@ impl ConnectionService {
             }
         }
 
-        // 4. Start adapter via lifecycle manager (handles everything: start, subscribe, route events)
-        //    Note: start_adapter returns degradation info (sync_failed, resume_failed) which is logged internally
-        let _start_result = self
-            .adapter_lifecycle_manager
-            .start_adapter(
+        // 4. Start the DAP adapter.
+        //
+        //    AttachPid mode (pid.is_some()) — used by the Rust client with lldb-dap —
+        //    triggers a ptrace(PTRACE_ATTACH) call that freezes ALL threads of the target
+        //    process for 60–180 s on macOS while lldb-dap enumerates 400+ system dylibs.
+        //    If we awaited start_adapter synchronously here, the target's HTTP server would
+        //    be frozen and unable to send the HTTP 200 response for the POST /api/v1/connections
+        //    request, causing the client to time out.  We therefore set the status to
+        //    "Connecting" and spawn the adapter startup in a background task so that the
+        //    HTTP response is returned before ptrace freezes the process.
+        //
+        //    All other modes (Attach/AttachRemote/LaunchProgram) connect in under 5 s and
+        //    do not freeze the caller, so they run synchronously and return "Connected".
+        if pid.is_some() {
+            // --- Background path (AttachPid / lldb-dap only) ---
+            self.connection_repo
+                .update_status(&connection_id, ConnectionStatus::Connecting)
+                .await?;
+
+            // Clone Arc handles for the background task (all are cheap Arc clones)
+            let adapter_lifecycle_manager_bg = self.adapter_lifecycle_manager.clone();
+            let connection_repo_bg = self.connection_repo.clone();
+            let reference_repo_bg = self.reference_repo.clone();
+            let system_event_tx_bg = self.system_event_tx.clone();
+            let connection_id_bg = connection_id.clone();
+            let host_bg = connection.host.clone();
+            let port_bg = connection.port;
+            let language_bg = connection.language; // Copy
+            let safe_mode_bg = connection.safe_mode; // Copy
+
+            tokio::spawn(async move {
+                info!(
+                    connection_id = %connection_id_bg.0,
+                    host = %host_bg,
+                    port = port_bg,
+                    pid = ?pid,
+                    "Background adapter task started"
+                );
+
+                // 5. Start adapter (may block 60–420 s for ptrace dylib enumeration).
+                //
+                // Inner timeouts per stage:
+                //   connect 30 s + initialize 30 s + attach 420 s (macOS) / 120 s (Linux)
+                //   + configurationDone 30 s = 510 s (macOS) / 210 s (Linux) max.
+                // The outer 540 s timeout is a safety net in case any inner timeout
+                // fails to fire, guaranteeing the task terminates before the
+                // 600 s wait_for_connection_connected polling window expires.
+                let start_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(540),
+                    adapter_lifecycle_manager_bg.start_adapter(
+                        connection_id_bg.clone(),
+                        &host_bg,
+                        port_bg,
+                        language_bg,
+                        program,
+                        pid,
+                        safe_mode_bg,
+                    ),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::error!(
+                        connection_id = %connection_id_bg.0,
+                        "Background adapter task outer timeout (540 s) exceeded — \
+                         inner DAP timeouts did not fire; forcing Failed status"
+                    );
+                    Err(detrix_core::Error::Adapter(
+                        "adapter start timed out after 540 s (outer safety limit)".to_string(),
+                    ))
+                });
+
+                match start_result {
+                    Ok(_) => {
+                        // 6. Update connection status to Connected
+                        if let Err(e) = connection_repo_bg
+                            .update_status(&connection_id_bg, ConnectionStatus::Connected)
+                            .await
+                        {
+                            tracing::warn!(
+                                "Background adapter: failed to update {} to Connected: {e}",
+                                connection_id_bg.0
+                            );
+                        }
+
+                        // 7. Add client reference if created_by is provided
+                        if let Some(ref client_id) = created_by {
+                            let reference = ConnectionReference::new(
+                                connection_id_bg.clone(),
+                                ClientIdentity::bridge(client_id),
+                                ReferenceKind::Client,
+                            );
+                            if let Err(e) = reference_repo_bg.add_reference(&reference).await {
+                                tracing::warn!(
+                                    connection_id = %connection_id_bg.0,
+                                    client_id = %client_id,
+                                    error = %e,
+                                    "Background adapter: failed to add client reference (non-fatal)"
+                                );
+                            }
+                        }
+
+                        // 8. Emit connection created event
+                        let event = SystemEvent::connection_created(
+                            connection_id_bg.clone(),
+                            &host_bg,
+                            port_bg,
+                            language_bg.as_str(),
+                        );
+                        if let Err(e) = system_event_tx_bg.send(event) {
+                            tracing::warn!("No subscribers for connection_created event: {e}");
+                        }
+
+                        info!(
+                            "Adapter started for connection {} (background task)",
+                            connection_id_bg.0
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            connection_id = %connection_id_bg.0,
+                            error = %e,
+                            "Background adapter start failed"
+                        );
+                        if let Err(update_err) = connection_repo_bg
+                            .update_status(
+                                &connection_id_bg,
+                                ConnectionStatus::Failed(e.to_string()),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "Background adapter: also failed to update status to Failed: {update_err}"
+                            );
+                        }
+                    }
+                }
+            });
+        } else {
+            // --- Synchronous path (all non-AttachPid modes) ---
+            self.adapter_lifecycle_manager
+                .start_adapter(
+                    connection_id.clone(),
+                    &connection.host,
+                    connection.port,
+                    connection.language,
+                    program,
+                    pid,
+                    connection.safe_mode,
+                )
+                .await?;
+
+            // 5. Update connection status to Connected
+            self.connection_repo
+                .update_status(&connection_id, ConnectionStatus::Connected)
+                .await?;
+
+            // 6. Add client reference if created_by is provided
+            if let Some(ref client_id) = created_by {
+                let reference = ConnectionReference::new(
+                    connection_id.clone(),
+                    ClientIdentity::bridge(client_id),
+                    ReferenceKind::Client,
+                );
+                if let Err(e) = self.reference_repo.add_reference(&reference).await {
+                    tracing::warn!(
+                        connection_id = %connection_id.0,
+                        client_id = %client_id,
+                        error = %e,
+                        "Failed to add client reference (non-fatal)"
+                    );
+                }
+            }
+
+            // 7. Emit connection created event
+            let event = SystemEvent::connection_created(
                 connection_id.clone(),
                 &connection.host,
                 connection.port,
-                connection.language,
-                program,
-                pid,
-                connection.safe_mode,
-            )
-            .await?;
-
-        // 5. Update connection status to Connected
-        self.connection_repo
-            .update_status(&connection_id, ConnectionStatus::Connected)
-            .await?;
-
-        // 6. Add client reference if created_by is provided
-        if let Some(ref client_id) = created_by {
-            let reference = ConnectionReference::new(
-                connection_id.clone(),
-                ClientIdentity::bridge(client_id),
-                ReferenceKind::Client,
+                connection.language.as_str(),
             );
-            if let Err(e) = self.reference_repo.add_reference(&reference).await {
-                tracing::warn!(
-                    connection_id = %connection_id.0,
-                    client_id = %client_id,
-                    error = %e,
-                    "Failed to add client reference (non-fatal)"
-                );
+            if let Err(e) = self.system_event_tx.send(event) {
+                tracing::warn!("No subscribers for connection_created event: {e}");
             }
-        }
-
-        // 7. Emit connection created event
-        let event = SystemEvent::connection_created(
-            connection_id.clone(),
-            &connection.host,
-            connection.port,
-            connection.language.as_str(),
-        );
-        if let Err(e) = self.system_event_tx.send(event) {
-            tracing::warn!("No subscribers for connection_created event: {e}");
         }
 
         Ok(connection_id)

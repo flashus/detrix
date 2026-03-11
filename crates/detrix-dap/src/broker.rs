@@ -92,6 +92,57 @@ impl DapBroker {
         self.send_message(message).await
     }
 
+    /// Send a request and wait for response with a custom timeout.
+    ///
+    /// Use this when the default `request_timeout_ms` from config is too short
+    /// for a specific request (e.g. lldb-dap `attach` with PID on macOS, which
+    /// can block for 60–120 s while ptrace enumerates loaded dylibs).
+    pub async fn send_request_with_timeout(
+        &self,
+        command: impl Into<String>,
+        arguments: Option<serde_json::Value>,
+        timeout: std::time::Duration,
+    ) -> Result<Response> {
+        use std::time::Instant;
+
+        let cmd: String = command.into();
+        let seq = self.next_sequence().await;
+        debug!(command = %cmd, timeout_ms = timeout.as_millis(), "Sending DAP request (custom timeout)");
+
+        let request = Request {
+            seq,
+            command: cmd,
+            arguments,
+        };
+
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pending = self.pending_requests.write().await;
+            pending.insert(seq, tx);
+        }
+
+        self.send_message(ProtocolMessage::Request(request)).await?;
+
+        let timeout_ms = timeout.as_millis() as u64;
+        let response_start = Instant::now();
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(response)) => {
+                tracing::debug!(
+                    response_time_ms = response_start.elapsed().as_millis() as u64,
+                    "DAP request completed"
+                );
+                response
+            }
+            Ok(Err(_)) => Err(Error::Communication("Response channel closed".to_string())),
+            Err(_) => {
+                let mut pending = self.pending_requests.write().await;
+                pending.remove(&seq);
+                warn!(timeout_ms, "DAP request timed out");
+                Err(Error::Timeout(timeout_ms))
+            }
+        }
+    }
+
     /// Send a request and wait for response
     ///
     /// Uses tracing instrumentation for performance monitoring:
@@ -415,6 +466,47 @@ impl DapBroker {
                 }
             }
             ProtocolMessage::Event(event) => {
+                // Early-discard events that Detrix never processes.
+                // lldb-dap emits hundreds of `module` events during attach (one per
+                // system dylib) which would otherwise flood every subscriber channel
+                // and slow down the attach phase.  Filter them out here before any
+                // channel allocation so they are truly zero-cost.
+                //
+                // Kept: "output" (logpoints), "stopped" (breakpoints/exceptions),
+                //        "terminated", "exited", "continued", "breakpoint"
+                // Discarded: "module", "thread", "loadedSource", "capabilities",
+                //             "process", "progressStart", "progressUpdate", "progressEnd",
+                //             "invalidated", "memory" and any other unknown event types
+                match event.event.as_str() {
+                    "output" | "stopped" | "terminated" | "exited" | "continued" | "breakpoint" => {
+                    } // keep — fall through
+                    other => {
+                        // Count `module` events and log every 50 to show attach progress
+                        // at INFO level. lldb-dap emits one per dylib; 400+ expected on
+                        // macOS Sequoia. All other discarded events stay at trace.
+                        if other == "module" {
+                            static MODULE_COUNT: std::sync::atomic::AtomicUsize =
+                                std::sync::atomic::AtomicUsize::new(0);
+                            let n =
+                                MODULE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            if n.is_multiple_of(50) {
+                                info!(
+                                    "Broker: lldb-dap attach progress — {} module events received",
+                                    n
+                                );
+                            } else {
+                                debug!(
+                                    "Broker: discarding 'module' event #{} (lldb-dap attach progress)",
+                                    n
+                                );
+                            }
+                        } else {
+                            trace!("Broker: discarding DAP event '{}'", other);
+                        }
+                        return;
+                    }
+                }
+
                 // Broadcast to all subscribers using try_send (non-blocking)
                 // If a subscriber's channel is full, we drop the event for that subscriber
                 // and log a warning. This prevents slow consumers from blocking the broker.
