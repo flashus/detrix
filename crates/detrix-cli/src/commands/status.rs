@@ -6,6 +6,11 @@ use crate::output::{Formatter, OutputFormat};
 use anyhow::{Context, Result};
 
 /// Run status command
+///
+/// Tries gRPC first. If gRPC fails (e.g. auth error in JWT mode where no static
+/// token is available), falls back to the public REST `/health` endpoint which
+/// is always accessible without authentication. This makes `detrix status`
+/// usable as a Docker healthcheck even for JWT-protected daemons.
 pub async fn run(
     ctx: &ClientContext,
     format: OutputFormat,
@@ -15,21 +20,46 @@ pub async fn run(
 ) -> Result<()> {
     let formatter = Formatter::new(format, quiet, no_color);
 
-    // Use gRPC for status with pre-discovered endpoints
-    let mut client = MetricsClient::with_endpoints(&ctx.endpoints)
-        .await
-        .context("Failed to connect to daemon. Is the daemon running?")?;
-
-    let status = client.get_status().await.context("Failed to get status")?;
-
-    formatter.print_status(&status);
-
-    // In verbose mode, show detailed lists
-    if verbose {
-        print_verbose_details(&formatter, &ctx.endpoints).await?;
+    // Try gRPC first (has full status details)
+    let grpc_result = async {
+        let mut client = MetricsClient::with_endpoints(&ctx.endpoints)
+            .await
+            .context("Failed to connect to daemon. Is the daemon running?")?;
+        client.get_status().await.context("Failed to get status")
     }
+    .await;
 
-    Ok(())
+    match grpc_result {
+        Ok(status) => {
+            formatter.print_status(&status);
+            if verbose {
+                print_verbose_details(&formatter, &ctx.endpoints).await?;
+            }
+            Ok(())
+        }
+        Err(grpc_err) => {
+            // Fall back to public REST /health endpoint.
+            // This handles JWT-mode daemons where no static token is configured
+            // locally (e.g. Docker healthchecks inside the container).
+            let health_url = format!("{}/health", ctx.endpoints.http_endpoint());
+            let healthy = reqwest::Client::new()
+                .get(&health_url)
+                .timeout(std::time::Duration::from_secs(3))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+
+            if healthy {
+                if !quiet {
+                    formatter.print_success("Daemon is running (auth required for full status)");
+                }
+                Ok(())
+            } else {
+                Err(grpc_err)
+            }
+        }
+    }
 }
 
 /// Print verbose details: connections and enabled metrics

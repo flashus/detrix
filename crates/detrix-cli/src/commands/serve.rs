@@ -80,6 +80,19 @@ pub async fn run(
         None
     };
 
+    // DETRIX_CONFIG env var overrides the --config flag (useful for Docker restart tests
+    // that need to switch config without rebuilding the image).
+    let config_path_override;
+    let config_path = if let Some(env_path) = std::env::var("DETRIX_CONFIG")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        config_path_override = env_path;
+        &config_path_override
+    } else {
+        config_path
+    };
+
     // Load configuration early to check port_fallback setting
     let mut config = detrix_config::load_config(Path::new(config_path))?;
 
