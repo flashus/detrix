@@ -6,7 +6,7 @@
 
 use super::connection_to_rest_response;
 use crate::constants::status;
-use crate::http::error::{HttpError, ToHttpOption, ToHttpResult};
+use crate::http::error::{HttpError, ToHttpBadRequest, ToHttpOption, ToHttpResult};
 use crate::state::ApiState;
 use crate::types::{ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse};
 use axum::{

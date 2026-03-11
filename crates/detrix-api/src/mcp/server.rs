@@ -52,27 +52,35 @@ pub struct DetrixServer {
     /// Authenticated user identity (resolved from token on session creation).
     /// None when auth is disabled — treated as Admin.
     user_id: Option<String>,
+    /// Authenticated user role. Admin role bypasses per-user metric isolation.
+    role: detrix_config::UserRole,
 }
 
 #[tool_router]
 impl DetrixServer {
     /// Create a new MCP server with an ephemeral UUID (for stdio/test path).
+    ///
+    /// user_id = None → scope() returns MetricScope::Admin (no per-user isolation).
+    /// Appropriate for the embedded local daemon (single-user, no multi-tenancy).
     pub fn new(state: Arc<ApiState>) -> Self {
         let client_id = uuid::Uuid::new_v4().to_string();
         tracing::info!(client_id = %client_id, "MCP stdio: generated ephemeral client_id");
-        Self::with_identity(state, Some(client_id), None)
+        // Role is unused when user_id = None (scope() unconditionally returns Admin).
+        Self::with_identity(state, Some(client_id), None, detrix_config::UserRole::User)
     }
 
     /// Create a new MCP server with an explicit client identity (for HTTP bridge path).
     pub fn with_client_id(state: Arc<ApiState>, client_id: Option<String>) -> Self {
-        Self::with_identity(state, client_id, None)
+        // Role is unused when user_id = None (scope() unconditionally returns Admin).
+        Self::with_identity(state, client_id, None, detrix_config::UserRole::User)
     }
 
-    /// Create a new MCP server with full identity (client_id + user_id).
+    /// Create a new MCP server with full identity (client_id + user_id + role).
     pub fn with_identity(
         state: Arc<ApiState>,
         client_id: Option<String>,
         user_id: Option<String>,
+        role: detrix_config::UserRole,
     ) -> Self {
         let instrumentation = McpInstrumentation::new(
             state.context.mcp_usage.clone(),
@@ -85,21 +93,17 @@ impl DetrixServer {
             instrumentation,
             client_id,
             user_id,
+            role,
         }
     }
 
     /// Build MetricScope from server's identity.
     ///
-    /// - If user_id is set: scope based on user + agent (client_id)
-    /// - If user_id is None (auth disabled): Admin scope
+    /// - If user_id is set: scope based on user + agent (client_id), respecting role
+    /// - If user_id is None (auth disabled or admin path): Admin scope
     fn scope(&self) -> detrix_application::MetricScope {
         match &self.user_id {
-            Some(uid) => crate::common::build_scope(
-                uid,
-                // MCP doesn't carry role info yet — use User role (conservative)
-                &detrix_config::UserRole::User,
-                self.client_id.clone(),
-            ),
+            Some(uid) => crate::common::build_scope(uid, &self.role, self.client_id.clone()),
             None => detrix_application::MetricScope::Admin,
         }
     }

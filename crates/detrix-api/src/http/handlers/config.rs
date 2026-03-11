@@ -151,8 +151,8 @@ pub async fn get_config(
     let config = state.config_service.get_config().await.redacted();
 
     // Serialize the redacted config to TOML
-    let toml_content =
-        toml::to_string_pretty(&config).http_context("Failed to serialize config")?;
+    let toml_content = toml::to_string_pretty(&config)
+        .map_err(|e| HttpError::internal(format!("Failed to serialize config: {e}")))?;
 
     // Build response with header comment
     let config_path = state.config_service.config_path();
@@ -239,7 +239,7 @@ pub async fn update_config(
 
     // Serialize updated config for response
     let config_toml = toml::to_string_pretty(&result.config)
-        .http_context("Failed to serialize updated config")?;
+        .map_err(|e| HttpError::internal(format!("Failed to serialize updated config: {e}")))?;
 
     let uptime = state.start_time.elapsed().as_secs();
     let version = format!("runtime-{}s", uptime);

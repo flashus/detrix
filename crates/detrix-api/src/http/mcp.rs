@@ -7,6 +7,7 @@
 //!
 //! NO business logic here - just protocol translation!
 
+use crate::http::middleware::AuthenticatedUser;
 use crate::mcp::{
     AcknowledgeEventsParams, AddMetricParams, CloseConnectionParams, CreateConnectionParams,
     DetrixServer, DisconnectAllParams, EnableFromDiffParams, GetConfigParams, GetConnectionParams,
@@ -18,7 +19,7 @@ use crate::mcp::{
 use crate::mcp_client_tracker::{McpClientId, ParentProcessInfo};
 use crate::state::ApiState;
 use axum::{
-    extract::State,
+    extract::{Extension, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -176,6 +177,7 @@ pub const HTTP_ROUTER_TOOLS: &[&str] = http_router_tool_names!(
 /// When daemon is spawned by MCP (--mcp-spawned), it auto-shutdowns when all clients disconnect.
 pub async fn mcp_handler(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, McpHttpError> {
@@ -238,7 +240,8 @@ pub async fn mcp_handler(
     // Create MCP server instance with client identity from header (if present)
     // Uses shared validation (rejects empty, reserved "__daemon__")
     let client_id = crate::common::extract_client_id_from_headers(&headers).unwrap_or(None);
-    let mcp_server = DetrixServer::with_client_id(Arc::clone(&state), client_id);
+    let mcp_server =
+        DetrixServer::with_identity(Arc::clone(&state), client_id, Some(user.user_id), user.role);
 
     // Parse the method from the request
     let method = payload.get("method").and_then(|v| v.as_str());
@@ -536,6 +539,13 @@ mod tests {
     use super::*;
     use crate::test_support::create_test_state;
 
+    fn admin_user() -> Extension<AuthenticatedUser> {
+        Extension(AuthenticatedUser {
+            user_id: "default".to_string(),
+            role: detrix_config::UserRole::Admin,
+        })
+    }
+
     #[tokio::test]
     async fn test_mcp_handler_initialize() {
         let (state, _temp_dir) = create_test_state().await;
@@ -547,7 +557,7 @@ mod tests {
         });
 
         let headers = HeaderMap::new();
-        let result = mcp_handler(State(state), headers, Json(request)).await;
+        let result = mcp_handler(State(state), admin_user(), headers, Json(request)).await;
         assert!(result.is_ok(), "initialize should succeed");
 
         let response = result.unwrap().0;
@@ -567,7 +577,7 @@ mod tests {
         });
 
         let headers = HeaderMap::new();
-        let result = mcp_handler(State(state), headers, Json(request)).await;
+        let result = mcp_handler(State(state), admin_user(), headers, Json(request)).await;
         assert!(result.is_ok(), "tools/list should succeed");
 
         let response = result.unwrap().0;
@@ -599,7 +609,7 @@ mod tests {
         });
 
         let headers = HeaderMap::new();
-        let result = mcp_handler(State(state), headers, Json(request)).await;
+        let result = mcp_handler(State(state), admin_user(), headers, Json(request)).await;
         assert!(result.is_ok(), "tools/call list_metrics should succeed");
 
         let response = result.unwrap().0;
@@ -623,7 +633,7 @@ mod tests {
         });
 
         let headers = HeaderMap::new();
-        let result = mcp_handler(State(state), headers, Json(request)).await;
+        let result = mcp_handler(State(state), admin_user(), headers, Json(request)).await;
         assert!(result.is_ok(), "tools/call get_status should succeed");
 
         let response = result.unwrap().0;
@@ -641,7 +651,7 @@ mod tests {
         });
 
         let headers = HeaderMap::new();
-        let result = mcp_handler(State(state), headers, Json(request)).await;
+        let result = mcp_handler(State(state), admin_user(), headers, Json(request)).await;
         assert!(result.is_err(), "Should fail with invalid JSON-RPC");
     }
 
@@ -660,7 +670,7 @@ mod tests {
         });
 
         let headers = HeaderMap::new();
-        let result = mcp_handler(State(state), headers, Json(request)).await;
+        let result = mcp_handler(State(state), admin_user(), headers, Json(request)).await;
         assert!(result.is_ok());
 
         let response = result.unwrap().0;
@@ -694,7 +704,13 @@ mod tests {
             "test-client-123".parse().unwrap(),
         );
 
-        let result = mcp_handler(State(Arc::clone(&state)), headers, Json(request)).await;
+        let result = mcp_handler(
+            State(Arc::clone(&state)),
+            admin_user(),
+            headers,
+            Json(request),
+        )
+        .await;
         assert!(result.is_ok());
 
         // Client should have been auto-registered via touch()
@@ -719,7 +735,7 @@ mod tests {
         });
 
         let headers = HeaderMap::new();
-        let result = mcp_handler(State(state), headers, Json(request)).await;
+        let result = mcp_handler(State(state), admin_user(), headers, Json(request)).await;
         assert!(result.is_ok(), "tools/call list_metrics should succeed");
 
         let response = result.unwrap().0;

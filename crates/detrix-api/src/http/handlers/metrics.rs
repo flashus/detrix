@@ -6,7 +6,7 @@ use super::{default_mode, metric_to_rest_response};
 use crate::constants::status;
 use crate::generated::detrix::v1::Location;
 use crate::grpc::conversions::core_event_to_proto;
-use crate::http::error::{HttpError, ToHttpOption, ToHttpResult};
+use crate::http::error::{HttpError, ToHttpBadRequest, ToHttpOption, ToHttpResult};
 use crate::http::middleware::AuthenticatedUser;
 use crate::state::ApiState;
 use crate::types::{MetricInfo, ProtoMetricEvent};
@@ -157,6 +157,8 @@ fn default_limit() -> i64 {
 /// Metrics that fail conversion are silently skipped with a warning logged.
 pub async fn list_metrics(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<ListMetricsQuery>,
 ) -> Result<Json<PaginatedMetricsResponse>, HttpError> {
     // Use configured defaults for pagination (from ConfigService for hot-reload support)
@@ -167,16 +169,21 @@ pub async fn list_metrics(
     let limit = params.limit.unwrap_or(default_limit).min(max_limit);
     let offset = params.offset.unwrap_or(0);
 
+    let client_id = super::extract_client_id(&headers)?;
+    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id);
+
     info!(
         "REST: list_metrics (connection_id={:?}, enabled={:?}, limit={}, offset={})",
         params.connection_id, params.enabled, limit, offset
     );
 
     // Build filter for DB-level filtering (PERF-02 N+1 fix)
+    // Admin scope (user_id = None) returns all metrics; User/Agent scope filters to own metrics.
     let filter = MetricFilter {
         connection_id: params.connection_id.map(ConnectionId),
         enabled: params.enabled,
         group: None,
+        user_id: scope.user_id().map(|s| s.to_string()),
     };
 
     // Use DB-level filtering for efficient queries
