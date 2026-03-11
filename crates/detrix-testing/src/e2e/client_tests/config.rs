@@ -128,6 +128,11 @@ impl ClientTestConfig {
     pub fn rust() -> Self {
         let mut env_vars = HashMap::new();
         env_vars.insert("DETRIX_CLIENT_ENABLED".to_string(), "1".to_string());
+        // lldb-dap 22.x on macOS loads hundreds of dylib module events during
+        // ptrace attach, pausing the fixture for 30+ seconds.  The daemon's
+        // /api/v1/connections handler waits for full DAP initialization before
+        // returning, so the fixture's register call must be patient enough.
+        env_vars.insert("DETRIX_REGISTER_TIMEOUT".to_string(), "120".to_string());
 
         Self {
             language: ClientLanguage::Rust,

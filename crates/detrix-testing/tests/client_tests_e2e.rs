@@ -379,8 +379,23 @@ async fn test_rust_client_no_duplicate_events() {
         }
     };
 
-    // Wait for connection to stabilize
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    // Wait for the DAP adapter to fully connect before adding metrics.
+    // The daemon returns connection_id immediately and runs start_adapter in the background,
+    // so the connection may be "connecting" for up to 420 s on macOS Sequoia (lldb-dap 22.x
+    // enumerates 400+ system dylibs from the dyld shared cache during attach).
+    let step = reporter.step_start("Phase1b", "Wait for adapter to connect");
+    let connected =
+        ClientTestScenarios::wait_for_connection_connected(&daemon_client, &connection_id, 600)
+            .await;
+    if !connected {
+        reporter.step_failed(step, "Connection did not reach 'connected' within 600 s");
+        client.print_logs(50);
+        executor.print_daemon_logs(50);
+        reporter.print_footer(false);
+        executor.stop_all();
+        panic!("Connection timed out waiting for 'connected' status");
+    }
+    reporter.step_success(step, Some("Adapter connected"));
 
     // Add a metric to observe the pnl variable
     // Line 121 is where pnl is calculated: let pnl = calculate_pnl(...)

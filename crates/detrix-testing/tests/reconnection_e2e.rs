@@ -21,7 +21,7 @@
 use detrix_testing::e2e::{
     cleanup_orphaned_e2e_processes,
     client::{AddMetricRequest, ApiClient},
-    client_tests::{ClientProcessTester, ClientTestConfig, ClientTester},
+    client_tests::{ClientProcessTester, ClientTestConfig, ClientTestScenarios, ClientTester},
     executor::{find_detrix_binary, get_workspace_root},
     require_tool, RestClient, TestExecutor, TestReporter,
 };
@@ -138,6 +138,21 @@ async fn test_rust_reconnection_different_port() {
             panic!("Wake failed: {}", e);
         }
     };
+
+    // Wait for the adapter to finish connecting (lldb-dap attach + module enumeration).
+    // On macOS Sequoia this can take 60–300+ s due to dyld shared cache enumeration.
+    let step = reporter.step_start("Wait connect 1", "Wait for adapter to connect");
+    if !ClientTestScenarios::wait_for_connection_connected(&daemon_client, &connection_id_1, 600)
+        .await
+    {
+        reporter.step_failed(step, "Connection did not reach 'connected' within 600 s");
+        client1.print_logs(50);
+        executor.print_daemon_logs(50);
+        reporter.print_footer(false);
+        executor.stop_all();
+        panic!("Connection timed out waiting for 'connected' status");
+    }
+    reporter.step_success(step, Some("Adapter connected"));
 
     // Add a metric and wait for events
     let step = reporter.step_start("Add metric 1", "Add metric to observe pnl variable");
@@ -389,6 +404,20 @@ async fn test_rust_reconnection_different_port() {
     // PHASE 7: Verify events from session 2
     // ========================================================================
     reporter.section("PHASE 7: VERIFY EVENTS FROM SESSION 2");
+
+    // Wait for the adapter to finish connecting before adding metrics.
+    let step = reporter.step_start("Wait connect 2", "Wait for adapter to connect (session 2)");
+    if !ClientTestScenarios::wait_for_connection_connected(&daemon_client, &connection_id_2, 600)
+        .await
+    {
+        reporter.step_failed(step, "Connection did not reach 'connected' within 600 s");
+        client2.print_logs(50);
+        executor.print_daemon_logs(50);
+        reporter.print_footer(false);
+        executor.stop_all();
+        panic!("Connection timed out waiting for 'connected' status");
+    }
+    reporter.step_success(step, Some("Adapter connected (session 2)"));
 
     // Re-add the same metric (upsert) for session 2
     let step = reporter.step_start("Add metric 2", "Re-add metric for session 2 (same name)");
