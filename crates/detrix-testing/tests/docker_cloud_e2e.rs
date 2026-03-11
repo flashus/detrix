@@ -526,7 +526,7 @@ impl BridgeProcess {
         &mut self,
         name: &str,
         location: &str,
-        expression: &str,
+        expressions: &[&str],
         connection_id: &str,
     ) -> Result<(), String> {
         self.call_tool(
@@ -534,7 +534,7 @@ impl BridgeProcess {
             json!({
                 "name": name,
                 "location": location,
-                "expressions": [expression],
+                "expressions": expressions,
                 "connection_id": connection_id
             }),
         )
@@ -738,6 +738,35 @@ async fn poll_for_events_bridge(
     }
 }
 
+/// Look up a metric's numeric ID by name using the admin token.
+/// Returns the ID as a String, or None if not found.
+async fn admin_get_metric_id(
+    client: &reqwest::Client,
+    daemon_url: &str,
+    admin_token: &str,
+    metric_name: &str,
+) -> Option<String> {
+    let resp = client
+        .get(format!("{}/api/v1/metrics", daemon_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .ok()?;
+    let json: serde_json::Value = resp.json().await.ok()?;
+    json.get("metrics")?
+        .as_array()?
+        .iter()
+        .find(|m| {
+            m.get("name")
+                .and_then(|n| n.as_str())
+                .map(|n| n == metric_name)
+                .unwrap_or(false)
+        })
+        .and_then(|m| m.get("metricId").and_then(|id| id.as_u64()))
+        .map(|id| id.to_string())
+}
+
 // =============================================================================
 // Orchestrator
 // =============================================================================
@@ -807,7 +836,7 @@ async fn test_cloud_e2e() {
         .add_metric(
             "cloud-py-basic",
             &format!("{}#60", PYTHON_FILE),
-            "order_id",
+            &["order_id"],
             &py_conn,
         )
         .await
@@ -836,7 +865,7 @@ async fn test_cloud_e2e() {
             // find_logpoint("symbol"): symbol is declared at +26 but NOT yet in scope there;
             // first safe line is +27 (quantity declaration), where symbol IS in scope.
             &format!("{}#{}", GO_FILE, go_lines::CODEMAP.find_logpoint("symbol")),
-            "symbol",
+            &["symbol"],
             &go_conn,
         )
         .await
@@ -862,7 +891,7 @@ async fn test_cloud_e2e() {
                     .add_metric(
                         "cloud-rust-basic",
                         &format!("{}#108", RUST_FILE),
-                        "symbol",
+                        &["symbol"],
                         &rust_conn,
                     )
                     .await
@@ -889,9 +918,12 @@ async fn test_cloud_e2e() {
             false
         }
     };
-    if !rust_available {
-        println!("  [SKIP] Rust tests skipped — lldb-dap not working in container");
-    }
+    assert!(
+        rust_available,
+        "Rust E2E failed — lldb-dap not working in container. \
+        Dockerfile.rust runtime uses debian:bookworm-slim + lldb-17 from apt.llvm.org. \
+        If this fails, the Docker image may be stale — run: task rebuild-daemon-container"
+    );
 
     // ── Cleanup: Sleep all apps (debuggers stop) ──
     println!("\n--- Phase 1 cleanup: sleeping all apps ---");
@@ -1446,7 +1478,7 @@ async fn test_cloud_e2e() {
                         .add_metric(
                             "cloud-rust-adv",
                             &format!("{}#108", RUST_FILE),
-                            "symbol",
+                            &["symbol"],
                             &rust_conn,
                         )
                         .await
@@ -1488,19 +1520,15 @@ async fn test_cloud_e2e() {
             }
         }
     };
-    if !rust_adv_available {
-        println!("  [SKIP] Rust advertise-URL tests skipped");
-    }
+    assert!(
+        rust_adv_available,
+        "Rust advertise-URL E2E failed — lldb-dap not working in container. \
+        Dockerfile.rust runtime uses debian:bookworm-slim + lldb-17 from apt.llvm.org. \
+        If this fails, the Docker image may be stale — run: task rebuild-daemon-container"
+    );
 
     println!("\n{}", "=".repeat(60));
-    println!(
-        "Phase 6 complete — advertise_url verified: Python + Go{}",
-        if rust_adv_available {
-            " + Rust"
-        } else {
-            " (Rust skipped)"
-        }
-    );
+    println!("Phase 6 complete — advertise_url verified: Python + Go + Rust");
     println!("{}", "=".repeat(60));
 
     // ── Phase 7: MCP Bridge Auto-Switch via Advertise URL ──
@@ -2048,6 +2076,549 @@ async fn test_cloud_e2e() {
 
     println!("\n{}", "=".repeat(60));
     println!("Phase 9 complete — scope-aware find_variable verified");
+    println!("{}", "=".repeat(60));
+
+    // ── Phase 10: Multi-tenant access control ──
+    // Restart daemon with multi-user config (alice/bob/admin), then:
+    //   1. Alice adds a Python metric (alice token + PYTHON_APP_URL bridge)
+    //   2. Bob tries DELETE on Alice's metric → 403
+    //   3. Bob adds metric at same Python location → both metrics stored
+    //   4. Alice disables her metric → Bob's metric still fires events
+    //   5. Admin sees all metrics (both users)
+    println!("\n{}", "=".repeat(60));
+    println!("Phase 10: Multi-tenant access control");
+    println!("{}", "=".repeat(60));
+
+    // Restart daemon with multi-user config via DETRIX_CONFIG env var.
+    // detrix-multiuser.toml is already mounted read-only at
+    // /data/detrix/detrix-multiuser.toml (docker-compose.yml).
+    println!("\n--- Restarting daemon with multi-user config ---");
+    restart_daemon_with_env(&[("DETRIX_CONFIG", "/data/detrix/detrix-multiuser.toml")]).await;
+    println!("  Daemon restarted with multi-user config");
+
+    const ALICE_TOKEN: &str = "dtx_alice_cloud";
+    const BOB_TOKEN: &str = "dtx_bob_cloud";
+    const ADMIN_TOKEN: &str = "dtx_admin_cloud";
+
+    let daemon_url_10 = format!("http://127.0.0.1:{}", DAEMON_HTTP_PORT);
+
+    // ── Phase 10a: Alice wakes Python and adds a metric ──
+    println!("\n--- Phase 10a: Alice adds Python metric ---");
+    let mut alice_bridge = BridgeProcess::spawn(&daemon_url_10, ALICE_TOKEN, None).await;
+    alice_bridge
+        .wake(PYTHON_APP_URL)
+        .await
+        .expect("Phase 10: alice wake failed");
+
+    let py_conn_10 =
+        poll_for_connection_bridge(&mut alice_bridge, "python", Duration::from_secs(15))
+            .await
+            .expect("Phase 10: Python connection not found within 15s");
+    println!("  Alice Python connection: {}", py_conn_10);
+
+    alice_bridge
+        .add_metric(
+            "cloud-alice-metric",
+            &format!("{}#60", PYTHON_FILE),
+            &["price"],
+            &py_conn_10,
+        )
+        .await
+        .expect("Phase 10: alice add_metric failed");
+    println!("  Alice added metric cloud-alice-metric");
+
+    // Verify Alice's metric fires events
+    let alice_events = poll_for_events_bridge(
+        &mut alice_bridge,
+        "cloud-alice-metric",
+        Duration::from_secs(15),
+    )
+    .await;
+    assert!(
+        alice_events > 0,
+        "Phase 10: Alice's metric should fire events (got 0)"
+    );
+    println!("  Alice's metric fired {} events", alice_events);
+
+    alice_bridge.kill().await;
+
+    // ── Phase 10b: Bob tries to DELETE Alice's metric → 403 ──
+    println!("\n--- Phase 10b: Bob cannot delete Alice's metric (403) ---");
+    let http_client_10 = reqwest::Client::new();
+
+    // Get Alice's metric ID via admin token first
+    let metrics_resp = http_client_10
+        .get(format!("{}/api/v1/metrics", daemon_url_10))
+        .header("Authorization", format!("Bearer {}", ADMIN_TOKEN))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .expect("Phase 10: list metrics (admin) failed");
+    assert!(
+        metrics_resp.status().is_success(),
+        "Phase 10: admin list metrics failed: {}",
+        metrics_resp.status()
+    );
+    let metrics_json: serde_json::Value = metrics_resp
+        .json()
+        .await
+        .expect("Phase 10: parse metrics JSON failed");
+    let alice_metric_id = metrics_json
+        .get("metrics")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| {
+            arr.iter().find(|m| {
+                m.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n == "cloud-alice-metric")
+                    .unwrap_or(false)
+            })
+        })
+        .and_then(|m| m.get("metricId").and_then(|id| id.as_u64()))
+        .expect("Phase 10: cloud-alice-metric not found in admin list")
+        .to_string();
+    println!("  Alice's metric ID: {}", alice_metric_id);
+
+    // Bob tries to delete Alice's metric
+    let bob_delete_resp = http_client_10
+        .delete(format!(
+            "{}/api/v1/metrics/{}",
+            daemon_url_10, alice_metric_id
+        ))
+        .header("Authorization", format!("Bearer {}", BOB_TOKEN))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .expect("Phase 10: bob delete request failed");
+    assert_eq!(
+        bob_delete_resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "Phase 10: Bob should get 403 when deleting Alice's metric, got: {}",
+        bob_delete_resp.status()
+    );
+    println!("  Bob DELETE Alice's metric → 403 (correct)");
+
+    // ── Phase 10c: Bob adds metric at a different Python location → both stored ──
+    // Note: Bob uses line 65 (pnl calculation) to get his own independent logpoint.
+    // Each user gets their own metric in storage; admin sees both (multi-tenant storage verified).
+    println!("\n--- Phase 10c: Bob adds metric at different Python location ---");
+    let mut bob_bridge = BridgeProcess::spawn(&daemon_url_10, BOB_TOKEN, None).await;
+    bob_bridge
+        .wake(PYTHON_APP_URL)
+        .await
+        .expect("Phase 10: bob wake failed");
+
+    let py_conn_bob =
+        poll_for_connection_bridge(&mut bob_bridge, "python", Duration::from_secs(15))
+            .await
+            .expect("Phase 10: Bob Python connection not found within 15s");
+    println!("  Bob Python connection: {}", py_conn_bob);
+
+    bob_bridge
+        .add_metric(
+            "cloud-bob-metric",
+            &format!("{}#65", PYTHON_FILE),
+            &["quantity"],
+            &py_conn_bob,
+        )
+        .await
+        .expect("Phase 10: bob add_metric failed");
+    println!("  Bob added metric cloud-bob-metric at line 65");
+
+    // Verify Bob's metric fires events from his own logpoint
+    let bob_events =
+        poll_for_events_bridge(&mut bob_bridge, "cloud-bob-metric", Duration::from_secs(15)).await;
+    assert!(
+        bob_events > 0,
+        "Phase 10: Bob's metric should fire events (got 0)"
+    );
+    println!("  Bob's metric fired {} events", bob_events);
+
+    // Admin should see both metrics
+    let admin_list_resp = http_client_10
+        .get(format!("{}/api/v1/metrics", daemon_url_10))
+        .header("Authorization", format!("Bearer {}", ADMIN_TOKEN))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .expect("Phase 10: admin list metrics failed");
+    let admin_metrics: serde_json::Value = admin_list_resp
+        .json()
+        .await
+        .expect("Phase 10: parse admin metrics failed");
+    let admin_metric_count = admin_metrics
+        .get("metrics")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    assert!(
+        admin_metric_count >= 2,
+        "Phase 10: Admin should see ≥2 metrics (alice + bob), got: {}",
+        admin_metric_count
+    );
+    println!(
+        "  Admin sees {} metrics (both alice + bob)",
+        admin_metric_count
+    );
+
+    bob_bridge.kill().await;
+
+    // ── Phase 10d: Alice disables her metric → Bob's still fires ──
+    println!("\n--- Phase 10d: Alice disables her metric, Bob's still fires ---");
+    let alice_disable_resp = http_client_10
+        .post(format!(
+            "{}/api/v1/metrics/{}/disable",
+            daemon_url_10, alice_metric_id
+        ))
+        .header("Authorization", format!("Bearer {}", ALICE_TOKEN))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .expect("Phase 10: alice disable request failed");
+    assert!(
+        alice_disable_resp.status().is_success(),
+        "Phase 10: Alice disable her metric failed: {}",
+        alice_disable_resp.status()
+    );
+    println!("  Alice disabled her metric");
+
+    // Bob's metric at same line should still fire — open a new bridge to check
+    let mut bob_bridge2 = BridgeProcess::spawn(&daemon_url_10, BOB_TOKEN, None).await;
+    let bob_events2 = poll_for_events_bridge(
+        &mut bob_bridge2,
+        "cloud-bob-metric",
+        Duration::from_secs(15),
+    )
+    .await;
+    assert!(
+        bob_events2 > 0,
+        "Phase 10: Bob's metric should still fire after Alice disabled hers (got 0)"
+    );
+    println!(
+        "  Bob's metric still fires {} events after Alice disabled hers",
+        bob_events2
+    );
+    bob_bridge2.kill().await;
+
+    // ── Phase 10e: Same-line overlapping metrics ──
+    // Tests 3 overlap types × 3 steps (create, disable-one, delete-one).
+    // All metrics at line 60: order_id = place_order(symbol, quantity, price)
+    // Available vars at line 60: price, quantity, order_id, symbol, iteration
+    //
+    // For each type:
+    //   Step 1: Alice + Bob add metrics at same line → admin sees both
+    //   Step 2: Disable Alice → Bob becomes DAP template → Bob fires events
+    //   Step 3: Delete Alice (disabled) → Bob still fires events
+    println!("\n{}", "=".repeat(60));
+    println!("Phase 10e: Same-line overlapping metrics");
+    println!("{}", "=".repeat(60));
+
+    // Delete cloud-alice-metric (disabled in Phase 10d, still in DB at line 60 for user "alice").
+    // Without this, find_by_location would return the existing metric when Alice adds at line 60,
+    // and p10e-*-alice would never be created (the service merges into the existing one instead).
+    let _ = http_client_10
+        .delete(format!(
+            "{}/api/v1/metrics/{}",
+            daemon_url_10, alice_metric_id
+        ))
+        .header("Authorization", format!("Bearer {}", ADMIN_TOKEN))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await;
+    println!("  Pre-cleanup: removed cloud-alice-metric to avoid line-60 collision");
+
+    // ── Type 1: Non-overlapping (Alice: price, Bob: quantity) ──
+    println!("\n--- 10e-Type1: Non-overlapping expressions (Alice:price, Bob:quantity) ---");
+    {
+        let mut alice_b = BridgeProcess::spawn(&daemon_url_10, ALICE_TOKEN, None).await;
+        let mut bob_b = BridgeProcess::spawn(&daemon_url_10, BOB_TOKEN, None).await;
+
+        // Step 1: Both add metrics at line 60
+        alice_b
+            .add_metric(
+                "p10e-1-alice",
+                &format!("{}#60", PYTHON_FILE),
+                &["price"],
+                &py_conn_10,
+            )
+            .await
+            .expect("10e-Type1: alice add_metric failed");
+        bob_b
+            .add_metric(
+                "p10e-1-bob",
+                &format!("{}#60", PYTHON_FILE),
+                &["quantity"],
+                &py_conn_10,
+            )
+            .await
+            .expect("10e-Type1: bob add_metric failed");
+
+        let a_id =
+            admin_get_metric_id(&http_client_10, &daemon_url_10, ADMIN_TOKEN, "p10e-1-alice")
+                .await
+                .expect("10e-Type1: p10e-1-alice not found in admin list");
+        let b_id = admin_get_metric_id(&http_client_10, &daemon_url_10, ADMIN_TOKEN, "p10e-1-bob")
+            .await
+            .expect("10e-Type1: p10e-1-bob not found in admin list");
+        println!("  Step1: both stored (alice={}, bob={})", a_id, b_id);
+
+        // Step 2: Disable Alice → Bob becomes template → Bob fires events
+        http_client_10
+            .post(format!("{}/api/v1/metrics/{}/disable", daemon_url_10, a_id))
+            .header("Authorization", format!("Bearer {}", ALICE_TOKEN))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .expect("10e-Type1: alice disable request failed")
+            .error_for_status()
+            .expect("10e-Type1: alice disable returned error status");
+        let bob_ev1 =
+            poll_for_events_bridge(&mut bob_b, "p10e-1-bob", Duration::from_secs(20)).await;
+        assert!(
+            bob_ev1 > 0,
+            "10e-Type1 Step2: Bob should get events after Alice disabled (got 0)"
+        );
+        println!("  Step2: Bob got {} events after Alice disabled", bob_ev1);
+
+        // Step 3: Delete Alice's (disabled) metric → Bob still fires events
+        http_client_10
+            .delete(format!("{}/api/v1/metrics/{}", daemon_url_10, a_id))
+            .header("Authorization", format!("Bearer {}", ADMIN_TOKEN))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .expect("10e-Type1: alice delete request failed")
+            .error_for_status()
+            .expect("10e-Type1: alice delete returned error status");
+        let bob_ev2 =
+            poll_for_events_bridge(&mut bob_b, "p10e-1-bob", Duration::from_secs(20)).await;
+        assert!(
+            bob_ev2 > 0,
+            "10e-Type1 Step3: Bob should get events after Alice deleted (got 0)"
+        );
+        println!("  Step3: Bob got {} events after Alice deleted", bob_ev2);
+
+        // Cleanup: delete Bob's metric
+        let _ = http_client_10
+            .delete(format!("{}/api/v1/metrics/{}", daemon_url_10, b_id))
+            .header("Authorization", format!("Bearer {}", ADMIN_TOKEN))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await;
+        alice_b.kill().await;
+        bob_b.kill().await;
+    }
+    println!("  10e-Type1 PASSED");
+
+    // ── Type 2: Identical expressions (Alice: price, Bob: price) ──
+    println!("\n--- 10e-Type2: Identical expressions (Alice:price, Bob:price) ---");
+    {
+        let mut alice_b = BridgeProcess::spawn(&daemon_url_10, ALICE_TOKEN, None).await;
+        let mut bob_b = BridgeProcess::spawn(&daemon_url_10, BOB_TOKEN, None).await;
+
+        // Step 1: Both add metrics at line 60 with same expression
+        alice_b
+            .add_metric(
+                "p10e-2-alice",
+                &format!("{}#60", PYTHON_FILE),
+                &["price"],
+                &py_conn_10,
+            )
+            .await
+            .expect("10e-Type2: alice add_metric failed");
+        bob_b
+            .add_metric(
+                "p10e-2-bob",
+                &format!("{}#60", PYTHON_FILE),
+                &["price"],
+                &py_conn_10,
+            )
+            .await
+            .expect("10e-Type2: bob add_metric failed");
+
+        let a_id =
+            admin_get_metric_id(&http_client_10, &daemon_url_10, ADMIN_TOKEN, "p10e-2-alice")
+                .await
+                .expect("10e-Type2: p10e-2-alice not found in admin list");
+        let b_id = admin_get_metric_id(&http_client_10, &daemon_url_10, ADMIN_TOKEN, "p10e-2-bob")
+            .await
+            .expect("10e-Type2: p10e-2-bob not found in admin list");
+        println!("  Step1: both stored (alice={}, bob={})", a_id, b_id);
+
+        // Step 2: Disable Alice → Bob becomes template → Bob fires events
+        http_client_10
+            .post(format!("{}/api/v1/metrics/{}/disable", daemon_url_10, a_id))
+            .header("Authorization", format!("Bearer {}", ALICE_TOKEN))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .expect("10e-Type2: alice disable request failed")
+            .error_for_status()
+            .expect("10e-Type2: alice disable returned error status");
+        let bob_ev1 =
+            poll_for_events_bridge(&mut bob_b, "p10e-2-bob", Duration::from_secs(20)).await;
+        assert!(
+            bob_ev1 > 0,
+            "10e-Type2 Step2: Bob should get events after Alice disabled (got 0)"
+        );
+        println!("  Step2: Bob got {} events after Alice disabled", bob_ev1);
+
+        // Step 3: Delete Alice's (disabled) metric → Bob still fires events
+        http_client_10
+            .delete(format!("{}/api/v1/metrics/{}", daemon_url_10, a_id))
+            .header("Authorization", format!("Bearer {}", ADMIN_TOKEN))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .expect("10e-Type2: alice delete request failed")
+            .error_for_status()
+            .expect("10e-Type2: alice delete returned error status");
+        let bob_ev2 =
+            poll_for_events_bridge(&mut bob_b, "p10e-2-bob", Duration::from_secs(20)).await;
+        assert!(
+            bob_ev2 > 0,
+            "10e-Type2 Step3: Bob should get events after Alice deleted (got 0)"
+        );
+        println!("  Step3: Bob got {} events after Alice deleted", bob_ev2);
+
+        // Cleanup: delete Bob's metric
+        let _ = http_client_10
+            .delete(format!("{}/api/v1/metrics/{}", daemon_url_10, b_id))
+            .header("Authorization", format!("Bearer {}", ADMIN_TOKEN))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await;
+        alice_b.kill().await;
+        bob_b.kill().await;
+    }
+    println!("  10e-Type2 PASSED");
+
+    // ── Type 3: Partially overlapping (Alice: price, Bob: price + quantity) ──
+    println!("\n--- 10e-Type3: Partial overlap (Alice:[price], Bob:[price,quantity]) ---");
+    {
+        let mut alice_b = BridgeProcess::spawn(&daemon_url_10, ALICE_TOKEN, None).await;
+        let mut bob_b = BridgeProcess::spawn(&daemon_url_10, BOB_TOKEN, None).await;
+
+        // Step 1: Alice: [price], Bob: [price, quantity] at same line
+        alice_b
+            .add_metric(
+                "p10e-3-alice",
+                &format!("{}#60", PYTHON_FILE),
+                &["price"],
+                &py_conn_10,
+            )
+            .await
+            .expect("10e-Type3: alice add_metric failed");
+        bob_b
+            .add_metric(
+                "p10e-3-bob",
+                &format!("{}#60", PYTHON_FILE),
+                &["price", "quantity"],
+                &py_conn_10,
+            )
+            .await
+            .expect("10e-Type3: bob add_metric failed");
+
+        let a_id =
+            admin_get_metric_id(&http_client_10, &daemon_url_10, ADMIN_TOKEN, "p10e-3-alice")
+                .await
+                .expect("10e-Type3: p10e-3-alice not found in admin list");
+        let b_id = admin_get_metric_id(&http_client_10, &daemon_url_10, ADMIN_TOKEN, "p10e-3-bob")
+            .await
+            .expect("10e-Type3: p10e-3-bob not found in admin list");
+        println!("  Step1: both stored (alice={}, bob={})", a_id, b_id);
+
+        // Step 2: Disable Alice → Bob becomes template (with price+quantity) → Bob fires events
+        http_client_10
+            .post(format!("{}/api/v1/metrics/{}/disable", daemon_url_10, a_id))
+            .header("Authorization", format!("Bearer {}", ALICE_TOKEN))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .expect("10e-Type3: alice disable request failed")
+            .error_for_status()
+            .expect("10e-Type3: alice disable returned error status");
+        let bob_ev1 =
+            poll_for_events_bridge(&mut bob_b, "p10e-3-bob", Duration::from_secs(20)).await;
+        assert!(
+            bob_ev1 > 0,
+            "10e-Type3 Step2: Bob should get events after Alice disabled (got 0)"
+        );
+        println!("  Step2: Bob got {} events after Alice disabled", bob_ev1);
+
+        // Step 3: Delete Alice's (disabled) metric → Bob still fires events
+        http_client_10
+            .delete(format!("{}/api/v1/metrics/{}", daemon_url_10, a_id))
+            .header("Authorization", format!("Bearer {}", ADMIN_TOKEN))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .expect("10e-Type3: alice delete request failed")
+            .error_for_status()
+            .expect("10e-Type3: alice delete returned error status");
+        let bob_ev2 =
+            poll_for_events_bridge(&mut bob_b, "p10e-3-bob", Duration::from_secs(20)).await;
+        assert!(
+            bob_ev2 > 0,
+            "10e-Type3 Step3: Bob should get events after Alice deleted (got 0)"
+        );
+        println!("  Step3: Bob got {} events after Alice deleted", bob_ev2);
+
+        // Cleanup: delete Bob's metric
+        let _ = http_client_10
+            .delete(format!("{}/api/v1/metrics/{}", daemon_url_10, b_id))
+            .header("Authorization", format!("Bearer {}", ADMIN_TOKEN))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await;
+        alice_b.kill().await;
+        bob_b.kill().await;
+    }
+    println!("  10e-Type3 PASSED");
+
+    println!("\n{}", "=".repeat(60));
+    println!("Phase 10e complete — same-line overlapping metrics verified");
+    println!("{}", "=".repeat(60));
+
+    // ── Phase 10 cleanup ──
+    println!("\n--- Phase 10 cleanup ---");
+    // cloud-alice-metric was already deleted at the start of Phase 10e; this is a no-op.
+    let _ = http_client_10
+        .delete(format!(
+            "{}/api/v1/metrics/{}",
+            daemon_url_10, alice_metric_id
+        ))
+        .header("Authorization", format!("Bearer {}", ADMIN_TOKEN))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await;
+    // Delete bob metric (cloud-bob-metric at line 65, from Phase 10c)
+    if let Some(bob_metric_id) = admin_get_metric_id(
+        &http_client_10,
+        &daemon_url_10,
+        ADMIN_TOKEN,
+        "cloud-bob-metric",
+    )
+    .await
+    {
+        let _ = http_client_10
+            .delete(format!(
+                "{}/api/v1/metrics/{}",
+                daemon_url_10, bob_metric_id
+            ))
+            .header("Authorization", format!("Bearer {}", ADMIN_TOKEN))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await;
+    }
+    // Sleep Python app
+    let mut cleanup_bridge = BridgeProcess::spawn(&daemon_url_10, ADMIN_TOKEN, None).await;
+    cleanup_bridge.sleep_app(PYTHON_APP_URL).await;
+    cleanup_bridge.kill().await;
+    println!("  Phase 10 cleaned up");
+
+    println!("\n{}", "=".repeat(60));
+    println!("Phase 10 complete — multi-tenant access control verified");
     println!("{}", "=".repeat(60));
 
     println!("\n{}", "=".repeat(60));
