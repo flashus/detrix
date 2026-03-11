@@ -9,14 +9,47 @@ services:
     volumes:
       - detrix-data:/data/detrix
       - ./detrix.toml:/data/detrix/detrix.toml:ro
+      - ./detrix-multiuser.toml:/data/detrix/detrix-multiuser.toml:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
       DETRIX_TOKEN: docker-test-token
       DETRIX_ADVERTISE_URL: ${TEST_ADVERTISE_URL:-}
+      DETRIX_CONFIG: ${DETRIX_CONFIG:-}
     healthcheck:
       test: ["CMD", "/usr/local/bin/detrix", "status", "--config", "/data/detrix/detrix.toml", "-q"]
       interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mock-jwks:
+    build:
+      context: ./mock-jwks
+      dockerfile: Dockerfile
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/jwks')"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  detrix-jwt:
+    build:
+      context: ../..
+      dockerfile: fixtures/docker/Dockerfile.server
+    ports:
+      - "8097:8090"
+      - "50066:50061"
+    volumes:
+      - detrix-jwt-data:/data/detrix
+      - ./detrix-jwt.toml:/data/detrix/detrix.toml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      mock-jwks:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/detrix", "status", "--config", "/data/detrix/detrix.toml", "-q"]
+      interval: 3s
       timeout: 3s
       retries: 10
 
@@ -52,6 +85,10 @@ services:
       DETRIX_HOST: test-app-go
       DETRIX_CONTROL_PORT: "8091"
       DETRIX_TOKEN: docker-test-token
+      # Go needs a longer registration timeout because Delve DAP initialization
+      # (dlv attach + DAP handshake) can take several seconds in Docker with
+      # multiple services running, exceeding the default 5s timeout.
+      DETRIX_REGISTER_TIMEOUT: "30"
 
   test-app-rust:
     build:
@@ -78,3 +115,4 @@ services:
 
 volumes:
   detrix-data:
+  detrix-jwt-data:
