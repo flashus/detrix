@@ -149,6 +149,18 @@ tasks:
     cmds:
       - cargo test --package detrix-testing --test unified_e2e basic -- --nocapture
 
+  # JWKS / JWT Docker Cloud E2E Tests
+  test-cloud-jwt:
+    desc: Run JWKS/JWT cloud E2E tests (requires Docker, builds mock-jwks + detrix-jwt)
+    vars:
+      COMPOSE_FILE: fixtures/docker/docker-compose.yml
+      PROJECT: detrix-cloud-test
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --wait mock-jwks detrix-jwt
+      - defer: docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} stop mock-jwks detrix-jwt
+      - cargo test -p detrix-testing --test jwks_cloud_e2e -- --ignored --nocapture --test-threads=1
+      - task: check-orphans
+
   # Rebuild only the daemon Docker image (no cache) without touching app containers.
   rebuild-daemon-container:
     desc: Force-rebuild the detrix daemon Docker image
