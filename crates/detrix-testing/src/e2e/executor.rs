@@ -491,31 +491,78 @@ pub fn find_detrix_binary(workspace_root: &std::path::Path) -> Option<PathBuf> {
 
 /// Check whether the detrix binary is up-to-date with the workspace source.
 ///
-/// Compares the binary's mtime against every `.rs` and `Cargo.toml` file under
-/// `<workspace_root>/crates/`. Returns `Err` with a human-readable message if any
-/// source file is newer than the binary.
+/// Primary strategy: parse Cargo's dep-info file (`<binary>.d`) which lists the
+/// exact set of source files that contributed to the binary. This avoids false
+/// positives from test-only crates (e.g. `detrix-testing`) and integration test
+/// files that are compiled into separate test binaries, not the release binary.
 ///
-/// Skips `target/` subdirectories to avoid false positives from generated files.
+/// Fallback (no `.d` file): walk `<workspace_root>/crates/` skipping `target/`,
+/// `tests/`, `benches/`, and `examples/` directories.
 pub fn check_binary_freshness(binary: &Path, workspace_root: &Path) -> Result<(), String> {
     let binary_mtime = binary
         .metadata()
         .and_then(|m| m.modified())
         .map_err(|e| format!("Cannot stat binary {}: {e}", binary.display()))?;
 
+    // Cargo writes a Makefile-style dep-info file alongside the binary.
+    // It contains the exact list of source files used in the build — ground truth.
+    let dep_info = binary.with_extension("d");
+    if dep_info.exists() {
+        return check_freshness_via_dep_info(binary, binary_mtime, &dep_info);
+    }
+
+    // Fallback: walk crates/ excluding directories that never affect the release binary.
     let src_root = workspace_root.join("crates");
     if let Some((stale_path, _)) = newest_source_file(&src_root, binary_mtime) {
-        return Err(format!(
-            "Release binary is STALE — source was modified after the last build.\n\
-             Binary : {}\n\
-             Newer  : {}\n\n\
-             Fix    : cargo build --release\n\
-             Bypass : DETRIX_SKIP_FRESHNESS_CHECK=1 cargo test ...",
-            binary.display(),
-            stale_path.display(),
-        ));
+        return Err(stale_warning(binary, &stale_path));
     }
 
     Ok(())
+}
+
+/// Check freshness using Cargo's dep-info file (`<binary>.d`).
+///
+/// Format: one long line — `<target>: <dep1> <dep2> ...` — with space-separated
+/// absolute paths. This is Cargo's own dependency tracking, so it includes only
+/// files that actually affect the binary (excludes dev-only crates, test files, etc.).
+fn check_freshness_via_dep_info(
+    binary: &Path,
+    binary_mtime: std::time::SystemTime,
+    dep_info: &Path,
+) -> Result<(), String> {
+    let content = match std::fs::read_to_string(dep_info) {
+        Ok(s) => s,
+        // If we can't read the dep-info, fall back gracefully (no false positives).
+        Err(_) => return Ok(()),
+    };
+
+    // Strip the target portion ("path/to/binary: ") — everything after the first ':'
+    let deps_str = content.split_once(':').map(|x| x.1).unwrap_or("");
+
+    for path_str in deps_str.split_whitespace() {
+        // Cargo escapes backslash-space as "\ " in paths; strip the leading backslash.
+        let path_str: &str = path_str.trim_start_matches('\\');
+        let path = std::path::Path::new(path_str);
+        if let Ok(mtime) = path.metadata().and_then(|m| m.modified()) {
+            if mtime > binary_mtime {
+                return Err(stale_warning(binary, path));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn stale_warning(binary: &Path, newer: &Path) -> String {
+    format!(
+        "Release binary is STALE — source was modified after the last build.\n\
+         Binary : {}\n\
+         Newer  : {}\n\n\
+         Fix    : cargo build --release\n\
+         Bypass : DETRIX_SKIP_FRESHNESS_CHECK=1 cargo test ...",
+        binary.display(),
+        newer.display(),
+    )
 }
 
 /// Recursively find the newest source file under `dir` that is newer than `since`.
@@ -534,8 +581,12 @@ fn newest_source_file(
         };
 
         if ft.is_dir() {
-            // Skip build artifacts
-            if path.file_name().is_some_and(|n| n == "target") {
+            // Skip directories that never contribute to the release binary.
+            // `target/` — build artifacts.
+            // `tests/`, `benches/`, `examples/` — compiled into separate binaries by Cargo,
+            //   not into the release binary; treating them as sources causes false positives.
+            let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if matches!(dir_name, "target" | "tests" | "benches" | "examples") {
                 continue;
             }
             if let Some(sub) = newest_source_file(&path, since) {
@@ -1050,7 +1101,11 @@ pub fn start_debugpy_setsid(port: u16, script_path: &str) -> Result<Child, std::
     let python = find_python();
     let mut cmd = Command::new(&python);
     cmd.args([
-        "-Xfrozen_modules=off", // Disable frozen modules to prevent debugpy breakpoint issues
+        // Note: -Xfrozen_modules=off was removed because it causes Python import lock
+        // contention under concurrent test load (8+ Python processes importing debugpy
+        // simultaneously all try to write the same .pyc files, causing them to hang
+        // waiting for file locks). Our tests only set logpoints on user code, not
+        // stdlib — so frozen modules do not affect logpoint functionality.
         "-m",
         "debugpy",
         "--listen",
@@ -1947,18 +2002,91 @@ impl TestExecutor {
                         .as_mut()
                         .map(|p| p.try_wait().ok().flatten().is_none())
                         .unwrap_or(false);
-                    let exit_status = if !alive {
-                        self.debugpy_process
-                            .as_mut()
-                            .and_then(|p| p.try_wait().ok().flatten())
-                            .map(|s| format!("{}", s))
-                            .unwrap_or_else(|| "unknown".to_string())
-                    } else {
-                        "still running".to_string()
-                    };
+
+                    // If process is alive but stuck (never opened the port), kill and retry once.
+                    // Root cause: Python import lock contention under concurrent test load causes
+                    // the interpreter to hang during module import. The retry succeeds because
+                    // .pyc bytecode is now warm in the OS file cache from the first attempt.
+                    if alive {
+                        eprintln!(
+                            "start_debugpy: pid={} stuck on port {} after {}s — killing and retrying once",
+                            pid, self.debugpy_port, DEBUGPY_STARTUP_TIMEOUT_SECS
+                        );
+                        if let Some(mut p) = self.debugpy_process.take() {
+                            let _ = p.kill();
+                            let _ = p.wait();
+                            unregister_e2e_process("debugpy", pid);
+                        }
+                        // Kill anything that may have grabbed the port during the stuck period
+                        self.kill_process_on_port(self.debugpy_port);
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+
+                        return match start_debugpy_setsid(self.debugpy_port, script_path) {
+                            Ok(mut retry_proc) => {
+                                let retry_pid = retry_proc.id();
+                                register_e2e_process("debugpy", retry_pid);
+                                let detected2 = wait_for_debugger_port_with_process(
+                                    self.debugpy_port,
+                                    DEBUGPY_STARTUP_TIMEOUT_SECS,
+                                    Some(&mut retry_proc),
+                                )
+                                .await;
+                                self.debugpy_process = Some(retry_proc);
+                                if detected2 {
+                                    tokio::time::sleep(Duration::from_millis(300)).await;
+                                    let still_alive = self
+                                        .debugpy_process
+                                        .as_mut()
+                                        .map(|p| p.try_wait().ok().flatten().is_none())
+                                        .unwrap_or(false);
+                                    if still_alive {
+                                        Ok(())
+                                    } else {
+                                        Err(format!(
+                                            "debugpy (pid={}) crashed after binding port {} on retry. \
+                                             Check /tmp/debugpy_e2e_{}.log",
+                                            retry_pid, self.debugpy_port, self.debugpy_port
+                                        ))
+                                    }
+                                } else {
+                                    let retry_alive = self
+                                        .debugpy_process
+                                        .as_mut()
+                                        .map(|p| p.try_wait().ok().flatten().is_none())
+                                        .unwrap_or(false);
+                                    Err(format!(
+                                        "debugpy not listening on port {} after retry \
+                                         (pid={}, alive={}, status={}). \
+                                         Check /tmp/debugpy_e2e_{}.log",
+                                        self.debugpy_port,
+                                        retry_pid,
+                                        retry_alive,
+                                        if retry_alive {
+                                            "still running"
+                                        } else {
+                                            "exited"
+                                        },
+                                        self.debugpy_port
+                                    ))
+                                }
+                            }
+                            Err(e) => Err(format!(
+                                "debugpy retry spawn failed on port {}: {}",
+                                self.debugpy_port, e
+                            )),
+                        };
+                    }
+
+                    let exit_status = self
+                        .debugpy_process
+                        .as_mut()
+                        .and_then(|p| p.try_wait().ok().flatten())
+                        .map(|s| format!("{}", s))
+                        .unwrap_or_else(|| "unknown".to_string());
                     Err(format!(
-                        "debugpy not listening on port {} after spawn (pid={}, alive={}, status={})",
-                        self.debugpy_port, pid, alive, exit_status
+                        "debugpy not listening on port {} after spawn (pid={}, alive=false, status={}). \
+                         Check /tmp/debugpy_e2e_{}.log",
+                        self.debugpy_port, pid, exit_status, self.debugpy_port
                     ))
                 }
             }
