@@ -28,6 +28,10 @@ use tokio::sync::broadcast;
 ///
 /// Uses dependency injection via trait objects for testability.
 /// Delegates adapter lifecycle management to AdapterLifecycleManager.
+///
+/// All fields are `Arc` handles, so `Clone` is cheap and enables the background
+/// `tokio::spawn` task (AttachPid mode) to share the same service instance.
+#[derive(Clone)]
 pub struct ConnectionService {
     /// Repository for persisting connections
     connection_repo: ConnectionRepositoryRef,
@@ -272,11 +276,8 @@ impl ConnectionService {
                 .update_status(&connection_id, ConnectionStatus::Connecting)
                 .await?;
 
-            // Clone Arc handles for the background task (all are cheap Arc clones)
-            let adapter_lifecycle_manager_bg = self.adapter_lifecycle_manager.clone();
-            let connection_repo_bg = self.connection_repo.clone();
-            let reference_repo_bg = self.reference_repo.clone();
-            let system_event_tx_bg = self.system_event_tx.clone();
+            // Clone self (cheap: all fields are Arc handles) for the background task.
+            let this = self.clone();
             let connection_id_bg = connection_id.clone();
             let host_bg = connection.host.clone();
             let port_bg = connection.port;
@@ -302,7 +303,7 @@ impl ConnectionService {
                 // 600 s wait_for_connection_connected polling window expires.
                 let start_result = tokio::time::timeout(
                     std::time::Duration::from_secs(540),
-                    adapter_lifecycle_manager_bg.start_adapter(
+                    this.adapter_lifecycle_manager.start_adapter(
                         connection_id_bg.clone(),
                         &host_bg,
                         port_bg,
@@ -326,49 +327,28 @@ impl ConnectionService {
 
                 match start_result {
                     Ok(_) => {
-                        // 6. Update connection status to Connected
-                        if let Err(e) = connection_repo_bg
-                            .update_status(&connection_id_bg, ConnectionStatus::Connected)
+                        // 6–8. Update status, add reference, emit event.
+                        if let Err(e) = this
+                            .finalize_connection_start(
+                                &connection_id_bg,
+                                &host_bg,
+                                port_bg,
+                                language_bg,
+                                &created_by,
+                            )
                             .await
                         {
                             tracing::warn!(
-                                "Background adapter: failed to update {} to Connected: {e}",
+                                connection_id = %connection_id_bg.0,
+                                error = %e,
+                                "Background adapter: failed to finalize connection start"
+                            );
+                        } else {
+                            info!(
+                                "Adapter started for connection {} (background task)",
                                 connection_id_bg.0
                             );
                         }
-
-                        // 7. Add client reference if created_by is provided
-                        if let Some(ref client_id) = created_by {
-                            let reference = ConnectionReference::new(
-                                connection_id_bg.clone(),
-                                ClientIdentity::bridge(client_id),
-                                ReferenceKind::Client,
-                            );
-                            if let Err(e) = reference_repo_bg.add_reference(&reference).await {
-                                tracing::warn!(
-                                    connection_id = %connection_id_bg.0,
-                                    client_id = %client_id,
-                                    error = %e,
-                                    "Background adapter: failed to add client reference (non-fatal)"
-                                );
-                            }
-                        }
-
-                        // 8. Emit connection created event
-                        let event = SystemEvent::connection_created(
-                            connection_id_bg.clone(),
-                            &host_bg,
-                            port_bg,
-                            language_bg.as_str(),
-                        );
-                        if let Err(e) = system_event_tx_bg.send(event) {
-                            tracing::warn!("No subscribers for connection_created event: {e}");
-                        }
-
-                        info!(
-                            "Adapter started for connection {} (background task)",
-                            connection_id_bg.0
-                        );
                     }
                     Err(e) => {
                         tracing::error!(
@@ -376,7 +356,8 @@ impl ConnectionService {
                             error = %e,
                             "Background adapter start failed"
                         );
-                        if let Err(update_err) = connection_repo_bg
+                        if let Err(update_err) = this
+                            .connection_repo
                             .update_status(
                                 &connection_id_bg,
                                 ConnectionStatus::Failed(e.to_string()),
@@ -404,41 +385,64 @@ impl ConnectionService {
                 )
                 .await?;
 
-            // 5. Update connection status to Connected
-            self.connection_repo
-                .update_status(&connection_id, ConnectionStatus::Connected)
-                .await?;
-
-            // 6. Add client reference if created_by is provided
-            if let Some(ref client_id) = created_by {
-                let reference = ConnectionReference::new(
-                    connection_id.clone(),
-                    ClientIdentity::bridge(client_id),
-                    ReferenceKind::Client,
-                );
-                if let Err(e) = self.reference_repo.add_reference(&reference).await {
-                    tracing::warn!(
-                        connection_id = %connection_id.0,
-                        client_id = %client_id,
-                        error = %e,
-                        "Failed to add client reference (non-fatal)"
-                    );
-                }
-            }
-
-            // 7. Emit connection created event
-            let event = SystemEvent::connection_created(
-                connection_id.clone(),
+            // 5–7. Update status, add reference, emit event.
+            self.finalize_connection_start(
+                &connection_id,
                 &connection.host,
                 connection.port,
-                connection.language.as_str(),
-            );
-            if let Err(e) = self.system_event_tx.send(event) {
-                tracing::warn!("No subscribers for connection_created event: {e}");
-            }
+                connection.language,
+                &created_by,
+            )
+            .await?;
         }
 
         Ok(connection_id)
+    }
+
+    /// Finalize a successful adapter start: update status to Connected, add client
+    /// reference, and emit the connection-created system event.
+    ///
+    /// Returns `Err` only when the status update fails so callers can propagate
+    /// (sync path) or log (background task) accordingly. Reference add and event
+    /// emit failures are non-fatal and logged as warnings.
+    async fn finalize_connection_start(
+        &self,
+        connection_id: &ConnectionId,
+        host: &str,
+        port: u16,
+        language: detrix_core::SourceLanguage,
+        created_by: &Option<String>,
+    ) -> Result<()> {
+        // Update connection status to Connected
+        self.connection_repo
+            .update_status(connection_id, ConnectionStatus::Connected)
+            .await?;
+
+        // Add client reference if created_by is provided
+        if let Some(ref client_id) = created_by {
+            let reference = ConnectionReference::new(
+                connection_id.clone(),
+                ClientIdentity::bridge(client_id),
+                ReferenceKind::Client,
+            );
+            if let Err(e) = self.reference_repo.add_reference(&reference).await {
+                tracing::warn!(
+                    connection_id = %connection_id.0,
+                    client_id = %client_id,
+                    error = %e,
+                    "Failed to add client reference (non-fatal)"
+                );
+            }
+        }
+
+        // Emit connection created event
+        let event =
+            SystemEvent::connection_created(connection_id.clone(), host, port, language.as_str());
+        if let Err(e) = self.system_event_tx.send(event) {
+            tracing::warn!("No subscribers for connection_created event: {e}");
+        }
+
+        Ok(())
     }
 
     /// Disconnect from a debugger server
