@@ -837,7 +837,9 @@ impl McpBridge {
 
     /// Disable metrics created by this bridge on the specified daemon
     ///
-    /// Lists all metrics and disables only those with `createdBy` matching this bridge's client ID.
+    /// Lists all metrics and disables only those with `agentId` matching this bridge's client ID.
+    /// The `agent_id` uniquely identifies this bridge session regardless of which user is
+    /// authenticated, so checking `agentId` alone is correct and sufficient.
     /// Returns the number of metrics successfully disabled.
     async fn disable_my_metrics_on_daemon(&self, daemon_url: &str) -> Result<usize> {
         let token = self.auth_token.read().await.clone();
@@ -860,11 +862,11 @@ impl McpBridge {
             .await
             .context("Failed to parse metrics response")?;
 
-        // Disable only metrics created by this bridge
+        // Disable only metrics created by this bridge instance (matched via agentId)
         let mut disabled_count = 0;
         for metric in metrics {
-            let user_id = metric.get("userId").and_then(|v| v.as_str());
-            if user_id != Some(&self.client_id) {
+            let agent_id = metric.get("agentId").and_then(|v| v.as_str());
+            if agent_id != Some(&self.client_id) {
                 continue;
             }
             if let Some(metric_id) = metric.get("metricId").and_then(|v| v.as_str()) {

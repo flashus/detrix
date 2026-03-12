@@ -12,6 +12,65 @@ use detrix_core::ConnectionId;
 use sqlx::Row;
 use tracing::{debug, trace};
 
+/// Build the INSERT SQL for the metrics table.
+///
+/// Both `save` (plain insert) and `save_with_options` (upsert) share the same
+/// 33-column column list and VALUES placeholder block.  Only the suffix differs:
+/// - `upsert = false`: plain INSERT (conflict → error, caller gets last_insert_rowid)
+/// - `upsert = true`:  ON CONFLICT … DO UPDATE … RETURNING id
+fn metric_insert_query(upsert: bool) -> String {
+    let base = "INSERT INTO metrics (
+                name, connection_id, group_name, location, expressions_json, expression_hash, language,
+                enabled, mode_type, mode_config, condition_expr, safety_level,
+                created_at, updated_at, user_id, agent_id,
+                capture_stack_trace, stack_trace_ttl, stack_trace_slice,
+                capture_memory_snapshot, snapshot_scope, snapshot_ttl,
+                anchor_symbol, anchor_symbol_kind, anchor_symbol_range, anchor_offset,
+                anchor_fingerprint, anchor_context_before, anchor_source_line, anchor_context_after,
+                anchor_last_verified, anchor_original_location, anchor_status
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
+                    ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)";
+
+    if upsert {
+        format!(
+            "{}\n            ON CONFLICT(location, connection_id, user_id) DO UPDATE SET
+                name = excluded.name,
+                group_name = excluded.group_name,
+                expressions_json = excluded.expressions_json,
+                expression_hash = excluded.expression_hash,
+                language = excluded.language,
+                enabled = excluded.enabled,
+                mode_type = excluded.mode_type,
+                mode_config = excluded.mode_config,
+                condition_expr = excluded.condition_expr,
+                safety_level = excluded.safety_level,
+                updated_at = excluded.updated_at,
+                capture_stack_trace = excluded.capture_stack_trace,
+                stack_trace_ttl = excluded.stack_trace_ttl,
+                stack_trace_slice = excluded.stack_trace_slice,
+                capture_memory_snapshot = excluded.capture_memory_snapshot,
+                snapshot_scope = excluded.snapshot_scope,
+                snapshot_ttl = excluded.snapshot_ttl,
+                anchor_symbol = excluded.anchor_symbol,
+                anchor_symbol_kind = excluded.anchor_symbol_kind,
+                anchor_symbol_range = excluded.anchor_symbol_range,
+                anchor_offset = excluded.anchor_offset,
+                anchor_fingerprint = excluded.anchor_fingerprint,
+                anchor_context_before = excluded.anchor_context_before,
+                anchor_source_line = excluded.anchor_source_line,
+                anchor_context_after = excluded.anchor_context_after,
+                anchor_last_verified = excluded.anchor_last_verified,
+                anchor_original_location = excluded.anchor_original_location,
+                anchor_status = excluded.anchor_status
+            RETURNING id",
+            base
+        )
+    } else {
+        base.to_string()
+    }
+}
+
 #[async_trait]
 impl MetricRepository for SqliteStorage {
     /// Save a new metric (fails on duplicate name+connection_id)
@@ -84,52 +143,9 @@ impl MetricRepository for SqliteStorage {
         // For upsert mode, we need RETURNING to get the ID (could be existing or new)
         // For non-upsert mode, we use execute() + last_insert_rowid() which is simpler
         let id = if upsert {
-            let query = r#"
-            INSERT INTO metrics (
-                name, connection_id, group_name, location, expressions_json, expression_hash, language,
-                enabled, mode_type, mode_config, condition_expr, safety_level,
-                created_at, updated_at, user_id, agent_id,
-                capture_stack_trace, stack_trace_ttl, stack_trace_slice,
-                capture_memory_snapshot, snapshot_scope, snapshot_ttl,
-                anchor_symbol, anchor_symbol_kind, anchor_symbol_range, anchor_offset,
-                anchor_fingerprint, anchor_context_before, anchor_source_line, anchor_context_after,
-                anchor_last_verified, anchor_original_location, anchor_status
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
-                    ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)
-            ON CONFLICT(location, connection_id, user_id) DO UPDATE SET
-                name = excluded.name,
-                group_name = excluded.group_name,
-                expressions_json = excluded.expressions_json,
-                expression_hash = excluded.expression_hash,
-                language = excluded.language,
-                enabled = excluded.enabled,
-                mode_type = excluded.mode_type,
-                mode_config = excluded.mode_config,
-                condition_expr = excluded.condition_expr,
-                safety_level = excluded.safety_level,
-                updated_at = excluded.updated_at,
-                capture_stack_trace = excluded.capture_stack_trace,
-                stack_trace_ttl = excluded.stack_trace_ttl,
-                stack_trace_slice = excluded.stack_trace_slice,
-                capture_memory_snapshot = excluded.capture_memory_snapshot,
-                snapshot_scope = excluded.snapshot_scope,
-                snapshot_ttl = excluded.snapshot_ttl,
-                anchor_symbol = excluded.anchor_symbol,
-                anchor_symbol_kind = excluded.anchor_symbol_kind,
-                anchor_symbol_range = excluded.anchor_symbol_range,
-                anchor_offset = excluded.anchor_offset,
-                anchor_fingerprint = excluded.anchor_fingerprint,
-                anchor_context_before = excluded.anchor_context_before,
-                anchor_source_line = excluded.anchor_source_line,
-                anchor_context_after = excluded.anchor_context_after,
-                anchor_last_verified = excluded.anchor_last_verified,
-                anchor_original_location = excluded.anchor_original_location,
-                anchor_status = excluded.anchor_status
-            RETURNING id
-            "#;
+            let query = metric_insert_query(true);
 
-            let row = sqlx::query(query)
+            let row = sqlx::query(&query)
                 .bind(&metric.name)
                 .bind(&metric.connection_id.0)
                 .bind(&metric.group)
@@ -144,7 +160,7 @@ impl MetricRepository for SqliteStorage {
                 .bind(safety_level)
                 .bind(now)
                 .bind(now)
-                .bind(metric.user_id.as_deref().unwrap_or("system"))
+                .bind(metric.user_id.as_deref())
                 .bind(metric.agent_id.as_deref())
                 .bind(metric.capture_stack_trace)
                 .bind(metric.stack_trace_ttl.map(|t| t as i64))
@@ -169,22 +185,9 @@ impl MetricRepository for SqliteStorage {
             row.get::<i64, _>("id")
         } else {
             // Plain INSERT - use execute() + last_insert_rowid() for simplicity
-            let query = r#"
-            INSERT INTO metrics (
-                name, connection_id, group_name, location, expressions_json, expression_hash, language,
-                enabled, mode_type, mode_config, condition_expr, safety_level,
-                created_at, updated_at, user_id, agent_id,
-                capture_stack_trace, stack_trace_ttl, stack_trace_slice,
-                capture_memory_snapshot, snapshot_scope, snapshot_ttl,
-                anchor_symbol, anchor_symbol_kind, anchor_symbol_range, anchor_offset,
-                anchor_fingerprint, anchor_context_before, anchor_source_line, anchor_context_after,
-                anchor_last_verified, anchor_original_location, anchor_status
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
-                    ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)
-            "#;
+            let query = metric_insert_query(false);
 
-            sqlx::query(query)
+            sqlx::query(&query)
                 .bind(&metric.name)
                 .bind(&metric.connection_id.0)
                 .bind(&metric.group)
@@ -199,7 +202,7 @@ impl MetricRepository for SqliteStorage {
                 .bind(safety_level)
                 .bind(now)
                 .bind(now)
-                .bind(metric.user_id.as_deref().unwrap_or("system"))
+                .bind(metric.user_id.as_deref())
                 .bind(metric.agent_id.as_deref())
                 .bind(metric.capture_stack_trace)
                 .bind(metric.stack_trace_ttl.map(|t| t as i64))
@@ -483,7 +486,7 @@ impl MetricRepository for SqliteStorage {
             }
             None => {
                 sqlx::query(
-                    "SELECT * FROM metrics WHERE connection_id = ? AND location = ? LIMIT 1",
+                    "SELECT * FROM metrics WHERE connection_id = ? AND location = ? ORDER BY created_at ASC LIMIT 1",
                 )
                 .bind(&connection_id.0)
                 .bind(&location_pattern)
@@ -506,7 +509,7 @@ impl MetricRepository for SqliteStorage {
     ) -> Result<Vec<Metric>> {
         let location_pattern = format!("@{}#{}", file, line);
 
-        let rows = sqlx::query("SELECT * FROM metrics WHERE connection_id = ? AND location = ?")
+        let rows = sqlx::query("SELECT * FROM metrics WHERE connection_id = ? AND location = ? ORDER BY created_at ASC")
             .bind(&connection_id.0)
             .bind(&location_pattern)
             .fetch_all(self.pool())
@@ -609,21 +612,22 @@ impl MetricRepository for SqliteStorage {
 
         let rows = sqlx::query(query).fetch_all(self.pool()).await?;
 
-        let summaries: Vec<detrix_application::ports::GroupSummary> = rows
+        let summaries: Result<Vec<detrix_application::ports::GroupSummary>> = rows
             .iter()
             .map(|row| {
-                let name: Option<String> = row.try_get("group_name").unwrap_or(None);
-                let metric_count: i64 = row.try_get("metric_count").unwrap_or(0);
-                let enabled_count: i64 = row.try_get("enabled_count").unwrap_or(0);
+                let name: Option<String> = row.try_get("group_name")?;
+                let metric_count: i64 = row.try_get("metric_count")?;
+                let enabled_count: i64 = row.try_get("enabled_count")?;
 
-                detrix_application::ports::GroupSummary {
+                Ok(detrix_application::ports::GroupSummary {
                     name,
                     metric_count: metric_count as u64,
                     enabled_count: enabled_count as u64,
-                }
+                })
             })
             .collect();
 
+        let summaries = summaries?;
         debug!(group_count = summaries.len(), "Group summaries query");
 
         Ok(summaries)
@@ -646,8 +650,11 @@ impl MetricRepository for SqliteStorage {
     }
 
     async fn migrate_connection_id(&self, from: &ConnectionId, to: &ConnectionId) -> Result<u64> {
-        // UPDATE OR IGNORE skips rows that would violate the unique index on (location, connection_id),
-        // preserving any metric already present at the same location on the target connection.
+        // UPDATE OR IGNORE skips rows that would violate the unique index on
+        // (location, connection_id, user_id), preserving any metric already present
+        // at the same location+user on the target connection.
+        // Because user_id is included in the index, metrics belonging to different users
+        // at the same location will not conflict during migration.
         let result =
             sqlx::query("UPDATE OR IGNORE metrics SET connection_id = ? WHERE connection_id = ?")
                 .bind(&to.0)
@@ -862,11 +869,7 @@ pub(crate) fn row_to_metric(row: &sqlx::sqlite::SqliteRow) -> Result<Metric> {
         condition: condition_expr,
         safety_level,
         created_at: Some(created_at),
-        user_id: row
-            .try_get("user_id")
-            .ok()
-            .flatten()
-            .or_else(|| row.try_get("created_by").unwrap_or(None)),
+        user_id: row.try_get("user_id").ok().flatten(),
         agent_id: row.try_get("agent_id").unwrap_or(None),
         // Introspection fields
         capture_stack_trace,

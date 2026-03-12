@@ -151,7 +151,7 @@ impl ConnectionService {
         connection.control_plane_url = control_plane_url;
         connection.build_commit = build_commit;
         connection.build_tag = build_tag;
-        connection.created_by = created_by.clone();
+        connection.user_id = created_by.clone();
         let connection_id = connection.id.clone();
 
         // 2. Check if connection with same UUID already exists and is connected

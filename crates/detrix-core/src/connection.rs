@@ -188,8 +188,9 @@ pub struct Connection {
 
     /// Client identity of the creator (from X-Detrix-Client-Id header).
     /// Used for multi-user reference counting in cloud mode.
+    /// Renamed from `created_by` (migration 003).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_by: Option<String>,
+    pub user_id: Option<String>,
 
     /// When the connection was created (microseconds since epoch)
     pub created_at: i64,
@@ -265,7 +266,7 @@ impl Connection {
             control_plane_url: None,
             build_commit: None,
             build_tag: None,
-            created_by: None,
+            user_id: None,
             created_at: now,
             last_connected_at: None,
             last_active: now,
@@ -318,7 +319,7 @@ impl Connection {
             control_plane_url: None,
             build_commit: None,
             build_tag: None,
-            created_by: None,
+            user_id: None,
             created_at: now,
             last_connected_at: None,
             last_active: now,

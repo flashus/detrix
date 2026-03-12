@@ -141,8 +141,8 @@ async fn test_metric_exists_by_name() {
 async fn test_metric_duplicate_location_fails_by_default() {
     let storage = create_test_storage().await;
 
-    // Create first metric at a specific location
-    let metric1 = Metric::new(
+    // Create first metric at a specific location (same user_id to trigger conflict)
+    let mut metric1 = Metric::new(
         "first_metric".to_string(),
         ConnectionId::from("default"),
         Location {
@@ -153,12 +153,13 @@ async fn test_metric_duplicate_location_fails_by_default() {
         SourceLanguage::Python,
     )
     .unwrap();
+    metric1.user_id = Some("alice".to_string());
 
     // Save first metric
     MetricRepository::save(&storage, &metric1).await.unwrap();
 
-    // Create second metric with different name but SAME location
-    let metric2 = Metric::new(
+    // Create second metric with different name but SAME location and SAME user_id
+    let mut metric2 = Metric::new(
         "second_metric".to_string(),
         ConnectionId::from("default"),
         Location {
@@ -169,6 +170,7 @@ async fn test_metric_duplicate_location_fails_by_default() {
         SourceLanguage::Python,
     )
     .unwrap();
+    metric2.user_id = Some("alice".to_string());
 
     // Default save (upsert=false) should fail due to location UNIQUE constraint
     let result = MetricRepository::save(&storage, &metric2).await;
@@ -179,8 +181,8 @@ async fn test_metric_duplicate_location_fails_by_default() {
 async fn test_metric_duplicate_location_upserts_when_enabled() {
     let storage = create_test_storage().await;
 
-    // Create first metric at a specific location
-    let metric1 = Metric::new(
+    // Create first metric at a specific location (same user_id to trigger conflict)
+    let mut metric1 = Metric::new(
         "first_metric".to_string(),
         ConnectionId::from("default"),
         Location {
@@ -191,13 +193,14 @@ async fn test_metric_duplicate_location_upserts_when_enabled() {
         SourceLanguage::Python,
     )
     .unwrap();
+    metric1.user_id = Some("alice".to_string());
 
     // Save first metric
     let id1 = MetricRepository::save(&storage, &metric1).await.unwrap();
     assert!(id1.0 > 0);
 
-    // Create second metric with different name but SAME location and different expression
-    let metric2 = Metric::new(
+    // Create second metric with different name but SAME location, expression, and user_id
+    let mut metric2 = Metric::new(
         "second_metric".to_string(),
         ConnectionId::from("default"),
         Location {
@@ -208,6 +211,7 @@ async fn test_metric_duplicate_location_upserts_when_enabled() {
         SourceLanguage::Python,
     )
     .unwrap();
+    metric2.user_id = Some("alice".to_string());
 
     // Explicit upsert should succeed and return same ID
     let id2 = MetricRepository::save_with_options(&storage, &metric2, true)

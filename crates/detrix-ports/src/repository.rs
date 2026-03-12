@@ -38,11 +38,12 @@ pub struct MetricFilter {
 pub trait MetricRepository: Send + Sync {
     /// Save a new metric
     ///
-    /// If `upsert` is false (default), fails if metric with same (location, connection_id) exists.
-    /// If `upsert` is true, updates existing metric with same (location, connection_id).
+    /// If `upsert` is false (default), fails if metric with same (location, connection_id, user_id) exists.
+    /// If `upsert` is true, updates existing metric with same (location, connection_id, user_id).
     ///
-    /// Note: Uniqueness is based on location (file:line) + connection_id, not name.
-    /// This matches DAP's constraint of one logpoint per line.
+    /// Note: Uniqueness is based on (location, connection_id, user_id).
+    /// Each user can have their own metric at the same location; `NULL` user_ids are
+    /// each treated as distinct in the SQLite UNIQUE index.
     async fn save(&self, metric: &Metric) -> Result<MetricId> {
         self.save_with_options(metric, false).await
     }

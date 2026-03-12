@@ -260,16 +260,22 @@ impl MetricRepository for MockMetricRepository {
 
     async fn migrate_connection_id(&self, from: &ConnectionId, to: &ConnectionId) -> Result<u64> {
         let mut metrics = self.metrics.write().unwrap();
-        // Collect locations already occupied on the target connection (conflict detection)
-        let occupied: std::collections::HashSet<(String, u32)> = metrics
+        // Collect (location, user_id) tuples already occupied on the target connection.
+        // Mirrors the SQLite unique index on (location, connection_id, user_id): two users
+        // can have metrics at the same location, so user_id must be included in conflict detection.
+        let occupied: std::collections::HashSet<(String, u32, Option<String>)> = metrics
             .values()
             .filter(|m| &m.connection_id == to)
-            .map(|m| (m.location.file.clone(), m.location.line))
+            .map(|m| (m.location.file.clone(), m.location.line, m.user_id.clone()))
             .collect();
         let mut migrated = 0u64;
         for metric in metrics.values_mut() {
             if &metric.connection_id == from
-                && !occupied.contains(&(metric.location.file.clone(), metric.location.line))
+                && !occupied.contains(&(
+                    metric.location.file.clone(),
+                    metric.location.line,
+                    metric.user_id.clone(),
+                ))
             {
                 metric.connection_id = to.clone();
                 migrated += 1;
