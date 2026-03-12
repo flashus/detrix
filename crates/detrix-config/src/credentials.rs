@@ -33,9 +33,17 @@ pub enum CredentialsError {
 }
 
 /// Credential for a single target daemon.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TargetCredential {
     pub token: String,
+}
+
+impl std::fmt::Debug for TargetCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TargetCredential")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Collection of per-host credentials.

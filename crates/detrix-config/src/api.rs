@@ -10,6 +10,15 @@ use crate::constants::{
     DEFAULT_WS_PONG_TIMEOUT_MS, MAX_RATE_LIMIT_BURST,
 };
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
+
+/// Default user_id injected when authentication is disabled.
+///
+/// Used both in the middleware (HTTP/gRPC) and in the auto-auth setup in `serve`.
+pub const AUTO_AUTH_DEFAULT_USER_ID: &str = "default";
+
+/// Maximum allowed length for a static bearer token.
+const MAX_TOKEN_LEN: usize = 512;
 
 // ============================================================================
 // API Config
@@ -370,7 +379,10 @@ pub enum AuthMode {
     External,
 }
 
-/// Role for a static user
+/// Role for a static user.
+///
+/// Intentionally has no `Default` impl — all fields of `StaticUser` must be
+/// explicit in config to avoid accidentally granting the wrong access level.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum UserRole {
@@ -378,15 +390,28 @@ pub enum UserRole {
     User,
 }
 
-/// A statically configured user with a bearer token
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A statically configured user with a bearer token.
+///
+/// # Note
+/// Intentionally no `Default` impl — all fields must be explicit.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StaticUser {
-    /// Bearer token (constant-time compared)
+    /// Bearer token (constant-time compared; redacted in Debug output)
     pub token: String,
     /// User identity — becomes `metric.user_id`
     pub user_id: String,
     /// Role: admin or user
     pub role: UserRole,
+}
+
+impl std::fmt::Debug for StaticUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StaticUser")
+            .field("token", &"[REDACTED]")
+            .field("user_id", &self.user_id)
+            .field("role", &self.role)
+            .finish()
+    }
 }
 
 /// Authentication configuration for API endpoints
@@ -422,6 +447,12 @@ pub struct AuthConfig {
     /// Default: ["GetStatus"]
     #[serde(default = "default_grpc_public_methods")]
     pub grpc_public_methods: Vec<String>,
+
+    /// Deprecated: use `[[api.auth.users]]` instead.
+    ///
+    /// If this field is present in config, `validate()` returns a clear migration error.
+    #[serde(default, alias = "bearer_token", skip_serializing)]
+    pub _bearer_token_deprecated: Option<String>,
 }
 
 /// JWT configuration for external authentication mode
@@ -488,6 +519,25 @@ impl AuthConfig {
     ///
     /// Ensures that valid credentials are provided when authentication is enabled.
     pub fn validate(&self) -> Result<(), String> {
+        // Detect deprecated bearer_token migration scenario
+        if self._bearer_token_deprecated.is_some() && self.users.is_empty() {
+            return Err("Config error: 'bearer_token' is no longer supported. \
+                 Use [[api.auth.users]] instead. See CHANGELOG.md."
+                .to_string());
+        }
+
+        // Warn if users are configured but mode is not Simple (they will be ignored)
+        if matches!(
+            self.mode,
+            Some(AuthMode::External) | Some(AuthMode::Disabled)
+        ) && !self.users.is_empty()
+        {
+            tracing::warn!(
+                mode = ?self.mode,
+                "api.auth.users configured but mode is not 'simple'; static tokens will be ignored"
+            );
+        }
+
         match self.effective_mode() {
             AuthMode::Disabled => Ok(()),
             AuthMode::Simple => {
@@ -496,12 +546,34 @@ impl AuthConfig {
                         "api.auth.users must contain at least one user in simple mode".to_string(),
                     );
                 }
+
+                let mut seen_tokens = std::collections::HashSet::new();
+                let mut seen_user_ids = std::collections::HashSet::new();
+
                 for (i, user) in self.users.iter().enumerate() {
                     if user.token.is_empty() {
                         return Err(format!("api.auth.users[{}].token cannot be empty", i));
                     }
+                    if user.token.len() > MAX_TOKEN_LEN {
+                        return Err(format!(
+                            "api.auth.users[{}].token exceeds maximum length of {} characters",
+                            i, MAX_TOKEN_LEN
+                        ));
+                    }
                     if user.user_id.is_empty() {
                         return Err(format!("api.auth.users[{}].user_id cannot be empty", i));
+                    }
+                    if !seen_tokens.insert(user.token.as_str()) {
+                        return Err(format!(
+                            "api.auth.users[{}].token is a duplicate (tokens must be unique)",
+                            i
+                        ));
+                    }
+                    if !seen_user_ids.insert(user.user_id.as_str()) {
+                        return Err(format!(
+                            "api.auth.users[{}].user_id '{}' is a duplicate (user_ids must be unique)",
+                            i, user.user_id
+                        ));
                     }
                 }
                 Ok(())
@@ -515,10 +587,14 @@ impl AuthConfig {
         }
     }
 
-    /// Look up a static user by token.
+    /// Look up a static user by token using constant-time comparison.
+    ///
+    /// Uses `subtle::ConstantTimeEq` to prevent timing side-channel attacks.
     /// Returns `None` if no user matches.
     pub fn find_user_by_token(&self, token: &str) -> Option<&StaticUser> {
-        self.users.iter().find(|u| u.token == token)
+        self.users
+            .iter()
+            .find(|u| bool::from(u.token.as_bytes().ct_eq(token.as_bytes())))
     }
 
     /// Check if a path is a public endpoint (no auth required)
@@ -550,6 +626,7 @@ impl Default for AuthConfig {
             jwt: JwtConfig::default(),
             public_endpoints: default_public_endpoints(),
             grpc_public_methods: default_grpc_public_methods(),
+            _bearer_token_deprecated: None,
         }
     }
 }

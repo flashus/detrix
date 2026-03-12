@@ -26,6 +26,9 @@ thiserror = { workspace = true }
 # UUID generation (machine identity)
 uuid = { workspace = true }
 
+# Constant-time comparison (prevents timing side-channel on token comparison)
+subtle = "2"
+
 # Logging
 tracing = { workspace = true }
 
