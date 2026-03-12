@@ -31,6 +31,19 @@ pub fn build_scope(
     detrix_application::extract_scope(user_id, role, agent_id)
 }
 
+/// Authenticated user identity, shared across HTTP and gRPC authentication layers.
+///
+/// Injected into request extensions after successful authentication.
+/// HTTP handlers extract it via `Extension<AuthenticatedUser>`;
+/// gRPC handlers extract it via `request.extensions().get::<AuthenticatedUser>()`.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedUser {
+    /// User identity (from StaticUser.user_id or JWT `sub` claim)
+    pub user_id: String,
+    /// User role (Admin or User)
+    pub role: detrix_config::UserRole,
+}
+
 /// HTTP header / gRPC metadata key for client identity.
 ///
 /// Used across REST, gRPC, and MCP to identify the originator of mutations.

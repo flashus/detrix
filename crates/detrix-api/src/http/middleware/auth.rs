@@ -13,7 +13,7 @@ use axum::{
     response::Response,
 };
 use detrix_application::JwksValidator;
-use detrix_config::{AuthConfig, AuthMode, UserRole};
+use detrix_config::{AuthConfig, AuthMode, UserRole, AUTO_AUTH_DEFAULT_USER_ID};
 use std::sync::Arc;
 use tracing::{debug, error, warn};
 
@@ -21,17 +21,8 @@ use tracing::{debug, error, warn};
 use detrix_config::constants::AUTHORIZATION_HEADER;
 use detrix_config::constants::BEARER_PREFIX;
 
-/// Authenticated user identity extracted from token or JWT.
-///
-/// Injected into request extensions after successful authentication.
-/// Handlers can extract this using `Extension<AuthenticatedUser>`.
-#[derive(Clone, Debug)]
-pub struct AuthenticatedUser {
-    /// User identity (from StaticUser.user_id or JWT sub claim)
-    pub user_id: String,
-    /// User role (Admin or User)
-    pub role: UserRole,
-}
+/// Re-export the shared `AuthenticatedUser` type from `crate::common`.
+pub use crate::common::AuthenticatedUser;
 
 /// Authentication middleware state
 #[derive(Clone)]
@@ -82,7 +73,7 @@ pub async fn auth_middleware(
     if config.effective_mode() == AuthMode::Disabled {
         let mut request = request;
         request.extensions_mut().insert(AuthenticatedUser {
-            user_id: "default".to_string(),
+            user_id: AUTO_AUTH_DEFAULT_USER_ID.to_string(),
             role: UserRole::Admin,
         });
         return Ok(next.run(request).await);
@@ -138,9 +129,19 @@ pub async fn auth_middleware(
 
                     match validator.validate_token(token).await {
                         Ok(claims) => {
+                            // Reject JWTs without `sub` — all un-identified callers
+                            // sharing "anonymous" would break tenant isolation.
+                            let user_id = match claims.sub.clone() {
+                                Some(sub) => sub,
+                                None => {
+                                    warn!(path = %path, "JWT missing 'sub' claim — rejecting");
+                                    return Err(StatusCode::UNAUTHORIZED);
+                                }
+                            };
+
                             debug!(
                                 path = %path,
-                                sub = ?claims.sub,
+                                sub = %user_id,
                                 email = ?claims.email,
                                 "JWT authentication successful"
                             );
@@ -148,13 +149,7 @@ pub async fn auth_middleware(
                             // Determine role from JWT claims
                             let role = resolve_jwt_role(&claims, &config.jwt);
 
-                            let authenticated = AuthenticatedUser {
-                                user_id: claims
-                                    .sub
-                                    .clone()
-                                    .unwrap_or_else(|| "anonymous".to_string()),
-                                role,
-                            };
+                            let authenticated = AuthenticatedUser { user_id, role };
 
                             let mut request = request;
                             request.extensions_mut().insert(authenticated);
@@ -180,19 +175,53 @@ pub async fn auth_middleware(
     }
 }
 
-/// Determine user role from JWT claims based on config
+/// Traverse a dot-separated path in a JSON value (e.g. `"realm_access.roles"`).
+fn get_claim_value<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    path.split('.').try_fold(root, |node, key| node.get(key))
+}
+
+/// Determine user role from JWT claims based on config.
+///
+/// Supports dot-path notation for nested claims, e.g. `admin_role_claim = "realm_access.roles"`.
 pub fn resolve_jwt_role(
     claims: &detrix_application::JwtClaims,
     jwt_config: &detrix_config::JwtConfig,
 ) -> UserRole {
-    if let (Some(ref claim_name), Some(ref claim_value)) =
+    let (Some(ref claim_name), Some(ref claim_value)) =
         (&jwt_config.admin_role_claim, &jwt_config.admin_role_value)
-    {
-        // Check the standard "roles" field if claim_name is "roles"
-        if claim_name == "roles" && claims.roles.iter().any(|r| r == claim_value) {
+    else {
+        return UserRole::User;
+    };
+
+    // Fast path: the well-known top-level "roles" array has a dedicated typed field.
+    if claim_name == "roles" {
+        if claims.roles.iter().any(|r| r == claim_value) {
+            return UserRole::Admin;
+        }
+        return UserRole::User;
+    }
+
+    // Generic path: traverse dot-separated path in extra claims.
+    let extra_root = serde_json::Value::Object(
+        claims
+            .extra
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    );
+    if let Some(node) = get_claim_value(&extra_root, claim_name) {
+        let is_admin = match node {
+            serde_json::Value::String(s) => s == claim_value,
+            serde_json::Value::Array(arr) => arr
+                .iter()
+                .any(|v| v.as_str().is_some_and(|s| s == claim_value)),
+            _ => false,
+        };
+        if is_admin {
             return UserRole::Admin;
         }
     }
+
     UserRole::User
 }
 
@@ -469,5 +498,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_resolve_jwt_role_with_standard_roles_claim() {
+        let claims = detrix_application::JwtClaims {
+            roles: vec!["admin".to_string()],
+            ..Default::default()
+        };
+        let config = detrix_config::JwtConfig {
+            admin_role_claim: Some("roles".to_string()),
+            admin_role_value: Some("admin".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_jwt_role(&claims, &config), UserRole::Admin);
+    }
+
+    #[test]
+    fn test_resolve_jwt_role_with_custom_claim_name() {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("groups".to_string(), serde_json::json!(["admin", "users"]));
+        let claims = detrix_application::JwtClaims {
+            extra,
+            ..Default::default()
+        };
+        let config = detrix_config::JwtConfig {
+            admin_role_claim: Some("groups".to_string()),
+            admin_role_value: Some("admin".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_jwt_role(&claims, &config), UserRole::Admin);
+    }
+
+    #[test]
+    fn test_resolve_jwt_role_nested_dot_path() {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert(
+            "realm_access".to_string(),
+            serde_json::json!({"roles": ["detrix-admin", "user"]}),
+        );
+        let claims = detrix_application::JwtClaims {
+            extra,
+            ..Default::default()
+        };
+        let config = detrix_config::JwtConfig {
+            admin_role_claim: Some("realm_access.roles".to_string()),
+            admin_role_value: Some("detrix-admin".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_jwt_role(&claims, &config), UserRole::Admin);
+    }
+
+    #[test]
+    fn test_resolve_jwt_role_no_match_returns_user() {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("groups".to_string(), serde_json::json!(["viewer"]));
+        let claims = detrix_application::JwtClaims {
+            extra,
+            ..Default::default()
+        };
+        let config = detrix_config::JwtConfig {
+            admin_role_claim: Some("groups".to_string()),
+            admin_role_value: Some("admin".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_jwt_role(&claims, &config), UserRole::User);
     }
 }

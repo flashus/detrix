@@ -6,19 +6,15 @@
 //! - External: JWT validation via JWKS endpoint (for enterprise SSO)
 
 use detrix_application::JwksValidator;
-use detrix_config::{AuthConfig, AuthMode, UserRole};
+use detrix_config::{AuthConfig, AuthMode, UserRole, AUTO_AUTH_DEFAULT_USER_ID};
 use std::sync::Arc;
 use tonic::{Request, Status};
 use tracing::{debug, error, warn};
 
 use detrix_config::constants::{AUTHORIZATION_METADATA_KEY, BEARER_PREFIX};
 
-/// Authenticated user identity (same as HTTP middleware version)
-#[derive(Clone, Debug)]
-pub struct AuthenticatedUser {
-    pub user_id: String,
-    pub role: UserRole,
-}
+/// Re-export the shared `AuthenticatedUser` type from `crate::common`.
+pub use crate::common::AuthenticatedUser;
 
 /// Auth interceptor state (shared across all interceptor clones)
 #[derive(Clone)]
@@ -61,7 +57,7 @@ pub fn create_auth_interceptor(
         if config.effective_mode() == AuthMode::Disabled {
             let mut request = request;
             request.extensions_mut().insert(AuthenticatedUser {
-                user_id: "default".to_string(),
+                user_id: AUTO_AUTH_DEFAULT_USER_ID.to_string(),
                 role: UserRole::Admin,
             });
             return Ok(request);
@@ -104,29 +100,49 @@ pub fn create_auth_interceptor(
                             Status::unauthenticated("Authentication not configured")
                         })?;
 
-                        // Use block_in_place to run async validation in sync interceptor
-                        let result = tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current()
-                                .block_on(validator.validate_token(token))
+                        // Run async JWT validation from a sync interceptor without
+                        // block_in_place, which panics on current-thread runtimes
+                        // (e.g. #[tokio::test]). Instead spawn a dedicated OS thread
+                        // with its own single-thread runtime — works in all contexts.
+                        let validator = Arc::clone(validator);
+                        let token_owned = token.to_string();
+                        #[allow(clippy::expect_used)]
+                        let result = std::thread::scope(|s| {
+                            s.spawn(|| {
+                                tokio::runtime::Builder::new_current_thread()
+                                    .enable_all()
+                                    .build()
+                                    .expect("tokio runtime construction cannot fail")
+                                    .block_on(validator.validate_token(&token_owned))
+                            })
+                            .join()
+                            .expect("JWT validation thread panicked")
                         });
 
                         match result {
                             Ok(claims) => {
+                                // Reject JWTs without `sub` — sharing "anonymous" breaks
+                                // tenant isolation.
+                                let user_id = match claims.sub.clone() {
+                                    Some(sub) => sub,
+                                    None => {
+                                        warn!("JWT missing 'sub' claim — rejecting");
+                                        return Err(Status::unauthenticated(
+                                            "JWT missing 'sub' claim",
+                                        ));
+                                    }
+                                };
                                 debug!(
-                                    sub = ?claims.sub,
+                                    sub = %user_id,
                                     email = ?claims.email,
                                     "JWT authentication successful"
                                 );
                                 let role =
                                     crate::http::middleware::resolve_jwt_role(&claims, &config.jwt);
                                 let mut request = request;
-                                request.extensions_mut().insert(AuthenticatedUser {
-                                    user_id: claims
-                                        .sub
-                                        .clone()
-                                        .unwrap_or_else(|| "anonymous".to_string()),
-                                    role,
-                                });
+                                request
+                                    .extensions_mut()
+                                    .insert(AuthenticatedUser { user_id, role });
                                 Ok(request)
                             }
                             Err(e) => {

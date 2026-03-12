@@ -14,7 +14,7 @@ use axum::{
     http::HeaderMap,
     Extension, Json,
 };
-use detrix_application::{GroupOperationResult, GroupSummary};
+use detrix_application::{GroupOperationResult, GroupSummary, MetricFilter};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -75,19 +75,59 @@ impl GroupOperationResponse {
 /// - `enabledCount`: Enabled metrics in the group
 pub async fn list_groups(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<GroupInfo>>, HttpError> {
     info!("REST: list_groups");
 
-    // Use efficient GROUP BY query (PERF-02 N+1 fix)
-    let summaries = state
+    let client_id = super::extract_client_id(&headers)?;
+    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id);
+
+    // Admin scope: use efficient GROUP BY query from storage.
+    // User/Agent scope: fetch user's metrics and compute summaries in-memory
+    // (avoids adding user_id filter to the storage GROUP BY query for now).
+    if scope.user_id().is_none() {
+        let summaries = state
+            .context
+            .metric_service
+            .list_group_summaries()
+            .await
+            .http_context("Failed to list group summaries")?;
+        return Ok(Json(summaries.into_iter().map(GroupInfo::from).collect()));
+    }
+
+    // User/Agent: filter metrics by user_id then build summaries
+    let filter = MetricFilter {
+        user_id: scope.user_id().map(|s| s.to_string()),
+        ..Default::default()
+    };
+    let (metrics, _) = state
         .context
         .metric_service
-        .list_group_summaries()
+        .list_metrics_filtered(&filter, usize::MAX, 0)
         .await
-        .http_context("Failed to list group summaries")?;
+        .http_context("Failed to list metrics for groups")?;
 
-    // Convert using From trait (GroupSummary → proto GroupInfo)
-    Ok(Json(summaries.into_iter().map(GroupInfo::from).collect()))
+    // Build summaries from filtered metrics
+    let mut group_map: std::collections::HashMap<Option<String>, (u64, u64)> =
+        std::collections::HashMap::new();
+    for m in &metrics {
+        let entry = group_map.entry(m.group.clone()).or_insert((0, 0));
+        entry.0 += 1;
+        if m.enabled {
+            entry.1 += 1;
+        }
+    }
+    let summaries: Vec<GroupInfo> = group_map
+        .into_iter()
+        .map(|(name, (metric_count, enabled_count))| GroupInfo {
+            name: name.unwrap_or_else(|| "default".to_string()),
+            metric_count: metric_count as u32,
+            enabled_count: enabled_count as u32,
+        })
+        .collect();
+
+    Ok(Json(summaries))
 }
 
 /// List all metrics belonging to a specific group.
@@ -100,14 +140,23 @@ pub async fn list_groups(
 /// Returns empty array if no metrics in the group.
 pub async fn list_group_metrics(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(group_name): Path<String>,
 ) -> Result<Json<Vec<MetricInfo>>, HttpError> {
     info!("REST: list_group_metrics (group={})", group_name);
 
-    let metrics = state
+    let client_id = super::extract_client_id(&headers)?;
+    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id);
+
+    let filter = MetricFilter {
+        user_id: scope.user_id().map(|s| s.to_string()),
+        ..Default::default()
+    };
+    let (metrics, _) = state
         .context
         .metric_service
-        .list_metrics()
+        .list_metrics_filtered(&filter, usize::MAX, 0)
         .await
         .http_context("Failed to list metrics")?;
 

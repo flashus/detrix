@@ -318,21 +318,34 @@ impl ListMetricsResult {
 pub async fn list_metrics_impl(
     state: &Arc<ApiState>,
     params: ListMetricsParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<ListMetricsResult, McpError> {
+    use detrix_application::MetricFilter;
+
+    // Build filter with scope's user_id for multi-tenant isolation
+    let filter = MetricFilter {
+        user_id: scope.user_id().map(|s| s.to_string()),
+        ..Default::default()
+    };
+
     let metrics = if let Some(ref group_name) = params.group {
-        state
+        let (all, _) = state
             .context
             .metric_service
-            .list_metrics_by_group(group_name)
+            .list_metrics_filtered(&filter, usize::MAX, 0)
             .await
-            .mcp_context("Failed to list metrics")?
+            .mcp_context("Failed to list metrics")?;
+        all.into_iter()
+            .filter(|m| m.group.as_deref() == Some(group_name.as_str()))
+            .collect::<Vec<_>>()
     } else {
-        state
+        let (all, _) = state
             .context
             .metric_service
-            .list_metrics()
+            .list_metrics_filtered(&filter, usize::MAX, 0)
             .await
-            .mcp_context("Failed to list metrics")?
+            .mcp_context("Failed to list metrics")?;
+        all
     };
 
     debug!("list_metrics: found {} metrics in storage", metrics.len());

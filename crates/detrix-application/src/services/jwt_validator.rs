@@ -3,6 +3,12 @@
 //! Validates JWTs using JWKS (JSON Web Key Set) from an external identity provider.
 //! Supports RS256 algorithm commonly used by OAuth2/OIDC providers.
 //!
+//! # Algorithm Support
+//!
+//! **Note: Only RS256 (RSA + SHA-256) is currently supported.**
+//! ES256, HS256, and other algorithms are rejected. Most enterprise OIDC providers
+//! (Okta, Auth0, Keycloak, Azure AD, Google) use RS256 by default.
+//!
 //! Features:
 //! - JWKS caching with configurable TTL
 //! - Automatic key refresh on cache miss
@@ -77,7 +83,7 @@ impl<T> JwtTokenResultExt<T> for Result<T, jsonwebtoken::errors::Error> {
 /// JWT claims extracted after validation
 ///
 /// Standard claims plus common custom claims from identity providers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct JwtClaims {
     /// Subject (user ID)
     pub sub: Option<String>,
@@ -103,6 +109,9 @@ pub struct JwtClaims {
     /// Scopes (common in OAuth2)
     #[serde(default)]
     pub scope: Option<String>,
+    /// Extra claims not captured by named fields (e.g. realm_access, groups)
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// Audience can be a single string or array of strings

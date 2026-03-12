@@ -1319,4 +1319,58 @@ mod tests {
             result
         );
     }
+
+    // ==================== Phase 2.6: list_metrics_filtered user_id scope test ====================
+
+    #[tokio::test]
+    async fn test_list_metrics_filtered_by_user_id() {
+        use crate::MetricFilter;
+
+        let service = create_test_service().await;
+
+        // Add alice's metric
+        let mut alice_metric = create_test_metric("alice_metric");
+        alice_metric.user_id = Some("alice".to_string());
+        service.add_metric(alice_metric, false, None).await.unwrap();
+
+        // Add bob's metric
+        let mut bob_metric = create_test_metric_at_line("bob_metric", 200);
+        bob_metric.user_id = Some("bob".to_string());
+        service.add_metric(bob_metric, false, None).await.unwrap();
+
+        // Filter by alice's user_id → only alice's metric returned
+        let alice_filter = MetricFilter {
+            user_id: Some("alice".to_string()),
+            ..Default::default()
+        };
+        let (alice_metrics, alice_total) = service
+            .list_metrics_filtered(&alice_filter, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(alice_total, 1, "Alice should have exactly 1 metric");
+        assert_eq!(alice_metrics[0].name, "alice_metric");
+
+        // Filter by bob's user_id → only bob's metric returned
+        let bob_filter = MetricFilter {
+            user_id: Some("bob".to_string()),
+            ..Default::default()
+        };
+        let (bob_metrics, bob_total) = service
+            .list_metrics_filtered(&bob_filter, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(bob_total, 1, "Bob should have exactly 1 metric");
+        assert_eq!(bob_metrics[0].name, "bob_metric");
+
+        // Admin (no user_id filter) → both metrics returned
+        let admin_filter = MetricFilter::default();
+        let (all_metrics, all_total) = service
+            .list_metrics_filtered(&admin_filter, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(all_total, 2, "Admin should see all 2 metrics");
+        let names: Vec<_> = all_metrics.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"alice_metric"));
+        assert!(names.contains(&"bob_metric"));
+    }
 }

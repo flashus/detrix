@@ -375,7 +375,8 @@ impl DetrixServer {
         Parameters(params): Parameters<ListMetricsParams>,
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("list_metrics");
-        match tools::list_metrics_impl(&self.state, params).await {
+        let scope = self.scope();
+        match tools::list_metrics_impl(&self.state, params, &scope).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 Ok(CallToolResult::success(vec![

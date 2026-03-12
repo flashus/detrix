@@ -232,9 +232,14 @@ pub async fn list_metrics(
 /// - 404 Not Found: Metric with given ID does not exist
 pub async fn get_metric(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<u64>,
 ) -> Result<Json<MetricInfo>, HttpError> {
     info!("REST: get_metric (id={})", id);
+
+    let client_id = super::extract_client_id(&headers)?;
+    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id);
 
     let metric = state
         .context
@@ -243,6 +248,11 @@ pub async fn get_metric(
         .await
         .http_context("Failed to get metric")?
         .http_not_found(&format!("Metric {}", id))?;
+
+    // Enforce scope — return 404 (not 403) to avoid leaking existence of other users' metrics
+    if !scope.can_read(&metric) {
+        return Err(HttpError::not_found(format!("Metric {}", id)));
+    }
 
     // Single metric should always have ID - error if missing (database integrity issue)
     Ok(Json(metric_to_rest_response(&metric).http_err()?))
@@ -409,6 +419,8 @@ pub async fn delete_metric(
 /// data from previous sessions. Pass `since=0` to explicitly request all events.
 pub async fn query_events(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<QueryEventsParams>,
 ) -> Result<Json<Vec<ProtoMetricEvent>>, HttpError> {
     info!(
@@ -416,11 +428,27 @@ pub async fn query_events(
         params.metric_id, params.metric_name, params.limit, params.since
     );
 
-    // If metric_name provided, look up the metric ID first
+    let client_id = super::extract_client_id(&headers)?;
+    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id);
+
+    // If metric_name provided, look up the metric ID first; enforce scope on lookup
     let metric_id = match (&params.metric_id, &params.metric_name) {
-        (Some(id), _) => Some(MetricId(*id)),
+        (Some(id), _) => {
+            // Scope-check by metric ID: fetch the metric to verify ownership
+            let metric = state
+                .context
+                .metric_service
+                .get_metric(MetricId(*id))
+                .await
+                .http_context("Failed to look up metric")?
+                .http_not_found(&format!("Metric {}", id))?;
+            if !scope.can_read(&metric) {
+                return Err(HttpError::not_found(format!("Metric {}", id)));
+            }
+            Some(MetricId(*id))
+        }
         (None, Some(name)) => {
-            // Look up by name via MetricService
+            // Look up by name via MetricService, then enforce scope
             let metric = state
                 .context
                 .metric_service
@@ -428,6 +456,9 @@ pub async fn query_events(
                 .await
                 .http_context("Failed to look up metric")?
                 .http_not_found(&format!("Metric {}", name))?;
+            if !scope.can_read(&metric) {
+                return Err(HttpError::not_found(format!("Metric {}", name)));
+            }
             metric.id
         }
         (None, None) => None,
