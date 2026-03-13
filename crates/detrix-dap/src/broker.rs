@@ -6,6 +6,7 @@
 //! - Request/response correlation
 //! - Event broadcasting to subscribers
 
+use crate::constants::{broker as broker_consts, events};
 use crate::{Error, Event, ProtocolMessage, Request, Response, Result};
 use detrix_config::AdapterConnectionConfig;
 use serde_json;
@@ -40,6 +41,11 @@ pub struct DapBroker {
 
     /// Adapter connection configuration
     config: AdapterConnectionConfig,
+
+    /// Per-instance module event counter (resets for each new broker/connection).
+    /// Kept to ensure the Arc lives as long as the broker even after the reader task ends.
+    #[allow(dead_code)]
+    module_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl DapBroker {
@@ -56,9 +62,15 @@ impl DapBroker {
             Box::new(writer) as Box<dyn AsyncWrite + Send + Unpin>
         ));
 
+        let module_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
         // Spawn reader task to process incoming messages
-        let reader_task =
-            Self::spawn_reader_task(reader, pending_requests.clone(), event_subscribers.clone());
+        let reader_task = Self::spawn_reader_task(
+            reader,
+            pending_requests.clone(),
+            event_subscribers.clone(),
+            module_count.clone(),
+        );
 
         Self {
             next_seq,
@@ -67,6 +79,7 @@ impl DapBroker {
             stdin,
             reader_task: Some(reader_task),
             config,
+            module_count,
         }
     }
 
@@ -97,6 +110,11 @@ impl DapBroker {
     /// Use this when the default `request_timeout_ms` from config is too short
     /// for a specific request (e.g. lldb-dap `attach` with PID on macOS, which
     /// can block for 60–120 s while ptrace enumerates loaded dylibs).
+    ///
+    /// Uses tracing instrumentation for performance monitoring:
+    /// - Tracks lock acquisition time for pending_requests RwLock
+    /// - Records request timeout and overall latency
+    #[tracing::instrument(skip(self, command, arguments), fields(seq))]
     pub async fn send_request_with_timeout(
         &self,
         command: impl Into<String>,
@@ -107,59 +125,9 @@ impl DapBroker {
 
         let cmd: String = command.into();
         let seq = self.next_sequence().await;
-        debug!(command = %cmd, timeout_ms = timeout.as_millis(), "Sending DAP request (custom timeout)");
-
-        let request = Request {
-            seq,
-            command: cmd,
-            arguments,
-        };
-
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending_requests.write().await;
-            pending.insert(seq, tx);
-        }
-
-        self.send_message(ProtocolMessage::Request(request)).await?;
-
-        let timeout_ms = timeout.as_millis() as u64;
-        let response_start = Instant::now();
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(response)) => {
-                tracing::debug!(
-                    response_time_ms = response_start.elapsed().as_millis() as u64,
-                    "DAP request completed"
-                );
-                response
-            }
-            Ok(Err(_)) => Err(Error::Communication("Response channel closed".to_string())),
-            Err(_) => {
-                let mut pending = self.pending_requests.write().await;
-                pending.remove(&seq);
-                warn!(timeout_ms, "DAP request timed out");
-                Err(Error::Timeout(timeout_ms))
-            }
-        }
-    }
-
-    /// Send a request and wait for response
-    ///
-    /// Uses tracing instrumentation for performance monitoring:
-    /// - Tracks lock acquisition time for pending_requests RwLock
-    /// - Records request timeout and overall latency
-    #[tracing::instrument(skip(self, command, arguments), fields(seq))]
-    pub async fn send_request(
-        &self,
-        command: impl Into<String>,
-        arguments: Option<serde_json::Value>,
-    ) -> Result<Response> {
-        use std::time::Instant;
-
-        let cmd: String = command.into();
-        let seq = self.next_sequence().await;
         tracing::Span::current().record("seq", seq);
-        debug!(command = %cmd, "Sending DAP request");
+        let timeout_ms = timeout.as_millis() as u64;
+        debug!(command = %cmd, timeout_ms, "Sending DAP request");
 
         let request = Request {
             seq,
@@ -173,7 +141,7 @@ impl DapBroker {
             let lock_start = Instant::now();
             let mut pending = self.pending_requests.write().await;
             let lock_duration_us = lock_start.elapsed().as_micros();
-            if lock_duration_us > 1000 {
+            if lock_duration_us > broker_consts::SLOW_LOCK_THRESHOLD_US {
                 // Log if lock acquisition took > 1ms (potential contention)
                 warn!(
                     lock_duration_us = lock_duration_us,
@@ -184,13 +152,10 @@ impl DapBroker {
             pending.insert(seq, tx);
         }
 
-        // Send request
         self.send_message(ProtocolMessage::Request(request)).await?;
 
-        // Wait for response (with timeout from config)
-        let timeout_ms = self.config.request_timeout_ms;
         let response_start = Instant::now();
-        match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(response)) => {
                 tracing::debug!(
                     response_time_ms = response_start.elapsed().as_millis() as u64,
@@ -204,7 +169,7 @@ impl DapBroker {
                 let lock_start = Instant::now();
                 let mut pending = self.pending_requests.write().await;
                 let lock_duration_us = lock_start.elapsed().as_micros();
-                if lock_duration_us > 1000 {
+                if lock_duration_us > broker_consts::SLOW_LOCK_THRESHOLD_US {
                     warn!(
                         lock_duration_us = lock_duration_us,
                         pending_count = pending.len(),
@@ -212,8 +177,97 @@ impl DapBroker {
                     );
                 }
                 pending.remove(&seq);
-                warn!(timeout_ms = timeout_ms, "DAP request timed out");
+                warn!(timeout_ms, "DAP request timed out");
                 Err(Error::Timeout(timeout_ms))
+            }
+        }
+    }
+
+    /// Send a request and wait for response using the default timeout from config.
+    pub async fn send_request(
+        &self,
+        command: impl Into<String>,
+        arguments: Option<serde_json::Value>,
+    ) -> Result<Response> {
+        let timeout = std::time::Duration::from_millis(self.config.request_timeout_ms);
+        self.send_request_with_timeout(command, arguments, timeout)
+            .await
+    }
+
+    /// Send a request without blocking but detect an early `success: false` response.
+    ///
+    /// Used for DAP requests (attach, launch) where:
+    /// - Some adapters (e.g. lldb-dap 22.x) never send a response.
+    /// - Other adapters (e.g. lldb-dap 21.x) may immediately return `success: false`
+    ///   on permission errors or bad PIDs.
+    ///
+    /// Registers a pending response channel **before** sending so the reader loop
+    /// can route any incoming response.  Then waits at most `failure_window`:
+    /// - No response within window → removes the pending channel, returns `Ok(())`.
+    ///   Any later response will trigger a harmless "unknown request seq" warning.
+    /// - `success: true` response → adapter acknowledged early (21.x), returns `Ok(())`.
+    /// - `success: false` response → returns `Err(InitializationFailed(...))`.
+    pub async fn send_and_detect_failure(
+        &self,
+        command: impl Into<String>,
+        arguments: Option<serde_json::Value>,
+        failure_window: std::time::Duration,
+    ) -> Result<()> {
+        let cmd: String = command.into();
+        let seq = self.next_sequence().await;
+        debug!(command = %cmd, seq, "Sending DAP request (no-wait with failure detection)");
+
+        let request = Request {
+            seq,
+            command: cmd,
+            arguments,
+        };
+
+        // Register pending channel before sending so the reader loop can route the response.
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pending = self.pending_requests.write().await;
+            pending.insert(seq, tx);
+        }
+
+        self.send_message(ProtocolMessage::Request(request)).await?;
+
+        // Wait briefly for an early failure response.
+        // rx yields Result<Result<Response>, RecvError>; timeout wraps that in Result<_, Elapsed>.
+        match tokio::time::timeout(failure_window, rx).await {
+            Err(_timeout) => {
+                // No response within the window — normal for adapters that don't
+                // acknowledge this request (e.g. lldb-dap 22.x).
+                // Remove the pending entry so any late response logs a clear warning.
+                let mut pending = self.pending_requests.write().await;
+                pending.remove(&seq);
+                debug!(
+                    seq,
+                    "No early response within failure-detection window (normal)"
+                );
+                Ok(())
+            }
+            Ok(Ok(Ok(response))) => {
+                if response.success {
+                    debug!(seq, "Early success response received");
+                    Ok(())
+                } else {
+                    let msg = response
+                        .message
+                        .unwrap_or_else(|| "Attach failed".to_string());
+                    warn!(seq, error = %msg, "Adapter returned failure response");
+                    Err(Error::InitializationFailed(msg))
+                }
+            }
+            Ok(Ok(Err(e))) => {
+                // Reader task sent an error (e.g. adapter disconnected mid-attach).
+                Err(e)
+            }
+            Ok(Err(_)) => {
+                // Sender dropped — reader task exited.  Connection is gone.
+                Err(Error::Communication(
+                    "Response channel closed unexpectedly".to_string(),
+                ))
             }
         }
     }
@@ -324,6 +378,7 @@ impl DapBroker {
         reader: R,
         pending_requests: Arc<RwLock<HashMap<i64, ResponseSender>>>,
         event_subscribers: Arc<RwLock<Vec<mpsc::Sender<Event>>>>,
+        module_count: Arc<std::sync::atomic::AtomicUsize>,
     ) -> tokio::task::JoinHandle<()>
     where
         R: AsyncRead + Send + Unpin + 'static,
@@ -345,14 +400,20 @@ impl DapBroker {
                         //             but some debuggers may only send exited)
                         let session_end_event = match &message {
                             ProtocolMessage::Event(e)
-                                if e.event == "terminated" || e.event == "exited" =>
+                                if e.event == events::TERMINATED || e.event == events::EXITED =>
                             {
                                 Some(e.event.clone())
                             }
                             _ => None,
                         };
 
-                        Self::handle_message(message, &pending_requests, &event_subscribers).await;
+                        Self::handle_message(
+                            message,
+                            &pending_requests,
+                            &event_subscribers,
+                            &module_count,
+                        )
+                        .await;
 
                         if let Some(event_name) = session_end_event {
                             info!(
@@ -449,6 +510,7 @@ impl DapBroker {
         message: ProtocolMessage,
         pending_requests: &Arc<RwLock<HashMap<i64, ResponseSender>>>,
         event_subscribers: &Arc<RwLock<Vec<mpsc::Sender<Event>>>>,
+        module_count: &Arc<std::sync::atomic::AtomicUsize>,
     ) {
         match message {
             ProtocolMessage::Response(response) => {
@@ -478,25 +540,28 @@ impl DapBroker {
                 //             "process", "progressStart", "progressUpdate", "progressEnd",
                 //             "invalidated", "memory" and any other unknown event types
                 match event.event.as_str() {
-                    "output" | "stopped" | "terminated" | "exited" | "continued" | "breakpoint" => {
-                    } // keep — fall through
+                    events::OUTPUT
+                    | events::STOPPED
+                    | events::TERMINATED
+                    | events::EXITED
+                    | events::CONTINUED
+                    | events::BREAKPOINT => {} // keep — fall through
                     other => {
-                        // Count `module` events and log every 50 to show attach progress
+                        // Count `module` events and log every N to show attach progress
                         // at INFO level. lldb-dap emits one per dylib; 400+ expected on
                         // macOS Sequoia. All other discarded events stay at trace.
-                        if other == "module" {
-                            static MODULE_COUNT: std::sync::atomic::AtomicUsize =
-                                std::sync::atomic::AtomicUsize::new(0);
+                        if other == events::MODULE {
                             let n =
-                                MODULE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                            if n.is_multiple_of(50) {
+                                module_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            if n.is_multiple_of(broker_consts::MODULE_EVENT_LOG_FREQUENCY) {
                                 info!(
                                     "Broker: lldb-dap attach progress — {} module events received",
                                     n
                                 );
                             } else {
                                 debug!(
-                                    "Broker: discarding 'module' event #{} (lldb-dap attach progress)",
+                                    "Broker: discarding '{}' event #{} (lldb-dap attach progress)",
+                                    events::MODULE,
                                     n
                                 );
                             }

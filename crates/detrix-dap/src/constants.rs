@@ -15,6 +15,12 @@ pub mod events {
     pub const TERMINATED: &str = "terminated";
     /// Exited event - debuggee process exited
     pub const EXITED: &str = "exited";
+    /// Continued event - execution resumed
+    pub const CONTINUED: &str = "continued";
+    /// Breakpoint event - breakpoint added/changed/removed
+    pub const BREAKPOINT: &str = "breakpoint";
+    /// Module event - module loaded/unloaded (lldb-dap: one per dylib during attach)
+    pub const MODULE: &str = "module";
 }
 
 /// DAP request command names
@@ -80,4 +86,16 @@ pub mod defaults {
     /// but we need a thread ID for requests like stackTrace and continue.
     /// Thread 1 is typically the main thread in most applications.
     pub const THREAD_ID: i64 = 1;
+}
+
+/// Broker tuning constants
+pub mod broker {
+    /// Lock acquisition time threshold in microseconds above which a warning is emitted.
+    /// Indicates potential contention on the pending_requests RwLock.
+    pub const SLOW_LOCK_THRESHOLD_US: u128 = 1000;
+
+    /// Log `module` event progress at INFO level every N events.
+    /// lldb-dap emits one `module` event per loaded dylib during attach;
+    /// 400+ are expected on macOS Sequoia.
+    pub const MODULE_EVENT_LOG_FREQUENCY: usize = 50;
 }

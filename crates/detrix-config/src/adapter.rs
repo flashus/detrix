@@ -66,6 +66,18 @@ pub struct AdapterConnectionConfig {
     /// Default: 100
     #[serde(default = "default_max_value_length")]
     pub max_value_length: usize,
+    /// Override the `configurationDone` wait timeout (seconds) for AttachPid mode.
+    ///
+    /// When `None`, platform defaults apply: 420s on macOS, 120s elsewhere.
+    /// Useful when attaching to a process with an unusually large or small number
+    /// of loaded shared libraries. Set in `[adapter]` section of `detrix.toml`:
+    ///
+    /// ```toml
+    /// # [adapter]
+    /// # attach_config_done_timeout_secs = 300
+    /// ```
+    #[serde(default)]
+    pub attach_config_done_timeout_secs: Option<u64>,
 }
 
 fn default_adapter_host() -> String {
@@ -137,6 +149,7 @@ impl Default for AdapterConnectionConfig {
             event_channel_capacity: default_event_channel_capacity(),
             reconnect: ReconnectConfig::default(),
             max_value_length: default_max_value_length(),
+            attach_config_done_timeout_secs: None,
         }
     }
 }

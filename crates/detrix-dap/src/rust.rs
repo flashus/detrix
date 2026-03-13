@@ -498,20 +498,28 @@ impl RustAdapter {
     }
 
     /// Find the Rust sysroot by running `rustc --print sysroot`.
+    ///
+    /// Uses `tokio::task::block_in_place` so the blocking subprocess call does
+    /// not stall the async runtime when called from an async context.
     fn find_rust_sysroot() -> Option<String> {
-        std::process::Command::new("rustc")
-            .args(["--print", "sysroot"])
-            .output()
-            .ok()
-            .and_then(|output| {
-                if output.status.success() {
-                    String::from_utf8(output.stdout)
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                } else {
-                    None
-                }
-            })
+        let run = || {
+            std::process::Command::new("rustc")
+                .args(["--print", "sysroot"])
+                .output()
+                .ok()
+                .and_then(|output| {
+                    if output.status.success() {
+                        String::from_utf8(output.stdout)
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+        };
+        // block_in_place is a no-op when called outside a multi-thread runtime,
+        // so it is safe to call here regardless of the execution context.
+        tokio::task::block_in_place(run)
     }
 
     /// Add fallback formatters when Rust sysroot is not available.

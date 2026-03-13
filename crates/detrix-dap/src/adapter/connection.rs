@@ -19,6 +19,15 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::{debug, info, trace, warn};
 
+/// Per-attempt TCP connect timeout. Caps each individual connect() call so
+/// OS-level TCP handshake timeouts (macOS default ~75 s) cannot block the
+/// entire retry loop. Fast-fail (ECONNREFUSED) returns immediately.
+const TCP_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Upper bound (exclusive) of the random jitter added to each retry interval (milliseconds).
+/// Prevents thundering-herd when multiple clients retry at the same backoff delay.
+const CONNECT_RETRY_JITTER_RANGE_MS: u64 = 100;
+
 /// Launch adapter as subprocess (Launch mode)
 pub async fn launch_subprocess(
     config: &AdapterConfig,
@@ -74,7 +83,7 @@ pub async fn launch_subprocess(
     ));
 
     // Initialize DAP connection
-    initialize_dap(&dap_broker, config, capabilities).await?;
+    initialize_dap(&dap_broker, config, capabilities, connection_config).await?;
 
     // Store broker
     {
@@ -134,7 +143,7 @@ pub async fn connect_tcp(
     ));
 
     // Initialize DAP connection (direct mode - no connect info needed)
-    initialize_dap(&dap_broker, config, capabilities).await?;
+    initialize_dap(&dap_broker, config, capabilities, connection_config).await?;
 
     // Store broker
     {
@@ -173,15 +182,9 @@ async fn connect_with_retry(
     let mut attempt = 0u32;
     let mut connection_refused_count = 0u32;
 
-    // Per-attempt timeout: cap each individual connect() call so OS-level TCP
-    // handshake timeouts (macOS default ~75 s) cannot block the entire loop.
-    // We use 10 s as a reasonable upper bound; fast-fail (ECONNREFUSED) returns
-    // immediately, so this only matters when the port is not yet open.
-    let per_attempt_timeout = Duration::from_secs(10);
-
     loop {
         let connect_result =
-            tokio::time::timeout(per_attempt_timeout, TcpStream::connect(&address)).await;
+            tokio::time::timeout(TCP_CONNECT_ATTEMPT_TIMEOUT, TcpStream::connect(&address)).await;
 
         let io_result = match connect_result {
             Ok(r) => r,
@@ -192,7 +195,7 @@ async fn connect_with_retry(
                     format!(
                         "TCP connect to {} timed out after {}s",
                         address,
-                        per_attempt_timeout.as_secs()
+                        TCP_CONNECT_ATTEMPT_TIMEOUT.as_secs()
                     ),
                 ))
             }
@@ -227,7 +230,7 @@ async fn connect_with_retry(
                 }
 
                 // Exponential backoff with jitter to prevent thundering herd
-                let jitter_ms = rand::rng().random_range(0..100);
+                let jitter_ms = rand::rng().random_range(0..CONNECT_RETRY_JITTER_RANGE_MS);
                 let wait_ms = retry_interval_ms.saturating_add(jitter_ms);
 
                 trace!(
