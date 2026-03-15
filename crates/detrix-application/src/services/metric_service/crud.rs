@@ -135,6 +135,9 @@ impl MetricService {
         // Validate SafeMode constraints (stack trace/memory snapshot in SafeMode)
         self.validate_safe_mode(&metric)?;
 
+        // Validate tenant ID lengths (security boundary fields)
+        Metric::validate_tenant_ids(metric.user_id.as_deref(), metric.agent_id.as_deref())?;
+
         // Validate metric (may produce warnings)
         let mut warnings = self.validate_metric(&metric)?;
 

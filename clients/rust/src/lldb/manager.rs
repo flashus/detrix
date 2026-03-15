@@ -359,8 +359,10 @@ fn allocate_port(host: &str) -> Result<u16> {
 /// This avoids consuming lldb-dap's single connection slot.
 fn is_port_in_use(port: u16) -> bool {
     use std::net::TcpListener;
-    // Bind on the loopback address; any listener on the port (whether bound to
-    // 127.0.0.1 or 0.0.0.0) will cause this to fail with EADDRINUSE.
+    // NOTE: On macOS, binding 127.0.0.1:port fails when something else is ALREADY
+    // bound to 127.0.0.1:port. This works because both lldb-dap and our probe
+    // use 127.0.0.1. Do NOT rely on this to detect 0.0.0.0 listeners on macOS
+    // (macOS allows a specific-address bind alongside a wildcard bind).
     TcpListener::bind(("127.0.0.1", port)).is_err()
 }
 

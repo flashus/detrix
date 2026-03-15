@@ -22,7 +22,7 @@ use detrix_application::{
     EventRepositoryRef, JwksValidator, McpUsageRepositoryRef, SystemEventRepositoryRef,
     SystemEventService,
 };
-use detrix_config::{PortRegistry, ServiceType};
+use detrix_config::{PortRegistry, ServiceType, AUTO_AUTH_DEFAULT_USER_ID};
 use detrix_core::ParseLanguageExt;
 #[allow(unused_imports)]
 use detrix_logging::{debug, error, info, warn};
@@ -165,7 +165,7 @@ pub async fn run(
         config.api.auth.mode = Some(detrix_config::AuthMode::Simple);
         config.api.auth.users = vec![detrix_config::StaticUser {
             token: auto_token,
-            user_id: "default".to_string(),
+            user_id: AUTO_AUTH_DEFAULT_USER_ID.to_string(),
             role: detrix_config::UserRole::Admin,
         }];
     }

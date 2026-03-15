@@ -93,6 +93,25 @@ pub fn sample_metric_with_id(id: u64, name: &str) -> Metric {
     metric
 }
 
+/// Create a sample metric owned by a specific user.
+///
+/// Useful for multi-tenant tests that verify user isolation.
+pub fn sample_metric_for_user(user_id: &str) -> Metric {
+    let mut metric = sample_metric(&format!("metric_{}", user_id));
+    metric.user_id = Some(user_id.to_string());
+    metric
+}
+
+/// Create a sample metric owned by a specific agent within a user's scope.
+///
+/// Useful for multi-tenant tests that verify agent-level isolation.
+pub fn sample_metric_for_agent(user_id: &str, agent_id: &str) -> Metric {
+    let mut metric = sample_metric(&format!("metric_{}_{}", user_id, agent_id));
+    metric.user_id = Some(user_id.to_string());
+    metric.agent_id = Some(agent_id.to_string());
+    metric
+}
+
 /// Create a sample metric in a specific group
 pub fn sample_metric_in_group(name: &str, group: &str) -> Metric {
     let mut metric = sample_metric(name);

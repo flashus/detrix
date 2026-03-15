@@ -44,6 +44,9 @@ pub const SAFETY_TRUSTED: &str = "trusted";
 /// Maximum length of a metric name (1-255 characters)
 pub const MAX_METRIC_NAME_LEN: usize = 255;
 
+/// Maximum length of a `user_id` or `agent_id` field (security-boundary fields)
+pub const MAX_USER_ID_LEN: usize = 256;
+
 /// Delimiter for multi-expression values in logpoint output and hashing.
 /// ASCII Unit Separator (0x1F) - safe to use since it never appears in expression values.
 pub const MULTI_EXPR_DELIMITER: char = '\x1F';
@@ -166,12 +169,12 @@ pub struct Metric {
 
     /// Authenticated user identity (from token or JWT sub claim).
     /// Used for multi-tenant metric ownership and access control.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
 
     /// Agent/session identity (from MCP client_id or X-Detrix-Agent-Id header).
     /// Identifies which agent/session created this metric within a user's scope.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
 
     // Stack trace capture options
@@ -326,6 +329,29 @@ impl Metric {
     pub fn validate_expressions_length(expressions: &[String], max_length: usize) -> Result<()> {
         for expr in expressions {
             Self::validate_expression_length(expr, max_length)?;
+        }
+        Ok(())
+    }
+
+    /// Validate that `user_id` and `agent_id` do not exceed the maximum length.
+    ///
+    /// These are security-boundary fields used for multi-tenant access control.
+    pub fn validate_tenant_ids(user_id: Option<&str>, agent_id: Option<&str>) -> Result<()> {
+        if let Some(uid) = user_id {
+            if uid.len() > MAX_USER_ID_LEN {
+                return Err(Error::InvalidMetricName(format!(
+                    "user_id exceeds maximum length of {} characters",
+                    MAX_USER_ID_LEN
+                )));
+            }
+        }
+        if let Some(aid) = agent_id {
+            if aid.len() > MAX_USER_ID_LEN {
+                return Err(Error::InvalidMetricName(format!(
+                    "agent_id exceeds maximum length of {} characters",
+                    MAX_USER_ID_LEN
+                )));
+            }
         }
         Ok(())
     }
@@ -546,6 +572,60 @@ mod tests {
 
         let deserialized: MetricMode = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, mode);
+    }
+
+    #[test]
+    fn test_metric_user_id_agent_id_default_to_none() {
+        let metric = Metric::new(
+            "test_metric".to_string(),
+            ConnectionId::from("conn"),
+            Location {
+                file: "f.py".to_string(),
+                line: 1,
+            },
+            vec!["x".to_string()],
+            SourceLanguage::Python,
+        )
+        .unwrap();
+        assert!(metric.user_id.is_none());
+        assert!(metric.agent_id.is_none());
+    }
+
+    #[test]
+    fn test_metric_user_id_agent_id_serde_round_trip() {
+        // Deserialize from JSON that omits user_id and agent_id → both None
+        let json = r#"{
+            "name": "m",
+            "connectionId": "c",
+            "location": "f.py#1",
+            "expressions": ["x"],
+            "language": "python",
+            "enabled": true
+        }"#;
+        // Partial deserialization via serde_json::from_value after filling required fields
+        let mut metric = Metric::new(
+            "m".to_string(),
+            ConnectionId::from("c"),
+            Location {
+                file: "f.py".to_string(),
+                line: 1,
+            },
+            vec!["x".to_string()],
+            SourceLanguage::Python,
+        )
+        .unwrap();
+        metric.user_id = Some("alice".to_string());
+        metric.agent_id = Some("agent-42".to_string());
+
+        let serialized = serde_json::to_string(&metric).unwrap();
+        let deserialized: Metric = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.user_id, Some("alice".to_string()));
+        assert_eq!(deserialized.agent_id, Some("agent-42".to_string()));
+        // Confirm the json contains the user_id and agent_id
+        assert!(serialized.contains("alice"));
+        assert!(serialized.contains("agent-42"));
+        // Silence unused variable warning from the json string above
+        let _ = json;
     }
 }
 

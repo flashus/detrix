@@ -36,29 +36,28 @@ impl ConnectionRepository for SqliteStorage {
                 build_commit = excluded.build_commit,
                 build_tag = excluded.build_tag,
                 user_id = COALESCE(excluded.user_id, connections.user_id)",
-            CONNECTION_COLUMNS,
-            CONNECTION_PLACEHOLDERS
+            CONNECTION_COLUMNS, CONNECTION_PLACEHOLDERS
         );
         sqlx::query(&insert_sql)
-        .bind(&connection.id.0)
-        .bind(&connection.name)
-        .bind(&connection.workspace_root)
-        .bind(&connection.hostname)
-        .bind(&connection.host)
-        .bind(connection.port as i64)
-        .bind(connection.language.as_str())
-        .bind(connection.status.to_string())
-        .bind(connection.auto_reconnect)
-        .bind(connection.safe_mode)
-        .bind(connection.created_at)
-        .bind(connection.last_connected_at)
-        .bind(connection.last_active)
-        .bind(&connection.control_plane_url)
-        .bind(&connection.build_commit)
-        .bind(&connection.build_tag)
-        .bind(&connection.user_id)
-        .execute(self.pool())
-        .await?;
+            .bind(&connection.id.0)
+            .bind(&connection.name)
+            .bind(&connection.workspace_root)
+            .bind(&connection.hostname)
+            .bind(&connection.host)
+            .bind(connection.port as i64)
+            .bind(connection.language.as_str())
+            .bind(connection.status.to_string())
+            .bind(connection.auto_reconnect)
+            .bind(connection.safe_mode)
+            .bind(connection.created_at)
+            .bind(connection.last_connected_at)
+            .bind(connection.last_active)
+            .bind(&connection.control_plane_url)
+            .bind(&connection.build_commit)
+            .bind(&connection.build_tag)
+            .bind(&connection.user_id)
+            .execute(self.pool())
+            .await?;
 
         debug!(connection_id = %connection.id.0, "Connection saved");
 

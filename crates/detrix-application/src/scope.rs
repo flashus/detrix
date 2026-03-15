@@ -69,6 +69,18 @@ impl MetricScope {
     }
 }
 
+impl std::fmt::Display for MetricScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetricScope::Admin => write!(f, "Admin"),
+            MetricScope::User(uid) => write!(f, "User({})", uid),
+            MetricScope::Agent { user_id, agent_id } => {
+                write!(f, "Agent({}/{})", user_id, agent_id)
+            }
+        }
+    }
+}
+
 /// Build a MetricScope from an authenticated user and optional agent identity.
 pub fn extract_scope(user_id: &str, role: &UserRole, agent_id: Option<String>) -> MetricScope {
     if *role == UserRole::Admin {

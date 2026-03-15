@@ -270,9 +270,10 @@ pub struct TouchConnectionsResponse {
 /// Returns JSON with the count of successfully updated connections.
 ///
 /// # Security
-/// No IP-based access control - connections are scoped to the daemon instance.
-/// In single-user deployments, this is sufficient. For multi-user scenarios,
-/// add authentication middleware (JWT, OAuth) at the HTTP layer.
+/// This endpoint is intentionally public (no authentication required).
+/// The MCP bridge heartbeat calls this endpoint every 10 seconds, including
+/// scenarios where the token may be unavailable (e.g. daemon restart, token
+/// refresh in progress). Authentication would break liveness tracking.
 #[instrument(skip(state))]
 pub async fn touch_connections(
     State(state): State<Arc<ApiState>>,

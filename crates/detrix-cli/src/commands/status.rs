@@ -4,6 +4,7 @@ use crate::context::ClientContext;
 use crate::grpc_client::{ConnectionsClient, DaemonEndpoints, MetricsClient};
 use crate::output::{Formatter, OutputFormat};
 use anyhow::{Context, Result};
+use detrix_logging::debug;
 
 /// Run status command
 ///
@@ -41,10 +42,17 @@ pub async fn run(
             // Fall back to public REST /health endpoint.
             // This handles JWT-mode daemons where no static token is configured
             // locally (e.g. Docker healthchecks inside the container).
+            debug!(
+                error = %grpc_err,
+                "gRPC status failed, falling back to /health endpoint"
+            );
             let health_url = format!("{}/health", ctx.endpoints.http_endpoint());
-            let healthy = reqwest::Client::new()
-                .get(&health_url)
+            let http_client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(3))
+                .build()
+                .unwrap_or_default();
+            let healthy = http_client
+                .get(&health_url)
                 .send()
                 .await
                 .map(|r| r.status().is_success())

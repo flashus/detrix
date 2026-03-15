@@ -263,13 +263,12 @@ async fn test_jwt_admin_role_grants_full_access() {
     println!("✓ admin role JWT grants full access");
 }
 
-/// User isolation: JWT user-a cannot delete JWT user-b's metric.
+/// Multi-user authentication: two distinct JWT users can each authenticate successfully.
 #[tokio::test]
 #[ignore]
-async fn test_jwt_user_isolation() {
-    // This test verifies that two different JWT users cannot mutate each other's metrics.
-    // It uses the list endpoint to confirm both users get their own view,
-    // as creating metrics would require an active DAP connection.
+async fn test_jwt_multi_user_authentication() {
+    // This test verifies that two different JWT users can both authenticate
+    // and access the API. It uses the list endpoint (no active DAP connection needed).
 
     let alice_token = sign(&JwtClaims::valid("jwt-alice"));
     let bob_token = sign(&JwtClaims::valid("jwt-bob"));
@@ -280,5 +279,5 @@ async fn test_jwt_user_isolation() {
     assert_eq!(alice_status, StatusCode::OK, "alice JWT → {}", alice_status);
     assert_eq!(bob_status, StatusCode::OK, "bob JWT → {}", bob_status);
 
-    println!("✓ JWT user isolation: both users can access their own views");
+    println!("✓ JWT multi-user authentication: both users authenticated successfully");
 }
