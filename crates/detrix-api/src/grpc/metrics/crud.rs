@@ -7,27 +7,16 @@ use crate::generated::detrix::v1::{
     RemoveMetricRequest, RemoveMetricResponse, UpdateMetricRequest,
 };
 use crate::grpc::conversions::{add_request_to_metric, core_to_proto_location};
-use crate::grpc::interceptor::AuthenticatedUser;
 use crate::state::ApiState;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
-
-/// Extract AuthenticatedUser from gRPC request extensions.
-/// Always present — the interceptor injects a default Admin when auth is disabled.
-fn extract_user<T>(request: &Request<T>) -> Result<AuthenticatedUser, Status> {
-    request
-        .extensions()
-        .get::<AuthenticatedUser>()
-        .cloned()
-        .ok_or_else(|| Status::unauthenticated("Missing authentication"))
-}
 
 /// Handle add_metric request
 pub async fn handle_add_metric(
     state: &Arc<ApiState>,
     request: Request<AddMetricRequest>,
 ) -> Result<Response<MetricResponse>, Status> {
-    let user = extract_user(&request)?;
+    let user = crate::grpc::extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
     let mut req = request.into_inner();
 
@@ -112,7 +101,7 @@ pub async fn handle_remove_metric(
     state: &Arc<ApiState>,
     request: Request<RemoveMetricRequest>,
 ) -> Result<Response<RemoveMetricResponse>, Status> {
-    let user = extract_user(&request)?;
+    let user = crate::grpc::extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
     let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
     let req = request.into_inner();
@@ -157,7 +146,7 @@ pub async fn handle_update_metric(
     state: &Arc<ApiState>,
     request: Request<UpdateMetricRequest>,
 ) -> Result<Response<MetricResponse>, Status> {
-    let user = extract_user(&request)?;
+    let user = crate::grpc::extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
     let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
     let req = request.into_inner();
@@ -224,6 +213,9 @@ pub async fn handle_get_metric(
     state: &Arc<ApiState>,
     request: Request<GetMetricRequest>,
 ) -> Result<Response<MetricResponse>, Status> {
+    let user = crate::grpc::extract_user(&request)?;
+    let client_id = crate::grpc::extract_client_id(&request)?;
+    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id);
     let req = request.into_inner();
 
     // Extract metric from oneof identifier
@@ -247,6 +239,11 @@ pub async fn handle_get_metric(
             .ok_or_else(|| Status::not_found(format!("Metric '{}' not found", name)))?,
         None => return Err(Status::invalid_argument("Missing metric identifier")),
     };
+
+    // Enforce read scope — return not_found to avoid leaking existence
+    if !scope.can_read(&metric) {
+        return Err(Status::not_found("Metric not found"));
+    }
 
     // Metric from storage should always have ID - error if missing (database integrity issue)
     let metric_id = metric

@@ -29,6 +29,9 @@ uuid = { workspace = true }
 # Constant-time comparison (prevents timing side-channel on token comparison)
 subtle = "2"
 
+# SHA-256 for hash-then-compare token lookup (normalizes variable-length tokens)
+sha2 = { workspace = true }
+
 # Logging
 tracing = { workspace = true }
 

@@ -5,11 +5,12 @@
 //! last reference is removed.
 
 use crate::http::error::{HttpError, ToHttpResult};
+use crate::http::middleware::AuthenticatedUser;
 use crate::state::ApiState;
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    Json,
+    Extension, Json,
 };
 use detrix_core::connection_reference::ClientIdentity;
 use detrix_core::ConnectionId;
@@ -215,6 +216,7 @@ pub async fn list_references(
 #[instrument(skip(state))]
 pub async fn admin_disconnect_all(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
 ) -> Result<Json<AdminDisconnectAllResponse>, HttpError> {
     // Gate by config flag
     let config = state.config_service.get_config().await;
@@ -223,6 +225,15 @@ pub async fn admin_disconnect_all(
             axum::http::StatusCode::FORBIDDEN,
             "Admin endpoints are disabled. Set api.rest.admin_endpoints_enabled = true in config.",
             detrix_core::ErrorCode::Unauthorized,
+        ));
+    }
+
+    // Require admin role
+    if user.role != detrix_config::UserRole::Admin {
+        return Err(HttpError::with_code(
+            StatusCode::FORBIDDEN,
+            "Admin role required",
+            detrix_core::ErrorCode::Forbidden,
         ));
     }
 
@@ -263,6 +274,7 @@ pub struct DisableMetricsByOwnerResponse {
 #[instrument(skip(state))]
 pub async fn admin_disable_metrics_by_owner(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     axum::Json(req): axum::Json<DisableMetricsByOwnerRequest>,
 ) -> Result<axum::Json<DisableMetricsByOwnerResponse>, HttpError> {
     // Gate by config flag
@@ -272,6 +284,15 @@ pub async fn admin_disable_metrics_by_owner(
             axum::http::StatusCode::FORBIDDEN,
             "Admin endpoints are disabled. Set api.rest.admin_endpoints_enabled = true in config.",
             detrix_core::ErrorCode::Unauthorized,
+        ));
+    }
+
+    // Require admin role
+    if user.role != detrix_config::UserRole::Admin {
+        return Err(HttpError::with_code(
+            StatusCode::FORBIDDEN,
+            "Admin role required",
+            detrix_core::ErrorCode::Forbidden,
         ));
     }
 

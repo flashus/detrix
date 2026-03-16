@@ -10,7 +10,6 @@ use crate::constants::{
     DEFAULT_WS_PONG_TIMEOUT_MS, MAX_RATE_LIMIT_BURST,
 };
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 
 /// Default user_id injected when authentication is disabled.
 ///
@@ -589,12 +588,21 @@ impl AuthConfig {
 
     /// Look up a static user by token using constant-time comparison.
     ///
-    /// Uses `subtle::ConstantTimeEq` to prevent timing side-channel attacks.
-    /// Returns `None` if no user matches.
+    /// Hash-then-compare prevents timing side-channels from variable-length tokens:
+    /// SHA-256 normalizes all tokens to 32 bytes before `ct_eq`, and full iteration
+    /// prevents early-exit leaks.
     pub fn find_user_by_token(&self, token: &str) -> Option<&StaticUser> {
-        self.users
-            .iter()
-            .find(|u| bool::from(u.token.as_bytes().ct_eq(token.as_bytes())))
+        use sha2::{Digest, Sha256};
+        use subtle::ConstantTimeEq;
+        let input_hash = Sha256::digest(token.as_bytes());
+        let mut result: Option<&StaticUser> = None;
+        for user in &self.users {
+            let stored_hash = Sha256::digest(user.token.as_bytes());
+            if bool::from(input_hash.ct_eq(&stored_hash)) {
+                result = Some(user);
+            }
+        }
+        result
     }
 
     /// Check if a path is a public endpoint (no auth required)

@@ -461,7 +461,15 @@ pub async fn query_events(
             }
             metric.id
         }
-        (None, None) => None,
+        (None, None) => {
+            // Non-admin users must specify a metric to prevent cross-user data leaks
+            if scope.user_id().is_some() {
+                return Err(HttpError::bad_request(
+                    "metric_id or metric_name filter required for non-admin users",
+                ));
+            }
+            None
+        }
     };
 
     // Query events via StreamingService (Clean Architecture - delegate to application layer)
@@ -472,8 +480,7 @@ pub async fn query_events(
             .await
             .http_context("Failed to query events")?,
         None => {
-            // Return recent events from all metrics
-            // Note: since filter not applied to "all events" query for simplicity
+            // Admin-only: return recent events from all metrics
             streaming_service
                 .query_all_events(Some(params.limit))
                 .await
