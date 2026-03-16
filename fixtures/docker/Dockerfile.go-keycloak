@@ -1,0 +1,34 @@
+# Go Test App Docker Image for Keycloak E2E
+# Same build as Dockerfile.go but with alpine runtime for JWT token acquisition.
+# The entrypoint script fetches a JWT from Keycloak before starting the app.
+
+# ---- Build Stage ----
+FROM golang:1.24 AS builder
+
+WORKDIR /src
+
+COPY clients/go /src/clients/go
+COPY fixtures/go /src/fixtures/go
+
+WORKDIR /src/fixtures/go
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go build -gcflags="all=-N -l" -o /build/detrix_example_app .
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go install github.com/go-delve/delve/cmd/dlv@latest
+
+# ---- Runtime Stage (alpine — has curl for token acquisition) ----
+FROM alpine:3.20
+
+RUN apk add --no-cache curl ca-certificates
+
+COPY --from=builder /build/detrix_example_app /usr/local/bin/detrix_example_app
+COPY --from=builder /go/bin/dlv /usr/local/bin/dlv
+
+COPY fixtures/docker/keycloak/entrypoint-go.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

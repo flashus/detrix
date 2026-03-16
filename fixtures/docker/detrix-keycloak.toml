@@ -1,0 +1,31 @@
+# Detrix server configuration for Keycloak E2E testing
+# Used by the detrix-keycloak service in docker-compose.keycloak.yml
+
+[api.rest]
+host = "0.0.0.0"
+port = 8090
+
+[api.rest.rate_limit]
+enabled = false
+
+[api.grpc]
+host = "0.0.0.0"
+port = 50061
+
+[storage]
+path = "/data/detrix/data-keycloak.db"
+
+[vfs]
+source_priority = ["bridge", "control_plane", "disk"]
+fetch_timeout_seconds = 10
+
+[api.auth]
+mode = "external"
+
+[api.auth.jwt]
+jwks_url = "http://keycloak:8080/realms/detrix/protocol/openid-connect/certs"
+issuer = "http://keycloak:8080/realms/detrix"
+audience = "detrix-api"
+cache_ttl_seconds = 10
+admin_role_claim = "realm_access.roles"
+admin_role_value = "detrix-admin"
