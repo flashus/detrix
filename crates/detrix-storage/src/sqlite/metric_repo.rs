@@ -18,6 +18,10 @@ use tracing::{debug, trace};
 /// 33-column column list and VALUES placeholder block.  Only the suffix differs:
 /// - `upsert = false`: plain INSERT (conflict → error, caller gets last_insert_rowid)
 /// - `upsert = true`:  ON CONFLICT … DO UPDATE … RETURNING id
+///
+/// **NULL `user_id` behavior:** SQLite treats each NULL as distinct in UNIQUE indexes,
+/// so `ON CONFLICT(location, connection_id, user_id)` with NULL `user_id` will **always insert**
+/// rather than update. This is intentional for pre-migration legacy metrics without owners.
 fn metric_insert_query(upsert: bool) -> String {
     let base = "INSERT INTO metrics (
                 name, connection_id, group_name, location, expressions_json, expression_hash, language,

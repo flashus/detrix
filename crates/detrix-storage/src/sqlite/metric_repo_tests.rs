@@ -950,3 +950,219 @@ async fn test_get_group_summaries_integration_with_list_groups() {
         );
     }
 }
+
+// ========================================================================
+// Multi-tenant storage tests
+// ========================================================================
+
+#[tokio::test]
+async fn test_find_by_location_with_user_id() {
+    let storage = create_test_storage().await;
+
+    let loc = Location {
+        file: "tenant.py".to_string(),
+        line: 42,
+    };
+    let conn = ConnectionId::from("conn1");
+
+    // Alice's metric at (tenant.py, 42)
+    let mut m_alice = Metric::new(
+        "alice_metric".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["x".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    m_alice.user_id = Some("alice".to_string());
+    MetricRepository::save_with_options(&storage, &m_alice, true)
+        .await
+        .unwrap();
+
+    // Bob's metric at same location
+    let mut m_bob = Metric::new(
+        "bob_metric".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["y".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    m_bob.user_id = Some("bob".to_string());
+    MetricRepository::save_with_options(&storage, &m_bob, true)
+        .await
+        .unwrap();
+
+    // Alice's lookup finds alice's metric only
+    let found =
+        MetricRepository::find_by_location(&storage, &conn, &loc.file, loc.line, Some("alice"))
+            .await
+            .unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().user_id.as_deref(), Some("alice"));
+
+    // Bob's lookup finds bob's metric only
+    let found =
+        MetricRepository::find_by_location(&storage, &conn, &loc.file, loc.line, Some("bob"))
+            .await
+            .unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().user_id.as_deref(), Some("bob"));
+}
+
+#[tokio::test]
+async fn test_find_by_location_none_user_id() {
+    let storage = create_test_storage().await;
+
+    let loc = Location {
+        file: "legacy.py".to_string(),
+        line: 10,
+    };
+    let conn = ConnectionId::from("conn1");
+
+    // Create two metrics at same location for different users
+    let mut m1 = Metric::new(
+        "user_a".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["a".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    m1.user_id = Some("alice".to_string());
+    MetricRepository::save_with_options(&storage, &m1, true)
+        .await
+        .unwrap();
+
+    let mut m2 = Metric::new(
+        "user_b".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["b".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    m2.user_id = Some("bob".to_string());
+    MetricRepository::save_with_options(&storage, &m2, true)
+        .await
+        .unwrap();
+
+    // None user_id returns first metric at location (admin/legacy behavior)
+    let found = MetricRepository::find_by_location(&storage, &conn, &loc.file, loc.line, None)
+        .await
+        .unwrap();
+    assert!(found.is_some());
+}
+
+#[tokio::test]
+async fn test_find_filtered_with_user_id() {
+    use detrix_application::ports::MetricFilter;
+
+    let storage = create_test_storage().await;
+
+    // Create metrics for alice and bob
+    let mut m1 = create_test_metric("alice_m1").await;
+    m1.user_id = Some("alice".to_string());
+    MetricRepository::save(&storage, &m1).await.unwrap();
+
+    let mut m2 = create_test_metric("alice_m2").await;
+    m2.user_id = Some("alice".to_string());
+    MetricRepository::save(&storage, &m2).await.unwrap();
+
+    let mut m3 = create_test_metric("bob_m1").await;
+    m3.user_id = Some("bob".to_string());
+    MetricRepository::save(&storage, &m3).await.unwrap();
+
+    // Filter by alice's user_id
+    let filter = MetricFilter {
+        user_id: Some("alice".to_string()),
+        ..Default::default()
+    };
+    let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
+        .await
+        .unwrap();
+
+    assert_eq!(total, 2);
+    assert_eq!(metrics.len(), 2);
+    assert!(metrics
+        .iter()
+        .all(|m| m.user_id.as_deref() == Some("alice")));
+
+    // Filter by bob's user_id
+    let filter = MetricFilter {
+        user_id: Some("bob".to_string()),
+        ..Default::default()
+    };
+    let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
+        .await
+        .unwrap();
+
+    assert_eq!(total, 1);
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0].user_id.as_deref(), Some("bob"));
+}
+
+#[tokio::test]
+async fn test_null_user_id_upsert_creates_duplicates() {
+    // Documents SQLite NULL != NULL behavior: upsert with NULL user_id
+    // always inserts rather than updating.
+    let storage = create_test_storage().await;
+
+    let loc = Location {
+        file: "null_test.py".to_string(),
+        line: 1,
+    };
+    let conn = ConnectionId::from("conn1");
+
+    let m1 = Metric::new(
+        "null_user_1".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["x".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    // user_id defaults to None
+
+    let id1 = MetricRepository::save_with_options(&storage, &m1, true)
+        .await
+        .unwrap();
+
+    let m2 = Metric::new(
+        "null_user_2".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["y".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    // user_id also None
+
+    let id2 = MetricRepository::save_with_options(&storage, &m2, true)
+        .await
+        .unwrap();
+
+    // NULL != NULL in SQLite UNIQUE indexes, so both inserts succeed
+    assert_ne!(id1, id2, "NULL user_id should create separate rows");
+
+    let all = MetricRepository::find_all(&storage).await.unwrap();
+    assert_eq!(all.len(), 2, "Both NULL user_id rows should exist");
+}
+
+#[tokio::test]
+async fn test_agent_id_round_trip() {
+    let storage = create_test_storage().await;
+
+    let mut metric = create_test_metric("agent_rt").await;
+    metric.user_id = Some("alice".to_string());
+    metric.agent_id = Some("claude-code-1".to_string());
+
+    let id = MetricRepository::save(&storage, &metric).await.unwrap();
+
+    let found = MetricRepository::find_by_id(&storage, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.user_id.as_deref(), Some("alice"));
+    assert_eq!(found.agent_id.as_deref(), Some("claude-code-1"));
+}

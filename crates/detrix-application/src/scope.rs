@@ -81,6 +81,18 @@ impl std::fmt::Display for MetricScope {
     }
 }
 
+/// Defense-in-depth: check that `scope` can read `metric`, returning NotFound on failure.
+///
+/// API handlers perform the primary enforcement; this helper is available for
+/// service-level guards where a consistent error type is preferred.
+pub fn check_read_access(scope: &MetricScope, metric: &Metric) -> Result<(), detrix_core::Error> {
+    if scope.can_read(metric) {
+        Ok(())
+    } else {
+        Err(detrix_core::Error::metric_not_found("Metric not found"))
+    }
+}
+
 /// Build a MetricScope from an authenticated user and optional agent identity.
 pub fn extract_scope(user_id: &str, role: &UserRole, agent_id: Option<String>) -> MetricScope {
     if *role == UserRole::Admin {
