@@ -6,7 +6,10 @@
 use super::events::handle_events;
 use super::metrics::MetricManager;
 use super::traits::OutputParser;
-use crate::{constants::requests, AdapterConfig, AdapterProcess, AdapterState, Error, Result};
+use crate::{
+    constants::{defaults, requests},
+    AdapterConfig, AdapterProcess, AdapterState, Error, Result,
+};
 use async_trait::async_trait;
 use detrix_application::{DapAdapter, RemoveMetricResult, SetMetricResult};
 use detrix_config::AdapterConnectionConfig;
@@ -368,7 +371,7 @@ impl<P: OutputParser> BaseAdapter<P> {
 
         debug!("[{}] Sending continue request to resume execution", lang);
         let continue_args = serde_json::json!({
-            "threadId": 1  // Use main thread
+            "threadId": defaults::THREAD_ID
         });
 
         let response = broker

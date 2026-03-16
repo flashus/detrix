@@ -249,7 +249,7 @@ pub async fn initialize_dap(
         let timeout = connection_config
             .attach_config_done_timeout_secs
             .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(120));
+            .unwrap_or(Duration::from_secs(defaults::ATTACH_TIMEOUT_SECS));
         info!(
             "AttachPid: waiting for configurationDone (timeout={}s, covers attach processing)",
             timeout.as_secs()

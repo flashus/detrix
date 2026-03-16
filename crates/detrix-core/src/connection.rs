@@ -186,9 +186,8 @@ pub struct Connection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_tag: Option<String>,
 
-    /// Client identity of the creator (from X-Detrix-Client-Id header).
-    /// Used for multi-user reference counting in cloud mode.
-    /// Renamed from `created_by` (migration 003).
+    /// Authenticated user identity (from token or JWT sub claim).
+    /// Used for multi-tenant connection ownership.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
 

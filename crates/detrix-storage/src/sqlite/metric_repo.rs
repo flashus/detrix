@@ -874,7 +874,7 @@ pub(crate) fn row_to_metric(row: &sqlx::sqlite::SqliteRow) -> Result<Metric> {
         safety_level,
         created_at: Some(created_at),
         user_id: row.try_get("user_id").ok().flatten(),
-        agent_id: row.try_get("agent_id").unwrap_or(None),
+        agent_id: row.try_get("agent_id").ok().flatten(),
         // Introspection fields
         capture_stack_trace,
         stack_trace_ttl: stack_trace_ttl.map(|t| t as u64),

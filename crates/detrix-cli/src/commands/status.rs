@@ -6,6 +6,8 @@ use crate::output::{Formatter, OutputFormat};
 use anyhow::{Context, Result};
 use detrix_logging::debug;
 
+const HEALTH_CHECK_TIMEOUT_SECS: u64 = 3;
+
 /// Run status command
 ///
 /// Tries gRPC first. If gRPC fails (e.g. auth error in JWT mode where no static
@@ -48,7 +50,7 @@ pub async fn run(
             );
             let health_url = format!("{}/health", ctx.endpoints.http_endpoint());
             let http_client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(3))
+                .timeout(std::time::Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS))
                 .build()
                 .unwrap_or_default();
             let healthy = http_client

@@ -179,7 +179,7 @@ pub async fn capture_memory_snapshot(
         serde_json::to_value(&scopes_args).debug_ok("Failed to serialize scopes args")?;
 
     let scopes_response = broker
-        .send_request("scopes", Some(scopes_args_json))
+        .send_request(crate::constants::requests::SCOPES, Some(scopes_args_json))
         .await
         .debug_ok("Scopes request failed")?;
 
@@ -234,7 +234,10 @@ pub async fn capture_memory_snapshot(
             continue;
         };
 
-        if let Ok(vars_response) = broker.send_request("variables", Some(vars_args_json)).await {
+        if let Ok(vars_response) = broker
+            .send_request(crate::constants::requests::VARIABLES, Some(vars_args_json))
+            .await
+        {
             if vars_response.success {
                 if let Some(body) = vars_response.body {
                     if let Ok(vars_body) = serde_json::from_value::<VariablesResponseBody>(body) {
@@ -296,7 +299,10 @@ pub async fn evaluate_expression(
         expression, context, frame_id
     );
 
-    let response = match broker.send_request("evaluate", Some(args)).await {
+    let response = match broker
+        .send_request(crate::constants::requests::EVALUATE, Some(args))
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             let err = format!("DAP request failed: {}", e);

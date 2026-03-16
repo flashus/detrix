@@ -10,6 +10,7 @@
 //! - test_connection_timeout - Fail gracefully on unused port
 //! - test_adapter_state_transitions - Verify state machine
 //! - test_adapter_stop_idempotent - Stop is idempotent
+
 //! - test_is_ready_state - is_ready() returns correct state
 //!
 //! # Rust-Specific Tests
@@ -33,6 +34,17 @@ use detrix_testing::e2e::{require_tool, ToolDependency};
 use std::process::Stdio;
 use tokio::process::{Child, Command};
 
+/// Common lldb-dap search paths across platforms.
+const LLDB_DAP_SEARCH_PATHS: &[&str] = &[
+    "lldb-dap",                            // System PATH
+    "/opt/homebrew/opt/llvm/bin/lldb-dap", // Homebrew on macOS ARM
+    "/usr/local/opt/llvm/bin/lldb-dap",    // Homebrew on macOS Intel
+    "/usr/bin/lldb-dap",                   // Linux system install
+    "/usr/lib/llvm-18/bin/lldb-dap",       // Linux LLVM 18
+    "/usr/lib/llvm-17/bin/lldb-dap",       // Linux LLVM 17
+    "/usr/lib/llvm-16/bin/lldb-dap",       // Linux LLVM 16
+];
+
 // ============================================================================
 // Rust Test Fixture
 // ============================================================================
@@ -51,18 +63,7 @@ impl DapTestFixture for RustFixture {
     }
 
     async fn is_available() -> bool {
-        // Check for lldb-dap in common locations
-        let lldb_dap_paths = [
-            "lldb-dap",                            // System PATH
-            "/opt/homebrew/opt/llvm/bin/lldb-dap", // Homebrew on macOS ARM
-            "/usr/local/opt/llvm/bin/lldb-dap",    // Homebrew on macOS Intel
-            "/usr/bin/lldb-dap",                   // Linux system install
-            "/usr/lib/llvm-18/bin/lldb-dap",       // Linux LLVM 18
-            "/usr/lib/llvm-17/bin/lldb-dap",       // Linux LLVM 17
-            "/usr/lib/llvm-16/bin/lldb-dap",       // Linux LLVM 16
-        ];
-
-        for path in lldb_dap_paths {
+        for path in LLDB_DAP_SEARCH_PATHS {
             let output = Command::new(path).arg("--version").output().await;
             if let Ok(out) = output {
                 if out.status.success() {
@@ -174,17 +175,7 @@ fn main() {
 
 /// Find lldb-dap in common locations
 async fn find_lldb_dap() -> Option<String> {
-    let lldb_dap_paths = [
-        "lldb-dap",
-        "/opt/homebrew/opt/llvm/bin/lldb-dap",
-        "/usr/local/opt/llvm/bin/lldb-dap",
-        "/usr/bin/lldb-dap",
-        "/usr/lib/llvm-18/bin/lldb-dap",
-        "/usr/lib/llvm-17/bin/lldb-dap",
-        "/usr/lib/llvm-16/bin/lldb-dap",
-    ];
-
-    for path in lldb_dap_paths {
+    for path in LLDB_DAP_SEARCH_PATHS {
         let output = Command::new(path).arg("--version").output().await;
         if let Ok(out) = output {
             if out.status.success() {

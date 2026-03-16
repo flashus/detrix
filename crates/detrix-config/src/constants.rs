@@ -75,9 +75,6 @@ pub const HEADER_FILE_SERVER_URL: &str = "X-Detrix-File-Server-Url";
 /// HTTP header carrying the auth token for the bridge file server.
 pub const HEADER_FILE_SERVER_TOKEN: &str = "X-Detrix-File-Server-Token";
 
-/// HTTP header carrying the client ID for disconnect_all scoping.
-pub const HEADER_CLIENT_ID: &str = "X-Detrix-Client-Id";
-
 /// Override gRPC port (highest priority, typically for testing)
 pub const ENV_DETRIX_GRPC_PORT_OVERRIDE: &str = "DETRIX_GRPC_PORT_OVERRIDE";
 

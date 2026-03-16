@@ -339,7 +339,7 @@ impl Metric {
     pub fn validate_tenant_ids(user_id: Option<&str>, agent_id: Option<&str>) -> Result<()> {
         if let Some(uid) = user_id {
             if uid.len() > MAX_USER_ID_LEN {
-                return Err(Error::InvalidMetricName(format!(
+                return Err(Error::InvalidTenantId(format!(
                     "user_id exceeds maximum length of {} characters",
                     MAX_USER_ID_LEN
                 )));
@@ -347,7 +347,7 @@ impl Metric {
         }
         if let Some(aid) = agent_id {
             if aid.len() > MAX_USER_ID_LEN {
-                return Err(Error::InvalidMetricName(format!(
+                return Err(Error::InvalidTenantId(format!(
                     "agent_id exceeds maximum length of {} characters",
                     MAX_USER_ID_LEN
                 )));

@@ -86,6 +86,10 @@ pub mod defaults {
     /// but we need a thread ID for requests like stackTrace and continue.
     /// Thread 1 is typically the main thread in most applications.
     pub const THREAD_ID: i64 = 1;
+
+    /// Default timeout in seconds for the configurationDone response during attach.
+    /// Covers full attach processing cycle (module enumeration, ptrace setup).
+    pub const ATTACH_TIMEOUT_SECS: u64 = 120;
 }
 
 /// Broker tuning constants
