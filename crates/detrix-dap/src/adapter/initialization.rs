@@ -109,9 +109,9 @@ pub async fn initialize_dap(
             debug!("Remote attach successful");
         }
         ConnectionMode::Launch => {
-            // For launch mode, the launch request would be sent separately
-            // TODO: actual implementation of launch mode deferred for later
-            debug!("Launch mode - launch request would be sent separately");
+            return Err(crate::error::Error::InitializationFailed(
+                "Launch mode is not yet implemented".to_string(),
+            ));
         }
         ConnectionMode::LaunchProgram {
             host,

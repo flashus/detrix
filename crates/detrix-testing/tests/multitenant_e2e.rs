@@ -573,6 +573,61 @@ async fn test_unauthenticated_denied() {
     println!("✓ unauthenticated → 401");
 }
 
+/// GET metric by ID belonging to another user → 404 (not 200).
+#[tokio::test]
+async fn test_cross_user_get_denied() {
+    let Some(d) = setup().await else { return };
+
+    // Alice creates a metric
+    let alice_id = d
+        .create_disabled_metric(ALICE_TOKEN, "alice_private_get", &d.connection_id)
+        .await
+        .unwrap();
+
+    // Bob tries to GET Alice's metric → should get 404 (not found, to avoid leaking existence)
+    let bob_client = MultitenantDaemon::client_for(BOB_TOKEN);
+    let resp = bob_client
+        .get(format!("{}/api/v1/metrics/{}", d.base_url(), alice_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "Bob GET of Alice's metric should return 404"
+    );
+    println!("✓ cross-user GET → 404");
+}
+
+/// PUT metric belonging to another user → 403.
+#[tokio::test]
+async fn test_cross_user_update_denied() {
+    let Some(d) = setup().await else { return };
+
+    // Alice creates a metric
+    let alice_id = d
+        .create_disabled_metric(ALICE_TOKEN, "alice_private_upd", &d.connection_id)
+        .await
+        .unwrap();
+
+    // Bob tries to UPDATE Alice's metric → should be denied
+    let bob_client = MultitenantDaemon::client_for(BOB_TOKEN);
+    let resp = bob_client
+        .put(format!("{}/api/v1/metrics/{}", d.base_url(), alice_id))
+        .json(&json!({"expressions": ["hacked"]}))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    // Expect 403 (Forbidden) or 404 (Not Found) — either is acceptable for access denial
+    assert!(
+        status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+        "Bob UPDATE of Alice's metric should return 403 or 404, got {}",
+        status
+    );
+    println!("✓ cross-user UPDATE → {}", status);
+}
+
 /// Wrong token → 401.
 #[tokio::test]
 async fn test_wrong_token_denied() {

@@ -1373,4 +1373,91 @@ mod tests {
         assert!(names.contains(&"alice_metric"));
         assert!(names.contains(&"bob_metric"));
     }
+
+    // ========================================================================
+    // Multi-tenant scope enforcement tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_user_scope_cannot_remove_other_user_metric() {
+        let service = create_test_service().await;
+
+        // Alice creates a metric
+        let mut metric = create_test_metric_at_line("alice_protected", 100);
+        metric.user_id = Some("alice".to_string());
+        let outcome = service.add_metric(metric, false, None).await.unwrap();
+        let metric_id = outcome.value;
+
+        // Bob tries to remove Alice's metric
+        let bob_scope = MetricScope::User("bob".to_string());
+        let result = service.remove_metric(metric_id, &bob_scope).await;
+        assert!(
+            result.is_err(),
+            "Bob should not be able to remove Alice's metric"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_user_scope_cannot_update_other_user_metric() {
+        let service = create_test_service().await;
+
+        // Alice creates a metric
+        let mut metric = create_test_metric_at_line("alice_update", 110);
+        metric.user_id = Some("alice".to_string());
+        let outcome = service.add_metric(metric, false, None).await.unwrap();
+        let metric_id = outcome.value;
+
+        // Fetch and try to update as Bob
+        let mut fetched = service.get_metric(metric_id).await.unwrap().unwrap();
+        fetched.expressions = vec!["hacked".to_string()];
+
+        let bob_scope = MetricScope::User("bob".to_string());
+        let result = service.update_metric(&fetched, &bob_scope).await;
+        assert!(
+            result.is_err(),
+            "Bob should not be able to update Alice's metric"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_scope_cannot_mutate_other_agent_metric() {
+        let service = create_test_service().await;
+
+        // Agent1 creates a metric
+        let mut metric = create_test_metric_at_line("agent1_metric", 120);
+        metric.user_id = Some("alice".to_string());
+        metric.agent_id = Some("agent1".to_string());
+        let outcome = service.add_metric(metric, false, None).await.unwrap();
+        let metric_id = outcome.value;
+
+        // Agent2 (same user) tries to toggle
+        let agent2_scope = MetricScope::Agent {
+            user_id: "alice".to_string(),
+            agent_id: "agent2".to_string(),
+        };
+        let result = service.toggle_metric(metric_id, false, &agent2_scope).await;
+        assert!(
+            result.is_err(),
+            "Agent2 should not be able to toggle Agent1's metric"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_user_scope_can_mutate_own_metric() {
+        let service = create_test_service().await;
+
+        // Alice creates a metric
+        let mut metric = create_test_metric_at_line("alice_own", 130);
+        metric.user_id = Some("alice".to_string());
+        let outcome = service.add_metric(metric, false, None).await.unwrap();
+        let metric_id = outcome.value;
+
+        // Alice can toggle her own metric
+        let alice_scope = MetricScope::User("alice".to_string());
+        let result = service.toggle_metric(metric_id, false, &alice_scope).await;
+        assert!(
+            result.is_ok(),
+            "Alice should be able to toggle her own metric"
+        );
+    }
 }

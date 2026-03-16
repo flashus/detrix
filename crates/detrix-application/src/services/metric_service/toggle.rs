@@ -357,24 +357,29 @@ impl MetricService {
     /// # Returns
     /// Number of metrics that were disabled.
     pub async fn disable_metrics_by_owner(&self, client_identity: &str) -> Result<u64> {
-        let all_metrics = self.list_metrics().await?;
+        use detrix_ports::MetricFilter;
+
+        let filter = MetricFilter {
+            user_id: Some(client_identity.to_string()),
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let (metrics, _) = self.list_metrics_filtered(&filter, usize::MAX, 0).await?;
         let mut disabled = 0u64;
 
         // Use Admin scope — this is an internal operation triggered by disconnect
         let scope = MetricScope::Admin;
 
-        for metric in all_metrics {
-            if metric.user_id.as_deref() == Some(client_identity) && metric.enabled {
-                if let Some(metric_id) = metric.id {
-                    if let Err(e) = self.toggle_metric(metric_id, false, &scope).await {
-                        tracing::warn!(
-                            "Failed to disable metric {} for client {}: {e}",
-                            metric_id,
-                            client_identity
-                        );
-                    }
-                    disabled += 1;
+        for metric in metrics {
+            if let Some(metric_id) = metric.id {
+                if let Err(e) = self.toggle_metric(metric_id, false, &scope).await {
+                    tracing::warn!(
+                        "Failed to disable metric {} for client {}: {e}",
+                        metric_id,
+                        client_identity
+                    );
                 }
+                disabled += 1;
             }
         }
 

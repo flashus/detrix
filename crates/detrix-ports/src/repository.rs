@@ -52,7 +52,7 @@ pub trait MetricRepository: Send + Sync {
     ///
     /// # Arguments
     /// * `metric` - The metric to save
-    /// * `upsert` - If true, update on (location, connection_id) conflict; if false, fail on conflict
+    /// * `upsert` - If true, update on (location, connection_id, user_id) conflict; if false, fail on conflict
     async fn save_with_options(&self, metric: &Metric, upsert: bool) -> Result<MetricId>;
 
     /// Find metric by ID
@@ -108,6 +108,9 @@ pub trait MetricRepository: Send + Sync {
     ) -> Result<Vec<Metric>>;
 
     /// Update existing metric
+    ///
+    /// Note: `user_id` and `agent_id` are immutable after creation —
+    /// `update()` preserves the original values stored at save time.
     async fn update(&self, metric: &Metric) -> Result<()>;
 
     /// Delete metric
@@ -122,7 +125,7 @@ pub trait MetricRepository: Send + Sync {
     /// Returns a tuple of (metrics, total_count) matching the filter.
     ///
     /// # Arguments
-    /// * `filter` - Filter criteria (connection_id, enabled, group)
+    /// * `filter` - Filter criteria (connection_id, enabled, group, user_id)
     /// * `limit` - Maximum number of metrics to return
     /// * `offset` - Number of metrics to skip
     async fn find_filtered(

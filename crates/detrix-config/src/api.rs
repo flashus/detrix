@@ -393,7 +393,7 @@ pub enum UserRole {
 ///
 /// # Note
 /// Intentionally no `Default` impl — all fields must be explicit.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct StaticUser {
     /// Bearer token (constant-time compared; redacted in Debug output)
     pub token: String,
@@ -501,6 +501,9 @@ fn default_public_endpoints() -> Vec<String> {
         "/metrics".to_string(),
         "/api/health".to_string(),
         "/api/status".to_string(),
+        "/detrix/mcp/heartbeat".to_string(),
+        "/detrix/mcp/disconnect".to_string(),
+        "/api/v1/connections/touch".to_string(),
     ]
 }
 
@@ -580,6 +583,13 @@ impl AuthConfig {
             AuthMode::External => {
                 if self.jwt.jwks_url.is_none() {
                     return Err("api.auth.jwt.jwks_url is required in external mode".to_string());
+                }
+                // admin_role_claim and admin_role_value must be specified together
+                if self.jwt.admin_role_claim.is_some() != self.jwt.admin_role_value.is_some() {
+                    return Err(
+                        "api.auth.jwt.admin_role_claim and admin_role_value must both be set or both be omitted"
+                            .to_string(),
+                    );
                 }
                 Ok(())
             }
@@ -1215,5 +1225,142 @@ max_age_seconds = 7200
         let result = config.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("allow_all"));
+    }
+
+    // ========================================================================
+    // Auth Config — migration / uniqueness / role-claim tests
+    // ========================================================================
+
+    #[test]
+    fn test_deprecated_bearer_token_migration_error() {
+        // TOML containing the old `bearer_token` field (no [[users]]) must
+        // produce a clear migration error from validate().
+        let config_toml = r#"
+mode = "simple"
+bearer_token = "old_secret_token"
+"#;
+        let config: AuthConfig =
+            toml::from_str(config_toml).expect("TOML with bearer_token should parse");
+        assert!(
+            config._bearer_token_deprecated.is_some(),
+            "deprecated field should be captured"
+        );
+        let result = config.validate();
+        assert!(
+            result.is_err(),
+            "validate() must fail for deprecated bearer_token"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("bearer_token"),
+            "error message should mention 'bearer_token', got: {err}"
+        );
+        assert!(
+            err.contains("[[api.auth.users]]") || err.contains("users"),
+            "error message should mention the replacement, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_token_validation() {
+        // Two users sharing the same token value must fail validate().
+        let shared_token = "dtx_shared_secret".to_string();
+        let config = AuthConfig {
+            mode: Some(AuthMode::Simple),
+            users: vec![
+                StaticUser {
+                    token: shared_token.clone(),
+                    user_id: "alice".to_string(),
+                    role: UserRole::User,
+                },
+                StaticUser {
+                    token: shared_token,
+                    user_id: "bob".to_string(),
+                    role: UserRole::User,
+                },
+            ],
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err(), "duplicate tokens must fail validate()");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("duplicate") || err.contains("unique"),
+            "error message should mention duplicates, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_user_id_validation() {
+        // Two users sharing the same user_id must fail validate().
+        let config = AuthConfig {
+            mode: Some(AuthMode::Simple),
+            users: vec![
+                StaticUser {
+                    token: "dtx_token_a".to_string(),
+                    user_id: "alice".to_string(),
+                    role: UserRole::User,
+                },
+                StaticUser {
+                    token: "dtx_token_b".to_string(),
+                    user_id: "alice".to_string(), // same user_id
+                    role: UserRole::Admin,
+                },
+            ],
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err(), "duplicate user_ids must fail validate()");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("duplicate") || err.contains("unique"),
+            "error message should mention duplicates, got: {err}"
+        );
+        assert!(
+            err.contains("user_id"),
+            "error message should mention 'user_id', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_admin_role_claim_value_pair_validation() {
+        // External mode: only admin_role_claim set (no admin_role_value) must fail.
+        let config_claim_only = AuthConfig {
+            mode: Some(AuthMode::External),
+            jwt: JwtConfig {
+                jwks_url: Some("https://auth.example.com/.well-known/jwks.json".to_string()),
+                admin_role_claim: Some("roles".to_string()),
+                admin_role_value: None, // deliberately omitted
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = config_claim_only.validate();
+        assert!(
+            result.is_err(),
+            "admin_role_claim without admin_role_value must fail validate()"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("admin_role_claim") && err.contains("admin_role_value"),
+            "error message should mention both fields, got: {err}"
+        );
+
+        // Only admin_role_value set (no admin_role_claim) must also fail.
+        let config_value_only = AuthConfig {
+            mode: Some(AuthMode::External),
+            jwt: JwtConfig {
+                jwks_url: Some("https://auth.example.com/.well-known/jwks.json".to_string()),
+                admin_role_claim: None, // deliberately omitted
+                admin_role_value: Some("detrix-admin".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = config_value_only.validate();
+        assert!(
+            result.is_err(),
+            "admin_role_value without admin_role_claim must fail validate()"
+        );
     }
 }
