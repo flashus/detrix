@@ -18,6 +18,11 @@ use detrix_logging::{debug, info, instrument};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+/// Outer timeout for background adapter start (9 minutes).
+/// Must exceed inner DAP timeout (attach_config_done_timeout_secs, default 120s)
+/// plus connection retry budget to avoid resource leaks.
+const ADAPTER_START_TIMEOUT_SECS: u64 = 540;
+
 /// Service for managing debugger connections
 ///
 /// This service handles the business logic for:
@@ -151,6 +156,7 @@ impl ConnectionService {
         connection.control_plane_url = control_plane_url;
         connection.build_commit = build_commit;
         connection.build_tag = build_tag;
+        Connection::validate_user_id(created_by.as_deref())?;
         connection.user_id = created_by.clone();
         let connection_id = connection.id.clone();
 
@@ -302,7 +308,7 @@ impl ConnectionService {
                 // fails to fire, guaranteeing the task terminates before the
                 // 600 s wait_for_connection_connected polling window expires.
                 let start_result = tokio::time::timeout(
-                    std::time::Duration::from_secs(540),
+                    std::time::Duration::from_secs(ADAPTER_START_TIMEOUT_SECS),
                     this.adapter_lifecycle_manager.start_adapter(
                         connection_id_bg.clone(),
                         &host_bg,

@@ -57,14 +57,46 @@ impl MockMetricRepository {
 
 #[async_trait]
 impl MetricRepository for MockMetricRepository {
-    async fn save_with_options(&self, metric: &Metric, _upsert: bool) -> Result<MetricId> {
-        let id = metric
-            .id
-            .unwrap_or_else(|| MetricId(self.next_id.fetch_add(1, Ordering::SeqCst) as u64));
-        let mut metric = metric.clone();
-        metric.id = Some(id);
-        self.metrics.write().unwrap().insert(id, metric);
-        Ok(id)
+    async fn save_with_options(&self, metric: &Metric, upsert: bool) -> Result<MetricId> {
+        // Check for a conflicting entry by (location.file, location.line, connection_id, user_id),
+        // mirroring SQLite's UNIQUE index on those four columns.
+        // Per SQL NULL semantics: NULL != NULL, so skip conflict detection when user_id is None.
+        let conflict_id: Option<MetricId> = if metric.user_id.is_some() {
+            self.metrics
+                .read()
+                .unwrap()
+                .iter()
+                .find(|(_, existing)| {
+                    existing.location.file == metric.location.file
+                        && existing.location.line == metric.location.line
+                        && existing.connection_id == metric.connection_id
+                        && existing.user_id == metric.user_id
+                })
+                .map(|(id, _)| *id)
+        } else {
+            None
+        };
+
+        match conflict_id {
+            Some(_) if !upsert => Err(Error::Database("UNIQUE constraint failed".into())),
+            Some(existing_id) => {
+                // Upsert: update the existing entry in place, preserving its ID.
+                let mut metric = metric.clone();
+                metric.id = Some(existing_id);
+                self.metrics.write().unwrap().insert(existing_id, metric);
+                Ok(existing_id)
+            }
+            None => {
+                // No conflict: assign a new ID if not already set, then insert.
+                let id = metric.id.unwrap_or_else(|| {
+                    MetricId(self.next_id.fetch_add(1, Ordering::SeqCst) as u64)
+                });
+                let mut metric = metric.clone();
+                metric.id = Some(id);
+                self.metrics.write().unwrap().insert(id, metric);
+                Ok(id)
+            }
+        }
     }
 
     async fn find_by_id(&self, id: MetricId) -> Result<Option<Metric>> {

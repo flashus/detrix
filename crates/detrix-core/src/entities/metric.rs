@@ -593,16 +593,6 @@ mod tests {
 
     #[test]
     fn test_metric_user_id_agent_id_serde_round_trip() {
-        // Deserialize from JSON that omits user_id and agent_id → both None
-        let json = r#"{
-            "name": "m",
-            "connectionId": "c",
-            "location": "f.py#1",
-            "expressions": ["x"],
-            "language": "python",
-            "enabled": true
-        }"#;
-        // Partial deserialization via serde_json::from_value after filling required fields
         let mut metric = Metric::new(
             "m".to_string(),
             ConnectionId::from("c"),
@@ -624,8 +614,49 @@ mod tests {
         // Confirm the json contains the user_id and agent_id
         assert!(serialized.contains("alice"));
         assert!(serialized.contains("agent-42"));
-        // Silence unused variable warning from the json string above
-        let _ = json;
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_both_none() {
+        assert!(Metric::validate_tenant_ids(None, None).is_ok());
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_valid() {
+        assert!(Metric::validate_tenant_ids(Some("alice"), Some("agent1")).is_ok());
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_at_max_length() {
+        let max_str = "a".repeat(MAX_USER_ID_LEN);
+        assert!(Metric::validate_tenant_ids(Some(&max_str), Some(&max_str)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_user_id_too_long() {
+        let long_str = "a".repeat(MAX_USER_ID_LEN + 1);
+        let result = Metric::validate_tenant_ids(Some(&long_str), None);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("user_id exceeds maximum length"));
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_agent_id_too_long() {
+        let long_str = "a".repeat(MAX_USER_ID_LEN + 1);
+        let result = Metric::validate_tenant_ids(None, Some(&long_str));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("agent_id exceeds maximum length"));
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_empty_strings() {
+        assert!(Metric::validate_tenant_ids(Some(""), Some("")).is_ok());
     }
 }
 

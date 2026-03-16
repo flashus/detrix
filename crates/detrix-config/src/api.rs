@@ -367,7 +367,7 @@ impl Default for RateLimitConfig {
 /// Authentication mode
 ///
 /// - **Disabled**: No authentication required (default)
-/// - **Simple**: Static bearer token from config (like Prometheus)
+/// - **Simple**: Per-user static tokens from config
 /// - **External**: JWT validation via JWKS endpoint (for enterprise SSO)
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

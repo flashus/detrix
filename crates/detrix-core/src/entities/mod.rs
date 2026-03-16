@@ -33,8 +33,8 @@ pub use memory::{
     StackTraceSlice,
 };
 pub use metric::{
-    Metric, MetricId, MetricMode, SafetyLevel, MAX_METRIC_NAME_LEN, MODE_FIRST, MODE_SAMPLE,
-    MODE_SAMPLE_INTERVAL, MODE_STREAM, MODE_THROTTLE, MULTI_EXPR_DELIMITER,
+    Metric, MetricId, MetricMode, SafetyLevel, MAX_METRIC_NAME_LEN, MAX_USER_ID_LEN, MODE_FIRST,
+    MODE_SAMPLE, MODE_SAMPLE_INTERVAL, MODE_STREAM, MODE_THROTTLE, MULTI_EXPR_DELIMITER,
     MULTI_EXPR_DELIMITER_STR, SAFETY_STRICT, SAFETY_TRUSTED,
 };
 pub use purity::{ImpureCall, PurityAnalysis, PurityLevel};

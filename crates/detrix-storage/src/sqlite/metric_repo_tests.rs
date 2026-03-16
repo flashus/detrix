@@ -1166,3 +1166,75 @@ async fn test_agent_id_round_trip() {
     assert_eq!(found.user_id.as_deref(), Some("alice"));
     assert_eq!(found.agent_id.as_deref(), Some("claude-code-1"));
 }
+
+#[tokio::test]
+async fn test_find_all_at_location_multi_user() {
+    let storage = create_test_storage().await;
+
+    let file = "shared.py";
+    let line = 77u32;
+    let conn = ConnectionId::from("conn-multi");
+
+    let loc = Location {
+        file: file.to_string(),
+        line,
+    };
+
+    // Alice's metric at (shared.py, 77)
+    let mut m_alice = Metric::new(
+        "alice_shared".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["alice.value".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    m_alice.user_id = Some("alice".to_string());
+    MetricRepository::save_with_options(&storage, &m_alice, true)
+        .await
+        .unwrap();
+
+    // Bob's metric at the same (shared.py, 77, conn-multi)
+    let mut m_bob = Metric::new(
+        "bob_shared".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["bob.value".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    m_bob.user_id = Some("bob".to_string());
+    MetricRepository::save_with_options(&storage, &m_bob, true)
+        .await
+        .unwrap();
+
+    // find_all_at_location should return both metrics
+    let found = MetricRepository::find_all_at_location(&storage, &conn, file, line)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        found.len(),
+        2,
+        "Both alice's and bob's metrics should be returned"
+    );
+
+    let user_ids: Vec<&str> = found.iter().filter_map(|m| m.user_id.as_deref()).collect();
+    assert!(
+        user_ids.contains(&"alice"),
+        "alice's metric should be in the result"
+    );
+    assert!(
+        user_ids.contains(&"bob"),
+        "bob's metric should be in the result"
+    );
+
+    // Non-existent location returns empty vec
+    let empty = MetricRepository::find_all_at_location(&storage, &conn, "nonexistent.py", 9999)
+        .await
+        .unwrap();
+    assert!(
+        empty.is_empty(),
+        "Non-existent location should return empty vec"
+    );
+}

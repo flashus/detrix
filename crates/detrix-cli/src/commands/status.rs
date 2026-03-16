@@ -48,17 +48,7 @@ pub async fn run(
                 error = %grpc_err,
                 "gRPC status failed, falling back to /health endpoint"
             );
-            let health_url = format!("{}/health", ctx.endpoints.http_endpoint());
-            let http_client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS))
-                .build()
-                .unwrap_or_default();
-            let healthy = http_client
-                .get(&health_url)
-                .send()
-                .await
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
+            let healthy = check_health_rest(&ctx.endpoints.http_endpoint()).await;
 
             if healthy {
                 if !quiet {
@@ -184,6 +174,24 @@ pub async fn sleep(
     Ok(())
 }
 
+/// Check daemon health via the public REST `/health` endpoint.
+///
+/// Returns `true` when the endpoint responds with a 2xx status code,
+/// `false` on any error or non-success status.
+async fn check_health_rest(http_endpoint: &str) -> bool {
+    let health_url = format!("{}/health", http_endpoint);
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS))
+        .build()
+        .unwrap_or_default();
+    http_client
+        .get(&health_url)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
 /// Disconnect all local debugger adapters
 pub async fn disconnect_all(
     ctx: &ClientContext,
@@ -208,4 +216,29 @@ pub async fn disconnect_all(
     ));
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_check_health_rest_returns_true_on_200() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        assert!(check_health_rest(&server.uri()).await);
+    }
+
+    #[tokio::test]
+    async fn test_check_health_rest_returns_false_on_unreachable() {
+        // Port 1 is almost certainly not serving HTTP
+        assert!(!check_health_rest("http://127.0.0.1:1").await);
+    }
 }

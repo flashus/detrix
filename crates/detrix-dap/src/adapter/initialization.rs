@@ -16,6 +16,14 @@ use tracing::{debug, info};
 /// immediately (lldb-dap 21.x on error, debugpy) will be caught within this window.
 const ATTACH_FAILURE_WINDOW: Duration = Duration::from_millis(500);
 
+/// Resolve the attach configurationDone timeout from config, falling back to the default.
+pub(crate) fn resolve_attach_timeout(config: &detrix_config::AdapterConnectionConfig) -> Duration {
+    config
+        .attach_config_done_timeout_secs
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(defaults::ATTACH_TIMEOUT_SECS))
+}
+
 /// Initialize DAP connection (handshake)
 pub async fn initialize_dap(
     broker: &DapBroker,
@@ -246,10 +254,7 @@ pub async fn initialize_dap(
     // Use a long timeout to cover the full cycle.
     let config_done_response = if matches!(config.connection_mode, ConnectionMode::AttachPid { .. })
     {
-        let timeout = connection_config
-            .attach_config_done_timeout_secs
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(defaults::ATTACH_TIMEOUT_SECS));
+        let timeout = resolve_attach_timeout(connection_config);
         info!(
             "AttachPid: waiting for configurationDone (timeout={}s, covers attach processing)",
             timeout.as_secs()
@@ -299,4 +304,25 @@ pub async fn initialize_dap(
 
     debug!("DAP connection initialized for {}", config.adapter_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_attach_timeout_default() {
+        let config = detrix_config::AdapterConnectionConfig::default();
+        assert_eq!(config.attach_config_done_timeout_secs, None);
+        let timeout = resolve_attach_timeout(&config);
+        assert_eq!(timeout, Duration::from_secs(defaults::ATTACH_TIMEOUT_SECS));
+    }
+
+    #[test]
+    fn test_resolve_attach_timeout_custom_override() {
+        let mut config = detrix_config::AdapterConnectionConfig::default();
+        config.attach_config_done_timeout_secs = Some(42);
+        let timeout = resolve_attach_timeout(&config);
+        assert_eq!(timeout, Duration::from_secs(42));
+    }
 }

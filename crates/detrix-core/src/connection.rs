@@ -1,7 +1,7 @@
 //! Connection entity and types for managing debugger connections (debugpy, delve, lldb-dap)
 
 use crate::connection_identity::ConnectionIdentity;
-use crate::entities::SourceLanguage;
+use crate::entities::{SourceLanguage, MAX_USER_ID_LEN};
 use crate::{Error, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -363,6 +363,22 @@ impl Connection {
                     | ConnectionStatus::Reconnecting
                     | ConnectionStatus::Failed(_)
             )
+    }
+
+    /// Validate that `user_id` does not exceed [`MAX_USER_ID_LEN`].
+    ///
+    /// Mirrors `Metric::validate_tenant_ids` so the same length limit applies
+    /// to both metrics and connections.
+    pub fn validate_user_id(user_id: Option<&str>) -> Result<()> {
+        if let Some(uid) = user_id {
+            if uid.len() > MAX_USER_ID_LEN {
+                return Err(Error::InvalidTenantId(format!(
+                    "connection user_id exceeds maximum length of {} characters",
+                    MAX_USER_ID_LEN
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Update last active timestamp
@@ -830,6 +846,28 @@ mod tests {
         // With ttl_days = -1 (indefinite), should never be considered inactive
         assert!(!conn.inactive_for_days(-1, now));
         assert!(!conn.inactive_for_days(-999, now));
+    }
+
+    #[test]
+    fn test_connection_user_id_too_long() {
+        let long_uid = "a".repeat(MAX_USER_ID_LEN + 1);
+        let result = Connection::validate_user_id(Some(&long_uid));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds maximum length"));
+    }
+
+    #[test]
+    fn test_connection_user_id_at_max_ok() {
+        let max_uid = "a".repeat(MAX_USER_ID_LEN);
+        assert!(Connection::validate_user_id(Some(&max_uid)).is_ok());
+    }
+
+    #[test]
+    fn test_connection_user_id_none_ok() {
+        assert!(Connection::validate_user_id(None).is_ok());
     }
 
     #[test]

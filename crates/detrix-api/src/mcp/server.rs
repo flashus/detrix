@@ -61,18 +61,14 @@ impl DetrixServer {
     /// Create a new MCP server with an ephemeral UUID (for stdio/test path).
     ///
     /// user_id = None → scope() returns MetricScope::Admin (no per-user isolation).
-    /// Appropriate for the embedded local daemon (single-user, no multi-tenancy).
+    /// Appropriate for the local `detrix mcp` stdio command (single-user, no network
+    /// exposure, no multi-tenancy). For HTTP-bridged multi-tenant paths, use
+    /// `with_identity()` with explicit user/role from auth middleware.
     pub fn new(state: Arc<ApiState>) -> Self {
         let client_id = uuid::Uuid::new_v4().to_string();
         tracing::info!(client_id = %client_id, "MCP stdio: generated ephemeral client_id");
         // Role is unused when user_id = None (scope() unconditionally returns Admin).
         Self::with_identity(state, Some(client_id), None, detrix_config::UserRole::User)
-    }
-
-    /// Create a new MCP server with an explicit client identity (for HTTP bridge path).
-    pub fn with_client_id(state: Arc<ApiState>, client_id: Option<String>) -> Self {
-        // Role is unused when user_id = None (scope() unconditionally returns Admin).
-        Self::with_identity(state, client_id, None, detrix_config::UserRole::User)
     }
 
     /// Create a new MCP server with full identity (client_id + user_id + role).

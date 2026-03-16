@@ -16,11 +16,11 @@
 //!   docker compose -f fixtures/docker/docker-compose.yml -p detrix-cloud-test \
 //!       stop mock-jwks detrix-jwt
 
+use detrix_testing::e2e::jwt::TestClaims;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use reqwest::{Client, StatusCode};
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -31,69 +31,26 @@ const ISSUER: &str = "detrix-test";
 const AUDIENCE: &str = "detrix";
 const KID: &str = "test-key-001";
 
-// ─── JWT claims ───────────────────────────────────────────────────────────────
+// ─── Claims helpers ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize)]
-struct JwtClaims {
-    sub: String,
-    iss: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    aud: Option<String>,
-    exp: u64,
-    iat: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    roles: Option<Vec<String>>,
+fn valid_claims(sub: &str) -> TestClaims {
+    TestClaims::new(sub, ISSUER).with_audience(AUDIENCE)
 }
 
-impl JwtClaims {
-    fn valid(sub: &str) -> Self {
-        let now = now_secs();
-        Self {
-            sub: sub.to_string(),
-            iss: ISSUER.to_string(),
-            aud: Some(AUDIENCE.to_string()),
-            exp: now + 3600,
-            iat: now,
-            roles: None,
-        }
-    }
-
-    fn expired(sub: &str) -> Self {
-        let now = now_secs();
-        Self {
-            sub: sub.to_string(),
-            iss: ISSUER.to_string(),
-            aud: Some(AUDIENCE.to_string()),
-            exp: now - 3600,
-            iat: now - 7200,
-            roles: None,
-        }
-    }
-
-    fn wrong_issuer(sub: &str) -> Self {
-        let mut c = Self::valid(sub);
-        c.iss = "wrong-issuer".to_string();
-        c
-    }
-
-    fn wrong_audience(sub: &str) -> Self {
-        let mut c = Self::valid(sub);
-        c.aud = Some("wrong-audience".to_string());
-        c
-    }
-
-    fn with_admin_role(sub: &str) -> Self {
-        let mut c = Self::valid(sub);
-        c.roles = Some(vec!["admin".to_string()]);
-        c
-    }
+fn expired_claims(sub: &str) -> TestClaims {
+    TestClaims::expired(sub, ISSUER).with_audience(AUDIENCE)
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+fn wrong_issuer_claims(sub: &str) -> TestClaims {
+    TestClaims::new(sub, "wrong-issuer").with_audience(AUDIENCE)
+}
+
+fn wrong_audience_claims(sub: &str) -> TestClaims {
+    TestClaims::new(sub, ISSUER).with_audience("wrong-audience")
+}
+
+fn admin_role_claims(sub: &str) -> TestClaims {
+    valid_claims(sub).with_roles(vec!["admin".to_string()])
 }
 
 // ─── Key loading ──────────────────────────────────────────────────────────────
@@ -114,7 +71,7 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn sign(claims: &JwtClaims) -> String {
+fn sign(claims: &TestClaims) -> String {
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(KID.to_string());
     encode(&header, claims, &encoding_key()).expect("JWT encode failed")
@@ -145,7 +102,7 @@ async fn get_metrics(token: &str) -> StatusCode {
 #[tokio::test]
 #[ignore]
 async fn test_jwt_valid_token_grants_access() {
-    let claims = JwtClaims::valid("user-alice");
+    let claims = valid_claims("user-alice");
     let token = sign(&claims);
 
     let status = get_metrics(&token).await;
@@ -162,7 +119,7 @@ async fn test_jwt_valid_token_grants_access() {
 #[tokio::test]
 #[ignore]
 async fn test_jwt_expired_token_denied() {
-    let claims = JwtClaims::expired("user-alice");
+    let claims = expired_claims("user-alice");
     let token = sign(&claims);
 
     let status = get_metrics(&token).await;
@@ -179,7 +136,7 @@ async fn test_jwt_expired_token_denied() {
 #[tokio::test]
 #[ignore]
 async fn test_jwt_wrong_issuer_denied() {
-    let claims = JwtClaims::wrong_issuer("user-alice");
+    let claims = wrong_issuer_claims("user-alice");
     let token = sign(&claims);
 
     let status = get_metrics(&token).await;
@@ -196,7 +153,7 @@ async fn test_jwt_wrong_issuer_denied() {
 #[tokio::test]
 #[ignore]
 async fn test_jwt_wrong_audience_denied() {
-    let claims = JwtClaims::wrong_audience("user-alice");
+    let claims = wrong_audience_claims("user-alice");
     let token = sign(&claims);
 
     let status = get_metrics(&token).await;
@@ -236,11 +193,11 @@ async fn test_jwt_no_token_denied() {
 #[tokio::test]
 #[ignore]
 async fn test_jwt_admin_role_grants_full_access() {
-    let admin_claims = JwtClaims::with_admin_role("admin-user");
+    let admin_claims = admin_role_claims("admin-user");
     let admin_token = sign(&admin_claims);
 
     // Create a user metric first with a regular token
-    let user_claims = JwtClaims::valid("regular-user");
+    let user_claims = valid_claims("regular-user");
     let user_token = sign(&user_claims);
 
     // Admin GET should succeed
@@ -270,8 +227,8 @@ async fn test_jwt_multi_user_authentication() {
     // This test verifies that two different JWT users can both authenticate
     // and access the API. It uses the list endpoint (no active DAP connection needed).
 
-    let alice_token = sign(&JwtClaims::valid("jwt-alice"));
-    let bob_token = sign(&JwtClaims::valid("jwt-bob"));
+    let alice_token = sign(&valid_claims("jwt-alice"));
+    let bob_token = sign(&valid_claims("jwt-bob"));
 
     let alice_status = get_metrics(&alice_token).await;
     let bob_status = get_metrics(&bob_token).await;

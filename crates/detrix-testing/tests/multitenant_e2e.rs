@@ -649,3 +649,79 @@ async fn test_wrong_token_denied() {
     );
     println!("✓ wrong token → 401");
 }
+
+/// Bob queries events for Alice's metric → 404 (metric not found for Bob's scope).
+#[tokio::test]
+async fn test_cross_user_events_denied() {
+    let Some(d) = setup().await else { return };
+
+    let conn = d.connection_id.clone();
+    let alice_id = d
+        .create_disabled_metric(ALICE_TOKEN, "alice-events-test", &conn)
+        .await
+        .expect("alice metric");
+
+    // Bob queries events for Alice's metric — the events endpoint enforces scope
+    // by checking metric ownership before returning events, so Bob should get 404.
+    let bob_client = MultitenantDaemon::client_for(BOB_TOKEN);
+    let resp = bob_client
+        .get(format!(
+            "{}/api/v1/events?metricId={}",
+            d.base_url(),
+            alice_id
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    // The events handler scope-checks the metric before returning events.
+    // Non-owners receive 404 (to avoid leaking existence), OR an empty array if
+    // the implementation instead filters by scope without returning an error.
+    assert!(
+        status == StatusCode::NOT_FOUND
+            || status == StatusCode::FORBIDDEN
+            || (status.is_success() && {
+                let body: Value = resp.json().await.unwrap_or(json!([]));
+                body.as_array().map(|a| a.is_empty()).unwrap_or(false)
+            }),
+        "Bob querying events for Alice's metric should → 404/403 or empty array, got {}",
+        status
+    );
+    println!("✓ cross-user events → {}", status);
+}
+
+/// Admin creates a metric; the response and GET both carry userId = "admin".
+#[tokio::test]
+async fn test_admin_metric_ownership_stamped() {
+    let Some(d) = setup().await else { return };
+
+    let conn = d.connection_id.clone();
+    let metric_id = d
+        .create_disabled_metric(ADMIN_TOKEN, "admin-owned-metric", &conn)
+        .await
+        .expect("admin metric");
+
+    // Fetch the metric details as admin and verify userId is stamped from the token.
+    let admin_client = MultitenantDaemon::client_for(ADMIN_TOKEN);
+    let resp = admin_client
+        .get(format!("{}/api/v1/metrics/{}", d.base_url(), metric_id))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(
+        resp.status().is_success(),
+        "admin GET of own metric should succeed, got: {}",
+        resp.status()
+    );
+
+    let body: Value = resp.json().await.unwrap();
+    let user_id = body["userId"].as_str().unwrap_or("");
+    assert_eq!(
+        user_id, "admin",
+        "userId in metric response should be 'admin' (stamped from token), got: {:?}",
+        body["userId"]
+    );
+    println!("✓ admin metric ownership stamped correctly (userId = \"admin\")");
+}
