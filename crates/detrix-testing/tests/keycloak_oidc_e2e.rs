@@ -37,10 +37,17 @@ async fn test_keycloak_jwks_returns_valid_keys() {
     );
 
     let resp = client.get(&jwks_url).send().await.expect("JWKS request");
-    assert_eq!(resp.status(), StatusCode::OK, "JWKS endpoint should return 200");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "JWKS endpoint should return 200"
+    );
 
     let body: serde_json::Value = resp.json().await.expect("parse JWKS");
-    let keys = body.get("keys").and_then(|k| k.as_array()).expect("JWKS should have keys array");
+    let keys = body
+        .get("keys")
+        .and_then(|k| k.as_array())
+        .expect("JWKS should have keys array");
 
     assert!(!keys.is_empty(), "JWKS should contain at least one key");
 
@@ -73,7 +80,10 @@ async fn test_keycloak_jwt_claims_structure() {
     let alice_claims = decode_jwt_payload(&alice_token.access_token);
 
     // sub should be a UUID, not the username
-    let sub = alice_claims.get("sub").and_then(|s| s.as_str()).expect("JWT should have 'sub'");
+    let sub = alice_claims
+        .get("sub")
+        .and_then(|s| s.as_str())
+        .expect("JWT should have 'sub'");
     assert!(
         sub.contains('-') && sub.len() >= 32,
         "sub should be a UUID, got: {}",
@@ -81,7 +91,10 @@ async fn test_keycloak_jwt_claims_structure() {
     );
 
     // iss should match Keycloak internal URL
-    let iss = alice_claims.get("iss").and_then(|s| s.as_str()).expect("JWT should have 'iss'");
+    let iss = alice_claims
+        .get("iss")
+        .and_then(|s| s.as_str())
+        .expect("JWT should have 'iss'");
     assert_eq!(
         iss, ISSUER_INTERNAL,
         "issuer should match Keycloak internal URL"
@@ -94,7 +107,11 @@ async fn test_keycloak_jwt_claims_structure() {
         serde_json::Value::Array(arr) => arr.iter().any(|v| v.as_str() == Some(CLIENT_ID)),
         _ => false,
     };
-    assert!(aud_matches, "aud should contain '{}', got: {}", CLIENT_ID, aud);
+    assert!(
+        aud_matches,
+        "aud should contain '{}', got: {}",
+        CLIENT_ID, aud
+    );
 
     // Admin JWT should have realm_access.roles containing detrix-admin
     let admin_claims = decode_jwt_payload(&admin_token.access_token);
@@ -105,9 +122,7 @@ async fn test_keycloak_jwt_claims_structure() {
         .get("roles")
         .and_then(|r| r.as_array())
         .expect("realm_access should have 'roles' array");
-    let has_admin = roles
-        .iter()
-        .any(|r| r.as_str() == Some(ADMIN_ROLE));
+    let has_admin = roles.iter().any(|r| r.as_str() == Some(ADMIN_ROLE));
     assert!(
         has_admin,
         "admin JWT should have '{}' in realm_access.roles, got: {:?}",

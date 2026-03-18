@@ -25,9 +25,9 @@ use tokio::time::sleep;
 
 // ─── Auth tokens ─────────────────────────────────────────────────────────────
 
-const ALICE_TOKEN: &str = "dtx_alice_test";
-const BOB_TOKEN: &str = "dtx_bob_test";
-const ADMIN_TOKEN: &str = "dtx_admin_test";
+const ALICE_TOKEN: &str = "dtx_alice_test_xx";
+const BOB_TOKEN: &str = "dtx_bob_test_xxxx";
+const ADMIN_TOKEN: &str = "dtx_admin_test_xx";
 
 // ─── Daemon wrapper ───────────────────────────────────────────────────────────
 

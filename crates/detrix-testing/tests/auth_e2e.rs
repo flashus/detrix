@@ -245,7 +245,7 @@ async fn test_simple_bearer_protected_endpoint() {
 /// Test 2: Simple bearer token - invalid token rejected
 #[tokio::test]
 async fn test_simple_bearer_invalid_token() {
-    let mut executor = SimpleBearerTestExecutor::new("correct-token");
+    let mut executor = SimpleBearerTestExecutor::new("correct-token-long-e2e");
 
     if let Err(e) = executor.start_daemon().await {
         executor.print_daemon_logs(100);
@@ -268,7 +268,7 @@ async fn test_simple_bearer_invalid_token() {
 /// Test 3: Simple bearer token - health endpoint is public
 #[tokio::test]
 async fn test_simple_bearer_health_public() {
-    let mut executor = SimpleBearerTestExecutor::new("test-token");
+    let mut executor = SimpleBearerTestExecutor::new("test-token-long-e2e");
 
     if let Err(e) = executor.start_daemon().await {
         executor.print_daemon_logs(100);
@@ -285,7 +285,7 @@ async fn test_simple_bearer_health_public() {
 /// Test 4: Simple bearer token - prometheus metrics endpoint is public
 #[tokio::test]
 async fn test_simple_bearer_metrics_endpoint_public() {
-    let mut executor = SimpleBearerTestExecutor::new("test-token");
+    let mut executor = SimpleBearerTestExecutor::new("test-token-long-e2e");
 
     if let Err(e) = executor.start_daemon().await {
         executor.print_daemon_logs(100);
@@ -308,7 +308,7 @@ async fn test_simple_bearer_metrics_endpoint_public() {
 /// Test 5: gRPC - protected endpoints require auth
 #[tokio::test]
 async fn test_grpc_protected_endpoint_requires_auth() {
-    let mut executor = SimpleBearerTestExecutor::new("grpc-test-token");
+    let mut executor = SimpleBearerTestExecutor::new("grpc-test-token-e2e");
 
     if let Err(e) = executor.start_daemon().await {
         executor.print_daemon_logs(100);
@@ -349,7 +349,7 @@ async fn test_grpc_protected_endpoint_requires_auth() {
 /// Test 6: gRPC - valid bearer token grants access
 #[tokio::test]
 async fn test_grpc_valid_token_grants_access() {
-    let mut executor = SimpleBearerTestExecutor::new("grpc-valid-token");
+    let mut executor = SimpleBearerTestExecutor::new("grpc-valid-token-e2e");
 
     if let Err(e) = executor.start_daemon().await {
         executor.print_daemon_logs(100);
@@ -375,7 +375,7 @@ async fn test_grpc_valid_token_grants_access() {
     });
     request.metadata_mut().insert(
         AUTHORIZATION_METADATA_KEY,
-        format!("{}grpc-valid-token", BEARER_PREFIX)
+        format!("{}grpc-valid-token-e2e", BEARER_PREFIX)
             .parse()
             .unwrap(),
     );
@@ -390,7 +390,7 @@ async fn test_grpc_valid_token_grants_access() {
 /// Test 7: gRPC - invalid bearer token rejected
 #[tokio::test]
 async fn test_grpc_invalid_token_rejected() {
-    let mut executor = SimpleBearerTestExecutor::new("correct-grpc-token");
+    let mut executor = SimpleBearerTestExecutor::new("correct-grpc-token-e2e");
 
     if let Err(e) = executor.start_daemon().await {
         executor.print_daemon_logs(100);

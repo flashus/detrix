@@ -196,6 +196,27 @@ async fn test_keycloak_multi_user_data_isolation() {
     );
     println!("  Alice delete Bob's metric → 404 (not 403) ✓");
 
+    // Step 6b: Alice tries to delete Bob's metric by numeric ID → 403
+    // First, admin queries to find Bob's metric ID
+    let (_, admin_all) = admin.list_metrics().await;
+    let bob_metric_id = admin_all
+        .iter()
+        .find(|m| m.name == "bob-metric-1")
+        .and_then(|m| m.metric_id.as_ref())
+        .and_then(|v| v.as_u64())
+        .expect("admin should see bob's metric with numeric ID");
+
+    let status = alice.delete_metric(bob_metric_id).await;
+    assert!(
+        status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+        "cross-user delete by numeric ID should → 403 or 404, got: {}",
+        status
+    );
+    println!(
+        "  Alice delete Bob's metric by ID ({}) → {} ✓",
+        bob_metric_id, status
+    );
+
     // Step 7: Admin deletes Alice's metric → 200
     let status = admin.delete_metric_by_name("alice-metric-1").await;
     assert!(

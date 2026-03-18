@@ -10,164 +10,13 @@
 
 mod keycloak_helpers;
 
-use detrix_testing::e2e::{find_detrix_binary, get_workspace_root};
+use detrix_testing::e2e::mcp_bridge::McpBridgeProcess;
 use keycloak_helpers::*;
 use reqwest::StatusCode;
-use serde_json::{json, Value};
-use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::time::Duration;
 
-// ─── MCP Bridge wrapper ─────────────────────────────────────────────────────
-
-/// Minimal MCP bridge process for Keycloak tests.
-/// Replicates the BridgeProcess pattern from docker_cloud_e2e.rs.
-struct McpBridge {
-    child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
-    reader: BufReader<tokio::process::ChildStdout>,
-    next_id: u64,
-}
-
-impl McpBridge {
-    async fn spawn(daemon_url: &str, token: &str) -> Self {
-        let ws_root = get_workspace_root();
-        let detrix_bin = find_detrix_binary(&ws_root)
-            .expect("detrix binary not found — run `cargo build` first");
-
-        let mut child = tokio::process::Command::new(&detrix_bin)
-            .args(["mcp", "--daemon-url", daemon_url])
-            .env("DETRIX_TOKEN", token)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn detrix mcp");
-
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let reader = BufReader::new(stdout);
-
-        let mut bridge = Self {
-            child,
-            stdin,
-            reader,
-            next_id: 1,
-        };
-        bridge.initialize().await;
-        bridge
-    }
-
-    async fn initialize(&mut self) {
-        let id = self.next_id;
-        self.next_id += 1;
-        let init_req = json!({
-            "jsonrpc": "2.0",
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": { "name": "keycloak-e2e", "version": "1.0" }
-            },
-            "id": id
-        });
-        self.write_message(&init_req).await;
-        let resp = self.read_response(10).await;
-        assert!(
-            resp.get("result").is_some(),
-            "initialize should succeed: {}",
-            resp
-        );
-
-        let notif = json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized"
-        });
-        self.write_message(&notif).await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-
-    async fn write_message(&mut self, msg: &Value) {
-        let line = format!("{}\n", msg);
-        self.stdin.write_all(line.as_bytes()).await.unwrap();
-        self.stdin.flush().await.unwrap();
-    }
-
-    async fn read_response(&mut self, timeout_secs: u64) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-        loop {
-            let mut line = String::new();
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                panic!("Bridge response timeout ({}s)", timeout_secs);
-            }
-            let n = tokio::time::timeout(remaining, self.reader.read_line(&mut line))
-                .await
-                .unwrap_or_else(|_| panic!("Bridge response timeout ({}s)", timeout_secs))
-                .expect("read bridge response");
-            assert!(n > 0, "EOF from bridge");
-            if let Ok(parsed) = serde_json::from_str::<Value>(line.trim()) {
-                if parsed.get("id").is_some_and(|v| !v.is_null()) {
-                    return parsed;
-                }
-            }
-        }
-    }
-
-    async fn call_tool(&mut self, name: &str, args: Value) -> Result<Value, String> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let request = json!({
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": { "name": name, "arguments": args },
-            "id": id
-        });
-        self.write_message(&request).await;
-        let resp = self.read_response(30).await;
-        if let Some(error) = resp.get("error") {
-            return Err(format!("JSON-RPC error: {}", error));
-        }
-        let result = resp.get("result").cloned().ok_or("no result")?;
-        if result.get("isError") == Some(&Value::Bool(true)) {
-            let text = extract_text(&result);
-            return Err(format!("Tool error: {}", text));
-        }
-        Ok(result)
-    }
-
-    /// List metrics via MCP tool and return parsed metric names.
-    async fn list_metric_names(&mut self) -> Vec<String> {
-        if let Ok(result) = self.call_tool("list_metrics", json!({"format": "json"})).await {
-            let text = extract_text(&result);
-            if let Some(start) = text.find('[') {
-                if let Ok(arr) = serde_json::from_str::<Vec<Value>>(&text[start..]) {
-                    return arr
-                        .iter()
-                        .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
-                        .collect();
-                }
-            }
-        }
-        vec![]
-    }
-
-    async fn kill(&mut self) {
-        let _ = self.child.kill().await;
-    }
-}
-
-fn extract_text(result: &Value) -> String {
-    result
-        .get("content")
-        .and_then(|c| c.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default()
-}
+// Type alias for brevity in this test file.
+type McpBridge = McpBridgeProcess;
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
@@ -262,7 +111,10 @@ async fn test_keycloak_mcp_bridge_per_user_scoping() {
     println!("  Admin MCP bridge spawned");
 
     // Step 3: Alice's bridge sees only her metrics
-    let alice_names = alice_bridge.list_metric_names().await;
+    let alice_names = alice_bridge
+        .list_metric_names()
+        .await
+        .expect("alice list_metric_names failed");
     assert!(
         alice_names.contains(&"mcp-alice-metric".to_string()),
         "alice bridge should see mcp-alice-metric, got: {:?}",
@@ -276,7 +128,10 @@ async fn test_keycloak_mcp_bridge_per_user_scoping() {
     println!("  Alice bridge: sees only her metric ✓");
 
     // Step 4: Bob's bridge sees only his metrics
-    let bob_names = bob_bridge.list_metric_names().await;
+    let bob_names = bob_bridge
+        .list_metric_names()
+        .await
+        .expect("bob list_metric_names failed");
     assert!(
         bob_names.contains(&"mcp-bob-metric".to_string()),
         "bob bridge should see mcp-bob-metric, got: {:?}",
@@ -290,7 +145,10 @@ async fn test_keycloak_mcp_bridge_per_user_scoping() {
     println!("  Bob bridge: sees only his metric ✓");
 
     // Step 5: Admin bridge sees all metrics
-    let admin_names = admin_bridge.list_metric_names().await;
+    let admin_names = admin_bridge
+        .list_metric_names()
+        .await
+        .expect("admin list_metric_names failed");
     assert!(
         admin_names.contains(&"mcp-alice-metric".to_string())
             && admin_names.contains(&"mcp-bob-metric".to_string()),

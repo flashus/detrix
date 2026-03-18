@@ -13,26 +13,29 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
+//
+// Port mappings come from: fixtures/docker/docker-compose.keycloak.yml
+// User credentials come from: fixtures/docker/keycloak/detrix-realm.json
 
 /// Host port for the Keycloak server (docker-compose.keycloak.yml: 18080:8080).
 pub const KEYCLOAK_PORT: u16 = 18080;
 
-/// Host port for the detrix-keycloak daemon REST API (8098:8090).
+/// Host port for the detrix-keycloak daemon REST API (docker-compose.keycloak.yml: 8098:8090).
 pub const DETRIX_HTTP_PORT: u16 = 8098;
 
-/// Host port for the detrix-keycloak daemon gRPC (50067:50061).
+/// Host port for the detrix-keycloak daemon gRPC (docker-compose.keycloak.yml: 50067:50061).
 pub const DETRIX_GRPC_PORT: u16 = 50067;
 
-/// Keycloak realm name.
+/// Keycloak realm name (detrix-realm.json: "realm": "detrix").
 pub const REALM: &str = "detrix";
 
-/// Keycloak OIDC client ID.
+/// Keycloak OIDC client ID (detrix-realm.json: clients[].clientId).
 pub const CLIENT_ID: &str = "detrix-api";
 
 /// Internal issuer URL (as seen inside Docker network, matches JWT `iss` claim).
 pub const ISSUER_INTERNAL: &str = "http://keycloak:8080/realms/detrix";
 
-/// User credentials.
+/// User credentials (detrix-realm.json: users[].username / credentials[].value).
 pub const ALICE_USER: &str = "alice";
 pub const ALICE_PASS: &str = "alice-pass";
 pub const BOB_USER: &str = "bob";
@@ -40,7 +43,7 @@ pub const BOB_PASS: &str = "bob-pass";
 pub const ADMIN_USER: &str = "admin-user";
 pub const ADMIN_PASS: &str = "admin-pass";
 
-/// Admin role value configured in detrix-keycloak.toml.
+/// Admin role value configured in detrix-keycloak.toml (jwt.admin_role_value).
 pub const ADMIN_ROLE: &str = "detrix-admin";
 
 /// Go test app control plane URL (Docker-internal, used by daemon).
@@ -229,19 +232,16 @@ impl DetrixClient {
 
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         // REST API returns array of metrics at top level
-        let metrics: Vec<MetricResponse> = serde_json::from_value(
-            body.get("metrics")
-                .cloned()
-                .unwrap_or_else(|| {
-                    // Might be a direct array
-                    if body.is_array() {
-                        body.clone()
-                    } else {
-                        serde_json::Value::Array(vec![])
-                    }
-                }),
-        )
-        .unwrap_or_default();
+        let metrics: Vec<MetricResponse> =
+            serde_json::from_value(body.get("metrics").cloned().unwrap_or_else(|| {
+                // Might be a direct array
+                if body.is_array() {
+                    body.clone()
+                } else {
+                    serde_json::Value::Array(vec![])
+                }
+            }))
+            .unwrap_or_default();
 
         (status, metrics)
     }
@@ -373,18 +373,13 @@ impl DetrixClient {
     }
 
     /// Poll for a connected connection of the given language. Returns connection_id.
-    pub async fn poll_for_connection(
-        &self,
-        language: &str,
-        timeout: Duration,
-    ) -> Option<String> {
+    pub async fn poll_for_connection(&self, language: &str, timeout: Duration) -> Option<String> {
         let start = std::time::Instant::now();
         loop {
             let (status, connections) = self.list_connections().await;
             if status == StatusCode::OK {
                 if let Some(conn) = connections.iter().find(|c| {
-                    c.language == language
-                        && (c.status == "connected" || c.status == "3")
+                    c.language == language && (c.status == "connected" || c.status == "3")
                 }) {
                     return Some(conn.connection_id.clone());
                 }

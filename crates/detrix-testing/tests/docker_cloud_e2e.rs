@@ -2096,9 +2096,9 @@ async fn test_cloud_e2e() {
     restart_daemon_with_env(&[("DETRIX_CONFIG", "/data/detrix/detrix-multiuser.toml")]).await;
     println!("  Daemon restarted with multi-user config");
 
-    const ALICE_TOKEN: &str = "dtx_alice_cloud";
-    const BOB_TOKEN: &str = "dtx_bob_cloud";
-    const ADMIN_TOKEN: &str = "dtx_admin_cloud";
+    const ALICE_TOKEN: &str = "dtx_alice_cloud_xx";
+    const BOB_TOKEN: &str = "dtx_bob_cloud_xxxx";
+    const ADMIN_TOKEN: &str = "dtx_admin_cloud_xx";
 
     let daemon_url_10 = format!("http://127.0.0.1:{}", DAEMON_HTTP_PORT);
 

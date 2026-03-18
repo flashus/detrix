@@ -173,6 +173,14 @@ tasks:
       - cargo test -p detrix-testing --test 'keycloak_*_e2e' -- --ignored --nocapture --test-threads=1
       - task: check-orphans
 
+  # All Docker-based E2E tests (JWT + Keycloak + Cloud)
+  test-cloud-all:
+    desc: Run ALL Docker E2E tests sequentially (JWT → Keycloak → Cloud)
+    cmds:
+      - task: test-cloud-jwt
+      - task: test-cloud-keycloak
+      - task: test-cloud
+
   # Rebuild only the daemon Docker image (no cache) without touching app containers.
   rebuild-daemon-container:
     desc: Force-rebuild the detrix daemon Docker image

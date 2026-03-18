@@ -23,17 +23,17 @@ fetch_timeout_seconds = 10
 mode = "simple"
 
 [[api.auth.users]]
-token = "dtx_alice_cloud"
+token = "dtx_alice_cloud_xx"
 user_id = "alice"
 role = "user"
 
 [[api.auth.users]]
-token = "dtx_bob_cloud"
+token = "dtx_bob_cloud_xxxx"
 user_id = "bob"
 role = "user"
 
 [[api.auth.users]]
-token = "dtx_admin_cloud"
+token = "dtx_admin_cloud_xx"
 user_id = "admin"
 role = "admin"
 

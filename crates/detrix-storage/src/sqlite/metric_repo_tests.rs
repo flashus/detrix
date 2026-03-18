@@ -530,6 +530,7 @@ async fn test_find_filtered_by_connection_id() {
         enabled: None,
         group: None,
         user_id: None,
+        agent_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -545,6 +546,7 @@ async fn test_find_filtered_by_connection_id() {
         enabled: None,
         group: None,
         user_id: None,
+        agent_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -582,6 +584,7 @@ async fn test_find_filtered_by_enabled() {
         enabled: Some(true),
         group: None,
         user_id: None,
+        agent_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -597,6 +600,7 @@ async fn test_find_filtered_by_enabled() {
         enabled: Some(false),
         group: None,
         user_id: None,
+        agent_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -635,6 +639,7 @@ async fn test_find_filtered_by_group() {
         enabled: None,
         group: Some("authentication".to_string()),
         user_id: None,
+        agent_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -652,6 +657,7 @@ async fn test_find_filtered_by_group() {
         enabled: None,
         group: Some("payments".to_string()),
         user_id: None,
+        agent_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -701,6 +707,7 @@ async fn test_find_filtered_combined_filters() {
         enabled: Some(true),
         group: Some("group-a".to_string()),
         user_id: None,
+        agent_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -1103,9 +1110,10 @@ async fn test_find_filtered_with_user_id() {
 }
 
 #[tokio::test]
-async fn test_null_user_id_upsert_creates_duplicates() {
-    // Documents SQLite NULL != NULL behavior: upsert with NULL user_id
-    // always inserts rather than updating.
+async fn test_null_user_id_upsert_updates_correctly() {
+    // Verifies that the SYSTEM_USER_ID sentinel makes NULL user_id upserts
+    // deterministic: a second save at the same location+connection_id updates
+    // the existing row instead of creating a duplicate.
     let storage = create_test_storage().await;
 
     let loc = Location {
@@ -1136,17 +1144,27 @@ async fn test_null_user_id_upsert_creates_duplicates() {
         SourceLanguage::Python,
     )
     .unwrap();
-    // user_id also None
+    // user_id also None — same location+connection_id should upsert
 
     let id2 = MetricRepository::save_with_options(&storage, &m2, true)
         .await
         .unwrap();
 
-    // NULL != NULL in SQLite UNIQUE indexes, so both inserts succeed
-    assert_ne!(id1, id2, "NULL user_id should create separate rows");
+    // With SYSTEM_USER_ID sentinel, upsert should update the existing row
+    assert_eq!(id1, id2, "NULL user_id upsert should update, not duplicate");
 
     let all = MetricRepository::find_all(&storage).await.unwrap();
-    assert_eq!(all.len(), 2, "Both NULL user_id rows should exist");
+    assert_eq!(all.len(), 1, "Only one row should exist after upsert");
+
+    // The row should have the second metric's name and expression
+    let metric = all.first().unwrap();
+    assert_eq!(metric.name, "null_user_2");
+    assert_eq!(metric.expressions, vec!["y".to_string()]);
+    // user_id should still be None (sentinel mapped back)
+    assert!(
+        metric.user_id.is_none(),
+        "user_id should be None, not SYSTEM_USER_ID"
+    );
 }
 
 #[tokio::test]

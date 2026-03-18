@@ -47,6 +47,7 @@ pub mod daemon_discovery;
 pub mod dap_scenarios;
 pub mod executor;
 pub mod jwt;
+pub mod mcp_bridge;
 pub mod port_registry;
 pub mod reporter;
 pub mod scenarios;
