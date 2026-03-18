@@ -15,6 +15,7 @@ use detrix_config::constants::{
 use detrix_core::UNKNOWN_WORKSPACE_ROOT;
 use detrix_logging::{debug, error, info, warn};
 use reqwest::Client;
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -23,6 +24,14 @@ use tokio::sync::{watch, RwLock};
 use uuid::Uuid;
 
 /// MCP stdio-to-HTTP bridge
+/// Minimal metric DTO for cleanup: only the fields we need.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MetricSummary {
+    metric_id: Option<String>,
+    agent_id: Option<String>,
+}
+
 pub struct McpBridge {
     config: BridgeConfig,
     client: Client,
@@ -857,19 +866,18 @@ impl McpBridge {
             anyhow::bail!("Failed to list metrics: {}", response.status());
         }
 
-        let metrics: Vec<serde_json::Value> = response
+        let metrics: Vec<MetricSummary> = response
             .json()
             .await
             .context("Failed to parse metrics response")?;
 
         // Disable only metrics created by this bridge instance (matched via agentId)
         let mut disabled_count = 0;
-        for metric in metrics {
-            let agent_id = metric.get("agentId").and_then(|v| v.as_str());
-            if agent_id != Some(&self.client_id) {
+        for metric in &metrics {
+            if metric.agent_id.as_deref() != Some(&*self.client_id) {
                 continue;
             }
-            if let Some(metric_id) = metric.get("metricId").and_then(|v| v.as_str()) {
+            if let Some(ref metric_id) = metric.metric_id {
                 let disable_url = format!("{}/api/v1/metrics/{}/disable", daemon_url, metric_id);
                 let mut disable_req = self.client.post(&disable_url);
                 if let Some(ref token) = token {

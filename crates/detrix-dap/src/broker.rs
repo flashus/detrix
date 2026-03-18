@@ -44,8 +44,7 @@ pub struct DapBroker {
 
     /// Per-instance module event counter (resets for each new broker/connection).
     /// Kept to ensure the Arc lives as long as the broker even after the reader task ends.
-    #[allow(dead_code)]
-    module_count: Arc<std::sync::atomic::AtomicUsize>,
+    _module_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl DapBroker {
@@ -79,7 +78,7 @@ impl DapBroker {
             stdin,
             reader_task: Some(reader_task),
             config,
-            module_count,
+            _module_count: module_count,
         }
     }
 
@@ -483,8 +482,8 @@ impl DapBroker {
 
             if line.starts_with("Content-Length:") {
                 let length_str = line.trim_start_matches("Content-Length:").trim();
-                content_length = Some(length_str.parse().map_err(|_| {
-                    Error::Protocol(format!("Invalid Content-Length: {}", length_str))
+                content_length = Some(length_str.parse().map_err(|e| {
+                    Error::Protocol(format!("Invalid Content-Length '{}': {}", length_str, e))
                 })?);
             }
         }
@@ -575,13 +574,13 @@ impl DapBroker {
                 // Broadcast to all subscribers using try_send (non-blocking)
                 // If a subscriber's channel is full, we drop the event for that subscriber
                 // and log a warning. This prevents slow consumers from blocking the broker.
-                let subscriber_count = event_subscribers.read().await.len();
+                let mut subscribers = event_subscribers.write().await;
+                let subscriber_count = subscribers.len();
                 trace!(
                     "Broadcasting event '{}' to {} subscribers",
                     event.event,
                     subscriber_count
                 );
-                let mut subscribers = event_subscribers.write().await;
                 let mut dropped_count = 0;
                 subscribers.retain(|tx| {
                     match tx.try_send(event.clone()) {

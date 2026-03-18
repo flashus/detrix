@@ -62,7 +62,7 @@ pub async fn enable_metric(
     Path(id): Path<u64>,
 ) -> Result<Json<ToggleMetricResponse>, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
-    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
+    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id.clone());
     info!("REST: enable_metric (id={}, client_id={:?})", id, client_id);
 
     let result = state
@@ -109,7 +109,7 @@ pub async fn disable_metric(
     Path(id): Path<u64>,
 ) -> Result<Json<ToggleMetricResponse>, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
-    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
+    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id.clone());
     info!(
         "REST: disable_metric (id={}, client_id={:?})",
         id, client_id
@@ -182,7 +182,7 @@ pub async fn update_metric(
     Json(payload): Json<UpdateMetricRequest>,
 ) -> Result<Json<MetricInfo>, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
-    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
+    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id.clone());
     info!("REST: update_metric (id={}, client_id={:?})", id, client_id);
 
     // Get existing metric

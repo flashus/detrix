@@ -31,6 +31,8 @@ pub struct MetricFilter {
     pub group: Option<String>,
     /// Filter by user ID (None = return all users, Some(uid) = only that user's metrics)
     pub user_id: Option<String>,
+    /// Optional agent_id filter for multi-tenant queries (future use).
+    pub agent_id: Option<String>,
 }
 
 /// Repository for metric entities

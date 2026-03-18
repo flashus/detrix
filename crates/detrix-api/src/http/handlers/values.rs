@@ -50,7 +50,7 @@ pub async fn get_metric_value(
     info!("REST: get_metric_value (id={})", id);
 
     let client_id = super::extract_client_id(&headers)?;
-    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id);
+    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
 
     // Get metric first for its name
     let metric = state
@@ -149,7 +149,7 @@ pub async fn get_metric_history(
     );
 
     let client_id = super::extract_client_id(&headers)?;
-    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id);
+    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
 
     // Get metric first for its name
     let metric = state

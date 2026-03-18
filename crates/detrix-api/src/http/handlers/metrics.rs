@@ -170,7 +170,7 @@ pub async fn list_metrics(
     let offset = params.offset.unwrap_or(0);
 
     let client_id = super::extract_client_id(&headers)?;
-    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id);
+    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
 
     info!(
         "REST: list_metrics (connection_id={:?}, enabled={:?}, limit={}, offset={})",
@@ -184,6 +184,7 @@ pub async fn list_metrics(
         enabled: params.enabled,
         group: None,
         user_id: scope.user_id().map(|s| s.to_string()),
+        agent_id: None,
     };
 
     // Use DB-level filtering for efficient queries
@@ -239,7 +240,7 @@ pub async fn get_metric(
     info!("REST: get_metric (id={})", id);
 
     let client_id = super::extract_client_id(&headers)?;
-    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id);
+    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
 
     let metric = state
         .context
@@ -395,7 +396,7 @@ pub async fn delete_metric(
     Path(id): Path<u64>,
 ) -> Result<StatusCode, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
-    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
+    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id.clone());
     info!("REST: delete_metric (id={}, client_id={:?})", id, client_id);
 
     state
@@ -429,7 +430,7 @@ pub async fn query_events(
     );
 
     let client_id = super::extract_client_id(&headers)?;
-    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id);
+    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
 
     // If metric_name provided, look up the metric ID first; enforce scope on lookup
     let metric_id = match (&params.metric_id, &params.metric_name) {

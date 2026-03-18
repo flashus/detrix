@@ -629,4 +629,35 @@ mod tests {
         // If no token, should remain None
         assert_eq!(redacted.output.gelf.http.auth_token, None);
     }
+
+    #[test]
+    fn test_config_redacted_masks_user_tokens() {
+        let mut config = Config::default();
+        config.api.auth.users = vec![
+            crate::api::StaticUser {
+                token: "super-secret-token-abc".to_string(),
+                user_id: "alice".to_string(),
+                role: crate::api::UserRole::User,
+            },
+            crate::api::StaticUser {
+                token: "another-secret-xyz".to_string(),
+                user_id: "bob".to_string(),
+                role: crate::api::UserRole::Admin,
+            },
+        ];
+
+        let redacted = config.redacted();
+
+        // Original tokens must be preserved
+        assert_eq!(config.api.auth.users[0].token, "super-secret-token-abc");
+        assert_eq!(config.api.auth.users[1].token, "another-secret-xyz");
+
+        // Redacted copy must mask all user tokens
+        assert_eq!(redacted.api.auth.users[0].token, "***REDACTED***");
+        assert_eq!(redacted.api.auth.users[1].token, "***REDACTED***");
+
+        // User identities should remain intact
+        assert_eq!(redacted.api.auth.users[0].user_id, "alice");
+        assert_eq!(redacted.api.auth.users[1].user_id, "bob");
+    }
 }
