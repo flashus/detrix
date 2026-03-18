@@ -1,8 +1,11 @@
 //! Common utilities shared across API layers (MCP, REST, gRPC)
 
+pub mod auth;
 pub mod diff_parser;
 pub mod expression_extractor;
 pub mod parsing;
+
+pub use auth::{authenticate_token, AuthError, AuthState};
 
 pub use diff_parser::{parse_diff, DiffParseResult, ParsedDiffLine, UnparseableLine};
 pub use expression_extractor::{
@@ -14,22 +17,6 @@ pub use parsing::{
     parse_location_flexible, parse_location_str, parse_location_with_expression,
     ParsedLocationWithExpression,
 };
-
-/// Build a `MetricScope` from user identity and optional agent/client ID.
-///
-/// Maps: `(user_id, role, agent_id)` → `MetricScope`.
-/// - Admin role → `MetricScope::Admin` (full access)
-/// - User role + agent_id → `MetricScope::Agent { user_id, agent_id }`
-/// - User role + no agent → `MetricScope::User(user_id)`
-///
-/// The `agent_id` parameter typically comes from `X-Detrix-Client-Id` header.
-pub fn build_scope(
-    user_id: &str,
-    role: &detrix_config::UserRole,
-    agent_id: Option<String>,
-) -> detrix_application::MetricScope {
-    detrix_application::extract_scope(user_id, role, agent_id)
-}
 
 /// Authenticated user identity, shared across HTTP and gRPC authentication layers.
 ///

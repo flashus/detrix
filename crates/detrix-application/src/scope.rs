@@ -89,6 +89,13 @@ pub fn check_read_access(scope: &MetricScope, metric: &Metric) -> Result<(), det
     if scope.can_read(metric) {
         Ok(())
     } else {
+        tracing::debug!(
+            scope = ?scope,
+            metric_user_id = ?metric.user_id,
+            metric_agent_id = ?metric.agent_id,
+            metric_id = ?metric.id,
+            "Read access denied by scope"
+        );
         Err(detrix_core::Error::metric_not_found("Metric not found"))
     }
 }

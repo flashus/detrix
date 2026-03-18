@@ -99,7 +99,7 @@ impl DetrixServer {
     /// - If user_id is None (auth disabled or admin path): Admin scope
     fn scope(&self) -> detrix_application::MetricScope {
         match &self.user_id {
-            Some(uid) => crate::common::build_scope(uid, &self.role, self.client_id.clone()),
+            Some(uid) => detrix_application::extract_scope(uid, &self.role, self.client_id.clone()),
             None => detrix_application::MetricScope::Admin,
         }
     }
@@ -396,7 +396,7 @@ impl DetrixServer {
         Parameters(params): Parameters<QueryMetricsParams>,
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("query_metrics");
-        match tools::query_metrics_impl(&self.state, params).await {
+        match tools::query_metrics_impl(&self.state, params, &self.scope()).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 Ok(CallToolResult::success(vec![
@@ -649,7 +649,7 @@ Language-specific setup:
         Parameters(params): Parameters<GetMetricParams>,
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("get_metric");
-        match tools::get_metric_impl(&self.state, params).await {
+        match tools::get_metric_impl(&self.state, params, &self.scope()).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 let json = serde_json::to_string_pretty(&result.build_json())
@@ -743,7 +743,7 @@ Language-specific setup:
         Parameters(params): Parameters<ListGroupsParams>,
     ) -> Result<CallToolResult, McpError> {
         let timer = self.start_tool_call("list_groups");
-        match tools::list_groups_impl(&self.state, params).await {
+        match tools::list_groups_impl(&self.state, params, &self.scope()).await {
             Ok(result) => {
                 self.finish_tool_success(timer);
                 Ok(CallToolResult::success(vec![

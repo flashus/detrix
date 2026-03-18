@@ -1,7 +1,9 @@
 //! Connection entity and types for managing debugger connections (debugpy, delve, lldb-dap)
 
 use crate::connection_identity::ConnectionIdentity;
-use crate::entities::{SourceLanguage, MAX_USER_ID_LEN};
+#[cfg(test)]
+use crate::entities::MAX_USER_ID_LEN;
+use crate::entities::{validate_tenant_id, SourceLanguage};
 use crate::{Error, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -367,18 +369,10 @@ impl Connection {
 
     /// Validate that `user_id` does not exceed [`MAX_USER_ID_LEN`].
     ///
-    /// Mirrors `Metric::validate_tenant_ids` so the same length limit applies
-    /// to both metrics and connections.
+    /// Delegates to the shared [`validate_tenant_id`] helper so the same length
+    /// limit applies to both metrics and connections.
     pub fn validate_user_id(user_id: Option<&str>) -> Result<()> {
-        if let Some(uid) = user_id {
-            if uid.len() > MAX_USER_ID_LEN {
-                return Err(Error::InvalidTenantId(format!(
-                    "connection user_id exceeds maximum length of {} characters",
-                    MAX_USER_ID_LEN
-                )));
-            }
-        }
-        Ok(())
+        validate_tenant_id("connection user_id", user_id)
     }
 
     /// Update last active timestamp

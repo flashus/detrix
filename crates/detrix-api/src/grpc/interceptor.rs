@@ -5,42 +5,17 @@
 //! - Simple: Per-user static tokens from config
 //! - External: JWT validation via JWKS endpoint (for enterprise SSO)
 
-use detrix_application::JwksValidator;
-use detrix_config::{AuthConfig, AuthMode, UserRole, AUTO_AUTH_DEFAULT_USER_ID};
-use std::sync::Arc;
+use detrix_config::{AuthMode, UserRole, AUTO_AUTH_DEFAULT_USER_ID};
 use tonic::{Request, Status};
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use detrix_config::constants::{AUTHORIZATION_METADATA_KEY, BEARER_PREFIX};
 
 /// Re-export the shared `AuthenticatedUser` type from `crate::common`.
 pub use crate::common::AuthenticatedUser;
 
-/// Auth interceptor state (shared across all interceptor clones)
-#[derive(Clone)]
-pub struct AuthInterceptorState {
-    pub config: Arc<AuthConfig>,
-    /// JWT validator for external mode (optional - only needed for external auth)
-    pub jwt_validator: Option<Arc<JwksValidator>>,
-}
-
-impl AuthInterceptorState {
-    /// Create new auth state from config (simple mode or disabled)
-    pub fn new(config: AuthConfig) -> Self {
-        Self {
-            config: Arc::new(config),
-            jwt_validator: None,
-        }
-    }
-
-    /// Create auth state with JWT validator for external mode
-    pub fn with_jwt_validator(config: AuthConfig, validator: JwksValidator) -> Self {
-        Self {
-            config: Arc::new(config),
-            jwt_validator: Some(Arc::new(validator)),
-        }
-    }
-}
+/// Type alias — gRPC interceptor uses the same auth state as HTTP middleware.
+pub type AuthInterceptorState = crate::common::auth::AuthState;
 
 /// Create an auth interceptor function for gRPC services
 ///
@@ -77,81 +52,37 @@ pub fn create_auth_interceptor(
                     Status::unauthenticated("Authorization header must use Bearer scheme")
                 })?;
 
-                match config.effective_mode() {
-                    AuthMode::Simple => {
-                        // Look up token in configured users list
-                        if let Some(user) = config.find_user_by_token(token) {
-                            debug!(user_id = %user.user_id, "Bearer token authentication successful");
-                            let mut request = request;
-                            request.extensions_mut().insert(AuthenticatedUser {
-                                user_id: user.user_id.clone(),
-                                role: user.role.clone(),
-                            });
-                            Ok(request)
-                        } else {
-                            warn!("Invalid Bearer token");
-                            Err(Status::unauthenticated("Invalid token"))
-                        }
-                    }
-                    AuthMode::External => {
-                        // Validate JWT via JWKS
-                        let validator = state.jwt_validator.as_ref().ok_or_else(|| {
-                            error!("JWT validator not configured for external mode");
-                            Status::unauthenticated("Authentication not configured")
-                        })?;
+                // Delegate to shared authenticate_token via a scoped thread
+                // (tonic interceptors are sync; authenticate_token is async).
+                let state_clone = state.clone();
+                let token_owned = token.to_string();
+                #[allow(clippy::expect_used)]
+                let auth_result = std::thread::scope(|s| {
+                    s.spawn(|| {
+                        tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("tokio runtime construction cannot fail")
+                            .block_on(crate::common::authenticate_token(
+                                &token_owned,
+                                &state_clone,
+                            ))
+                    })
+                    .join()
+                    .expect("Auth thread panicked")
+                });
 
-                        // Run async JWT validation from a sync interceptor without
-                        // block_in_place, which panics on current-thread runtimes
-                        // (e.g. #[tokio::test]). Instead spawn a dedicated OS thread
-                        // with its own single-thread runtime — works in all contexts.
-                        let validator = Arc::clone(validator);
-                        let token_owned = token.to_string();
-                        #[allow(clippy::expect_used)]
-                        let result = std::thread::scope(|s| {
-                            s.spawn(|| {
-                                tokio::runtime::Builder::new_current_thread()
-                                    .enable_all()
-                                    .build()
-                                    .expect("tokio runtime construction cannot fail")
-                                    .block_on(validator.validate_token(&token_owned))
-                            })
-                            .join()
-                            .expect("JWT validation thread panicked")
-                        });
-
-                        match result {
-                            Ok(claims) => {
-                                // Reject JWTs without `sub` — sharing "anonymous" breaks
-                                // tenant isolation.
-                                let user_id = match claims.sub.clone() {
-                                    Some(sub) => sub,
-                                    None => {
-                                        warn!("JWT missing 'sub' claim — rejecting");
-                                        return Err(Status::unauthenticated(
-                                            "JWT missing 'sub' claim",
-                                        ));
-                                    }
-                                };
-                                debug!(
-                                    sub = %user_id,
-                                    email = ?claims.email,
-                                    "JWT authentication successful"
-                                );
-                                let role =
-                                    crate::http::middleware::resolve_jwt_role(&claims, &config.jwt);
-                                let mut request = request;
-                                request
-                                    .extensions_mut()
-                                    .insert(AuthenticatedUser { user_id, role });
-                                Ok(request)
-                            }
-                            Err(e) => {
-                                warn!(error = %e, "JWT validation failed");
-                                Err(Status::unauthenticated("Invalid token"))
-                            }
-                        }
+                match auth_result {
+                    Ok(authenticated) => {
+                        debug!(user_id = %authenticated.user_id, "gRPC authentication successful");
+                        let mut request = request;
+                        request.extensions_mut().insert(authenticated);
+                        Ok(request)
                     }
-                    AuthMode::Disabled => Ok(request),
+                    Err(crate::common::AuthError::Internal(msg)) => Err(Status::internal(msg)),
+                    Err(crate::common::AuthError::Unauthenticated(msg)) => {
+                        Err(Status::unauthenticated(msg))
+                    }
                 }
             }
             None => {
@@ -165,7 +96,7 @@ pub fn create_auth_interceptor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use detrix_config::StaticUser;
+    use detrix_config::{AuthConfig, StaticUser};
 
     fn test_users() -> Vec<StaticUser> {
         vec![StaticUser {
@@ -309,6 +240,6 @@ mod tests {
 
         let result = interceptor(request);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), tonic::Code::Unauthenticated);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Internal);
     }
 }

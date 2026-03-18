@@ -104,6 +104,7 @@ impl MetricService {
         let metrics = self.storage.find_by_group(group).await?;
         let mut succeeded = 0;
         let mut failed: Vec<(String, String)> = Vec::new();
+        let mut skipped = 0u64;
 
         // Filter metrics that need enabling and group by connection
         //
@@ -116,6 +117,7 @@ impl MetricService {
         for mut metric in metrics {
             // Scope check: skip metrics the caller can't mutate
             if !scope.can_mutate(&metric) {
+                skipped += 1;
                 continue;
             }
             if !metric.enabled {
@@ -196,6 +198,16 @@ impl MetricService {
             }
         }
 
+        if skipped > 0 {
+            tracing::info!(
+                group,
+                succeeded,
+                failed = failed.len(),
+                skipped,
+                "enable_group: metrics skipped due to scope restrictions"
+            );
+        }
+
         Ok(GroupOperationResult { succeeded, failed })
     }
 
@@ -220,6 +232,7 @@ impl MetricService {
         let metrics = self.storage.find_by_group(group).await?;
         let mut succeeded = 0;
         let mut failed: Vec<(String, String)> = Vec::new();
+        let mut skipped = 0u64;
 
         // Filter metrics that need disabling and group by connection
         //
@@ -231,6 +244,7 @@ impl MetricService {
         for mut metric in metrics {
             // Scope check: skip metrics the caller can't mutate
             if !scope.can_mutate(&metric) {
+                skipped += 1;
                 continue;
             }
             if metric.enabled {
@@ -311,6 +325,16 @@ impl MetricService {
             }
         }
 
+        if skipped > 0 {
+            tracing::info!(
+                group,
+                succeeded,
+                failed = failed.len(),
+                skipped,
+                "disable_group: metrics skipped due to scope restrictions"
+            );
+        }
+
         Ok(GroupOperationResult { succeeded, failed })
     }
 
@@ -349,6 +373,45 @@ impl MetricService {
         Ok(summaries)
     }
 
+    /// List group summaries respecting multi-tenant scope.
+    ///
+    /// Admin scope: uses efficient SQL GROUP BY from storage.
+    /// User/Agent scope: fetches the user's metrics and computes summaries in-memory.
+    pub async fn list_group_summaries_scoped(
+        &self,
+        scope: &MetricScope,
+    ) -> Result<Vec<GroupSummary>> {
+        if scope.user_id().is_none() {
+            let summaries = self.storage.get_group_summaries().await?;
+            return Ok(summaries);
+        }
+
+        let filter = crate::ports::MetricFilter {
+            user_id: scope.user_id().map(|s| s.to_string()),
+            ..Default::default()
+        };
+        let (metrics, _) = self.list_metrics_filtered(&filter, usize::MAX, 0).await?;
+
+        let mut group_map: std::collections::HashMap<Option<String>, (u64, u64)> =
+            std::collections::HashMap::new();
+        for m in &metrics {
+            let entry = group_map.entry(m.group.clone()).or_insert((0, 0));
+            entry.0 += 1;
+            if m.enabled {
+                entry.1 += 1;
+            }
+        }
+
+        Ok(group_map
+            .into_iter()
+            .map(|(name, (metric_count, enabled_count))| GroupSummary {
+                name,
+                metric_count,
+                enabled_count,
+            })
+            .collect())
+    }
+
     /// Disable all metrics created by a specific client.
     ///
     /// Used by switch_daemon(disable_metrics=true) for user-scoped cleanup.
@@ -372,14 +435,14 @@ impl MetricService {
 
         for metric in metrics {
             if let Some(metric_id) = metric.id {
-                if let Err(e) = self.toggle_metric(metric_id, false, &scope).await {
-                    tracing::warn!(
+                match self.toggle_metric(metric_id, false, &scope).await {
+                    Ok(_) => disabled += 1,
+                    Err(e) => tracing::warn!(
                         "Failed to disable metric {} for client {}: {e}",
                         metric_id,
                         client_identity
-                    );
+                    ),
                 }
-                disabled += 1;
             }
         }
 

@@ -44,7 +44,12 @@ pub const SAFETY_TRUSTED: &str = "trusted";
 /// Maximum length of a metric name (1-255 characters)
 pub const MAX_METRIC_NAME_LEN: usize = 255;
 
-/// Maximum length of a `user_id` or `agent_id` field (security-boundary fields)
+/// Maximum length of a `user_id` or `agent_id` field (security-boundary fields).
+///
+/// Set to 256 because JWT `sub` claims can be up to 255 characters (per RFC 7519
+/// there is no formal limit, but 255 is the practical maximum seen in OIDC providers).
+/// 256 provides one byte of headroom and aligns with common OS/database username
+/// length limits (e.g. Linux `LOGIN_NAME_MAX`).
 pub const MAX_USER_ID_LEN: usize = 256;
 
 /// Delimiter for multi-expression values in logpoint output and hashing.
@@ -147,6 +152,21 @@ impl std::str::FromStr for SafetyLevel {
             )),
         }
     }
+}
+
+/// Validate that a single tenant-ID field does not exceed [`MAX_USER_ID_LEN`].
+///
+/// `field` is a display label used in the error message (e.g. `"user_id"`, `"agent_id"`).
+pub fn validate_tenant_id(field: &str, value: Option<&str>) -> Result<()> {
+    if let Some(v) = value {
+        if v.len() > MAX_USER_ID_LEN {
+            return Err(Error::InvalidTenantId(format!(
+                "{} exceeds maximum length of {} characters",
+                field, MAX_USER_ID_LEN
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Core metric entity
@@ -337,23 +357,8 @@ impl Metric {
     ///
     /// These are security-boundary fields used for multi-tenant access control.
     pub fn validate_tenant_ids(user_id: Option<&str>, agent_id: Option<&str>) -> Result<()> {
-        if let Some(uid) = user_id {
-            if uid.len() > MAX_USER_ID_LEN {
-                return Err(Error::InvalidTenantId(format!(
-                    "user_id exceeds maximum length of {} characters",
-                    MAX_USER_ID_LEN
-                )));
-            }
-        }
-        if let Some(aid) = agent_id {
-            if aid.len() > MAX_USER_ID_LEN {
-                return Err(Error::InvalidTenantId(format!(
-                    "agent_id exceeds maximum length of {} characters",
-                    MAX_USER_ID_LEN
-                )));
-            }
-        }
-        Ok(())
+        validate_tenant_id("user_id", user_id)?;
+        validate_tenant_id("agent_id", agent_id)
     }
 }
 

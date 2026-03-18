@@ -35,6 +35,8 @@ pub use connection_reference::{
     ClientIdentity, ConnectionReference, ReferenceKind, DAEMON_IDENTITY,
 };
 pub use entities::{
+    // Tenant ID validation
+    validate_tenant_id,
     AnchorStatus,
     CapturedStackTrace,
     CapturedVariable,
@@ -78,12 +80,23 @@ pub use entities::{
     SAFETY_TRUSTED,
 };
 pub use error::{Error, ErrorCategory, ErrorCode, NotFoundError, Result};
+// Re-export sentinel constants
+// DEFAULT_GROUP_NAME and SYSTEM_USER_ID are defined at crate root
 pub use expressions::expression_contains_function_call;
 pub use formatting::{
     format_timestamp_full, format_timestamp_micros, format_timestamp_short, format_timestamp_time,
     format_uptime, is_use_utc, set_use_utc, SECS_PER_DAY, SECS_PER_HOUR, SECS_PER_MINUTE,
 };
 pub use system_event::{SystemEvent, SystemEventType};
+
+/// Default group name for ungrouped metrics.
+pub const DEFAULT_GROUP_NAME: &str = "default";
+
+/// Sentinel `user_id` used in storage when the real user_id is `None`.
+///
+/// SQLite's `ON CONFLICT(name, connection_id, user_id)` treats two NULLs as
+/// distinct, so we substitute this sentinel to make the upsert deterministic.
+pub const SYSTEM_USER_ID: &str = "__system__";
 
 // Port traits are in detrix-application crate:
 // use detrix_application::{

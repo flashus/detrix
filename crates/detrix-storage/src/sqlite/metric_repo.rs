@@ -19,9 +19,13 @@ use tracing::{debug, trace};
 /// - `upsert = false`: plain INSERT (conflict → error, caller gets last_insert_rowid)
 /// - `upsert = true`:  ON CONFLICT … DO UPDATE … RETURNING id
 ///
-/// **NULL `user_id` behavior:** SQLite treats each NULL as distinct in UNIQUE indexes,
-/// so `ON CONFLICT(location, connection_id, user_id)` with NULL `user_id` will **always insert**
-/// rather than update. This is intentional for pre-migration legacy metrics without owners.
+/// **NULL `user_id` handling:** SQLite treats each NULL as distinct in UNIQUE indexes,
+/// so we substitute `SYSTEM_USER_ID` ("__system__") for NULL user_id in the upsert path.
+/// `row_to_metric` maps the sentinel back to `None`.
+///
+/// **Ownership invariant:** `user_id` and `agent_id` are intentionally excluded from
+/// the `DO UPDATE SET` clause — ownership does not transfer on upsert.  Only
+/// non-ownership fields (name, expressions, mode, etc.) are updated.
 fn metric_insert_query(upsert: bool) -> String {
     let base = "INSERT INTO metrics (
                 name, connection_id, group_name, location, expressions_json, expression_hash, language,
@@ -146,6 +150,17 @@ impl MetricRepository for SqliteStorage {
 
         // For upsert mode, we need RETURNING to get the ID (could be existing or new)
         // For non-upsert mode, we use execute() + last_insert_rowid() which is simpler
+        //
+        // Sentinel substitution: SQLite treats NULL as distinct in UNIQUE indexes,
+        // so ON CONFLICT(location, connection_id, user_id) would never fire when
+        // user_id is NULL.  We substitute SYSTEM_USER_ID ("__system__") for NULL
+        // to make the upsert deterministic.  row_to_metric maps it back to None.
+        let effective_user_id = metric.user_id.as_deref().or(if upsert {
+            Some(detrix_core::SYSTEM_USER_ID)
+        } else {
+            None
+        });
+
         let id = if upsert {
             let query = metric_insert_query(true);
 
@@ -164,7 +179,7 @@ impl MetricRepository for SqliteStorage {
                 .bind(safety_level)
                 .bind(now)
                 .bind(now)
-                .bind(metric.user_id.as_deref())
+                .bind(effective_user_id)
                 .bind(metric.agent_id.as_deref())
                 .bind(metric.capture_stack_trace)
                 .bind(metric.stack_trace_ttl.map(|t| t as i64))
@@ -206,7 +221,7 @@ impl MetricRepository for SqliteStorage {
                 .bind(safety_level)
                 .bind(now)
                 .bind(now)
-                .bind(metric.user_id.as_deref())
+                .bind(effective_user_id)
                 .bind(metric.agent_id.as_deref())
                 .bind(metric.capture_stack_trace)
                 .bind(metric.stack_trace_ttl.map(|t| t as i64))
@@ -873,8 +888,19 @@ pub(crate) fn row_to_metric(row: &sqlx::sqlite::SqliteRow) -> Result<Metric> {
         condition: condition_expr,
         safety_level,
         created_at: Some(created_at),
-        user_id: row.try_get("user_id").ok().flatten(),
-        agent_id: row.try_get("agent_id").ok().flatten(),
+        user_id: row
+            .try_get::<Option<String>, _>("user_id")
+            .unwrap_or_else(|e| {
+                trace!(metric_id = id, error = %e, "user_id column not found");
+                None
+            })
+            .filter(|uid| uid != detrix_core::SYSTEM_USER_ID),
+        agent_id: row
+            .try_get::<Option<String>, _>("agent_id")
+            .unwrap_or_else(|e| {
+                trace!(metric_id = id, error = %e, "agent_id column not found");
+                None
+            }),
         // Introspection fields
         capture_stack_trace,
         stack_trace_ttl: stack_trace_ttl.map(|t| t as u64),

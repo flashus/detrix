@@ -19,6 +19,9 @@ pub const AUTO_AUTH_DEFAULT_USER_ID: &str = "default";
 /// Maximum allowed length for a static bearer token.
 const MAX_TOKEN_LEN: usize = 512;
 
+/// Minimum allowed length for a static bearer token.
+const MIN_TOKEN_LEN: usize = 16;
+
 // ============================================================================
 // API Config
 // ============================================================================
@@ -393,7 +396,7 @@ pub enum UserRole {
 ///
 /// # Note
 /// Intentionally no `Default` impl — all fields must be explicit.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StaticUser {
     /// Bearer token (constant-time compared; redacted in Debug output)
     pub token: String,
@@ -429,6 +432,11 @@ pub struct AuthConfig {
     /// - `Some(Disabled)`: explicitly disabled
     /// - `Some(Simple)`: per-user static tokens
     /// - `Some(External)`: JWT via JWKS
+    ///
+    // NOTE: `#[serde(default)]` on `Option<T>` is technically redundant (serde
+    // already deserializes missing keys as `None`), but we keep it throughout
+    // the config crate for explicitness — it signals "this field is optional in
+    // the TOML config" to readers without requiring serde knowledge.
     #[serde(default)]
     pub mode: Option<AuthMode>,
     /// Per-user static tokens for simple mode (replaces bearer_token)
@@ -521,11 +529,17 @@ impl AuthConfig {
     ///
     /// Ensures that valid credentials are provided when authentication is enabled.
     pub fn validate(&self) -> Result<(), String> {
-        // Detect deprecated bearer_token migration scenario
-        if self._bearer_token_deprecated.is_some() && self.users.is_empty() {
-            return Err("Config error: 'bearer_token' is no longer supported. \
-                 Use [[api.auth.users]] instead. See CHANGELOG.md."
-                .to_string());
+        // Detect deprecated bearer_token usage — always warn, then error if no users
+        if self._bearer_token_deprecated.is_some() {
+            tracing::warn!(
+                "api.auth.bearer_token is deprecated and will be ignored; \
+                 remove it from your config. Use [[api.auth.users]] instead."
+            );
+            if self.users.is_empty() {
+                return Err("Config error: 'bearer_token' is no longer supported. \
+                     Use [[api.auth.users]] instead. See CHANGELOG.md."
+                    .to_string());
+            }
         }
 
         // Warn if users are configured but mode is not Simple (they will be ignored)
@@ -555,6 +569,12 @@ impl AuthConfig {
                 for (i, user) in self.users.iter().enumerate() {
                     if user.token.is_empty() {
                         return Err(format!("api.auth.users[{}].token cannot be empty", i));
+                    }
+                    if user.token.len() < MIN_TOKEN_LEN {
+                        return Err(format!(
+                            "api.auth.users[{}].token is too short (minimum {} characters)",
+                            i, MIN_TOKEN_LEN
+                        ));
                     }
                     if user.token.len() > MAX_TOKEN_LEN {
                         return Err(format!(
@@ -932,11 +952,26 @@ mod tests {
     }
 
     #[test]
+    fn test_auth_config_simple_mode_short_token() {
+        let config = AuthConfig {
+            mode: Some(AuthMode::Simple),
+            users: vec![StaticUser {
+                token: "short".to_string(),
+                user_id: "alice".to_string(),
+                role: UserRole::User,
+            }],
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("too short"), "got: {err}");
+    }
+
+    #[test]
     fn test_auth_config_simple_mode_empty_user_id() {
         let config = AuthConfig {
             mode: Some(AuthMode::Simple),
             users: vec![StaticUser {
-                token: "dtx_token".to_string(),
+                token: "dtx_token_longtoken".to_string(),
                 user_id: "".to_string(),
                 role: UserRole::User,
             }],
@@ -1052,12 +1087,12 @@ mod tests {
 mode = "simple"
 
 [[users]]
-token = "dtx_alice_3f9a"
+token = "dtx_alice_3f9a_xxxx"
 user_id = "alice"
 role = "user"
 
 [[users]]
-token = "dtx_admin_7c2b"
+token = "dtx_admin_7c2b_xxxx"
 user_id = "admin"
 role = "admin"
 "#;
@@ -1297,12 +1332,12 @@ bearer_token = "old_secret_token"
             mode: Some(AuthMode::Simple),
             users: vec![
                 StaticUser {
-                    token: "dtx_token_a".to_string(),
+                    token: "dtx_token_aaaa_xxxx".to_string(),
                     user_id: "alice".to_string(),
                     role: UserRole::User,
                 },
                 StaticUser {
-                    token: "dtx_token_b".to_string(),
+                    token: "dtx_token_bbbb_xxxx".to_string(),
                     user_id: "alice".to_string(), // same user_id
                     role: UserRole::Admin,
                 },

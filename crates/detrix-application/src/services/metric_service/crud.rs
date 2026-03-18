@@ -493,10 +493,33 @@ impl MetricService {
         Ok(metric)
     }
 
+    /// Get a metric by ID with scope enforcement (defense-in-depth).
+    ///
+    /// Returns `Ok(None)` if the metric exists but the scope denies read access,
+    /// preventing information leakage about other tenants' metrics.
+    pub async fn get_metric_scoped(
+        &self,
+        metric_id: MetricId,
+        scope: &MetricScope,
+    ) -> Result<Option<Metric>> {
+        let metric = self.storage.find_by_id(metric_id).await?;
+        Ok(metric.filter(|m| scope.can_read(m)))
+    }
+
     /// Get a metric by name
     pub async fn get_metric_by_name(&self, name: &str) -> Result<Option<Metric>> {
         let metric = self.storage.find_by_name(name).await?;
         Ok(metric)
+    }
+
+    /// Get a metric by name with scope enforcement (defense-in-depth).
+    pub async fn get_metric_by_name_scoped(
+        &self,
+        name: &str,
+        scope: &MetricScope,
+    ) -> Result<Option<Metric>> {
+        let metric = self.storage.find_by_name(name).await?;
+        Ok(metric.filter(|m| scope.can_read(m)))
     }
 
     /// List all metrics

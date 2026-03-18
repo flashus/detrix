@@ -22,7 +22,9 @@ use tracing::{info, warn};
 impl From<GroupSummary> for GroupInfo {
     fn from(summary: GroupSummary) -> Self {
         Self {
-            name: summary.name.unwrap_or_else(|| "default".to_string()),
+            name: summary
+                .name
+                .unwrap_or_else(|| detrix_core::DEFAULT_GROUP_NAME.to_string()),
             metric_count: summary.metric_count as u32,
             enabled_count: summary.enabled_count as u32,
         }
@@ -81,53 +83,16 @@ pub async fn list_groups(
     info!("REST: list_groups");
 
     let client_id = super::extract_client_id(&headers)?;
-    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id);
+    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
 
-    // Admin scope: use efficient GROUP BY query from storage.
-    // User/Agent scope: fetch user's metrics and compute summaries in-memory
-    // (avoids adding user_id filter to the storage GROUP BY query for now).
-    if scope.user_id().is_none() {
-        let summaries = state
-            .context
-            .metric_service
-            .list_group_summaries()
-            .await
-            .http_context("Failed to list group summaries")?;
-        return Ok(Json(summaries.into_iter().map(GroupInfo::from).collect()));
-    }
-
-    // User/Agent: filter metrics by user_id then build summaries
-    let filter = MetricFilter {
-        user_id: scope.user_id().map(|s| s.to_string()),
-        ..Default::default()
-    };
-    let (metrics, _) = state
+    let summaries = state
         .context
         .metric_service
-        .list_metrics_filtered(&filter, usize::MAX, 0)
+        .list_group_summaries_scoped(&scope)
         .await
-        .http_context("Failed to list metrics for groups")?;
+        .http_context("Failed to list group summaries")?;
 
-    // Build summaries from filtered metrics
-    let mut group_map: std::collections::HashMap<Option<String>, (u64, u64)> =
-        std::collections::HashMap::new();
-    for m in &metrics {
-        let entry = group_map.entry(m.group.clone()).or_insert((0, 0));
-        entry.0 += 1;
-        if m.enabled {
-            entry.1 += 1;
-        }
-    }
-    let summaries: Vec<GroupInfo> = group_map
-        .into_iter()
-        .map(|(name, (metric_count, enabled_count))| GroupInfo {
-            name: name.unwrap_or_else(|| "default".to_string()),
-            metric_count: metric_count as u32,
-            enabled_count: enabled_count as u32,
-        })
-        .collect();
-
-    Ok(Json(summaries))
+    Ok(Json(summaries.into_iter().map(GroupInfo::from).collect()))
 }
 
 /// List all metrics belonging to a specific group.
@@ -147,10 +112,11 @@ pub async fn list_group_metrics(
     info!("REST: list_group_metrics (group={})", group_name);
 
     let client_id = super::extract_client_id(&headers)?;
-    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id);
+    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
 
     let filter = MetricFilter {
         user_id: scope.user_id().map(|s| s.to_string()),
+        group: Some(group_name.clone()),
         ..Default::default()
     };
     let (metrics, _) = state
@@ -160,14 +126,10 @@ pub async fn list_group_metrics(
         .await
         .http_context("Failed to list metrics")?;
 
-    // Filter by group and convert to proto DTOs
+    // Convert to proto DTOs
     // Caller decides: skip invalid metrics with logging
     let filtered: Vec<MetricInfo> = metrics
         .iter()
-        .filter(|m| {
-            let metric_group = m.group.clone().unwrap_or_else(|| "default".to_string());
-            metric_group == group_name
-        })
         .filter_map(|m| {
             metric_to_rest_response(m)
                 .inspect_err(|e| warn!(metric_name = %m.name, "Skipping metric: {}", e))
@@ -195,7 +157,7 @@ pub async fn enable_group(
     Path(group_name): Path<String>,
 ) -> Result<Json<GroupOperationResponse>, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
-    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
+    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id.clone());
     info!(
         "REST: enable_group (group={}, client_id={:?})",
         group_name, client_id
@@ -230,7 +192,7 @@ pub async fn disable_group(
     Path(group_name): Path<String>,
 ) -> Result<Json<GroupOperationResponse>, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
-    let scope = crate::common::build_scope(&user.user_id, &user.role, client_id.clone());
+    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id.clone());
     info!(
         "REST: disable_group (group={}, client_id={:?})",
         group_name, client_id

@@ -12,43 +12,17 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use detrix_application::JwksValidator;
-use detrix_config::{AuthConfig, AuthMode, UserRole, AUTO_AUTH_DEFAULT_USER_ID};
-use std::sync::Arc;
-use tracing::{debug, error, warn};
+use detrix_config::{AuthMode, UserRole, AUTO_AUTH_DEFAULT_USER_ID};
+use tracing::{debug, warn};
 
 #[cfg(test)]
 use detrix_config::constants::AUTHORIZATION_HEADER;
 use detrix_config::constants::BEARER_PREFIX;
 
+/// Re-export the shared `AuthState` from `crate::common::auth`.
+pub use crate::common::auth::AuthState;
 /// Re-export the shared `AuthenticatedUser` type from `crate::common`.
 pub use crate::common::AuthenticatedUser;
-
-/// Authentication middleware state
-#[derive(Clone)]
-pub struct AuthState {
-    pub config: Arc<AuthConfig>,
-    /// JWT validator for external mode (optional - only needed for external auth)
-    pub jwt_validator: Option<Arc<JwksValidator>>,
-}
-
-impl AuthState {
-    /// Create auth state from config (simple mode or disabled)
-    pub fn new(config: AuthConfig) -> Self {
-        Self {
-            config: Arc::new(config),
-            jwt_validator: None,
-        }
-    }
-
-    /// Create auth state with JWT validator for external mode
-    pub fn with_jwt_validator(config: AuthConfig, validator: JwksValidator) -> Self {
-        Self {
-            config: Arc::new(config),
-            jwt_validator: Some(Arc::new(validator)),
-        }
-    }
-}
 
 /// Authentication middleware
 ///
@@ -64,7 +38,7 @@ impl AuthState {
 /// - All requests pass through without validation
 pub async fn auth_middleware(
     State(auth_state): State<AuthState>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let config = &auth_state.config;
@@ -82,9 +56,14 @@ pub async fn auth_middleware(
     // Own the path to avoid borrow issues with request mutation
     let path = request.uri().path().to_string();
 
-    // Skip auth for public endpoints
+    // Skip auth for public endpoints — inject default Admin user so that
+    // any downstream handler using Extension<AuthenticatedUser> still works.
     if config.is_public_endpoint(&path) {
         debug!(path = %path, "Skipping auth for public endpoint");
+        request.extensions_mut().insert(AuthenticatedUser {
+            user_id: detrix_config::AUTO_AUTH_DEFAULT_USER_ID.to_string(),
+            role: detrix_config::UserRole::Admin,
+        });
         return Ok(next.run(request).await);
     }
 
@@ -104,67 +83,20 @@ pub async fn auth_middleware(
                 StatusCode::UNAUTHORIZED
             })?;
 
-            match config.effective_mode() {
-                AuthMode::Simple => {
-                    // Look up token in configured users list
-                    if let Some(user) = config.find_user_by_token(token) {
-                        debug!(path = %path, user_id = %user.user_id, "Bearer token authentication successful");
-                        let authenticated = AuthenticatedUser {
-                            user_id: user.user_id.clone(),
-                            role: user.role.clone(),
-                        };
-                        let mut request = request;
-                        request.extensions_mut().insert(authenticated);
-                        return Ok(next.run(request).await);
-                    }
-                    warn!(path = %path, "Invalid bearer token");
-                    Err(StatusCode::UNAUTHORIZED)
-                }
-                AuthMode::External => {
-                    // Validate JWT via JWKS
-                    let validator = auth_state.jwt_validator.as_ref().ok_or_else(|| {
-                        error!(path = %path, "JWT validator not configured for external mode");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?;
-
-                    match validator.validate_token(token).await {
-                        Ok(claims) => {
-                            // Reject JWTs without `sub` — all un-identified callers
-                            // sharing "anonymous" would break tenant isolation.
-                            let user_id = match claims.sub.clone() {
-                                Some(sub) => sub,
-                                None => {
-                                    warn!(path = %path, "JWT missing 'sub' claim — rejecting");
-                                    return Err(StatusCode::UNAUTHORIZED);
-                                }
-                            };
-
-                            debug!(
-                                path = %path,
-                                sub = %user_id,
-                                email = ?claims.email,
-                                "JWT authentication successful"
-                            );
-
-                            // Determine role from JWT claims
-                            let role = resolve_jwt_role(&claims, &config.jwt);
-
-                            let authenticated = AuthenticatedUser { user_id, role };
-
-                            let mut request = request;
-                            request.extensions_mut().insert(authenticated);
-
-                            Ok(next.run(request).await)
-                        }
-                        Err(e) => {
-                            warn!(path = %path, error = %e, "JWT validation failed");
-                            Err(StatusCode::UNAUTHORIZED)
-                        }
-                    }
-                }
-                AuthMode::Disabled => {
-                    // Should not reach here, but handle gracefully
+            // Delegate to shared authenticate_token logic
+            match crate::common::authenticate_token(token, &auth_state).await {
+                Ok(authenticated) => {
+                    debug!(path = %path, user_id = %authenticated.user_id, "Authentication successful");
+                    request.extensions_mut().insert(authenticated);
                     Ok(next.run(request).await)
+                }
+                Err(crate::common::AuthError::Internal(msg)) => {
+                    warn!(path = %path, "Auth internal error: {}", msg);
+                    Err(StatusCode::INTERNAL_SERVER_ERROR)
+                }
+                Err(crate::common::AuthError::Unauthenticated(msg)) => {
+                    warn!(path = %path, "Auth failed: {}", msg);
+                    Err(StatusCode::UNAUTHORIZED)
                 }
             }
         }
@@ -229,7 +161,7 @@ pub fn resolve_jwt_role(
 mod tests {
     use super::*;
     use axum::{body::Body, routing::get, Router};
-    use detrix_config::StaticUser;
+    use detrix_config::{AuthConfig, StaticUser};
     use tower::ServiceExt;
 
     async fn test_handler() -> &'static str {

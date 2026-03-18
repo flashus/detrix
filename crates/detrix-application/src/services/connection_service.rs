@@ -134,7 +134,7 @@ impl ConnectionService {
     /// * `control_plane_url` - App control plane URL for transparent file fetching
     /// * `build_commit` - Git commit SHA at build time
     /// * `build_tag` - Build version tag
-    /// * `created_by` - Client identity of the creator (from X-Detrix-Client-Id header)
+    /// * `user_id` - Authenticated user identity (from token or JWT sub claim)
     #[allow(clippy::too_many_arguments)]
     #[instrument(skip(self), fields(host = %host, port = port, name = %identity.name, language = %identity.language, workspace_root = %identity.workspace_root, hostname = %identity.hostname, pid = ?pid, safe_mode = safe_mode))]
     pub async fn create_connection_with_metadata(
@@ -148,7 +148,7 @@ impl ConnectionService {
         control_plane_url: Option<String>,
         build_commit: Option<String>,
         build_tag: Option<String>,
-        created_by: Option<String>,
+        user_id: Option<String>,
     ) -> Result<ConnectionId> {
         // 1. Create Connection entity from identity (validates identity, host, port, language + generates UUID)
         let mut connection = Connection::new_with_identity(identity, host, port)?;
@@ -156,8 +156,8 @@ impl ConnectionService {
         connection.control_plane_url = control_plane_url;
         connection.build_commit = build_commit;
         connection.build_tag = build_tag;
-        Connection::validate_user_id(created_by.as_deref())?;
-        connection.user_id = created_by.clone();
+        Connection::validate_user_id(user_id.as_deref())?;
+        connection.user_id = user_id.clone();
         let connection_id = connection.id.clone();
 
         // 2. Check if connection with same UUID already exists and is connected
@@ -175,7 +175,7 @@ impl ConnectionService {
 
             if is_connected || is_starting {
                 // Even if already connected/starting, ensure the caller holds a reference
-                if let Some(ref client_id) = created_by {
+                if let Some(ref client_id) = user_id {
                     let reference = ConnectionReference::new(
                         existing.id.clone(),
                         ClientIdentity::bridge(client_id),
@@ -340,7 +340,7 @@ impl ConnectionService {
                                 &host_bg,
                                 port_bg,
                                 language_bg,
-                                &created_by,
+                                &user_id,
                             )
                             .await
                         {
@@ -397,7 +397,7 @@ impl ConnectionService {
                 &connection.host,
                 connection.port,
                 connection.language,
-                &created_by,
+                &user_id,
             )
             .await?;
         }
@@ -417,15 +417,15 @@ impl ConnectionService {
         host: &str,
         port: u16,
         language: detrix_core::SourceLanguage,
-        created_by: &Option<String>,
+        user_id: &Option<String>,
     ) -> Result<()> {
         // Update connection status to Connected
         self.connection_repo
             .update_status(connection_id, ConnectionStatus::Connected)
             .await?;
 
-        // Add client reference if created_by is provided
-        if let Some(ref client_id) = created_by {
+        // Add client reference if caller identity is provided
+        if let Some(ref client_id) = user_id {
             let reference = ConnectionReference::new(
                 connection_id.clone(),
                 ClientIdentity::bridge(client_id),

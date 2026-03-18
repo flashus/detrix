@@ -223,6 +223,7 @@ impl GetMetricResult {
 pub async fn get_metric_impl(
     state: &Arc<ApiState>,
     params: GetMetricParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<GetMetricResult, McpError> {
     let metric = state
         .context
@@ -231,6 +232,13 @@ pub async fn get_metric_impl(
         .await
         .mcp_context("Failed to get metric")?
         .mcp_ok_or(&format!("Metric '{}' not found", params.name))?;
+
+    if !scope.can_read(&metric) {
+        return Err(McpError::invalid_params(
+            format!("Metric '{}' not found", params.name),
+            None,
+        ));
+    }
 
     Ok(GetMetricResult {
         name: metric.name.clone(),
@@ -412,6 +420,7 @@ impl QueryMetricsResult {
 pub async fn query_metrics_impl(
     state: &Arc<ApiState>,
     params: QueryMetricsParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<QueryMetricsResult, McpError> {
     // Convert u64 to i64 for repository (capped, always fits)
     let limit = params
@@ -429,6 +438,12 @@ pub async fn query_metrics_impl(
             .await
         {
             Ok(Some(metric)) => {
+                if !scope.can_read(&metric) {
+                    return Err(McpError::invalid_params(
+                        format!("Metric '{}' not found", metric_name),
+                        None,
+                    ));
+                }
                 if let Some(metric_id) = metric.id {
                     let events = state
                         .event_repository
@@ -473,7 +488,11 @@ pub async fn query_metrics_impl(
             .await
             .mcp_context("Failed to list metrics")?;
 
-        let metric_ids: Vec<_> = metrics.iter().filter_map(|m| m.id).collect();
+        let metric_ids: Vec<_> = metrics
+            .iter()
+            .filter(|m| scope.can_read(m))
+            .filter_map(|m| m.id)
+            .collect();
 
         let events = state
             .event_repository
