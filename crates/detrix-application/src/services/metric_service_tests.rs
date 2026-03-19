@@ -813,34 +813,27 @@ mod tests {
             .await
             .unwrap();
 
-        // Verify partial success
-        assert_eq!(result.succeeded, 2, "Should have 2 successful enables");
-        assert_eq!(result.failed.len(), 1, "Should have 1 failure");
-        assert!(!result.is_complete(), "Should not be complete");
-        assert!(result.has_failures(), "Should have failures");
-
-        // Verify the failed metric name is in the failures
-        assert!(
-            result.failed.iter().any(|(name, _)| name == "metric_fail"),
-            "Failed metric should be 'metric_fail'"
+        // With sync_logpoint, storage is updated first and DAP sync is best-effort.
+        // All 3 metrics get enabled in storage; sync_logpoint merges expressions per-location
+        // so per-metric adapter failures don't apply.
+        assert_eq!(
+            result.succeeded, 3,
+            "All 3 metrics should be enabled in storage"
         );
+        assert!(
+            result.failed.is_empty(),
+            "No per-metric failures with sync_logpoint"
+        );
+        assert!(result.is_complete(), "Should be complete");
 
-        // Verify storage state: failed metric should still be disabled (rolled back)
+        // Verify all metrics are enabled in storage
         let metrics = service
             .list_metrics_by_group("partial_group")
             .await
             .unwrap();
-        let failed_metric = metrics.iter().find(|m| m.name == "metric_fail").unwrap();
         assert!(
-            !failed_metric.enabled,
-            "Failed metric should be rolled back to disabled"
-        );
-
-        // Verify successful metrics are enabled
-        let ok_metrics: Vec<_> = metrics.iter().filter(|m| m.name != "metric_fail").collect();
-        assert!(
-            ok_metrics.iter().all(|m| m.enabled),
-            "Successful metrics should be enabled"
+            metrics.iter().all(|m| m.enabled),
+            "All metrics should be enabled in storage"
         );
     }
 
@@ -887,27 +880,25 @@ mod tests {
             .await
             .unwrap();
 
-        // Verify partial success
-        assert_eq!(result.succeeded, 2, "Should have 2 successful disables");
-        assert_eq!(result.failed.len(), 1, "Should have 1 failure");
-        assert!(!result.is_complete());
+        // With sync_logpoint, storage is updated first and DAP sync is best-effort.
+        assert_eq!(
+            result.succeeded, 3,
+            "All 3 metrics should be disabled in storage"
+        );
+        assert!(
+            result.failed.is_empty(),
+            "No per-metric failures with sync_logpoint"
+        );
+        assert!(result.is_complete());
 
-        // Verify the failed metric is still enabled (rolled back)
+        // Verify all metrics are disabled in storage
         let metrics = service
             .list_metrics_by_group("partial_group")
             .await
             .unwrap();
-        let failed_metric = metrics.iter().find(|m| m.name == "metric_fail").unwrap();
         assert!(
-            failed_metric.enabled,
-            "Failed metric should be rolled back to enabled"
-        );
-
-        // Verify successful metrics are disabled
-        let ok_metrics: Vec<_> = metrics.iter().filter(|m| m.name != "metric_fail").collect();
-        assert!(
-            ok_metrics.iter().all(|m| !m.enabled),
-            "Successful metrics should be disabled"
+            metrics.iter().all(|m| !m.enabled),
+            "All metrics should be disabled in storage"
         );
     }
 
@@ -937,30 +928,20 @@ mod tests {
 
         adapter.fail_on_set_metric("fail_metric").await;
 
-        // Get result and try ensure_complete
+        // With sync_logpoint, storage updates succeed and DAP sync is best-effort.
+        // Per-metric adapter failures don't prevent storage updates.
         let result = service
             .enable_group("test", &MetricScope::Admin)
             .await
             .unwrap();
+        assert_eq!(result.succeeded, 2);
+
+        // Should succeed — no per-metric failures with sync_logpoint
         let ensure_result = result.ensure_complete();
-
-        // Should be an error
         assert!(
-            ensure_result.is_err(),
-            "ensure_complete should fail on partial success"
+            ensure_result.is_ok(),
+            "ensure_complete should succeed when all storage updates pass"
         );
-
-        // Verify error type
-        match ensure_result {
-            Err(crate::Error::PartialGroupFailure {
-                succeeded,
-                failures,
-            }) => {
-                assert_eq!(succeeded, 1);
-                assert_eq!(failures.len(), 1);
-            }
-            _ => panic!("Expected PartialGroupFailure error"),
-        }
     }
 
     // ==================== Adapter Disconnected Tests ====================
@@ -1055,21 +1036,26 @@ mod tests {
         // Disconnect adapter
         adapter.set_disconnected(true).await;
 
-        // Enable group - all should fail
+        // With sync_logpoint, storage updates succeed even when adapter is disconnected.
+        // sync_logpoint silently returns Ok when no adapter — logpoints will be synced
+        // when the adapter reconnects.
         let result = service
             .enable_group("test", &MetricScope::Admin)
             .await
             .unwrap();
 
-        assert_eq!(result.succeeded, 0, "No metrics should succeed");
-        assert_eq!(result.failed.len(), 2, "All metrics should fail");
-        assert!(!result.is_complete());
+        assert_eq!(result.succeeded, 2, "Storage updates should succeed");
+        assert!(
+            result.failed.is_empty(),
+            "No failures — sync is best-effort"
+        );
+        assert!(result.is_complete());
 
-        // Verify all metrics are still disabled
+        // Verify all metrics are enabled in storage (will sync when adapter reconnects)
         let metrics = service.list_metrics_by_group("test").await.unwrap();
         assert!(
-            metrics.iter().all(|m| !m.enabled),
-            "All metrics should be rolled back"
+            metrics.iter().all(|m| m.enabled),
+            "All metrics should be enabled in storage"
         );
     }
 

@@ -253,7 +253,7 @@ impl DapBroker {
                 } else {
                     let msg = response
                         .message
-                        .unwrap_or_else(|| "Attach failed".to_string());
+                        .unwrap_or_else(|| "Request failed".to_string());
                     warn!(seq, error = %msg, "Adapter returned failure response");
                     Err(Error::InitializationFailed(msg))
                 }

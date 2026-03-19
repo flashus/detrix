@@ -656,6 +656,8 @@ pub struct GroupOperationResult {
     pub succeeded: usize,
     /// Metrics that failed: (metric_name, error_message)
     pub failed: Vec<(String, String)>,
+    /// Number of metrics skipped due to scope restrictions
+    pub skipped: u64,
 }
 
 impl GroupOperationResult {
@@ -664,6 +666,7 @@ impl GroupOperationResult {
         Self {
             succeeded: count,
             failed: vec![],
+            skipped: 0,
         }
     }
 

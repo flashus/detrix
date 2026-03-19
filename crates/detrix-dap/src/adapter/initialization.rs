@@ -167,28 +167,15 @@ pub async fn initialize_dap(
                 host, port, program
             );
 
-            // Send launch WITHOUT waiting for a response.
+            // Send launch with failure detection (same pattern as Attach/AttachPid).
             //
-            // lldb-dap 21.x sent a `launch` response before the `initialized` event.
-            // lldb-dap 22.x emits events (`output`, `initialized`, `module`, …) instead
-            // and never sends a `launch` response at all.  Waiting for the response would
-            // block until the 30 s broker timeout.
-            //
-            // The broker's reader loop drains incoming events while we wait for the
-            // subsequent `configurationDone` response, so no events are lost.
-            let seq = broker.next_sequence().await;
-            let request = crate::Request {
-                seq,
-                command: requests::LAUNCH.to_string(),
-                arguments: Some(launch_args),
-            };
+            // lldb-dap 22.x won't respond to `launch` at all (emits events instead),
+            // so the failure window times out harmlessly. But if the adapter responds
+            // with success: false (e.g. bad program path), we surface the error immediately.
             broker
-                .send_message_no_wait(crate::ProtocolMessage::Request(request))
+                .send_and_detect_failure(requests::LAUNCH, Some(launch_args), ATTACH_FAILURE_WINDOW)
                 .await?;
-            debug!(
-                "Launch request sent (seq={}), not waiting for response (lldb-dap 22+ emits events instead)",
-                seq
-            );
+            debug!("Launch request sent (failure-detection window passed)");
         }
         ConnectionMode::AttachPid {
             host: _,

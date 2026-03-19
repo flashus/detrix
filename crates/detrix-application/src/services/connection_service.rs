@@ -323,11 +323,11 @@ impl ConnectionService {
                 .unwrap_or_else(|_| {
                     tracing::error!(
                         connection_id = %connection_id_bg.0,
-                        "Background adapter task outer timeout (540 s) exceeded — \
+                        "Background adapter task outer timeout ({ADAPTER_START_TIMEOUT_SECS} s) exceeded — \
                          inner DAP timeouts did not fire; forcing Failed status"
                     );
                     Err(detrix_core::Error::Adapter(
-                        "adapter start timed out after 540 s (outer safety limit)".to_string(),
+                        format!("adapter start timed out after {ADAPTER_START_TIMEOUT_SECS} s (outer safety limit)"),
                     ))
                 });
 

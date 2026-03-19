@@ -154,20 +154,7 @@ impl std::str::FromStr for SafetyLevel {
     }
 }
 
-/// Validate that a single tenant-ID field does not exceed [`MAX_USER_ID_LEN`].
-///
-/// `field` is a display label used in the error message (e.g. `"user_id"`, `"agent_id"`).
-pub fn validate_tenant_id(field: &str, value: Option<&str>) -> Result<()> {
-    if let Some(v) = value {
-        if v.len() > MAX_USER_ID_LEN {
-            return Err(Error::InvalidTenantId(format!(
-                "{} exceeds maximum length of {} characters",
-                field, MAX_USER_ID_LEN
-            )));
-        }
-    }
-    Ok(())
-}
+// validate_tenant_id is defined in entities/mod.rs (shared by Metric and Connection)
 
 /// Core metric entity
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -357,8 +344,8 @@ impl Metric {
     ///
     /// These are security-boundary fields used for multi-tenant access control.
     pub fn validate_tenant_ids(user_id: Option<&str>, agent_id: Option<&str>) -> Result<()> {
-        validate_tenant_id("user_id", user_id)?;
-        validate_tenant_id("agent_id", agent_id)
+        super::validate_tenant_id("user_id", user_id)?;
+        super::validate_tenant_id("agent_id", agent_id)
     }
 }
 
@@ -661,7 +648,19 @@ mod tests {
 
     #[test]
     fn test_validate_tenant_ids_empty_strings() {
-        assert!(Metric::validate_tenant_ids(Some(""), Some("")).is_ok());
+        let result = Metric::validate_tenant_ids(Some(""), Some("agent1"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must not be empty"));
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_reserved_system() {
+        let result = Metric::validate_tenant_ids(Some("__system__"), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("reserved value"));
     }
 }
 

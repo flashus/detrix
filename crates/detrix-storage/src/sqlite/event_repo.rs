@@ -25,7 +25,7 @@ impl EventRepository for SqliteStorage {
 
         let id = sqlx::query(
             r#"
-            INSERT INTO metric_events (
+            INSERT OR IGNORE INTO metric_events (
                 metric_id, metric_name, connection_id, timestamp, thread_name, thread_id,
                 values_json,
                 is_error, error_type, error_message, error_traceback,

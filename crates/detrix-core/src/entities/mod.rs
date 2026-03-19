@@ -33,11 +33,38 @@ pub use memory::{
     StackTraceSlice,
 };
 pub use metric::{
-    validate_tenant_id, Metric, MetricId, MetricMode, SafetyLevel, MAX_METRIC_NAME_LEN,
-    MAX_USER_ID_LEN, MODE_FIRST, MODE_SAMPLE, MODE_SAMPLE_INTERVAL, MODE_STREAM, MODE_THROTTLE,
-    MULTI_EXPR_DELIMITER, MULTI_EXPR_DELIMITER_STR, SAFETY_STRICT, SAFETY_TRUSTED,
+    Metric, MetricId, MetricMode, SafetyLevel, MAX_METRIC_NAME_LEN, MAX_USER_ID_LEN, MODE_FIRST,
+    MODE_SAMPLE, MODE_SAMPLE_INTERVAL, MODE_STREAM, MODE_THROTTLE, MULTI_EXPR_DELIMITER,
+    MULTI_EXPR_DELIMITER_STR, SAFETY_STRICT, SAFETY_TRUSTED,
 };
 pub use purity::{ImpureCall, PurityAnalysis, PurityLevel};
+
+use crate::error::{Error, Result};
+
+/// Validate that a single tenant-ID field is not empty, not reserved, and within length limit.
+///
+/// `field` is a display label used in the error message (e.g. `"user_id"`, `"agent_id"`).
+///
+/// Shared by [`Metric::validate_tenant_ids`] and [`Connection::validate_tenant_id`].
+pub fn validate_tenant_id(field: &str, value: Option<&str>) -> Result<()> {
+    if let Some(v) = value {
+        if v.is_empty() {
+            return Err(Error::InvalidTenantId(format!("{field} must not be empty")));
+        }
+        if v == crate::SYSTEM_USER_ID {
+            return Err(Error::InvalidTenantId(format!(
+                "{field} uses reserved value"
+            )));
+        }
+        if v.len() > MAX_USER_ID_LEN {
+            return Err(Error::InvalidTenantId(format!(
+                "{} exceeds maximum length of {} characters",
+                field, MAX_USER_ID_LEN
+            )));
+        }
+    }
+    Ok(())
+}
 
 // Note: File inspection types (CodeLine, CodeContext, FileInspectionRequest,
 // FileInspectionResult, FileOverview, LineInspectionResult, TextSearchMatch, VariableDefinition,

@@ -637,7 +637,9 @@ impl AuthConfig {
 
     /// Check if a path is a public endpoint (no auth required)
     pub fn is_public_endpoint(&self, path: &str) -> bool {
-        self.public_endpoints.iter().any(|p| path.starts_with(p))
+        self.public_endpoints
+            .iter()
+            .any(|p| path == p || path.starts_with(&format!("{p}/")))
     }
 
     /// Check if a gRPC method is public (no auth required)
@@ -1397,5 +1399,22 @@ bearer_token = "old_secret_token"
             result.is_err(),
             "admin_role_value without admin_role_claim must fail validate()"
         );
+    }
+
+    #[test]
+    fn test_is_public_endpoint_boundary_matching() {
+        let config = AuthConfig {
+            public_endpoints: vec!["/api/status".to_string()],
+            ..Default::default()
+        };
+
+        // Exact match
+        assert!(config.is_public_endpoint("/api/status"));
+        // Subpath match
+        assert!(config.is_public_endpoint("/api/status/details"));
+        // Must NOT match prefix collision (e.g. "/api/status_evil")
+        assert!(!config.is_public_endpoint("/api/status_evil"));
+        // Non-matching path
+        assert!(!config.is_public_endpoint("/api/metrics"));
     }
 }

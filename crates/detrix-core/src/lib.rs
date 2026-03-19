@@ -64,8 +64,9 @@ pub use entities::{
     StackFrame,
     StackTraceSlice,
     TypedValue,
-    // Metric name constants
+    // Metric/tenant ID length constants
     MAX_METRIC_NAME_LEN,
+    MAX_USER_ID_LEN,
     // Mode type constants
     MODE_FIRST,
     MODE_SAMPLE,
@@ -80,8 +81,6 @@ pub use entities::{
     SAFETY_TRUSTED,
 };
 pub use error::{Error, ErrorCategory, ErrorCode, NotFoundError, Result};
-// Re-export sentinel constants
-// DEFAULT_GROUP_NAME and SYSTEM_USER_ID are defined at crate root
 pub use expressions::expression_contains_function_call;
 pub use formatting::{
     format_timestamp_full, format_timestamp_micros, format_timestamp_short, format_timestamp_time,
@@ -92,13 +91,9 @@ pub use system_event::{SystemEvent, SystemEventType};
 /// Default group name for ungrouped metrics.
 pub const DEFAULT_GROUP_NAME: &str = "default";
 
-/// Sentinel `user_id` used in storage when the real user_id is `None`.
+/// Sentinel `user_id` substituted for `None` in storage to ensure uniqueness
+/// constraint correctness (e.g. SQL `ON CONFLICT` treats NULLs as distinct).
 ///
-/// SQLite's `ON CONFLICT(name, connection_id, user_id)` treats two NULLs as
-/// distinct, so we substitute this sentinel to make the upsert deterministic.
+/// Also rejected by [`validate_tenant_id`] to prevent API callers from
+/// impersonating the "no owner" state.
 pub const SYSTEM_USER_ID: &str = "__system__";
-
-// Port traits are in detrix-application crate:
-// use detrix_application::{
-//     DapAdapter, DapAdapterFactory, MetricRepository, EventRepository, ConnectionRepository
-// };

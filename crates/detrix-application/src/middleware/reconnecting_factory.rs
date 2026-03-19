@@ -111,7 +111,7 @@ impl DapAdapterFactory for ReconnectingAdapterFactory {
         // AttachPid sends a DAP "attach" request that triggers ptrace(PTRACE_ATTACH) on macOS,
         // which can take 60-180 s while lldb-dap enumerates system dylibs. If the attach times
         // out, retrying just re-attaches to the same (broken) state and wastes another 180 s.
-        // The outer 280 s safety limit in connection_service.rs would fire during a retry,
+        // The outer 540 s safety limit in connection_service.rs would fire during a retry,
         // preventing the connection from ever reaching "Failed" status within the 300 s test
         // window. Skip the wrapper so a timeout propagates immediately.
         if pid.is_some() {

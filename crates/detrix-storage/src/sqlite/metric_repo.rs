@@ -574,6 +574,11 @@ impl MetricRepository for SqliteStorage {
             bind_values.push(uid.clone());
         }
 
+        if let Some(ref aid) = filter.agent_id {
+            conditions.push("agent_id = ?");
+            bind_values.push(aid.clone());
+        }
+
         let where_clause = if conditions.is_empty() {
             String::new()
         } else {

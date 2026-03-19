@@ -241,7 +241,7 @@ impl ErrorCode {
             // Security - authentication/authorization failures
             ErrorCode::Unauthorized => ErrorCategory::Security,
             ErrorCode::Forbidden => ErrorCategory::Security,
-            ErrorCode::InvalidTenantId => ErrorCategory::Security,
+            ErrorCode::InvalidTenantId => ErrorCategory::Terminal,
 
             // Remote app - retryable (network calls to remote apps)
             ErrorCode::RemoteAppError => ErrorCategory::Retryable,
