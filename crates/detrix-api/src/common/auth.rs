@@ -4,8 +4,8 @@
 //! middleware and the gRPC interceptor.
 
 use crate::common::AuthenticatedUser;
-use detrix_application::JwksValidator;
-use detrix_config::{AuthConfig, AuthMode, UserRole};
+use detrix_application::{JwksValidator, JwtClaims};
+use detrix_config::{AuthConfig, AuthMode, JwtConfig, UserRole};
 use std::sync::Arc;
 use tracing::{debug, error, warn};
 
@@ -84,7 +84,7 @@ pub async fn authenticate_token(
 
                     debug!(sub = %user_id, email = ?claims.email, "JWT authentication successful");
 
-                    let role = crate::http::middleware::resolve_jwt_role(&claims, &config.jwt);
+                    let role = resolve_jwt_role(&claims, &config.jwt);
 
                     Ok(AuthenticatedUser { user_id, role })
                 }
@@ -96,10 +96,54 @@ pub async fn authenticate_token(
         }
         AuthMode::Disabled => {
             // Should not reach here — caller should check mode first.
-            Ok(AuthenticatedUser {
-                user_id: detrix_config::AUTO_AUTH_DEFAULT_USER_ID.to_string(),
-                role: UserRole::Admin,
-            })
+            Ok(AuthenticatedUser::default_admin())
         }
     }
+}
+
+/// Traverse a dot-separated path in a JSON value (e.g. `"realm_access.roles"`).
+fn get_claim_value<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    path.split('.').try_fold(root, |node, key| node.get(key))
+}
+
+/// Determine user role from JWT claims based on config.
+///
+/// Supports dot-path notation for nested claims, e.g. `admin_role_claim = "realm_access.roles"`.
+pub fn resolve_jwt_role(claims: &JwtClaims, jwt_config: &JwtConfig) -> UserRole {
+    let (Some(ref claim_name), Some(ref claim_value)) =
+        (&jwt_config.admin_role_claim, &jwt_config.admin_role_value)
+    else {
+        return UserRole::User;
+    };
+
+    // Fast path: the well-known top-level "roles" array has a dedicated typed field.
+    if claim_name == "roles" {
+        if claims.roles.iter().any(|r| r == claim_value) {
+            return UserRole::Admin;
+        }
+        return UserRole::User;
+    }
+
+    // Generic path: traverse dot-separated path in extra claims.
+    let extra_root = serde_json::Value::Object(
+        claims
+            .extra
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    );
+    if let Some(node) = get_claim_value(&extra_root, claim_name) {
+        let is_admin = match node {
+            serde_json::Value::String(s) => s == claim_value,
+            serde_json::Value::Array(arr) => arr
+                .iter()
+                .any(|v| v.as_str().is_some_and(|s| s == claim_value)),
+            _ => false,
+        };
+        if is_admin {
+            return UserRole::Admin;
+        }
+    }
+
+    UserRole::User
 }

@@ -15,7 +15,7 @@ pub async fn handle_toggle_metric(
 ) -> Result<Response<ToggleMetricResponse>, Status> {
     let user = crate::grpc::extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
-    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id.clone());
+    let scope = user.scope(client_id.clone());
     let req = request.into_inner();
     tracing::info!(
         metric_id = req.metric_id,
@@ -62,7 +62,7 @@ pub async fn handle_enable_group(
 ) -> Result<Response<GroupResponse>, Status> {
     let user = crate::grpc::extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
-    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id.clone());
+    let scope = user.scope(client_id.clone());
     let req = request.into_inner();
     tracing::info!(group = %req.group_name, ?client_id, "gRPC: enable_group");
 
@@ -99,7 +99,7 @@ pub async fn handle_disable_group(
 ) -> Result<Response<GroupResponse>, Status> {
     let user = crate::grpc::extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
-    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id.clone());
+    let scope = user.scope(client_id.clone());
     let req = request.into_inner();
     tracing::info!(group = %req.group_name, ?client_id, "gRPC: disable_group");
 

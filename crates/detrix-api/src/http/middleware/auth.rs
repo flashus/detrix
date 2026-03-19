@@ -12,7 +12,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use detrix_config::{AuthMode, UserRole, AUTO_AUTH_DEFAULT_USER_ID};
+use detrix_config::AuthMode;
 use tracing::{debug, warn};
 
 #[cfg(test)]
@@ -46,10 +46,9 @@ pub async fn auth_middleware(
     // When auth is disabled: inject default Admin user so handlers always have scope
     if config.effective_mode() == AuthMode::Disabled {
         let mut request = request;
-        request.extensions_mut().insert(AuthenticatedUser {
-            user_id: AUTO_AUTH_DEFAULT_USER_ID.to_string(),
-            role: UserRole::Admin,
-        });
+        request
+            .extensions_mut()
+            .insert(AuthenticatedUser::default_admin());
         return Ok(next.run(request).await);
     }
 
@@ -60,10 +59,9 @@ pub async fn auth_middleware(
     // any downstream handler using Extension<AuthenticatedUser> still works.
     if config.is_public_endpoint(&path) {
         debug!(path = %path, "Skipping auth for public endpoint");
-        request.extensions_mut().insert(AuthenticatedUser {
-            user_id: detrix_config::AUTO_AUTH_DEFAULT_USER_ID.to_string(),
-            role: detrix_config::UserRole::Admin,
-        });
+        request
+            .extensions_mut()
+            .insert(AuthenticatedUser::default_admin());
         return Ok(next.run(request).await);
     }
 
@@ -107,61 +105,14 @@ pub async fn auth_middleware(
     }
 }
 
-/// Traverse a dot-separated path in a JSON value (e.g. `"realm_access.roles"`).
-fn get_claim_value<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
-    path.split('.').try_fold(root, |node, key| node.get(key))
-}
-
-/// Determine user role from JWT claims based on config.
-///
-/// Supports dot-path notation for nested claims, e.g. `admin_role_claim = "realm_access.roles"`.
-pub fn resolve_jwt_role(
-    claims: &detrix_application::JwtClaims,
-    jwt_config: &detrix_config::JwtConfig,
-) -> UserRole {
-    let (Some(ref claim_name), Some(ref claim_value)) =
-        (&jwt_config.admin_role_claim, &jwt_config.admin_role_value)
-    else {
-        return UserRole::User;
-    };
-
-    // Fast path: the well-known top-level "roles" array has a dedicated typed field.
-    if claim_name == "roles" {
-        if claims.roles.iter().any(|r| r == claim_value) {
-            return UserRole::Admin;
-        }
-        return UserRole::User;
-    }
-
-    // Generic path: traverse dot-separated path in extra claims.
-    let extra_root = serde_json::Value::Object(
-        claims
-            .extra
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-    );
-    if let Some(node) = get_claim_value(&extra_root, claim_name) {
-        let is_admin = match node {
-            serde_json::Value::String(s) => s == claim_value,
-            serde_json::Value::Array(arr) => arr
-                .iter()
-                .any(|v| v.as_str().is_some_and(|s| s == claim_value)),
-            _ => false,
-        };
-        if is_admin {
-            return UserRole::Admin;
-        }
-    }
-
-    UserRole::User
-}
+/// Re-export `resolve_jwt_role` from `crate::common::auth` for backwards compatibility.
+pub use crate::common::auth::resolve_jwt_role;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::{body::Body, routing::get, Router};
-    use detrix_config::{AuthConfig, StaticUser};
+    use detrix_config::{AuthConfig, StaticUser, UserRole};
     use tower::ServiceExt;
 
     async fn test_handler() -> &'static str {

@@ -260,7 +260,7 @@ pub async fn mcp_handler(
                     "capabilities": server_info.capabilities,
                     "serverInfo": {
                         "name": "detrix",
-                        "version": "1.0.0"
+                        "version": env!("CARGO_PKG_VERSION")
                     },
                     "instructions": server_info.instructions
                 }
@@ -511,14 +511,12 @@ async fn handle_tools_call(mcp_server: DetrixServer, id: Option<Value>, params: 
 #[derive(Debug)]
 pub enum McpHttpError {
     InvalidJsonRpc(String),
-    Internal(String),
 }
 
 impl IntoResponse for McpHttpError {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
             McpHttpError::InvalidJsonRpc(msg) => (StatusCode::BAD_REQUEST, msg),
-            McpHttpError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
 
         let body = Json(serde_json::json!({
@@ -540,10 +538,7 @@ mod tests {
     use crate::test_support::create_test_state;
 
     fn admin_user() -> Extension<AuthenticatedUser> {
-        Extension(AuthenticatedUser {
-            user_id: "default".to_string(),
-            role: detrix_config::UserRole::Admin,
-        })
+        Extension(AuthenticatedUser::default_admin())
     }
 
     #[tokio::test]

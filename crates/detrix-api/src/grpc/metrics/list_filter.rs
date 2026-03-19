@@ -17,7 +17,7 @@ pub async fn handle_list_metrics(
 ) -> Result<Response<ListMetricsResponse>, Status> {
     let user = crate::grpc::extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
-    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
+    let scope = user.scope(client_id);
     let req = request.into_inner();
 
     // Build filter with user scope and optional group
@@ -64,7 +64,7 @@ pub async fn handle_list_groups(
 ) -> Result<Response<ListGroupsResponse>, Status> {
     let user = crate::grpc::extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
-    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
+    let scope = user.scope(client_id);
 
     let summaries = state
         .context

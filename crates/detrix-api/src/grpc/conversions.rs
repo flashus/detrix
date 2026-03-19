@@ -7,6 +7,9 @@ use detrix_core::{
     SnapshotScope, StackTraceSlice as CoreStackTraceSlice, SAFETY_STRICT, SAFETY_TRUSTED,
 };
 
+/// Error code returned in proto `ErrorResult` for expression evaluation errors.
+const EVAL_ERROR_CODE: &str = "EVAL_ERROR";
+
 /// Convert proto Location to core Location
 pub fn proto_to_core_location(loc: &Location) -> CoreLocation {
     CoreLocation {
@@ -369,7 +372,7 @@ pub fn core_event_to_proto_with_location(
     let error = if *is_error {
         Some(crate::generated::detrix::v1::ErrorResult {
             error: true,
-            error_code: "EVAL_ERROR".to_string(),
+            error_code: EVAL_ERROR_CODE.to_string(),
             error_type: error_type.clone().unwrap_or_default(),
             error_message: error_message.clone().unwrap_or_default(),
             traceback: None,

@@ -50,7 +50,7 @@ pub async fn get_metric_value(
     info!("REST: get_metric_value (id={})", id);
 
     let client_id = super::extract_client_id(&headers)?;
-    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
+    let scope = user.scope(client_id);
 
     // Get metric first for its name
     let metric = state
@@ -102,8 +102,10 @@ pub struct MetricHistoryParams {
     pub until: Option<i64>,
 }
 
+const DEFAULT_HISTORY_LIMIT: i64 = 100;
+
 fn default_history_limit() -> i64 {
-    100
+    DEFAULT_HISTORY_LIMIT
 }
 
 /// Metric history response
@@ -149,7 +151,7 @@ pub async fn get_metric_history(
     );
 
     let client_id = super::extract_client_id(&headers)?;
-    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
+    let scope = user.scope(client_id);
 
     // Get metric first for its name
     let metric = state

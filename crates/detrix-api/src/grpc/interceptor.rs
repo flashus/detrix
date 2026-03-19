@@ -5,7 +5,7 @@
 //! - Simple: Per-user static tokens from config
 //! - External: JWT validation via JWKS endpoint (for enterprise SSO)
 
-use detrix_config::{AuthMode, UserRole, AUTO_AUTH_DEFAULT_USER_ID};
+use detrix_config::AuthMode;
 use tonic::{Request, Status};
 use tracing::{debug, warn};
 
@@ -31,10 +31,9 @@ pub fn create_auth_interceptor(
         // When auth is disabled: inject default Admin user so handlers always have scope
         if config.effective_mode() == AuthMode::Disabled {
             let mut request = request;
-            request.extensions_mut().insert(AuthenticatedUser {
-                user_id: AUTO_AUTH_DEFAULT_USER_ID.to_string(),
-                role: UserRole::Admin,
-            });
+            request
+                .extensions_mut()
+                .insert(AuthenticatedUser::default_admin());
             return Ok(request);
         }
 
@@ -96,7 +95,7 @@ pub fn create_auth_interceptor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use detrix_config::{AuthConfig, StaticUser};
+    use detrix_config::{AuthConfig, StaticUser, UserRole};
 
     fn test_users() -> Vec<StaticUser> {
         vec![StaticUser {

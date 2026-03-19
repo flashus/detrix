@@ -31,6 +31,21 @@ pub struct AuthenticatedUser {
     pub role: detrix_config::UserRole,
 }
 
+impl AuthenticatedUser {
+    /// Create the default admin user (used when auth is disabled or for public endpoints).
+    pub fn default_admin() -> Self {
+        Self {
+            user_id: detrix_config::AUTO_AUTH_DEFAULT_USER_ID.to_string(),
+            role: detrix_config::UserRole::Admin,
+        }
+    }
+
+    /// Build a `MetricScope` from this user, optionally scoped to a client_id.
+    pub fn scope(&self, client_id: Option<String>) -> detrix_application::MetricScope {
+        detrix_application::extract_scope(&self.user_id, &self.role, client_id)
+    }
+}
+
 /// HTTP header / gRPC metadata key for client identity.
 ///
 /// Used across REST, gRPC, and MCP to identify the originator of mutations.

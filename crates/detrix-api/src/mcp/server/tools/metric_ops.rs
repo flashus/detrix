@@ -42,7 +42,7 @@ pub async fn remove_metric_impl(
     let metric = match state
         .context
         .metric_service
-        .get_metric_by_name(&params.name)
+        .get_metric_by_name_scoped(&params.name, scope)
         .await
     {
         Ok(Some(m)) => m,
@@ -130,7 +130,7 @@ pub async fn toggle_metric_impl(
     let metric = match state
         .context
         .metric_service
-        .get_metric_by_name(&params.name)
+        .get_metric_by_name_scoped(&params.name, scope)
         .await
     {
         Ok(Some(m)) => m,
@@ -228,7 +228,7 @@ pub async fn get_metric_impl(
     let metric = state
         .context
         .metric_service
-        .get_metric_by_name(&params.name)
+        .get_metric_by_name_scoped(&params.name, scope)
         .await
         .mcp_context("Failed to get metric")?
         .mcp_ok_or(&format!("Metric '{}' not found", params.name))?;
@@ -277,7 +277,7 @@ pub async fn update_metric_impl(
     let mut metric = state
         .context
         .metric_service
-        .get_metric_by_name(&params.name)
+        .get_metric_by_name_scoped(&params.name, scope)
         .await
         .mcp_context("Failed to get metric")?
         .mcp_ok_or(&format!("Metric '{}' not found", params.name))?;
@@ -330,31 +330,19 @@ pub async fn list_metrics_impl(
 ) -> Result<ListMetricsResult, McpError> {
     use detrix_application::MetricFilter;
 
-    // Build filter with scope's user_id for multi-tenant isolation
+    // Build filter with scope's user_id + optional group for multi-tenant isolation
     let filter = MetricFilter {
         user_id: scope.user_id().map(|s| s.to_string()),
+        group: params.group.clone(),
         ..Default::default()
     };
 
-    let metrics = if let Some(ref group_name) = params.group {
-        let (all, _) = state
-            .context
-            .metric_service
-            .list_metrics_filtered(&filter, usize::MAX, 0)
-            .await
-            .mcp_context("Failed to list metrics")?;
-        all.into_iter()
-            .filter(|m| m.group.as_deref() == Some(group_name.as_str()))
-            .collect::<Vec<_>>()
-    } else {
-        let (all, _) = state
-            .context
-            .metric_service
-            .list_metrics_filtered(&filter, usize::MAX, 0)
-            .await
-            .mcp_context("Failed to list metrics")?;
-        all
-    };
+    let (metrics, _) = state
+        .context
+        .metric_service
+        .list_metrics_filtered(&filter, usize::MAX, 0)
+        .await
+        .mcp_context("Failed to list metrics")?;
 
     debug!("list_metrics: found {} metrics in storage", metrics.len());
     for m in &metrics {
@@ -434,7 +422,7 @@ pub async fn query_metrics_impl(
         match state
             .context
             .metric_service
-            .get_metric_by_name(metric_name)
+            .get_metric_by_name_scoped(metric_name, scope)
             .await
         {
             Ok(Some(metric)) => {

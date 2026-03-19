@@ -103,7 +103,7 @@ pub async fn handle_remove_metric(
 ) -> Result<Response<RemoveMetricResponse>, Status> {
     let user = crate::grpc::extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
-    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id.clone());
+    let scope = user.scope(client_id.clone());
     let req = request.into_inner();
     tracing::info!(?client_id, "gRPC: remove_metric");
 
@@ -148,7 +148,7 @@ pub async fn handle_update_metric(
 ) -> Result<Response<MetricResponse>, Status> {
     let user = crate::grpc::extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
-    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id.clone());
+    let scope = user.scope(client_id.clone());
     let req = request.into_inner();
     tracing::info!(metric_id = req.metric_id, ?client_id, "gRPC: update_metric");
     let metric_id = detrix_core::MetricId(req.metric_id);
@@ -215,7 +215,7 @@ pub async fn handle_get_metric(
 ) -> Result<Response<MetricResponse>, Status> {
     let user = crate::grpc::extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
-    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
+    let scope = user.scope(client_id);
     let req = request.into_inner();
 
     // Extract metric from oneof identifier

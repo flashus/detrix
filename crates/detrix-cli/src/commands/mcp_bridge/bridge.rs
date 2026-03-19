@@ -23,7 +23,6 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{watch, RwLock};
 use uuid::Uuid;
 
-/// MCP stdio-to-HTTP bridge
 /// Minimal metric DTO for cleanup: only the fields we need.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

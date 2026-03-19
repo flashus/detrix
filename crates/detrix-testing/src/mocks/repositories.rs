@@ -187,10 +187,7 @@ impl MetricRepository for MockMetricRepository {
                 m.connection_id == *connection_id
                     && m.location.file == file
                     && m.location.line == line
-                    && match user_id {
-                        Some(uid) => m.user_id.as_deref() == Some(uid),
-                        None => true,
-                    }
+                    && m.user_id.as_deref() == user_id
             })
             .cloned())
     }

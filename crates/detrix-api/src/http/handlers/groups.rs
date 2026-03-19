@@ -83,7 +83,7 @@ pub async fn list_groups(
     info!("REST: list_groups");
 
     let client_id = super::extract_client_id(&headers)?;
-    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
+    let scope = user.scope(client_id);
 
     let summaries = state
         .context
@@ -112,7 +112,7 @@ pub async fn list_group_metrics(
     info!("REST: list_group_metrics (group={})", group_name);
 
     let client_id = super::extract_client_id(&headers)?;
-    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
+    let scope = user.scope(client_id);
 
     let filter = MetricFilter {
         user_id: scope.user_id().map(|s| s.to_string()),
@@ -157,7 +157,7 @@ pub async fn enable_group(
     Path(group_name): Path<String>,
 ) -> Result<Json<GroupOperationResponse>, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
-    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id.clone());
+    let scope = user.scope(client_id.clone());
     info!(
         "REST: enable_group (group={}, client_id={:?})",
         group_name, client_id
@@ -192,7 +192,7 @@ pub async fn disable_group(
     Path(group_name): Path<String>,
 ) -> Result<Json<GroupOperationResponse>, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
-    let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id.clone());
+    let scope = user.scope(client_id.clone());
     info!(
         "REST: disable_group (group={}, client_id={:?})",
         group_name, client_id
