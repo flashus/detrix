@@ -57,7 +57,7 @@ impl StreamingService for StreamingServiceImpl {
         // Extract user BEFORE into_inner() consumes the request
         let user = crate::grpc::extract_user(&request)?;
         let client_id = crate::grpc::extract_client_id(&request)?;
-        let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
+        let scope = user.scope(client_id);
 
         let req = request.into_inner();
         let mut metric_ids: Vec<u64> = req.metric_ids;
@@ -110,7 +110,7 @@ impl StreamingService for StreamingServiceImpl {
         // Extract user BEFORE into_inner() consumes the request
         let user = crate::grpc::extract_user(&request)?;
         let client_id = crate::grpc::extract_client_id(&request)?;
-        let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
+        let scope = user.scope(client_id);
 
         let req = request.into_inner();
         let group_name = req.group_name;
@@ -173,7 +173,7 @@ impl StreamingService for StreamingServiceImpl {
         // Extract user BEFORE into_inner() consumes the request
         let user = crate::grpc::extract_user(&request)?;
         let client_id = crate::grpc::extract_client_id(&request)?;
-        let scope = detrix_application::extract_scope(&user.user_id, &user.role, client_id);
+        let scope = user.scope(client_id);
 
         let req = request.into_inner();
 
@@ -243,6 +243,11 @@ impl StreamingService for StreamingServiceImpl {
         &self,
         request: Request<QueryRequest>,
     ) -> Result<Response<QueryResponse>, Status> {
+        // Extract user BEFORE into_inner() consumes the request
+        let user = crate::grpc::extract_user(&request)?;
+        let client_id = crate::grpc::extract_client_id(&request)?;
+        let scope = user.scope(client_id);
+
         let req = request.into_inner();
 
         // Get query limits from ConfigService (hot-reload support)
@@ -257,11 +262,21 @@ impl StreamingService for StreamingServiceImpl {
         let cursor_filter = req.cursor.as_ref().and_then(|c| parse_cursor(c));
 
         // Convert metric IDs
-        let metric_ids: Vec<detrix_core::MetricId> = req
+        let mut metric_ids: Vec<detrix_core::MetricId> = req
             .metric_ids
             .iter()
             .map(|&id| detrix_core::MetricId(id))
             .collect();
+
+        // Non-admin scope: filter to only allowed metric IDs
+        if scope.user_id().is_some() {
+            let allowed = self.allowed_metric_ids(&scope).await?;
+            if metric_ids.is_empty() {
+                metric_ids = allowed.into_iter().map(detrix_core::MetricId).collect();
+            } else {
+                metric_ids.retain(|id| allowed.contains(&id.0));
+            }
+        }
 
         // Query events - fetch extra to determine has_more
         let fetch_limit = limit + 1;

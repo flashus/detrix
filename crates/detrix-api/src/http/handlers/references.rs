@@ -224,7 +224,7 @@ pub async fn admin_disconnect_all(
         return Err(HttpError::with_code(
             axum::http::StatusCode::FORBIDDEN,
             "Admin endpoints are disabled. Set api.rest.admin_endpoints_enabled = true in config.",
-            detrix_core::ErrorCode::Unauthorized,
+            detrix_core::ErrorCode::Forbidden,
         ));
     }
 
@@ -283,7 +283,7 @@ pub async fn admin_disable_metrics_by_owner(
         return Err(HttpError::with_code(
             axum::http::StatusCode::FORBIDDEN,
             "Admin endpoints are disabled. Set api.rest.admin_endpoints_enabled = true in config.",
-            detrix_core::ErrorCode::Unauthorized,
+            detrix_core::ErrorCode::Forbidden,
         ));
     }
 
