@@ -12,6 +12,73 @@ use detrix_core::ConnectionId;
 use sqlx::Row;
 use tracing::{debug, trace};
 
+/// Build the INSERT SQL for the metrics table.
+///
+/// Both `save` (plain insert) and `save_with_options` (upsert) share the same
+/// 33-column column list and VALUES placeholder block.  Only the suffix differs:
+/// - `upsert = false`: plain INSERT (conflict → error, caller gets last_insert_rowid)
+/// - `upsert = true`:  ON CONFLICT … DO UPDATE … RETURNING id
+///
+/// **NULL `user_id` handling:** SQLite treats each NULL as distinct in UNIQUE indexes,
+/// so we substitute `SYSTEM_USER_ID` ("__system__") for NULL user_id in the upsert path.
+/// `row_to_metric` maps the sentinel back to `None`.
+///
+/// **Ownership invariant:** `user_id` and `agent_id` are intentionally excluded from
+/// the `DO UPDATE SET` clause — ownership does not transfer on upsert.  Only
+/// non-ownership fields (name, expressions, mode, etc.) are updated.
+fn metric_insert_query(upsert: bool) -> String {
+    let base = "INSERT INTO metrics (
+                name, connection_id, group_name, location, expressions_json, expression_hash, language,
+                enabled, mode_type, mode_config, condition_expr, safety_level,
+                created_at, updated_at, user_id, agent_id,
+                capture_stack_trace, stack_trace_ttl, stack_trace_slice,
+                capture_memory_snapshot, snapshot_scope, snapshot_ttl,
+                anchor_symbol, anchor_symbol_kind, anchor_symbol_range, anchor_offset,
+                anchor_fingerprint, anchor_context_before, anchor_source_line, anchor_context_after,
+                anchor_last_verified, anchor_original_location, anchor_status
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
+                    ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)";
+
+    if upsert {
+        format!(
+            "{}\n            ON CONFLICT(location, connection_id, user_id) DO UPDATE SET
+                name = excluded.name,
+                group_name = excluded.group_name,
+                expressions_json = excluded.expressions_json,
+                expression_hash = excluded.expression_hash,
+                language = excluded.language,
+                enabled = excluded.enabled,
+                mode_type = excluded.mode_type,
+                mode_config = excluded.mode_config,
+                condition_expr = excluded.condition_expr,
+                safety_level = excluded.safety_level,
+                updated_at = excluded.updated_at,
+                capture_stack_trace = excluded.capture_stack_trace,
+                stack_trace_ttl = excluded.stack_trace_ttl,
+                stack_trace_slice = excluded.stack_trace_slice,
+                capture_memory_snapshot = excluded.capture_memory_snapshot,
+                snapshot_scope = excluded.snapshot_scope,
+                snapshot_ttl = excluded.snapshot_ttl,
+                anchor_symbol = excluded.anchor_symbol,
+                anchor_symbol_kind = excluded.anchor_symbol_kind,
+                anchor_symbol_range = excluded.anchor_symbol_range,
+                anchor_offset = excluded.anchor_offset,
+                anchor_fingerprint = excluded.anchor_fingerprint,
+                anchor_context_before = excluded.anchor_context_before,
+                anchor_source_line = excluded.anchor_source_line,
+                anchor_context_after = excluded.anchor_context_after,
+                anchor_last_verified = excluded.anchor_last_verified,
+                anchor_original_location = excluded.anchor_original_location,
+                anchor_status = excluded.anchor_status
+            RETURNING id",
+            base
+        )
+    } else {
+        base.to_string()
+    }
+}
+
 #[async_trait]
 impl MetricRepository for SqliteStorage {
     /// Save a new metric (fails on duplicate name+connection_id)
@@ -83,53 +150,23 @@ impl MetricRepository for SqliteStorage {
 
         // For upsert mode, we need RETURNING to get the ID (could be existing or new)
         // For non-upsert mode, we use execute() + last_insert_rowid() which is simpler
-        let id = if upsert {
-            let query = r#"
-            INSERT INTO metrics (
-                name, connection_id, group_name, location, expressions_json, expression_hash, language,
-                enabled, mode_type, mode_config, condition_expr, safety_level,
-                created_at, updated_at, created_by,
-                capture_stack_trace, stack_trace_ttl, stack_trace_slice,
-                capture_memory_snapshot, snapshot_scope, snapshot_ttl,
-                anchor_symbol, anchor_symbol_kind, anchor_symbol_range, anchor_offset,
-                anchor_fingerprint, anchor_context_before, anchor_source_line, anchor_context_after,
-                anchor_last_verified, anchor_original_location, anchor_status
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-                    ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)
-            ON CONFLICT(location, connection_id) DO UPDATE SET
-                name = excluded.name,
-                group_name = excluded.group_name,
-                expressions_json = excluded.expressions_json,
-                expression_hash = excluded.expression_hash,
-                language = excluded.language,
-                enabled = excluded.enabled,
-                mode_type = excluded.mode_type,
-                mode_config = excluded.mode_config,
-                condition_expr = excluded.condition_expr,
-                safety_level = excluded.safety_level,
-                updated_at = excluded.updated_at,
-                capture_stack_trace = excluded.capture_stack_trace,
-                stack_trace_ttl = excluded.stack_trace_ttl,
-                stack_trace_slice = excluded.stack_trace_slice,
-                capture_memory_snapshot = excluded.capture_memory_snapshot,
-                snapshot_scope = excluded.snapshot_scope,
-                snapshot_ttl = excluded.snapshot_ttl,
-                anchor_symbol = excluded.anchor_symbol,
-                anchor_symbol_kind = excluded.anchor_symbol_kind,
-                anchor_symbol_range = excluded.anchor_symbol_range,
-                anchor_offset = excluded.anchor_offset,
-                anchor_fingerprint = excluded.anchor_fingerprint,
-                anchor_context_before = excluded.anchor_context_before,
-                anchor_source_line = excluded.anchor_source_line,
-                anchor_context_after = excluded.anchor_context_after,
-                anchor_last_verified = excluded.anchor_last_verified,
-                anchor_original_location = excluded.anchor_original_location,
-                anchor_status = excluded.anchor_status
-            RETURNING id
-            "#;
+        //
+        // Sentinel substitution: SQLite treats NULL as distinct in UNIQUE indexes,
+        // so ON CONFLICT(location, connection_id, user_id) would never fire when
+        // user_id is NULL.  We substitute SYSTEM_USER_ID ("__system__") for NULL
+        // to make the upsert deterministic.  row_to_metric maps it back to None.
+        // Always substitute SYSTEM_USER_ID for NULL user_id, not just in upsert mode.
+        // This ensures the UNIQUE index on (location, connection_id, user_id) works
+        // consistently for both plain INSERT and ON CONFLICT paths.
+        let effective_user_id = metric
+            .user_id
+            .as_deref()
+            .or(Some(detrix_core::SYSTEM_USER_ID));
 
-            let row = sqlx::query(query)
+        let id = if upsert {
+            let query = metric_insert_query(true);
+
+            let row = sqlx::query(&query)
                 .bind(&metric.name)
                 .bind(&metric.connection_id.0)
                 .bind(&metric.group)
@@ -144,7 +181,8 @@ impl MetricRepository for SqliteStorage {
                 .bind(safety_level)
                 .bind(now)
                 .bind(now)
-                .bind(metric.created_by.as_deref().unwrap_or("system"))
+                .bind(effective_user_id)
+                .bind(metric.agent_id.as_deref())
                 .bind(metric.capture_stack_trace)
                 .bind(metric.stack_trace_ttl.map(|t| t as i64))
                 .bind(&stack_trace_slice_json)
@@ -168,22 +206,9 @@ impl MetricRepository for SqliteStorage {
             row.get::<i64, _>("id")
         } else {
             // Plain INSERT - use execute() + last_insert_rowid() for simplicity
-            let query = r#"
-            INSERT INTO metrics (
-                name, connection_id, group_name, location, expressions_json, expression_hash, language,
-                enabled, mode_type, mode_config, condition_expr, safety_level,
-                created_at, updated_at, created_by,
-                capture_stack_trace, stack_trace_ttl, stack_trace_slice,
-                capture_memory_snapshot, snapshot_scope, snapshot_ttl,
-                anchor_symbol, anchor_symbol_kind, anchor_symbol_range, anchor_offset,
-                anchor_fingerprint, anchor_context_before, anchor_source_line, anchor_context_after,
-                anchor_last_verified, anchor_original_location, anchor_status
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-                    ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)
-            "#;
+            let query = metric_insert_query(false);
 
-            sqlx::query(query)
+            sqlx::query(&query)
                 .bind(&metric.name)
                 .bind(&metric.connection_id.0)
                 .bind(&metric.group)
@@ -198,7 +223,8 @@ impl MetricRepository for SqliteStorage {
                 .bind(safety_level)
                 .bind(now)
                 .bind(now)
-                .bind(metric.created_by.as_deref().unwrap_or("system"))
+                .bind(effective_user_id)
+                .bind(metric.agent_id.as_deref())
                 .bind(metric.capture_stack_trace)
                 .bind(metric.stack_trace_ttl.map(|t| t as i64))
                 .bind(&stack_trace_slice_json)
@@ -463,21 +489,48 @@ impl MetricRepository for SqliteStorage {
         connection_id: &ConnectionId,
         file: &str,
         line: u32,
+        owner: detrix_application::ports::OwnerFilter<'_>,
     ) -> Result<Option<Metric>> {
+        use detrix_application::ports::OwnerFilter;
+
         // Location is stored as "@file#line" format
         let location_pattern = format!("@{}#{}", file, line);
 
-        let row =
-            sqlx::query("SELECT * FROM metrics WHERE connection_id = ? AND location = ? LIMIT 1")
-                .bind(&connection_id.0)
-                .bind(&location_pattern)
-                .fetch_optional(self.pool())
-                .await?;
+        let uid = match &owner {
+            OwnerFilter::User(uid) => *uid,
+            OwnerFilter::System => detrix_core::SYSTEM_USER_ID,
+        };
+
+        let row = sqlx::query(
+            "SELECT * FROM metrics WHERE connection_id = ? AND location = ? AND user_id = ? LIMIT 1",
+        )
+        .bind(&connection_id.0)
+        .bind(&location_pattern)
+        .bind(uid)
+        .fetch_optional(self.pool())
+        .await?;
 
         match row {
             Some(ref r) => Ok(Some(row_to_metric(r)?)),
             None => Ok(None),
         }
+    }
+
+    async fn find_all_at_location(
+        &self,
+        connection_id: &ConnectionId,
+        file: &str,
+        line: u32,
+    ) -> Result<Vec<Metric>> {
+        let location_pattern = format!("@{}#{}", file, line);
+
+        let rows = sqlx::query("SELECT * FROM metrics WHERE connection_id = ? AND location = ? ORDER BY created_at ASC")
+            .bind(&connection_id.0)
+            .bind(&location_pattern)
+            .fetch_all(self.pool())
+            .await?;
+
+        rows.iter().map(row_to_metric).collect()
     }
 
     async fn find_filtered(
@@ -510,6 +563,16 @@ impl MetricRepository for SqliteStorage {
                 conditions.push("group_name = ?");
                 bind_values.push(group.clone());
             }
+        }
+
+        if let Some(ref uid) = filter.user_id {
+            conditions.push("user_id = ?");
+            bind_values.push(uid.clone());
+        }
+
+        if let Some(ref aid) = filter.agent_id {
+            conditions.push("agent_id = ?");
+            bind_values.push(aid.clone());
         }
 
         let where_clause = if conditions.is_empty() {
@@ -569,22 +632,68 @@ impl MetricRepository for SqliteStorage {
 
         let rows = sqlx::query(query).fetch_all(self.pool()).await?;
 
-        let summaries: Vec<detrix_application::ports::GroupSummary> = rows
+        let summaries: Result<Vec<detrix_application::ports::GroupSummary>> = rows
             .iter()
             .map(|row| {
-                let name: Option<String> = row.try_get("group_name").unwrap_or(None);
-                let metric_count: i64 = row.try_get("metric_count").unwrap_or(0);
-                let enabled_count: i64 = row.try_get("enabled_count").unwrap_or(0);
+                let name: Option<String> = row.try_get("group_name")?;
+                let metric_count: i64 = row.try_get("metric_count")?;
+                let enabled_count: i64 = row.try_get("enabled_count")?;
 
-                detrix_application::ports::GroupSummary {
+                Ok(detrix_application::ports::GroupSummary {
                     name,
                     metric_count: metric_count as u64,
                     enabled_count: enabled_count as u64,
-                }
+                })
             })
             .collect();
 
+        let summaries = summaries?;
         debug!(group_count = summaries.len(), "Group summaries query");
+
+        Ok(summaries)
+    }
+
+    async fn get_group_summaries_by_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<detrix_application::ports::GroupSummary>> {
+        let query = r#"
+            SELECT
+                group_name,
+                COUNT(*) as metric_count,
+                SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as enabled_count
+            FROM metrics
+            WHERE user_id = ?
+            GROUP BY group_name
+            ORDER BY COALESCE(group_name, 'default')
+        "#;
+
+        let rows = sqlx::query(query)
+            .bind(user_id)
+            .fetch_all(self.pool())
+            .await?;
+
+        let summaries: Result<Vec<detrix_application::ports::GroupSummary>> = rows
+            .iter()
+            .map(|row| {
+                let name: Option<String> = row.try_get("group_name")?;
+                let metric_count: i64 = row.try_get("metric_count")?;
+                let enabled_count: i64 = row.try_get("enabled_count")?;
+
+                Ok(detrix_application::ports::GroupSummary {
+                    name,
+                    metric_count: metric_count as u64,
+                    enabled_count: enabled_count as u64,
+                })
+            })
+            .collect();
+
+        let summaries = summaries?;
+        debug!(
+            user_id,
+            group_count = summaries.len(),
+            "User group summaries query"
+        );
 
         Ok(summaries)
     }
@@ -606,8 +715,11 @@ impl MetricRepository for SqliteStorage {
     }
 
     async fn migrate_connection_id(&self, from: &ConnectionId, to: &ConnectionId) -> Result<u64> {
-        // UPDATE OR IGNORE skips rows that would violate the unique index on (location, connection_id),
-        // preserving any metric already present at the same location on the target connection.
+        // UPDATE OR IGNORE skips rows that would violate the unique index on
+        // (location, connection_id, user_id), preserving any metric already present
+        // at the same location+user on the target connection.
+        // Because user_id is included in the index, metrics belonging to different users
+        // at the same location will not conflict during migration.
         let result =
             sqlx::query("UPDATE OR IGNORE metrics SET connection_id = ? WHERE connection_id = ?")
                 .bind(&to.0)
@@ -822,7 +934,19 @@ pub(crate) fn row_to_metric(row: &sqlx::sqlite::SqliteRow) -> Result<Metric> {
         condition: condition_expr,
         safety_level,
         created_at: Some(created_at),
-        created_by: row.try_get("created_by").unwrap_or(None),
+        user_id: row
+            .try_get::<Option<String>, _>("user_id")
+            .unwrap_or_else(|e| {
+                trace!(metric_id = id, error = %e, "user_id column not found");
+                None
+            })
+            .filter(|uid| uid != detrix_core::SYSTEM_USER_ID),
+        agent_id: row
+            .try_get::<Option<String>, _>("agent_id")
+            .unwrap_or_else(|e| {
+                trace!(metric_id = id, error = %e, "agent_id column not found");
+                None
+            }),
         // Introspection fields
         capture_stack_trace,
         stack_trace_ttl: stack_trace_ttl.map(|t| t as u64),

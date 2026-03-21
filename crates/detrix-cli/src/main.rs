@@ -198,8 +198,9 @@ enum Commands {
         daemon_url: Option<String>,
 
         /// File server host to advertise (default: 127.0.0.1)
-        /// Used when switching daemons to tell the new daemon where to fetch files
-        #[arg(long)]
+        /// Used when switching daemons to tell the new daemon where to fetch files.
+        /// Can also be set via DETRIX_FILE_SERVER_HOST env var.
+        #[arg(long, env = "DETRIX_FILE_SERVER_HOST")]
         file_server_host: Option<String>,
     },
 

@@ -1,7 +1,9 @@
 //! Connection entity and types for managing debugger connections (debugpy, delve, lldb-dap)
 
 use crate::connection_identity::ConnectionIdentity;
-use crate::entities::SourceLanguage;
+#[cfg(test)]
+use crate::entities::MAX_USER_ID_LEN;
+use crate::entities::{validate_tenant_id, SourceLanguage};
 use crate::{Error, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -186,10 +188,10 @@ pub struct Connection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_tag: Option<String>,
 
-    /// Client identity of the creator (from X-Detrix-Client-Id header).
-    /// Used for multi-user reference counting in cloud mode.
+    /// Authenticated user identity (from token or JWT sub claim).
+    /// Used for multi-tenant connection ownership.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_by: Option<String>,
+    pub user_id: Option<String>,
 
     /// When the connection was created (microseconds since epoch)
     pub created_at: i64,
@@ -265,7 +267,7 @@ impl Connection {
             control_plane_url: None,
             build_commit: None,
             build_tag: None,
-            created_by: None,
+            user_id: None,
             created_at: now,
             last_connected_at: None,
             last_active: now,
@@ -318,7 +320,7 @@ impl Connection {
             control_plane_url: None,
             build_commit: None,
             build_tag: None,
-            created_by: None,
+            user_id: None,
             created_at: now,
             last_connected_at: None,
             last_active: now,
@@ -363,6 +365,14 @@ impl Connection {
                     | ConnectionStatus::Reconnecting
                     | ConnectionStatus::Failed(_)
             )
+    }
+
+    /// Validate that `user_id` is not empty, not reserved, and does not exceed [`MAX_USER_ID_LEN`].
+    ///
+    /// Delegates to the shared [`validate_tenant_id`] helper so the same
+    /// validation rules apply to both metrics and connections.
+    pub fn validate_user_id(user_id: Option<&str>) -> Result<()> {
+        validate_tenant_id("connection user_id", user_id)
     }
 
     /// Update last active timestamp
@@ -830,6 +840,28 @@ mod tests {
         // With ttl_days = -1 (indefinite), should never be considered inactive
         assert!(!conn.inactive_for_days(-1, now));
         assert!(!conn.inactive_for_days(-999, now));
+    }
+
+    #[test]
+    fn test_connection_user_id_too_long() {
+        let long_uid = "a".repeat(MAX_USER_ID_LEN + 1);
+        let result = Connection::validate_user_id(Some(&long_uid));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds maximum length"));
+    }
+
+    #[test]
+    fn test_connection_user_id_at_max_ok() {
+        let max_uid = "a".repeat(MAX_USER_ID_LEN);
+        assert!(Connection::validate_user_id(Some(&max_uid)).is_ok());
+    }
+
+    #[test]
+    fn test_connection_user_id_none_ok() {
+        assert!(Connection::validate_user_id(None).is_ok());
     }
 
     #[test]

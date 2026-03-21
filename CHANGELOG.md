@@ -5,6 +5,126 @@ All notable changes to Detrix will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] 2026-03-21 — Multi-Tenant Authentication
+
+> **⚠️ BREAKING CHANGES** — This release introduces multi-tenant authentication.
+> Existing single-user configurations require migration (see below).
+
+### Breaking Changes
+
+#### `Metric.created_by` removed — replaced by `user_id` + `agent_id`
+
+The `created_by` field has been removed from `Metric`. It is replaced by:
+- `user_id` — the authenticated user identity (from static token or JWT `sub` claim)
+- `agent_id` — the MCP bridge session UUID (from `X-Detrix-Client-Id` header)
+
+**Migration:** Re-add metrics after upgrading. Pre-migration metrics stored with
+`user_id = NULL` are not accessible to non-Admin users (see note below).
+
+#### Config: `api.auth.bearer_token` removed
+
+The top-level `bearer_token` config key is no longer supported.
+
+**Before (`v1.0`):**
+```toml
+[api.auth]
+bearer_token = "my-secret-token"
+```
+
+**After (`v1.1`):**
+```toml
+[api.auth]
+mode = "simple"
+
+[[api.auth.users]]
+token = "my-secret-token"
+user_id = "default"
+role = "admin"
+```
+
+Starting the daemon with no `[api.auth]` section auto-generates a secure token
+(stored at `~/detrix/auth-token`) — no config change needed for single-user setups.
+
+#### Config: `Connection.created_by` renamed to `user_id`
+
+The `created_by` field on the `Connection` entity has been renamed to `user_id`
+for consistency with `Metric.user_id`. A database migration (`003_connection_user_id.sql`)
+renames the column automatically on startup.
+
+### Security Fixes
+
+- **Constant-time token comparison** — Bearer tokens are now compared using
+  `subtle::ConstantTimeEq` to prevent timing side-channel attacks.
+- **Debug output token redaction** — `StaticUser.token` is redacted as
+  `[REDACTED]` in `Debug` output to prevent token leakage in logs/panics.
+- **JWT `sub` claim required** — JWTs without a `sub` claim are now rejected
+  with HTTP 401 / gRPC Unauthenticated. Previously, missing `sub` would silently
+  use `"anonymous"` as `user_id`, potentially granting shared identity to all
+  un-identified callers.
+
+### Bug Fixes
+
+- **Bridge `disable_my_metrics` used wrong field** — The MCP bridge now correctly
+  identifies its own metrics using `agentId` (the bridge's per-session UUID)
+  instead of `userId`. Previously, the bridge could accidentally miss metrics or
+  match other agents' metrics.
+- **NULL `user_id` stored as `"system"`** — Metrics with no authenticated user
+  now store `user_id = NULL` in the database instead of the sentinel string
+  `"system"`. This prevents scope mismatch when auth is later enabled.
+- **Non-deterministic `find_by_location` ordering** — `SELECT … LIMIT 1` now
+  includes `ORDER BY created_at ASC` to return a deterministic result.
+- **`migrate_connection_id` mock missed `user_id` in conflict detection** — The
+  in-memory mock now includes `user_id` in the occupied-location set, matching
+  the real SQLite `UPDATE OR IGNORE` behavior.
+
+### Validation Improvements
+
+- Duplicate bearer tokens in `[[api.auth.users]]` are now rejected at startup.
+- Duplicate `user_id` values in `[[api.auth.users]]` are now rejected at startup.
+- Token length is now limited to 512 characters.
+- Starting with the old `bearer_token = "..."` config now produces a clear error
+  message pointing to the migration guide, instead of a confusing startup failure.
+- **Tenant ID hardening** — `user_id` and `agent_id` now reject whitespace-only
+  strings, control characters, and the reserved `__*__` pattern (e.g., `__system__`,
+  `__admin__`). Invalid values return HTTP 400 / gRPC `INVALID_ARGUMENT` with
+  error code `1008` (`INVALID_TENANT_ID`).
+
+### Performance
+
+- **Pre-computed token hashes** — SHA-256 hashes of static user tokens are computed
+  at construction time instead of on every auth request, eliminating per-request
+  allocation in the authentication hot path.
+- **Zero-allocation public endpoint matching** — `is_public_endpoint()` no longer
+  allocates a `String` per endpoint per request.
+- **SQL-level group summaries** — `list_group_summaries_scoped` for non-admin users
+  now uses a SQL `GROUP BY … WHERE user_id = ?` query instead of fetching all user
+  metrics into memory.
+
+### Infrastructure
+
+- **`DETRIX_FILE_SERVER_HOST` env var** — The MCP bridge `--file-server-host` CLI
+  argument can now also be set via the `DETRIX_FILE_SERVER_HOST` environment variable
+  (CLI argument takes priority).
+- **Configurable attach failure window** — The DAP attach/launch failure detection
+  timeout (default 500ms) can now be configured via `attach_failure_window_ms` in
+  `[adapter]` config. Useful for high-latency remote/Docker scenarios.
+
+### Notes
+
+#### Pre-migration metrics are not visible to non-Admin users
+
+Metrics stored before the multi-tenant upgrade have `user_id = NULL` in the
+database. After the upgrade, only Admin-scoped callers can read these metrics.
+Non-Admin users will not see them in `list_metrics` / `get_metric` results.
+
+**Resolution:** Re-add the metrics after the upgrade. They will be associated
+with the authenticated user and become visible normally.
+
+This behavior is **intentional by design** — there is no safe way to
+automatically assign ownership to an anonymous metric after the fact.
+
+---
+
 ## [1.1.0] - 2026-02-26
 
 ### Highlights

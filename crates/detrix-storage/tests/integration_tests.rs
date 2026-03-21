@@ -262,14 +262,17 @@ async fn test_event_time_range_query() {
 async fn test_metric_duplicate_location_error() {
     let storage = create_storage().await;
 
-    // Two metrics at the SAME location (different names is OK, but same location is not)
-    let metric1 = create_metric("first_metric", "@test.py#100", "value");
-    let metric2 = create_metric("second_metric", "@test.py#100", "other");
+    // Two metrics at the SAME location with the SAME user_id (conflict expected).
+    // NULL user_id is distinct per SQLite semantics, so we must set an explicit user_id.
+    let mut metric1 = create_metric("first_metric", "@test.py#100", "value");
+    metric1.user_id = Some("alice".to_string());
+    let mut metric2 = create_metric("second_metric", "@test.py#100", "other");
+    metric2.user_id = Some("alice".to_string());
 
     // First save succeeds
     MetricRepository::save(&storage, &metric1).await.unwrap();
 
-    // Second save fails with database error (same location)
+    // Second save fails with database error (same location + same user_id)
     let result = MetricRepository::save(&storage, &metric2).await;
     assert!(result.is_err());
 

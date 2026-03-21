@@ -13,7 +13,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Machine-readable error codes for API consumers.
 ///
 /// Error code ranges:
-/// - 1xxx: Metric errors
+/// - 1xxx: Metric/input validation errors
 /// - 2xxx: Safety errors
 /// - 3xxx: Config errors
 /// - 4xxx: Connection errors
@@ -38,6 +38,8 @@ pub enum ErrorCode {
     MetricInvalidExpression = 1006,
     /// Expression too long (1007)
     MetricExpressionTooLong = 1007,
+    /// Invalid tenant ID (user_id or agent_id) (1008)
+    InvalidTenantId = 1008,
 
     // Safety errors (2xxx)
     /// Safety violation detected (2001)
@@ -207,6 +209,7 @@ impl ErrorCode {
             ErrorCode::MetricLocationConflict => ErrorCategory::Terminal,
             ErrorCode::MetricInvalidExpression => ErrorCategory::Terminal,
             ErrorCode::MetricExpressionTooLong => ErrorCategory::Terminal,
+            ErrorCode::InvalidTenantId => ErrorCategory::Terminal,
             ErrorCode::SafetyViolation => ErrorCategory::Terminal,
             ErrorCode::SafetyAstFailed => ErrorCategory::Terminal,
             ErrorCode::SafetyError => ErrorCategory::Terminal,
@@ -264,6 +267,7 @@ impl ErrorCode {
             ErrorCode::MetricLocationConflict => "METRIC_LOCATION_CONFLICT",
             ErrorCode::MetricInvalidExpression => "METRIC_INVALID_EXPRESSION",
             ErrorCode::MetricExpressionTooLong => "METRIC_EXPRESSION_TOO_LONG",
+            ErrorCode::InvalidTenantId => "INVALID_TENANT_ID",
 
             // Safety errors (2xxx)
             ErrorCode::SafetyViolation => "SAFETY_VIOLATION",
@@ -446,6 +450,10 @@ pub enum Error {
         existing_id: u64,
     },
 
+    // Tenant ID errors
+    #[error("Invalid tenant ID: {0}")]
+    InvalidTenantId(String),
+
     // Safety errors
     #[error("Safety violation: {violations:?}")]
     SafetyViolation { violations: Vec<String> },
@@ -526,6 +534,7 @@ impl Error {
             Error::MetricLocationConflict { .. } => ErrorCode::MetricLocationConflict,
             Error::InvalidExpression(_) => ErrorCode::MetricInvalidExpression,
             Error::ExpressionTooLong { .. } => ErrorCode::MetricExpressionTooLong,
+            Error::InvalidTenantId(_) => ErrorCode::InvalidTenantId,
 
             // Safety errors (2xxx)
             Error::SafetyViolation { .. } => ErrorCode::SafetyViolation,

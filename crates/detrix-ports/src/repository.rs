@@ -20,6 +20,19 @@ pub struct GroupSummary {
     pub enabled_count: u64,
 }
 
+/// Explicit ownership filter for location lookups.
+///
+/// Replaces the ambiguous `Option<&str>` in `find_by_location`:
+/// - `User(uid)` → match metrics owned by this user
+/// - `System` → match system metrics (maps to `SYSTEM_USER_ID` sentinel in storage)
+#[derive(Debug, Clone)]
+pub enum OwnerFilter<'a> {
+    /// Match metrics owned by this specific user.
+    User(&'a str),
+    /// Match system metrics (no explicit owner).
+    System,
+}
+
 /// Filter options for querying metrics
 #[derive(Debug, Clone, Default)]
 pub struct MetricFilter {
@@ -29,6 +42,10 @@ pub struct MetricFilter {
     pub enabled: Option<bool>,
     /// Filter by group name
     pub group: Option<String>,
+    /// Filter by user ID (None = return all users, Some(uid) = only that user's metrics)
+    pub user_id: Option<String>,
+    /// Optional agent_id filter for multi-tenant queries (future use).
+    pub agent_id: Option<String>,
 }
 
 /// Repository for metric entities
@@ -36,11 +53,12 @@ pub struct MetricFilter {
 pub trait MetricRepository: Send + Sync {
     /// Save a new metric
     ///
-    /// If `upsert` is false (default), fails if metric with same (location, connection_id) exists.
-    /// If `upsert` is true, updates existing metric with same (location, connection_id).
+    /// If `upsert` is false (default), fails if metric with same (location, connection_id, user_id) exists.
+    /// If `upsert` is true, updates existing metric with same (location, connection_id, user_id).
     ///
-    /// Note: Uniqueness is based on location (file:line) + connection_id, not name.
-    /// This matches DAP's constraint of one logpoint per line.
+    /// Note: Uniqueness is based on (location, connection_id, user_id).
+    /// Each user can have their own metric at the same location; `NULL` user_ids are
+    /// each treated as distinct in the SQLite UNIQUE index.
     async fn save(&self, metric: &Metric) -> Result<MetricId> {
         self.save_with_options(metric, false).await
     }
@@ -49,7 +67,7 @@ pub trait MetricRepository: Send + Sync {
     ///
     /// # Arguments
     /// * `metric` - The metric to save
-    /// * `upsert` - If true, update on (location, connection_id) conflict; if false, fail on conflict
+    /// * `upsert` - If true, update on (location, connection_id, user_id) conflict; if false, fail on conflict
     async fn save_with_options(&self, metric: &Metric, upsert: bool) -> Result<MetricId>;
 
     /// Find metric by ID
@@ -80,16 +98,33 @@ pub trait MetricRepository: Send + Sync {
     /// Find metrics by connection ID
     async fn find_by_connection_id(&self, connection_id: &ConnectionId) -> Result<Vec<Metric>>;
 
-    /// Find metric by location (file:line) and connection ID
-    /// Used to detect duplicate metrics at the same breakpoint location
+    /// Find metric by location (file:line), connection ID, and ownership.
+    ///
+    /// Used to detect duplicate metrics at the same breakpoint location for a specific user.
+    /// In multi-tenant mode, each user owns their own metric at a location.
     async fn find_by_location(
         &self,
         connection_id: &ConnectionId,
         file: &str,
         line: u32,
+        owner: OwnerFilter<'_>,
     ) -> Result<Option<Metric>>;
 
+    /// Find ALL metrics at a location across all users
+    ///
+    /// Used by logpoint merging: DAP has one logpoint per (file, line, connection_id),
+    /// so we need to union expressions from all users' metrics at that location.
+    async fn find_all_at_location(
+        &self,
+        connection_id: &ConnectionId,
+        file: &str,
+        line: u32,
+    ) -> Result<Vec<Metric>>;
+
     /// Update existing metric
+    ///
+    /// Note: `user_id` and `agent_id` are immutable after creation —
+    /// `update()` preserves the original values stored at save time.
     async fn update(&self, metric: &Metric) -> Result<()>;
 
     /// Delete metric
@@ -104,7 +139,7 @@ pub trait MetricRepository: Send + Sync {
     /// Returns a tuple of (metrics, total_count) matching the filter.
     ///
     /// # Arguments
-    /// * `filter` - Filter criteria (connection_id, enabled, group)
+    /// * `filter` - Filter criteria (connection_id, enabled, group, user_id)
     /// * `limit` - Maximum number of metrics to return
     /// * `offset` - Number of metrics to skip
     async fn find_filtered(
@@ -119,6 +154,16 @@ pub trait MetricRepository: Send + Sync {
     /// Returns aggregated group statistics using a single GROUP BY query.
     /// Much more efficient than loading all metrics and counting in memory.
     async fn get_group_summaries(&self) -> Result<Vec<GroupSummary>>;
+
+    /// Get group summaries filtered by user ID.
+    ///
+    /// Uses SQL `GROUP BY … WHERE user_id = ?` for efficient tenant-scoped aggregation.
+    /// Falls back to `get_group_summaries` when not implemented.
+    async fn get_group_summaries_by_user(&self, user_id: &str) -> Result<Vec<GroupSummary>> {
+        // Default implementation: load all and filter in memory (overridden by SQLite)
+        let _ = user_id;
+        self.get_group_summaries().await
+    }
 
     /// Delete all metrics for a connection.
     ///

@@ -202,7 +202,7 @@ detrix.Init(detrix.Config{
 ```
 
 ```rust
-// Rust (Cargo.toml: detrix-rs = "1.1.1")
+// Rust (Cargo.toml: detrix-rs = "1.2.0")
 detrix_rs::init(detrix_rs::Config {
     name: "my-service".into(),
     daemon_url: std::env::var("DETRIX_DAEMON_URL").unwrap_or_default(),
@@ -243,6 +243,44 @@ See `examples/docker-demo/` for a complete working example.
 
 ---
 
+## Authentication
+
+Detrix is **secure by default**. When no `[api.auth]` section is configured, the daemon auto-generates a token saved to `~/detrix/auth-token`. The MCP bridge discovers it automatically — no setup needed for single-user local development.
+
+For cloud and multi-user deployments, configure explicit authentication in `detrix.toml`:
+
+```toml
+[api.auth]
+mode = "simple"
+
+[[api.auth.users]]
+token = "dtx_alice_secret"
+user_id = "alice"
+role = "user"
+
+[[api.auth.users]]
+token = "dtx_admin_secret"
+user_id = "admin"
+role = "admin"
+```
+
+Each developer sets their token via `DETRIX_TOKEN`:
+
+```bash
+DETRIX_TOKEN=dtx_alice_secret detrix mcp
+```
+
+Or per-daemon in `~/detrix/credentials.toml`:
+
+```toml
+[targets."your-host:8090"]
+token = "dtx_alice_secret"
+```
+
+Detrix also supports JWT/JWKS for enterprise SSO. See the full [Authentication Guide](AUTH.md) for details on auth modes, access control, tenant ID validation, and multi-tenant configuration.
+
+---
+
 ## Troubleshooting
 
 ### MCP server not showing up
@@ -277,6 +315,7 @@ Configure allowed functions in `detrix.toml` — see [Clients Manual](CLIENTS.md
 ## Links
 
 - [README](../README.md)
+- [Authentication Guide](AUTH.md)
 - [CLI Reference](CLI.md)
 - [Clients Manual](CLIENTS.md)
 - [Build from Source](BUILD.md)

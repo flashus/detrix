@@ -211,6 +211,8 @@ mod tests {
             connection_id: "conn-1".to_string(),
             capture_stack_trace: false,
             capture_memory_snapshot: false,
+            user_id: String::new(),
+            agent_id: String::new(),
         };
 
         // Serialize to JSON
@@ -261,6 +263,8 @@ mod tests {
             connection_id: "conn".to_string(),
             capture_stack_trace: false,
             capture_memory_snapshot: false,
+            user_id: String::new(),
+            agent_id: String::new(),
         };
 
         // Print the actual serialized format

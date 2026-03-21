@@ -11,6 +11,17 @@ use crate::constants::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Default user_id injected when authentication is disabled.
+///
+/// Used both in the middleware (HTTP/gRPC) and in the auto-auth setup in `serve`.
+pub const AUTO_AUTH_DEFAULT_USER_ID: &str = "default";
+
+/// Maximum allowed length for a static bearer token.
+const MAX_TOKEN_LEN: usize = 512;
+
+/// Minimum allowed length for a static bearer token.
+const MIN_TOKEN_LEN: usize = 16;
+
 // ============================================================================
 // API Config
 // ============================================================================
@@ -359,7 +370,7 @@ impl Default for RateLimitConfig {
 /// Authentication mode
 ///
 /// - **Disabled**: No authentication required (default)
-/// - **Simple**: Static bearer token from config (like Prometheus)
+/// - **Simple**: Per-user static tokens from config
 /// - **External**: JWT validation via JWKS endpoint (for enterprise SSO)
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -370,27 +381,112 @@ pub enum AuthMode {
     External,
 }
 
+/// Role for a static user.
+///
+/// Intentionally has no `Default` impl — all fields of `StaticUser` must be
+/// explicit in config to avoid accidentally granting the wrong access level.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UserRole {
+    Admin,
+    User,
+}
+
+/// A statically configured user with a bearer token.
+///
+/// # Note
+/// Intentionally no `Default` impl — all fields must be explicit.
+#[derive(Clone, Serialize)]
+pub struct StaticUser {
+    /// Bearer token (constant-time compared; redacted in Debug output)
+    pub token: String,
+    /// User identity — becomes `metric.user_id`
+    pub user_id: String,
+    /// Role: admin or user
+    pub role: UserRole,
+    /// Pre-computed SHA-256 hash of `token` for constant-time lookup.
+    #[serde(skip)]
+    pub(crate) token_hash: [u8; 32],
+}
+
+// Custom Deserialize that computes token_hash after deserialization.
+// The derived Deserialize would leave token_hash as [0; 32] since it's #[serde(skip)].
+impl<'de> serde::Deserialize<'de> for StaticUser {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            token: String,
+            user_id: String,
+            role: UserRole,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(StaticUser::new(raw.token, raw.user_id, raw.role))
+    }
+}
+
+impl PartialEq for StaticUser {
+    fn eq(&self, other: &Self) -> bool {
+        self.token == other.token && self.user_id == other.user_id && self.role == other.role
+    }
+}
+
+impl Eq for StaticUser {}
+
+impl StaticUser {
+    /// Create a new StaticUser with pre-computed token hash.
+    pub fn new(token: String, user_id: String, role: UserRole) -> Self {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(token.as_bytes());
+        let mut token_hash = [0u8; 32];
+        token_hash.copy_from_slice(&hash);
+        Self {
+            token,
+            user_id,
+            role,
+            token_hash,
+        }
+    }
+}
+
+impl std::fmt::Debug for StaticUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StaticUser")
+            .field("token", &"[REDACTED]")
+            .field("user_id", &self.user_id)
+            .field("role", &self.role)
+            .finish()
+    }
+}
+
 /// Authentication configuration for API endpoints
 ///
 /// Supports two modes:
-/// 1. **Simple mode**: Static bearer token from config (like Prometheus)
+/// 1. **Simple mode**: Per-user static tokens from config
 /// 2. **External mode**: JWT validation via JWKS endpoint (for enterprise SSO)
 ///
 /// When `mode` is `None` (no `[api.auth]` section in config), the daemon
-/// auto-generates a bearer token for secure-by-default operation.
+/// auto-generates a token for secure-by-default operation.
 /// When `mode` is `Some(Disabled)`, auth is explicitly disabled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     /// Authentication mode.
     /// - `None`: not configured (daemon auto-enables auth)
     /// - `Some(Disabled)`: explicitly disabled
-    /// - `Some(Simple)`: static bearer token
+    /// - `Some(Simple)`: per-user static tokens
     /// - `Some(External)`: JWT via JWKS
+    ///
+    // NOTE: `#[serde(default)]` on `Option<T>` is technically redundant (serde
+    // already deserializes missing keys as `None`), but we keep it throughout
+    // the config crate for explicitness — it signals "this field is optional in
+    // the TOML config" to readers without requiring serde knowledge.
     #[serde(default)]
     pub mode: Option<AuthMode>,
-    /// Bearer token for simple mode
+    /// Per-user static tokens for simple mode (replaces bearer_token)
     #[serde(default)]
-    pub bearer_token: Option<String>,
+    pub users: Vec<StaticUser>,
     /// JWT configuration for external mode
     #[serde(default)]
     pub jwt: JwtConfig,
@@ -403,6 +499,12 @@ pub struct AuthConfig {
     /// Default: ["GetStatus"]
     #[serde(default = "default_grpc_public_methods")]
     pub grpc_public_methods: Vec<String>,
+
+    /// Deprecated: use `[[api.auth.users]]` instead.
+    ///
+    /// If this field is present in config, `validate()` returns a clear migration error.
+    #[serde(default, alias = "bearer_token", skip_serializing)]
+    pub _bearer_token_deprecated: Option<String>,
 }
 
 /// JWT configuration for external authentication mode
@@ -420,6 +522,12 @@ pub struct JwtConfig {
     /// JWKS cache TTL in seconds (default: 300 = 5 minutes)
     #[serde(default = "default_jwks_cache_ttl")]
     pub cache_ttl_seconds: u64,
+    /// JWT claim name containing user roles (e.g. "roles", "realm_access.roles")
+    #[serde(default)]
+    pub admin_role_claim: Option<String>,
+    /// Value within the role claim that grants admin access (e.g. "detrix-admin")
+    #[serde(default)]
+    pub admin_role_value: Option<String>,
 }
 
 impl Default for JwtConfig {
@@ -429,6 +537,8 @@ impl Default for JwtConfig {
             issuer: None,
             audience: None,
             cache_ttl_seconds: DEFAULT_JWKS_CACHE_TTL_SECONDS,
+            admin_role_claim: None,
+            admin_role_value: None,
         }
     }
 }
@@ -444,6 +554,9 @@ fn default_public_endpoints() -> Vec<String> {
         "/metrics".to_string(),
         "/api/health".to_string(),
         "/api/status".to_string(),
+        "/detrix/mcp/heartbeat".to_string(),
+        "/detrix/mcp/disconnect".to_string(),
+        "/api/v1/connections/touch".to_string(),
     ]
 }
 
@@ -457,29 +570,122 @@ impl AuthConfig {
         self.mode.clone().unwrap_or(AuthMode::Disabled)
     }
 
-    /// Validate authentication configuration
+    /// Validate authentication configuration.
     ///
     /// Ensures that valid credentials are provided when authentication is enabled.
     pub fn validate(&self) -> Result<(), String> {
+        // Detect deprecated bearer_token usage — always warn, then error if no users
+        if self._bearer_token_deprecated.is_some() {
+            tracing::warn!(
+                "api.auth.bearer_token is deprecated and will be ignored; \
+                 remove it from your config. Use [[api.auth.users]] instead."
+            );
+            if self.users.is_empty() {
+                return Err("Config error: 'bearer_token' is no longer supported. \
+                     Use [[api.auth.users]] instead. See CHANGELOG.md."
+                    .to_string());
+            }
+        }
+
+        // Warn if users are configured but mode is not Simple (they will be ignored)
+        if matches!(
+            self.mode,
+            Some(AuthMode::External) | Some(AuthMode::Disabled)
+        ) && !self.users.is_empty()
+        {
+            tracing::warn!(
+                mode = ?self.mode,
+                "api.auth.users configured but mode is not 'simple'; static tokens will be ignored"
+            );
+        }
+
         match self.effective_mode() {
             AuthMode::Disabled => Ok(()),
-            AuthMode::Simple => match &self.bearer_token {
-                Some(token) if !token.is_empty() => Ok(()),
-                Some(_) => Err("api.auth.bearer_token cannot be empty in simple mode".to_string()),
-                None => Err("api.auth.bearer_token is required in simple mode".to_string()),
-            },
+            AuthMode::Simple => {
+                if self.users.is_empty() {
+                    return Err(
+                        "api.auth.users must contain at least one user in simple mode".to_string(),
+                    );
+                }
+
+                let mut seen_tokens = std::collections::HashSet::new();
+                let mut seen_user_ids = std::collections::HashSet::new();
+
+                for (i, user) in self.users.iter().enumerate() {
+                    if user.token.is_empty() {
+                        return Err(format!("api.auth.users[{}].token cannot be empty", i));
+                    }
+                    if user.token.len() < MIN_TOKEN_LEN {
+                        return Err(format!(
+                            "api.auth.users[{}].token is too short (minimum {} characters)",
+                            i, MIN_TOKEN_LEN
+                        ));
+                    }
+                    if user.token.len() > MAX_TOKEN_LEN {
+                        return Err(format!(
+                            "api.auth.users[{}].token exceeds maximum length of {} characters",
+                            i, MAX_TOKEN_LEN
+                        ));
+                    }
+                    if user.user_id.is_empty() {
+                        return Err(format!("api.auth.users[{}].user_id cannot be empty", i));
+                    }
+                    if !seen_tokens.insert(user.token.as_str()) {
+                        return Err(format!(
+                            "api.auth.users[{}].token is a duplicate (tokens must be unique)",
+                            i
+                        ));
+                    }
+                    if !seen_user_ids.insert(user.user_id.as_str()) {
+                        return Err(format!(
+                            "api.auth.users[{}].user_id '{}' is a duplicate (user_ids must be unique)",
+                            i, user.user_id
+                        ));
+                    }
+                }
+                Ok(())
+            }
             AuthMode::External => {
                 if self.jwt.jwks_url.is_none() {
                     return Err("api.auth.jwt.jwks_url is required in external mode".to_string());
+                }
+                // admin_role_claim and admin_role_value must be specified together
+                if self.jwt.admin_role_claim.is_some() != self.jwt.admin_role_value.is_some() {
+                    return Err(
+                        "api.auth.jwt.admin_role_claim and admin_role_value must both be set or both be omitted"
+                            .to_string(),
+                    );
                 }
                 Ok(())
             }
         }
     }
 
+    /// Look up a static user by token using constant-time comparison.
+    ///
+    /// Hash-then-compare prevents timing side-channels from variable-length tokens:
+    /// SHA-256 normalizes all tokens to 32 bytes before `ct_eq`, and full iteration
+    /// prevents early-exit leaks.
+    pub fn find_user_by_token(&self, token: &str) -> Option<&StaticUser> {
+        use sha2::{Digest, Sha256};
+        use subtle::ConstantTimeEq;
+        let input_hash = Sha256::digest(token.as_bytes());
+        let mut result: Option<&StaticUser> = None;
+        for user in &self.users {
+            // Use pre-computed hash (populated by validate()) to avoid per-request hashing
+            if bool::from(input_hash.ct_eq(&user.token_hash)) {
+                result = Some(user);
+            }
+        }
+        result
+    }
+
     /// Check if a path is a public endpoint (no auth required)
     pub fn is_public_endpoint(&self, path: &str) -> bool {
-        self.public_endpoints.iter().any(|p| path.starts_with(p))
+        self.public_endpoints.iter().any(|p| {
+            path == p
+                || (path.starts_with(p.as_str()) && path.as_bytes().get(p.len()) == Some(&b'/'))
+        })
     }
 
     /// Check if a gRPC method is public (no auth required)
@@ -502,10 +708,11 @@ impl Default for AuthConfig {
     fn default() -> Self {
         AuthConfig {
             mode: None,
-            bearer_token: None,
+            users: Vec::new(),
             jwt: JwtConfig::default(),
             public_endpoints: default_public_endpoints(),
             grpc_public_methods: default_grpc_public_methods(),
+            _bearer_token_deprecated: None,
         }
     }
 }
@@ -741,11 +948,27 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
+    fn alice_user() -> StaticUser {
+        StaticUser::new(
+            "dtx_alice_secret".to_string(),
+            "alice".to_string(),
+            UserRole::User,
+        )
+    }
+
+    fn admin_user() -> StaticUser {
+        StaticUser::new(
+            "dtx_admin_secret".to_string(),
+            "admin".to_string(),
+            UserRole::Admin,
+        )
+    }
+
     #[test]
-    fn test_auth_config_simple_mode() {
+    fn test_auth_config_simple_mode_with_users() {
         let config = AuthConfig {
             mode: Some(AuthMode::Simple),
-            bearer_token: Some("my-secret-token".to_string()),
+            users: vec![alice_user(), admin_user()],
             ..Default::default()
         };
         assert!(config.validate().is_ok());
@@ -753,10 +976,10 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_config_simple_mode_missing_token() {
+    fn test_auth_config_simple_mode_no_users() {
         let config = AuthConfig {
             mode: Some(AuthMode::Simple),
-            bearer_token: None,
+            users: vec![],
             ..Default::default()
         };
         assert!(config.validate().is_err());
@@ -766,10 +989,62 @@ mod tests {
     fn test_auth_config_simple_mode_empty_token() {
         let config = AuthConfig {
             mode: Some(AuthMode::Simple),
-            bearer_token: Some("".to_string()),
+            users: vec![StaticUser::new(
+                "".to_string(),
+                "alice".to_string(),
+                UserRole::User,
+            )],
             ..Default::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_auth_config_simple_mode_short_token() {
+        let config = AuthConfig {
+            mode: Some(AuthMode::Simple),
+            users: vec![StaticUser::new(
+                "short".to_string(),
+                "alice".to_string(),
+                UserRole::User,
+            )],
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("too short"), "got: {err}");
+    }
+
+    #[test]
+    fn test_auth_config_simple_mode_empty_user_id() {
+        let config = AuthConfig {
+            mode: Some(AuthMode::Simple),
+            users: vec![StaticUser::new(
+                "dtx_token_longtoken".to_string(),
+                "".to_string(),
+                UserRole::User,
+            )],
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_auth_config_find_user_by_token() {
+        let config = AuthConfig {
+            mode: Some(AuthMode::Simple),
+            users: vec![alice_user(), admin_user()],
+            ..Default::default()
+        };
+        let found = config.find_user_by_token("dtx_alice_secret");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().user_id, "alice");
+        assert_eq!(found.unwrap().role, UserRole::User);
+
+        let admin = config.find_user_by_token("dtx_admin_secret");
+        assert!(admin.is_some());
+        assert_eq!(admin.unwrap().role, UserRole::Admin);
+
+        assert!(config.find_user_by_token("unknown").is_none());
     }
 
     #[test]
@@ -781,11 +1056,18 @@ mod tests {
                 issuer: Some("https://auth.example.com".to_string()),
                 audience: Some("detrix".to_string()),
                 cache_ttl_seconds: 300,
+                admin_role_claim: Some("roles".to_string()),
+                admin_role_value: Some("detrix-admin".to_string()),
             },
             ..Default::default()
         };
         assert!(config.validate().is_ok());
         assert!(config.is_enabled());
+        assert_eq!(config.jwt.admin_role_claim, Some("roles".to_string()));
+        assert_eq!(
+            config.jwt.admin_role_value,
+            Some("detrix-admin".to_string())
+        );
     }
 
     #[test]
@@ -801,14 +1083,11 @@ mod tests {
     #[test]
     fn test_auth_config_default_mode_is_none() {
         let config = AuthConfig::default();
-        // Default mode is None (not configured), NOT Some(Disabled)
         assert_eq!(config.mode, None);
-        // effective_mode() normalizes None to Disabled
         assert_eq!(config.effective_mode(), AuthMode::Disabled);
-        // Not enabled (None is not Simple or External)
         assert!(!config.is_enabled());
-        // Validates OK (None = auto-handled by daemon)
         assert!(config.validate().is_ok());
+        assert!(config.users.is_empty());
     }
 
     #[test]
@@ -819,31 +1098,22 @@ mod tests {
             ..Default::default()
         };
 
-        // Both behave the same for validation and middleware
         assert_eq!(
             none_config.effective_mode(),
             disabled_config.effective_mode()
         );
         assert_eq!(none_config.is_enabled(), disabled_config.is_enabled());
 
-        // But they differ in mode — daemon uses this to decide auto-auth
         assert_eq!(none_config.mode, None);
         assert_eq!(disabled_config.mode, Some(AuthMode::Disabled));
     }
 
     #[test]
     fn test_auth_config_toml_parsing_absent_mode() {
-        // When mode key is absent (even if other keys are present), mode should be None
-        let config_toml = r#"
-bearer_token = "ignored-since-no-mode"
-"#;
-        let config: AuthConfig = toml::from_str(config_toml).expect("Failed to parse TOML");
-        assert_eq!(config.mode, None);
-        assert!(!config.is_enabled());
-
-        // Empty TOML also yields None mode
+        // Empty TOML yields None mode
         let config: AuthConfig = toml::from_str("").expect("Failed to parse empty TOML");
         assert_eq!(config.mode, None);
+        assert!(!config.is_enabled());
     }
 
     #[test]
@@ -860,17 +1130,31 @@ bearer_token = "ignored-since-no-mode"
     }
 
     #[test]
-    fn test_auth_config_toml_parsing_simple() {
+    fn test_auth_config_toml_parsing_simple_with_users() {
         let config_toml = r#"
 mode = "simple"
-bearer_token = "my-test-token"
+
+[[users]]
+token = "dtx_alice_3f9a_xxxx"
+user_id = "alice"
+role = "user"
+
+[[users]]
+token = "dtx_admin_7c2b_xxxx"
+user_id = "admin"
+role = "admin"
 "#;
 
         let config: AuthConfig = toml::from_str(config_toml).expect("Failed to parse TOML");
 
         assert_eq!(config.mode, Some(AuthMode::Simple));
-        assert_eq!(config.bearer_token, Some("my-test-token".to_string()));
+        assert_eq!(config.users.len(), 2);
+        assert_eq!(config.users[0].user_id, "alice");
+        assert_eq!(config.users[0].role, UserRole::User);
+        assert_eq!(config.users[1].user_id, "admin");
+        assert_eq!(config.users[1].role, UserRole::Admin);
         assert!(config.is_enabled());
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -893,6 +1177,8 @@ mode = "external"
 [jwt]
 jwks_url = "https://auth.example.com/.well-known/jwks.json"
 issuer = "https://auth.example.com"
+admin_role_claim = "roles"
+admin_role_value = "detrix-admin"
 "#;
 
         let config: AuthConfig = toml::from_str(config_toml).expect("Failed to parse TOML");
@@ -902,6 +1188,11 @@ issuer = "https://auth.example.com"
         assert_eq!(
             config.jwt.jwks_url,
             Some("https://auth.example.com/.well-known/jwks.json".to_string())
+        );
+        assert_eq!(config.jwt.admin_role_claim, Some("roles".to_string()));
+        assert_eq!(
+            config.jwt.admin_role_value,
+            Some("detrix-admin".to_string())
         );
     }
 
@@ -1017,5 +1308,151 @@ max_age_seconds = 7200
         let result = config.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("allow_all"));
+    }
+
+    // ========================================================================
+    // Auth Config — migration / uniqueness / role-claim tests
+    // ========================================================================
+
+    #[test]
+    fn test_deprecated_bearer_token_migration_error() {
+        // TOML containing the old `bearer_token` field (no [[users]]) must
+        // produce a clear migration error from validate().
+        let config_toml = r#"
+mode = "simple"
+bearer_token = "old_secret_token"
+"#;
+        let config: AuthConfig =
+            toml::from_str(config_toml).expect("TOML with bearer_token should parse");
+        assert!(
+            config._bearer_token_deprecated.is_some(),
+            "deprecated field should be captured"
+        );
+        let result = config.validate();
+        assert!(
+            result.is_err(),
+            "validate() must fail for deprecated bearer_token"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("bearer_token"),
+            "error message should mention 'bearer_token', got: {err}"
+        );
+        assert!(
+            err.contains("[[api.auth.users]]") || err.contains("users"),
+            "error message should mention the replacement, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_token_validation() {
+        // Two users sharing the same token value must fail validate().
+        let shared_token = "dtx_shared_secret".to_string();
+        let config = AuthConfig {
+            mode: Some(AuthMode::Simple),
+            users: vec![
+                StaticUser::new(shared_token.clone(), "alice".to_string(), UserRole::User),
+                StaticUser::new(shared_token, "bob".to_string(), UserRole::User),
+            ],
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err(), "duplicate tokens must fail validate()");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("duplicate") || err.contains("unique"),
+            "error message should mention duplicates, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_user_id_validation() {
+        // Two users sharing the same user_id must fail validate().
+        let config = AuthConfig {
+            mode: Some(AuthMode::Simple),
+            users: vec![
+                StaticUser::new(
+                    "dtx_token_aaaa_xxxx".to_string(),
+                    "alice".to_string(),
+                    UserRole::User,
+                ),
+                StaticUser::new(
+                    "dtx_token_bbbb_xxxx".to_string(),
+                    "alice".to_string(), // same user_id
+                    UserRole::Admin,
+                ),
+            ],
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err(), "duplicate user_ids must fail validate()");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("duplicate") || err.contains("unique"),
+            "error message should mention duplicates, got: {err}"
+        );
+        assert!(
+            err.contains("user_id"),
+            "error message should mention 'user_id', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_admin_role_claim_value_pair_validation() {
+        // External mode: only admin_role_claim set (no admin_role_value) must fail.
+        let config_claim_only = AuthConfig {
+            mode: Some(AuthMode::External),
+            jwt: JwtConfig {
+                jwks_url: Some("https://auth.example.com/.well-known/jwks.json".to_string()),
+                admin_role_claim: Some("roles".to_string()),
+                admin_role_value: None, // deliberately omitted
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = config_claim_only.validate();
+        assert!(
+            result.is_err(),
+            "admin_role_claim without admin_role_value must fail validate()"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("admin_role_claim") && err.contains("admin_role_value"),
+            "error message should mention both fields, got: {err}"
+        );
+
+        // Only admin_role_value set (no admin_role_claim) must also fail.
+        let config_value_only = AuthConfig {
+            mode: Some(AuthMode::External),
+            jwt: JwtConfig {
+                jwks_url: Some("https://auth.example.com/.well-known/jwks.json".to_string()),
+                admin_role_claim: None, // deliberately omitted
+                admin_role_value: Some("detrix-admin".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = config_value_only.validate();
+        assert!(
+            result.is_err(),
+            "admin_role_value without admin_role_claim must fail validate()"
+        );
+    }
+
+    #[test]
+    fn test_is_public_endpoint_boundary_matching() {
+        let config = AuthConfig {
+            public_endpoints: vec!["/api/status".to_string()],
+            ..Default::default()
+        };
+
+        // Exact match
+        assert!(config.is_public_endpoint("/api/status"));
+        // Subpath match
+        assert!(config.is_public_endpoint("/api/status/details"));
+        // Must NOT match prefix collision (e.g. "/api/status_evil")
+        assert!(!config.is_public_endpoint("/api/status_evil"));
+        // Non-matching path
+        assert!(!config.is_public_endpoint("/api/metrics"));
     }
 }

@@ -214,7 +214,7 @@ detrix.init(name="my-app")   # That's it. Agent controls the rest.
 |----------|---------|------|
 | Python | `pip install detrix-py` | [Python Client](clients/python/README.md) |
 | Go | `go get github.com/flashus/detrix/clients/go` | [Go Client](clients/go/README.md) |
-| Rust | `detrix-rs = "1.1.1"` in Cargo.toml | [Rust Client](clients/rust/README.md) |
+| Rust | `detrix-rs = "1.2.0"` in Cargo.toml | [Rust Client](clients/rust/README.md) |
 
 > **Production pattern:** Build one service instance with debug symbols and a Detrix client. Route suspect traffic to it via Kafka, a sidecar, or your load balancer. The rest of your fleet runs unaffected — full-speed, no instrumentation overhead. You get deep observability on one instance without touching production.
 
@@ -242,7 +242,7 @@ See the [Clients Manual](docs/CLIENTS.md) for full documentation.
 | **Durable storage** | Events stored in SQLite on the daemon host. Run Detrix on a remote server, connect your agent in the morning and ask what happened overnight. Daemon auto-reconnects to the debug adapter if it restarts. |
 | **Extensible** | New frontends via open API; new language support by implementing a language adapter — [Adding Languages](docs/ADD_LANGUAGE.md) |
 | **Safety validation** | Sensitive variable names (`password`, `api_key`, `token`, `secret`, `private_key`, etc.) blocked before capture. Configurable blacklist + whitelist for variable names and functions in `detrix.toml`. Enable **safe mode** per connection to allow only variable watching — no expression execution, no stack traces, no memory snapshots. Blocked operations return a clear named error so the agent can explain the constraint. |
-| **Auth** | Bearer token auth (static or JWT/JWKS) — designed to run behind your reverse proxy |
+| **Auth** | Multi-tenant access control: per-user static tokens or JWT/JWKS, role-based authorization (Admin/User), per-agent metric isolation — [Auth Guide](docs/AUTH.md) |
 | **Event streaming** | Forward captured events to Graylog |
 | **4 API protocols** | MCP (stdio), gRPC, REST, WebSocket |
 
@@ -253,6 +253,7 @@ See the [Clients Manual](docs/CLIENTS.md) for full documentation.
 | | |
 |---|---|
 | [Installation Guide](docs/INSTALL.md) | Install, language setup, agent config, cloud debugging |
+| [Authentication](docs/AUTH.md) | Auth modes, per-user tokens, JWT/JWKS, access control |
 | [CLI Reference](docs/CLI.md) | Command-line interface |
 | [Clients Manual](docs/CLIENTS.md) | Python, Go, Rust client libraries |
 | [Architecture](docs/ARCHITECTURE.md) | Clean Architecture with 13 Rust crates |

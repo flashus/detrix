@@ -12,6 +12,7 @@
 //!
 //! NO business logic here - just event forwarding!
 
+use crate::common::AuthenticatedUser;
 use crate::state::ApiState;
 use axum::{
     extract::{
@@ -19,11 +20,14 @@ use axum::{
         State,
     },
     response::Response,
+    Extension,
 };
+use detrix_application::MetricFilter;
 use detrix_config::StreamingConfig;
 use detrix_core::MetricEvent;
 use futures::{sink::SinkExt, stream::StreamExt};
 use serde::Serialize;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -90,8 +94,30 @@ pub fn active_websocket_connections() -> u64 {
 pub async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
 ) -> Response {
     info!("WebSocket: Client connecting");
+
+    // Build per-user allowed metric IDs (computed at connection time).
+    // KNOWN LIMITATION: For non-admin users, metrics created after the WebSocket
+    // upgrade are invisible because allowed_ids is frozen at connection time.
+    // Clients should reconnect after creating new metrics to see their events.
+    let scope = user.scope(None);
+    let allowed_ids: Option<HashSet<u64>> = if scope.user_id().is_some() {
+        let filter = MetricFilter {
+            user_id: scope.user_id().map(String::from),
+            ..Default::default()
+        };
+        let (metrics, _) = state
+            .context
+            .metric_service
+            .list_metrics_filtered(&filter, usize::MAX, 0)
+            .await
+            .unwrap_or_default();
+        Some(metrics.iter().filter_map(|m| m.id.map(|id| id.0)).collect())
+    } else {
+        None // Admin sees all
+    };
 
     // Get streaming config from ConfigService (new connections get current config)
     let streaming_config = state
@@ -101,11 +127,16 @@ pub async fn websocket_handler(
         .api
         .streaming
         .clone();
-    ws.on_upgrade(move |socket| handle_websocket(socket, state, streaming_config))
+    ws.on_upgrade(move |socket| handle_websocket(socket, state, streaming_config, allowed_ids))
 }
 
 /// Handle WebSocket connection with timeouts
-async fn handle_websocket(socket: WebSocket, state: Arc<ApiState>, config: StreamingConfig) {
+async fn handle_websocket(
+    socket: WebSocket,
+    state: Arc<ApiState>,
+    config: StreamingConfig,
+    allowed_ids: Option<HashSet<u64>>,
+) {
     // Relaxed: Statistics counter - see ACTIVE_WS_CONNECTIONS doc comment
     ACTIVE_WS_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
 
@@ -138,6 +169,12 @@ async fn handle_websocket(socket: WebSocket, state: Arc<ApiState>, config: Strea
         loop {
             match event_rx.recv().await {
                 Ok(event) => {
+                    // Per-user filtering: skip events for metrics not in allowed set
+                    if let Some(ref allowed) = allowed_ids {
+                        if !allowed.contains(&event.metric_id.0) {
+                            continue;
+                        }
+                    }
                     let msg: EventMessage = event.into();
                     let json = match serde_json::to_string(&msg) {
                         Ok(json) => json,

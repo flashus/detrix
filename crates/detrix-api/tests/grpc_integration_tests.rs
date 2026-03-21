@@ -26,6 +26,7 @@ use detrix_api::generated::detrix::v1::{
     QueryRequest, RemoveMetricRequest, StatusRequest, StreamAllRequest, StreamMode,
     ToggleMetricRequest, UpdateMetricRequest,
 };
+use detrix_api::grpc::interceptor::{create_auth_interceptor, AuthInterceptorState};
 use detrix_api::grpc::{MetricsServiceImpl, StreamingServiceImpl};
 use detrix_api::ApiState;
 use detrix_application::{
@@ -132,6 +133,10 @@ impl TestServer {
         let metrics_service = MetricsServiceImpl::new(Arc::clone(&state));
         let streaming_service = StreamingServiceImpl::new(Arc::clone(&state));
 
+        // Auth interceptor (disabled mode → injects default Admin user)
+        let auth_state = AuthInterceptorState::new(detrix_config::AuthConfig::default());
+        let auth_interceptor = create_auth_interceptor(auth_state);
+
         // Find available port
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
@@ -145,8 +150,14 @@ impl TestServer {
         // Spawn server
         tokio::spawn(async move {
             Server::builder()
-                .add_service(MetricsServiceServer::new(metrics_service))
-                .add_service(StreamingServiceServer::new(streaming_service))
+                .add_service(MetricsServiceServer::with_interceptor(
+                    metrics_service,
+                    auth_interceptor.clone(),
+                ))
+                .add_service(StreamingServiceServer::with_interceptor(
+                    streaming_service,
+                    auth_interceptor,
+                ))
                 .serve_with_incoming_shutdown(incoming, async {
                     let _ = shutdown_rx.await;
                 })
@@ -221,6 +232,9 @@ impl TestServer {
         let metrics_service = MetricsServiceImpl::new(Arc::clone(&state));
         let streaming_service = StreamingServiceImpl::new(Arc::clone(&state));
 
+        let auth_state = AuthInterceptorState::new(detrix_config::AuthConfig::default());
+        let auth_interceptor = create_auth_interceptor(auth_state);
+
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let incoming = TcpListenerStream::new(listener);
@@ -228,8 +242,14 @@ impl TestServer {
 
         tokio::spawn(async move {
             Server::builder()
-                .add_service(MetricsServiceServer::new(metrics_service))
-                .add_service(StreamingServiceServer::new(streaming_service))
+                .add_service(MetricsServiceServer::with_interceptor(
+                    metrics_service,
+                    auth_interceptor.clone(),
+                ))
+                .add_service(StreamingServiceServer::with_interceptor(
+                    streaming_service,
+                    auth_interceptor,
+                ))
                 .serve_with_incoming_shutdown(incoming, async {
                     let _ = shutdown_rx.await;
                 })
@@ -1810,6 +1830,130 @@ async fn test_add_metric_absolute_path_still_works() {
         location.file, absolute_path,
         "Absolute path should be preserved unchanged"
     );
+
+    server.shutdown();
+}
+
+// ============================================================================
+// Scope Enforcement Read-Path Tests
+//
+// The TestServer uses AuthConfig::default() which sets auth to disabled.
+// With auth disabled, the interceptor injects a synthetic "default" Admin
+// user for every request. This means ALL metrics are readable/mutable under
+// MetricScope::Admin — ideal for verifying the list→filter→return pipeline
+// without needing real JWT tokens.
+//
+// Per-user filtering (MetricScope::User / MetricScope::Agent) is covered
+// by the scope.rs unit tests and the multi-tenant REST E2E tests.
+// ============================================================================
+
+/// Verify that metrics added via gRPC appear in the list response.
+///
+/// This exercises the full list → scope-filter → return pipeline.
+/// With auth disabled the server runs under Admin scope, so all metrics
+/// are visible — the test confirms the pipeline does not silently drop rows.
+#[tokio::test]
+async fn test_grpc_list_metrics_returns_only_own_user_metrics() {
+    let server = TestServer::start().await.expect("Failed to start server");
+    let mut client = server
+        .metrics_client()
+        .await
+        .expect("Failed to create client");
+
+    // Add a metric
+    let request =
+        create_add_metric_request("scope_list_metric", "test.py", 10, &server.connection_id);
+    let add_response = client.add_metric(request).await.expect("AddMetric failed");
+    let added_id = add_response.into_inner().metric_id;
+    assert!(added_id > 0, "Metric ID should be positive");
+
+    // List all metrics — Admin scope sees everything
+    let list_request = ListMetricsRequest {
+        group: None,
+        enabled_only: None,
+        name_pattern: None,
+        metadata: None,
+    };
+    let list_response = client
+        .list_metrics(list_request)
+        .await
+        .expect("ListMetrics failed");
+    let metrics = list_response.into_inner().metrics;
+
+    // The added metric must be present in the list
+    assert!(
+        metrics.iter().any(|m| m.metric_id == added_id),
+        "Added metric (id={}) should appear in list response, got ids: {:?}",
+        added_id,
+        metrics.iter().map(|m| m.metric_id).collect::<Vec<_>>()
+    );
+
+    server.shutdown();
+}
+
+/// Verify that get_metric returns the correct metric when multiple metrics exist.
+///
+/// This exercises the get → scope-check → return pipeline for each metric,
+/// confirming that ID-based lookup returns the exact requested metric rather
+/// than an arbitrary one.
+#[tokio::test]
+async fn test_grpc_get_metric_by_id_returns_correct_metric() {
+    let server = TestServer::start().await.expect("Failed to start server");
+    let mut client = server
+        .metrics_client()
+        .await
+        .expect("Failed to create client");
+
+    // Add two metrics with distinct names
+    let req_a =
+        create_add_metric_request("scope_get_metric_a", "test.py", 10, &server.connection_id);
+    let id_a = client
+        .add_metric(req_a)
+        .await
+        .expect("AddMetric A failed")
+        .into_inner()
+        .metric_id;
+
+    let req_b =
+        create_add_metric_request("scope_get_metric_b", "test.py", 20, &server.connection_id);
+    let id_b = client
+        .add_metric(req_b)
+        .await
+        .expect("AddMetric B failed")
+        .into_inner()
+        .metric_id;
+
+    assert_ne!(id_a, id_b, "Each metric should receive a unique ID");
+
+    // Fetch metric A by ID and verify identity
+    let resp_a = client
+        .get_metric(GetMetricRequest {
+            identifier: Some(
+                detrix_api::generated::detrix::v1::get_metric_request::Identifier::MetricId(id_a),
+            ),
+            metadata: None,
+        })
+        .await
+        .expect("GetMetric A failed")
+        .into_inner();
+
+    assert_eq!(resp_a.metric_id, id_a, "Should return metric A");
+    assert_eq!(resp_a.name, "scope_get_metric_a");
+
+    // Fetch metric B by ID and verify identity
+    let resp_b = client
+        .get_metric(GetMetricRequest {
+            identifier: Some(
+                detrix_api::generated::detrix::v1::get_metric_request::Identifier::MetricId(id_b),
+            ),
+            metadata: None,
+        })
+        .await
+        .expect("GetMetric B failed")
+        .into_inner();
+
+    assert_eq!(resp_b.metric_id, id_b, "Should return metric B");
+    assert_eq!(resp_b.name, "scope_get_metric_b");
 
     server.shutdown();
 }

@@ -25,7 +25,7 @@ impl EventRepository for SqliteStorage {
 
         let id = sqlx::query(
             r#"
-            INSERT INTO metric_events (
+            INSERT OR IGNORE INTO metric_events (
                 metric_id, metric_name, connection_id, timestamp, thread_name, thread_id,
                 values_json,
                 is_error, error_type, error_message, error_traceback,
@@ -76,9 +76,15 @@ impl EventRepository for SqliteStorage {
             let placeholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
             let joined = vec![placeholder; chunk.len()].join(", ");
 
+            // INSERT OR IGNORE: silently drops events whose metric_id no longer exists.
+            // This handles the race between event capture and metric removal: an event
+            // can be buffered for a metric that is deleted before the batch flush fires.
+            // Such events are meaningless (the metric is gone); ON DELETE CASCADE already
+            // removes existing events when a metric is deleted. IGNORE prevents a FK
+            // constraint failure from aborting the entire batch and losing valid events.
             let query = format!(
                 r#"
-                INSERT INTO metric_events (
+                INSERT OR IGNORE INTO metric_events (
                     metric_id, metric_name, connection_id, timestamp, thread_name, thread_id,
                     values_json,
                     is_error, error_type, error_message, error_traceback,

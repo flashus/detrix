@@ -7,12 +7,12 @@
 //! - `disconnect_all()` — stop all local adapters
 //! - `status()` — comprehensive system health
 
+use crate::common::CLIENT_ID_HEADER;
 use crate::constants::status;
 use crate::http::error::{HttpError, ToHttpResult};
 use crate::mcp_client_tracker::McpClientSummary;
 use crate::state::{ApiState, DaemonInfo};
 use axum::{extract::State, http::HeaderMap, Json};
-use detrix_config::constants::HEADER_CLIENT_ID;
 use detrix_core::connection_reference::ClientIdentity;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -228,7 +228,7 @@ pub async fn disconnect_all(
     if !addr.ip().is_loopback() {
         return Err(HttpError::bad_request(format!(
             "{} header required for remote disconnect_all",
-            HEADER_CLIENT_ID
+            CLIENT_ID_HEADER
         )));
     }
 

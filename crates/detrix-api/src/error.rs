@@ -29,6 +29,9 @@ pub enum Error {
 
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
+
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -46,6 +49,7 @@ impl Error {
             Error::NotFound(_) => ErrorCode::MetricNotFound,
             Error::Internal(_) => ErrorCode::InternalError,
             Error::Unauthorized(_) => ErrorCode::Unauthorized,
+            Error::Forbidden(_) => ErrorCode::Forbidden,
         }
     }
 
@@ -118,6 +122,7 @@ impl From<detrix_application::Error> for Error {
                 command, timeout_ms
             )),
             detrix_application::Error::Auth(msg) => Error::Unauthorized(msg),
+            detrix_application::Error::AccessDenied(msg) => Error::Forbidden(msg),
         }
     }
 }
@@ -186,6 +191,11 @@ impl From<Error> for tonic::Status {
             Error::Core(detrix_core::Error::RemoteApp(msg)) => {
                 tonic::Status::unavailable(format!("Remote app error: {}", msg))
             }
+            Error::Core(detrix_core::Error::InvalidTenantId(msg)) => {
+                tonic::Status::invalid_argument(format!("Invalid tenant ID: {}", msg))
+            }
+            Error::Unauthorized(msg) => tonic::Status::unauthenticated(msg),
+            Error::Forbidden(msg) => tonic::Status::permission_denied(msg),
             _ => {
                 tracing::warn!("gRPC internal error: {}", err);
                 tonic::Status::internal("Internal error")
@@ -205,6 +215,8 @@ impl Error {
             Error::Core(detrix_core::Error::MetricNotFound(_)) => StatusCode::NOT_FOUND,
             Error::Core(detrix_core::Error::InvalidMetricName(_)) => StatusCode::BAD_REQUEST,
             Error::Core(detrix_core::Error::Adapter(_)) => StatusCode::SERVICE_UNAVAILABLE,
+            Error::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            Error::Forbidden(_) => StatusCode::FORBIDDEN,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

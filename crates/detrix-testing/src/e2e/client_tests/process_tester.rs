@@ -259,11 +259,16 @@ impl ClientProcessTester {
             .map_err(|e| format!("Failed to read response: {}", e))
     }
 
-    /// Make HTTP POST request to control plane
-    async fn http_post(&self, path: &str, body: Option<&str>) -> Result<String, String> {
+    /// Make HTTP POST request to control plane with a configurable timeout
+    async fn http_post_timeout(
+        &self,
+        path: &str,
+        body: Option<&str>,
+        timeout: Duration,
+    ) -> Result<String, String> {
         let url = format!("http://127.0.0.1:{}{}", self.control_port, path);
         let client = reqwest::Client::new();
-        let mut request = client.post(&url).timeout(Duration::from_secs(10));
+        let mut request = client.post(&url).timeout(timeout);
 
         if let Some(b) = body {
             request = request
@@ -286,6 +291,12 @@ impl ClientProcessTester {
             .text()
             .await
             .map_err(|e| format!("Failed to read response: {}", e))
+    }
+
+    /// Make HTTP POST request with default 10-second timeout
+    async fn http_post(&self, path: &str, body: Option<&str>) -> Result<String, String> {
+        self.http_post_timeout(path, body, Duration::from_secs(10))
+            .await
     }
 
     /// Print client logs (for debugging)
@@ -326,11 +337,21 @@ impl ClientTester for ClientProcessTester {
     }
 
     async fn wake(&self, daemon_url: Option<&str>) -> Result<WakeResponse, String> {
+        // Wake can block for 60+ seconds on macOS with lldb-dap 22+ because
+        // the fixture process is paused by ptrace while lldb-dap enumerates
+        // all loaded system dylibs (400+ modules, one ptrace pause each).
+        // The daemon's /api/v1/connections handler blocks until DAP initialization
+        // completes (attach + configurationDone), which happens only after all
+        // module events are processed.  The fixture is frozen by ptrace the whole
+        // time.  Use a 180s timeout to handle even slow machines.
+        let wake_timeout = Duration::from_secs(180);
         let body = if let Some(url) = daemon_url {
             let req_body = serde_json::json!({ "daemon_url": url }).to_string();
-            self.http_post("/detrix/wake", Some(&req_body)).await?
+            self.http_post_timeout("/detrix/wake", Some(&req_body), wake_timeout)
+                .await?
         } else {
-            self.http_post("/detrix/wake", None).await?
+            self.http_post_timeout("/detrix/wake", None, wake_timeout)
+                .await?
         };
 
         serde_json::from_str(&body).map_err(|e| format!("Failed to parse wake response: {}", e))

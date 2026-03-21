@@ -36,12 +36,13 @@ impl RemoveMetricResult {
 pub async fn remove_metric_impl(
     state: &Arc<ApiState>,
     params: RemoveMetricParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<RemoveMetricResult, McpError> {
     // First check if metric exists
     let metric = match state
         .context
         .metric_service
-        .get_metric_by_name(&params.name)
+        .get_metric_by_name_scoped(&params.name, scope)
         .await
     {
         Ok(Some(m)) => m,
@@ -63,7 +64,12 @@ pub async fn remove_metric_impl(
     helpers::connection::require_debugger_connected(state).await?;
 
     if let Some(metric_id) = metric.id {
-        match state.context.metric_service.remove_metric(metric_id).await {
+        match state
+            .context
+            .metric_service
+            .remove_metric(metric_id, scope)
+            .await
+        {
             Ok(_) => Ok(RemoveMetricResult { name: params.name }),
             Err(e) => Err(McpError::internal_error(
                 format!("Failed to remove metric: {}", e),
@@ -118,12 +124,13 @@ impl ToggleMetricResult {
 pub async fn toggle_metric_impl(
     state: &Arc<ApiState>,
     params: ToggleMetricParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<ToggleMetricResult, McpError> {
     // First check if metric exists
     let metric = match state
         .context
         .metric_service
-        .get_metric_by_name(&params.name)
+        .get_metric_by_name_scoped(&params.name, scope)
         .await
     {
         Ok(Some(m)) => m,
@@ -148,7 +155,7 @@ pub async fn toggle_metric_impl(
         match state
             .context
             .metric_service
-            .toggle_metric(metric_id, params.enabled)
+            .toggle_metric(metric_id, params.enabled, scope)
             .await
         {
             Ok(result) => Ok(ToggleMetricResult {
@@ -216,14 +223,22 @@ impl GetMetricResult {
 pub async fn get_metric_impl(
     state: &Arc<ApiState>,
     params: GetMetricParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<GetMetricResult, McpError> {
     let metric = state
         .context
         .metric_service
-        .get_metric_by_name(&params.name)
+        .get_metric_by_name_scoped(&params.name, scope)
         .await
         .mcp_context("Failed to get metric")?
         .mcp_ok_or(&format!("Metric '{}' not found", params.name))?;
+
+    if !scope.can_read(&metric) {
+        return Err(McpError::invalid_params(
+            format!("Metric '{}' not found", params.name),
+            None,
+        ));
+    }
 
     Ok(GetMetricResult {
         name: metric.name.clone(),
@@ -256,12 +271,13 @@ impl UpdateMetricResult {
 pub async fn update_metric_impl(
     state: &Arc<ApiState>,
     params: UpdateMetricParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<UpdateMetricResult, McpError> {
     // Get the current metric first
     let mut metric = state
         .context
         .metric_service
-        .get_metric_by_name(&params.name)
+        .get_metric_by_name_scoped(&params.name, scope)
         .await
         .mcp_context("Failed to get metric")?
         .mcp_ok_or(&format!("Metric '{}' not found", params.name))?;
@@ -281,7 +297,7 @@ pub async fn update_metric_impl(
     state
         .context
         .metric_service
-        .update_metric(&metric)
+        .update_metric(&metric, scope)
         .await
         .mcp_context("Failed to update metric")?;
 
@@ -310,22 +326,23 @@ impl ListMetricsResult {
 pub async fn list_metrics_impl(
     state: &Arc<ApiState>,
     params: ListMetricsParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<ListMetricsResult, McpError> {
-    let metrics = if let Some(ref group_name) = params.group {
-        state
-            .context
-            .metric_service
-            .list_metrics_by_group(group_name)
-            .await
-            .mcp_context("Failed to list metrics")?
-    } else {
-        state
-            .context
-            .metric_service
-            .list_metrics()
-            .await
-            .mcp_context("Failed to list metrics")?
+    use detrix_application::MetricFilter;
+
+    // Build filter with scope's user_id + optional group for multi-tenant isolation
+    let filter = MetricFilter {
+        user_id: scope.user_id().map(|s| s.to_string()),
+        group: params.group.clone(),
+        ..Default::default()
     };
+
+    let (metrics, _) = state
+        .context
+        .metric_service
+        .list_metrics_filtered(&filter, usize::MAX, 0)
+        .await
+        .mcp_context("Failed to list metrics")?;
 
     debug!("list_metrics: found {} metrics in storage", metrics.len());
     for m in &metrics {
@@ -391,6 +408,7 @@ impl QueryMetricsResult {
 pub async fn query_metrics_impl(
     state: &Arc<ApiState>,
     params: QueryMetricsParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<QueryMetricsResult, McpError> {
     // Convert u64 to i64 for repository (capped, always fits)
     let limit = params
@@ -404,10 +422,16 @@ pub async fn query_metrics_impl(
         match state
             .context
             .metric_service
-            .get_metric_by_name(metric_name)
+            .get_metric_by_name_scoped(metric_name, scope)
             .await
         {
             Ok(Some(metric)) => {
+                if !scope.can_read(&metric) {
+                    return Err(McpError::invalid_params(
+                        format!("Metric '{}' not found", metric_name),
+                        None,
+                    ));
+                }
                 if let Some(metric_id) = metric.id {
                     let events = state
                         .event_repository
@@ -444,11 +468,16 @@ pub async fn query_metrics_impl(
             )),
         }
     } else if let Some(ref group_name) = params.group {
-        // Query by group
-        let metrics = state
+        // Query by group — push user_id filter to DB level instead of in-memory scope check
+        let filter = detrix_application::ports::MetricFilter {
+            user_id: scope.user_id().map(String::from),
+            group: Some(group_name.clone()),
+            ..Default::default()
+        };
+        let (metrics, _) = state
             .context
             .metric_service
-            .list_metrics_by_group(group_name)
+            .list_metrics_filtered(&filter, usize::MAX, 0)
             .await
             .mcp_context("Failed to list metrics")?;
 

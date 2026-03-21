@@ -10,6 +10,7 @@
 //! - test_connection_timeout - Fail gracefully on unused port
 //! - test_adapter_state_transitions - Verify state machine
 //! - test_adapter_stop_idempotent - Stop is idempotent
+
 //! - test_is_ready_state - is_ready() returns correct state
 //!
 //! # Rust-Specific Tests
@@ -33,6 +34,17 @@ use detrix_testing::e2e::{require_tool, ToolDependency};
 use std::process::Stdio;
 use tokio::process::{Child, Command};
 
+/// Common lldb-dap search paths across platforms.
+const LLDB_DAP_SEARCH_PATHS: &[&str] = &[
+    "lldb-dap",                            // System PATH
+    "/opt/homebrew/opt/llvm/bin/lldb-dap", // Homebrew on macOS ARM
+    "/usr/local/opt/llvm/bin/lldb-dap",    // Homebrew on macOS Intel
+    "/usr/bin/lldb-dap",                   // Linux system install
+    "/usr/lib/llvm-18/bin/lldb-dap",       // Linux LLVM 18
+    "/usr/lib/llvm-17/bin/lldb-dap",       // Linux LLVM 17
+    "/usr/lib/llvm-16/bin/lldb-dap",       // Linux LLVM 16
+];
+
 // ============================================================================
 // Rust Test Fixture
 // ============================================================================
@@ -51,18 +63,7 @@ impl DapTestFixture for RustFixture {
     }
 
     async fn is_available() -> bool {
-        // Check for lldb-dap in common locations
-        let lldb_dap_paths = [
-            "lldb-dap",                            // System PATH
-            "/opt/homebrew/opt/llvm/bin/lldb-dap", // Homebrew on macOS ARM
-            "/usr/local/opt/llvm/bin/lldb-dap",    // Homebrew on macOS Intel
-            "/usr/bin/lldb-dap",                   // Linux system install
-            "/usr/lib/llvm-18/bin/lldb-dap",       // Linux LLVM 18
-            "/usr/lib/llvm-17/bin/lldb-dap",       // Linux LLVM 17
-            "/usr/lib/llvm-16/bin/lldb-dap",       // Linux LLVM 16
-        ];
-
-        for path in lldb_dap_paths {
+        for path in LLDB_DAP_SEARCH_PATHS {
             let output = Command::new(path).arg("--version").output().await;
             if let Ok(out) = output {
                 if out.status.success() {
@@ -174,17 +175,7 @@ fn main() {
 
 /// Find lldb-dap in common locations
 async fn find_lldb_dap() -> Option<String> {
-    let lldb_dap_paths = [
-        "lldb-dap",
-        "/opt/homebrew/opt/llvm/bin/lldb-dap",
-        "/usr/local/opt/llvm/bin/lldb-dap",
-        "/usr/bin/lldb-dap",
-        "/usr/lib/llvm-18/bin/lldb-dap",
-        "/usr/lib/llvm-17/bin/lldb-dap",
-        "/usr/lib/llvm-16/bin/lldb-dap",
-    ];
-
-    for path in lldb_dap_paths {
+    for path in LLDB_DAP_SEARCH_PATHS {
         let output = Command::new(path).arg("--version").output().await;
         if let Ok(out) = output {
             if out.status.success() {
@@ -322,7 +313,8 @@ fn test_rust_adapter_logpoint_message() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -356,7 +348,8 @@ fn test_rust_struct_expression() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -390,7 +383,8 @@ fn test_rust_complex_expression() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -424,7 +418,8 @@ fn test_rust_option_expression() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -458,7 +453,8 @@ fn test_rust_iterator_expression() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -492,7 +488,8 @@ fn test_rust_str_expression() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -526,7 +523,8 @@ fn test_rust_tuple_expression() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -560,7 +558,8 @@ fn test_rust_array_expression() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -594,7 +593,8 @@ fn test_rust_deref_expression() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -628,7 +628,8 @@ fn test_rust_ref_expression() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -723,10 +724,17 @@ async fn test_lldb_full_connection() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("Failed to start lldb-dap");
+    let lldb_pid = lldb_process.id().unwrap_or(0);
+    if lldb_pid > 0 {
+        common::register_test_process("lldb-dap", lldb_pid);
+    }
 
     if !common::wait_for_port(port, 15).await {
         if let Ok(Some(status)) = lldb_process.try_wait() {
             eprintln!("lldb-dap process exited with status: {:?}", status);
+        }
+        if lldb_pid > 0 {
+            common::unregister_test_process("lldb-dap", lldb_pid);
         }
         lldb_process.kill().await.ok();
         RustFixture::cleanup(&script_path);
@@ -742,6 +750,9 @@ async fn test_lldb_full_connection() {
     let result = adapter.start().await;
 
     adapter.stop().await.ok();
+    if lldb_pid > 0 {
+        common::unregister_test_process("lldb-dap", lldb_pid);
+    }
     lldb_process.kill().await.ok();
     RustFixture::cleanup(&script_path);
     std::fs::remove_file(&binary_path).ok();
@@ -805,8 +816,15 @@ async fn test_lldb_launch_mode() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("Failed to start lldb-dap");
+    let lldb_pid = lldb_process.id().unwrap_or(0);
+    if lldb_pid > 0 {
+        common::register_test_process("lldb-dap", lldb_pid);
+    }
 
     if !common::wait_for_port(port, 15).await {
+        if lldb_pid > 0 {
+            common::unregister_test_process("lldb-dap", lldb_pid);
+        }
         lldb_process.kill().await.ok();
         std::fs::remove_file(&script_path).ok();
         std::fs::remove_file(&binary_path).ok();
@@ -835,6 +853,9 @@ async fn test_lldb_launch_mode() {
 
     // Cleanup
     adapter.stop().await.ok();
+    if lldb_pid > 0 {
+        common::unregister_test_process("lldb-dap", lldb_pid);
+    }
     lldb_process.kill().await.ok();
     std::fs::remove_file(&script_path).ok();
     std::fs::remove_file(&binary_path).ok();
@@ -881,8 +902,15 @@ async fn test_lldb_logpoint_setting() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("Failed to start lldb-dap");
+    let lldb_pid = lldb_process.id().unwrap_or(0);
+    if lldb_pid > 0 {
+        common::register_test_process("lldb-dap", lldb_pid);
+    }
 
     if !common::wait_for_port(port, 15).await {
+        if lldb_pid > 0 {
+            common::unregister_test_process("lldb-dap", lldb_pid);
+        }
         lldb_process.kill().await.ok();
         std::fs::remove_file(&script_path).ok();
         std::fs::remove_file(&binary_path).ok();
@@ -918,7 +946,8 @@ async fn test_lldb_logpoint_setting() {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         capture_stack_trace: false,
         stack_trace_ttl: None,
         stack_trace_slice: None,
@@ -946,6 +975,9 @@ async fn test_lldb_logpoint_setting() {
 
     // Cleanup
     adapter.stop().await.ok();
+    if lldb_pid > 0 {
+        common::unregister_test_process("lldb-dap", lldb_pid);
+    }
     lldb_process.kill().await.ok();
     std::fs::remove_file(&script_path).ok();
     std::fs::remove_file(&binary_path).ok();
@@ -964,10 +996,12 @@ async fn test_lldb_program_exit() {
     let port = common::get_test_port();
     eprintln!("Using port {} for lldb-dap exit test", port);
 
-    // Create a very short-running program (1 second)
+    // Program must run long enough for the DAP handshake (initialize + launch + configurationDone)
+    // to complete before the program exits. lldb-dap 22.x can take several seconds loading
+    // system dylibs on macOS. 5 s gives ample headroom while keeping the test reasonably fast.
     let script_path = std::env::temp_dir().join(format!("detrix_rust_exit_{}.rs", port));
     let binary_path = format!("/tmp/detrix_rust_exit_{}", port);
-    std::fs::write(&script_path, rust_program_with_logpoint_line(1)).unwrap();
+    std::fs::write(&script_path, rust_program_with_logpoint_line(5)).unwrap();
 
     let build_output = Command::new("rustc")
         .args(["-g", "-o", &binary_path, script_path.to_str().unwrap()])
@@ -989,8 +1023,15 @@ async fn test_lldb_program_exit() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("Failed to start lldb-dap");
+    let lldb_pid = lldb_process.id().unwrap_or(0);
+    if lldb_pid > 0 {
+        common::register_test_process("lldb-dap", lldb_pid);
+    }
 
     if !common::wait_for_port(port, 15).await {
+        if lldb_pid > 0 {
+            common::unregister_test_process("lldb-dap", lldb_pid);
+        }
         lldb_process.kill().await.ok();
         std::fs::remove_file(&script_path).ok();
         std::fs::remove_file(&binary_path).ok();
@@ -1017,6 +1058,9 @@ async fn test_lldb_program_exit() {
 
     // Cleanup
     adapter.stop().await.ok();
+    if lldb_pid > 0 {
+        common::unregister_test_process("lldb-dap", lldb_pid);
+    }
     lldb_process.kill().await.ok();
     std::fs::remove_file(&script_path).ok();
     std::fs::remove_file(&binary_path).ok();

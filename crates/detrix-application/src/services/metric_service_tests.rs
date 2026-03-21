@@ -8,7 +8,7 @@ mod tests {
     use crate::services::AdapterLifecycleManager;
     use crate::{
         ConnectionRepositoryRef, DapAdapter, DapAdapterFactory, DapAdapterFactoryRef,
-        DapAdapterRef, MetricRepositoryRef, RemoveMetricResult, SetMetricResult,
+        DapAdapterRef, MetricRepositoryRef, MetricScope, RemoveMetricResult, SetMetricResult,
     };
     use async_trait::async_trait;
     use detrix_core::{
@@ -424,7 +424,8 @@ mod tests {
             condition: None,
             safety_level: SafetyLevel::Strict,
             created_at: None,
-            created_by: None,
+            user_id: None,
+            agent_id: None,
             // Default values for introspection fields
             capture_stack_trace: false,
             stack_trace_ttl: None,
@@ -628,7 +629,10 @@ mod tests {
         metric.expressions = vec!["updated_expression.value".to_string()];
         metric.enabled = false;
 
-        service.update_metric(&metric).await.unwrap();
+        service
+            .update_metric(&metric, &MetricScope::Admin)
+            .await
+            .unwrap();
 
         // Verify update
         let retrieved = service.get_metric(metric_id).await.unwrap().unwrap();
@@ -647,7 +651,10 @@ mod tests {
         assert!(service.get_metric(metric_id).await.unwrap().is_some());
 
         // Remove it
-        service.remove_metric(metric_id).await.unwrap();
+        service
+            .remove_metric(metric_id, &MetricScope::Admin)
+            .await
+            .unwrap();
 
         // Verify it's gone
         assert!(service.get_metric(metric_id).await.unwrap().is_none());
@@ -665,12 +672,18 @@ mod tests {
         assert!(retrieved.enabled);
 
         // Disable
-        service.toggle_metric(metric_id, false).await.unwrap();
+        service
+            .toggle_metric(metric_id, false, &MetricScope::Admin)
+            .await
+            .unwrap();
         let retrieved = service.get_metric(metric_id).await.unwrap().unwrap();
         assert!(!retrieved.enabled);
 
         // Enable
-        service.toggle_metric(metric_id, true).await.unwrap();
+        service
+            .toggle_metric(metric_id, true, &MetricScope::Admin)
+            .await
+            .unwrap();
         let retrieved = service.get_metric(metric_id).await.unwrap().unwrap();
         assert!(retrieved.enabled);
     }
@@ -699,7 +712,10 @@ mod tests {
             .unwrap()
             .value;
 
-        let result = service.enable_group("test_group").await.unwrap();
+        let result = service
+            .enable_group("test_group", &MetricScope::Admin)
+            .await
+            .unwrap();
         assert_eq!(result.succeeded, 2);
         assert!(result.is_complete());
 
@@ -732,7 +748,10 @@ mod tests {
             .unwrap()
             .value;
 
-        let result = service.disable_group("test_group").await.unwrap();
+        let result = service
+            .disable_group("test_group", &MetricScope::Admin)
+            .await
+            .unwrap();
         assert_eq!(result.succeeded, 2);
         assert!(result.is_complete());
 
@@ -789,36 +808,32 @@ mod tests {
         adapter.fail_on_set_metric("metric_fail").await;
 
         // Enable group - should partially succeed
-        let result = service.enable_group("partial_group").await.unwrap();
+        let result = service
+            .enable_group("partial_group", &MetricScope::Admin)
+            .await
+            .unwrap();
 
-        // Verify partial success
-        assert_eq!(result.succeeded, 2, "Should have 2 successful enables");
-        assert_eq!(result.failed.len(), 1, "Should have 1 failure");
-        assert!(!result.is_complete(), "Should not be complete");
-        assert!(result.has_failures(), "Should have failures");
-
-        // Verify the failed metric name is in the failures
-        assert!(
-            result.failed.iter().any(|(name, _)| name == "metric_fail"),
-            "Failed metric should be 'metric_fail'"
+        // With sync_logpoint, storage is updated first and DAP sync is best-effort.
+        // All 3 metrics get enabled in storage; sync_logpoint merges expressions per-location
+        // so per-metric adapter failures don't apply.
+        assert_eq!(
+            result.succeeded, 3,
+            "All 3 metrics should be enabled in storage"
         );
+        assert!(
+            result.failed.is_empty(),
+            "No per-metric failures with sync_logpoint"
+        );
+        assert!(result.is_complete(), "Should be complete");
 
-        // Verify storage state: failed metric should still be disabled (rolled back)
+        // Verify all metrics are enabled in storage
         let metrics = service
             .list_metrics_by_group("partial_group")
             .await
             .unwrap();
-        let failed_metric = metrics.iter().find(|m| m.name == "metric_fail").unwrap();
         assert!(
-            !failed_metric.enabled,
-            "Failed metric should be rolled back to disabled"
-        );
-
-        // Verify successful metrics are enabled
-        let ok_metrics: Vec<_> = metrics.iter().filter(|m| m.name != "metric_fail").collect();
-        assert!(
-            ok_metrics.iter().all(|m| m.enabled),
-            "Successful metrics should be enabled"
+            metrics.iter().all(|m| m.enabled),
+            "All metrics should be enabled in storage"
         );
     }
 
@@ -860,29 +875,30 @@ mod tests {
         adapter.fail_on_remove_metric("metric_fail").await;
 
         // Disable group - should partially succeed
-        let result = service.disable_group("partial_group").await.unwrap();
+        let result = service
+            .disable_group("partial_group", &MetricScope::Admin)
+            .await
+            .unwrap();
 
-        // Verify partial success
-        assert_eq!(result.succeeded, 2, "Should have 2 successful disables");
-        assert_eq!(result.failed.len(), 1, "Should have 1 failure");
-        assert!(!result.is_complete());
+        // With sync_logpoint, storage is updated first and DAP sync is best-effort.
+        assert_eq!(
+            result.succeeded, 3,
+            "All 3 metrics should be disabled in storage"
+        );
+        assert!(
+            result.failed.is_empty(),
+            "No per-metric failures with sync_logpoint"
+        );
+        assert!(result.is_complete());
 
-        // Verify the failed metric is still enabled (rolled back)
+        // Verify all metrics are disabled in storage
         let metrics = service
             .list_metrics_by_group("partial_group")
             .await
             .unwrap();
-        let failed_metric = metrics.iter().find(|m| m.name == "metric_fail").unwrap();
         assert!(
-            failed_metric.enabled,
-            "Failed metric should be rolled back to enabled"
-        );
-
-        // Verify successful metrics are disabled
-        let ok_metrics: Vec<_> = metrics.iter().filter(|m| m.name != "metric_fail").collect();
-        assert!(
-            ok_metrics.iter().all(|m| !m.enabled),
-            "Successful metrics should be disabled"
+            metrics.iter().all(|m| !m.enabled),
+            "All metrics should be disabled in storage"
         );
     }
 
@@ -912,27 +928,20 @@ mod tests {
 
         adapter.fail_on_set_metric("fail_metric").await;
 
-        // Get result and try ensure_complete
-        let result = service.enable_group("test").await.unwrap();
+        // With sync_logpoint, storage updates succeed and DAP sync is best-effort.
+        // Per-metric adapter failures don't prevent storage updates.
+        let result = service
+            .enable_group("test", &MetricScope::Admin)
+            .await
+            .unwrap();
+        assert_eq!(result.succeeded, 2);
+
+        // Should succeed — no per-metric failures with sync_logpoint
         let ensure_result = result.ensure_complete();
-
-        // Should be an error
         assert!(
-            ensure_result.is_err(),
-            "ensure_complete should fail on partial success"
+            ensure_result.is_ok(),
+            "ensure_complete should succeed when all storage updates pass"
         );
-
-        // Verify error type
-        match ensure_result {
-            Err(crate::Error::PartialGroupFailure {
-                succeeded,
-                failures,
-            }) => {
-                assert_eq!(succeeded, 1);
-                assert_eq!(failures.len(), 1);
-            }
-            _ => panic!("Expected PartialGroupFailure error"),
-        }
     }
 
     // ==================== Adapter Disconnected Tests ====================
@@ -990,7 +999,9 @@ mod tests {
         adapter.set_disconnected(true).await;
 
         // Try to enable - should fail
-        let result = service.toggle_metric(metric_id, true).await;
+        let result = service
+            .toggle_metric(metric_id, true, &MetricScope::Admin)
+            .await;
         assert!(result.is_err(), "Should fail when adapter is disconnected");
 
         // Verify metric is still disabled (rolled back)
@@ -1025,23 +1036,31 @@ mod tests {
         // Disconnect adapter
         adapter.set_disconnected(true).await;
 
-        // Enable group - all should fail
-        let result = service.enable_group("test").await.unwrap();
+        // With sync_logpoint, storage updates succeed even when adapter is disconnected.
+        // sync_logpoint silently returns Ok when no adapter — logpoints will be synced
+        // when the adapter reconnects.
+        let result = service
+            .enable_group("test", &MetricScope::Admin)
+            .await
+            .unwrap();
 
-        assert_eq!(result.succeeded, 0, "No metrics should succeed");
-        assert_eq!(result.failed.len(), 2, "All metrics should fail");
-        assert!(!result.is_complete());
+        assert_eq!(result.succeeded, 2, "Storage updates should succeed");
+        assert!(
+            result.failed.is_empty(),
+            "No failures — sync is best-effort"
+        );
+        assert!(result.is_complete());
 
-        // Verify all metrics are still disabled
+        // Verify all metrics are enabled in storage (will sync when adapter reconnects)
         let metrics = service.list_metrics_by_group("test").await.unwrap();
         assert!(
-            metrics.iter().all(|m| !m.enabled),
-            "All metrics should be rolled back"
+            metrics.iter().all(|m| m.enabled),
+            "All metrics should be enabled in storage"
         );
     }
 
     #[tokio::test]
-    async fn test_remove_metric_fails_when_adapter_disconnected() {
+    async fn test_remove_metric_succeeds_when_adapter_disconnected() {
         let (service, adapter) = create_test_service_with_failing_adapter().await;
 
         // Add an enabled metric
@@ -1051,13 +1070,17 @@ mod tests {
         // Disconnect adapter
         adapter.set_disconnected(true).await;
 
-        // Try to remove - should fail (adapter needs to remove logpoint first)
-        let result = service.remove_metric(metric_id).await;
-        assert!(result.is_err(), "Should fail when adapter is disconnected");
+        // Remove should succeed — storage deletion happens, DAP cleanup is deferred
+        // (sync_logpoint gracefully handles missing adapter)
+        let result = service.remove_metric(metric_id, &MetricScope::Admin).await;
+        assert!(
+            result.is_ok(),
+            "Remove should succeed even when adapter is disconnected"
+        );
 
-        // Verify metric still exists
+        // Verify metric is gone from storage
         let metric = service.get_metric(metric_id).await.unwrap();
-        assert!(metric.is_some(), "Metric should still exist");
+        assert!(metric.is_none(), "Metric should be removed from storage");
     }
 
     // ==================== SafeMode Enforcement Tests ====================
@@ -1121,7 +1144,8 @@ mod tests {
             condition: None,
             safety_level: SafetyLevel::Strict,
             created_at: None,
-            created_by: None,
+            user_id: None,
+            agent_id: None,
             capture_stack_trace: false,
             stack_trace_ttl: None,
             stack_trace_slice: None,
@@ -1248,7 +1272,9 @@ mod tests {
         updated_metric.id = Some(metric_id);
         updated_metric.capture_stack_trace = true;
 
-        let result = service.update_metric(&updated_metric).await;
+        let result = service
+            .update_metric(&updated_metric, &MetricScope::Admin)
+            .await;
 
         assert!(
             result.is_err(),
@@ -1277,6 +1303,147 @@ mod tests {
             result.is_ok(),
             "Should allow introspection features when NOT in SafeMode: {:?}",
             result
+        );
+    }
+
+    // ==================== Phase 2.6: list_metrics_filtered user_id scope test ====================
+
+    #[tokio::test]
+    async fn test_list_metrics_filtered_by_user_id() {
+        use crate::MetricFilter;
+
+        let service = create_test_service().await;
+
+        // Add alice's metric
+        let mut alice_metric = create_test_metric("alice_metric");
+        alice_metric.user_id = Some("alice".to_string());
+        service.add_metric(alice_metric, false, None).await.unwrap();
+
+        // Add bob's metric
+        let mut bob_metric = create_test_metric_at_line("bob_metric", 200);
+        bob_metric.user_id = Some("bob".to_string());
+        service.add_metric(bob_metric, false, None).await.unwrap();
+
+        // Filter by alice's user_id → only alice's metric returned
+        let alice_filter = MetricFilter {
+            user_id: Some("alice".to_string()),
+            ..Default::default()
+        };
+        let (alice_metrics, alice_total) = service
+            .list_metrics_filtered(&alice_filter, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(alice_total, 1, "Alice should have exactly 1 metric");
+        assert_eq!(alice_metrics[0].name, "alice_metric");
+
+        // Filter by bob's user_id → only bob's metric returned
+        let bob_filter = MetricFilter {
+            user_id: Some("bob".to_string()),
+            ..Default::default()
+        };
+        let (bob_metrics, bob_total) = service
+            .list_metrics_filtered(&bob_filter, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(bob_total, 1, "Bob should have exactly 1 metric");
+        assert_eq!(bob_metrics[0].name, "bob_metric");
+
+        // Admin (no user_id filter) → both metrics returned
+        let admin_filter = MetricFilter::default();
+        let (all_metrics, all_total) = service
+            .list_metrics_filtered(&admin_filter, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(all_total, 2, "Admin should see all 2 metrics");
+        let names: Vec<_> = all_metrics.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"alice_metric"));
+        assert!(names.contains(&"bob_metric"));
+    }
+
+    // ========================================================================
+    // Multi-tenant scope enforcement tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_user_scope_cannot_remove_other_user_metric() {
+        let service = create_test_service().await;
+
+        // Alice creates a metric
+        let mut metric = create_test_metric_at_line("alice_protected", 100);
+        metric.user_id = Some("alice".to_string());
+        let outcome = service.add_metric(metric, false, None).await.unwrap();
+        let metric_id = outcome.value;
+
+        // Bob tries to remove Alice's metric
+        let bob_scope = MetricScope::User("bob".to_string());
+        let result = service.remove_metric(metric_id, &bob_scope).await;
+        assert!(
+            result.is_err(),
+            "Bob should not be able to remove Alice's metric"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_user_scope_cannot_update_other_user_metric() {
+        let service = create_test_service().await;
+
+        // Alice creates a metric
+        let mut metric = create_test_metric_at_line("alice_update", 110);
+        metric.user_id = Some("alice".to_string());
+        let outcome = service.add_metric(metric, false, None).await.unwrap();
+        let metric_id = outcome.value;
+
+        // Fetch and try to update as Bob
+        let mut fetched = service.get_metric(metric_id).await.unwrap().unwrap();
+        fetched.expressions = vec!["hacked".to_string()];
+
+        let bob_scope = MetricScope::User("bob".to_string());
+        let result = service.update_metric(&fetched, &bob_scope).await;
+        assert!(
+            result.is_err(),
+            "Bob should not be able to update Alice's metric"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_scope_cannot_mutate_other_agent_metric() {
+        let service = create_test_service().await;
+
+        // Agent1 creates a metric
+        let mut metric = create_test_metric_at_line("agent1_metric", 120);
+        metric.user_id = Some("alice".to_string());
+        metric.agent_id = Some("agent1".to_string());
+        let outcome = service.add_metric(metric, false, None).await.unwrap();
+        let metric_id = outcome.value;
+
+        // Agent2 (same user) tries to toggle
+        let agent2_scope = MetricScope::Agent {
+            user_id: "alice".to_string(),
+            agent_id: "agent2".to_string(),
+        };
+        let result = service.toggle_metric(metric_id, false, &agent2_scope).await;
+        assert!(
+            result.is_err(),
+            "Agent2 should not be able to toggle Agent1's metric"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_user_scope_can_mutate_own_metric() {
+        let service = create_test_service().await;
+
+        // Alice creates a metric
+        let mut metric = create_test_metric_at_line("alice_own", 130);
+        metric.user_id = Some("alice".to_string());
+        let outcome = service.add_metric(metric, false, None).await.unwrap();
+        let metric_id = outcome.value;
+
+        // Alice can toggle her own metric
+        let alice_scope = MetricScope::User("alice".to_string());
+        let result = service.toggle_metric(metric_id, false, &alice_scope).await;
+        assert!(
+            result.is_ok(),
+            "Alice should be able to toggle her own metric"
         );
     }
 }

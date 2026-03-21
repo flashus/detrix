@@ -3,16 +3,39 @@
 //! DAP handshake and mode-specific initialization logic.
 
 use super::config::{AdapterConfig, ConnectionMode};
+use crate::constants::{defaults, requests};
 use crate::{Capabilities, DapBroker, Error, InitializeRequestArguments, Result};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
+
+/// Default failure detection window (500ms). Overridden by config `attach_failure_window_ms`.
+const DEFAULT_ATTACH_FAILURE_WINDOW_MS: u64 = 500;
+
+/// Resolve the failure detection window from config, falling back to the default.
+fn resolve_failure_window(config: &detrix_config::AdapterConnectionConfig) -> Duration {
+    Duration::from_millis(
+        config
+            .attach_failure_window_ms
+            .unwrap_or(DEFAULT_ATTACH_FAILURE_WINDOW_MS),
+    )
+}
+
+/// Resolve the attach configurationDone timeout from config, falling back to the default.
+pub(crate) fn resolve_attach_timeout(config: &detrix_config::AdapterConnectionConfig) -> Duration {
+    config
+        .attach_config_done_timeout_secs
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(defaults::ATTACH_TIMEOUT_SECS))
+}
 
 /// Initialize DAP connection (handshake)
 pub async fn initialize_dap(
     broker: &DapBroker,
     config: &AdapterConfig,
     capabilities: &Arc<Mutex<Option<Capabilities>>>,
+    connection_config: &detrix_config::AdapterConnectionConfig,
 ) -> Result<()> {
     debug!("Initializing DAP connection for {}", config.adapter_id);
 
@@ -28,7 +51,7 @@ pub async fn initialize_dap(
     };
 
     let response = broker
-        .send_request("initialize", Some(serde_json::to_value(init_args)?))
+        .send_request(requests::INITIALIZE, Some(serde_json::to_value(init_args)?))
         .await?;
 
     if !response.success {
@@ -65,20 +88,18 @@ pub async fn initialize_dap(
             });
             debug!("Sending attach request to {}:{}", host, port);
 
-            // Send attach request WITHOUT waiting - debugpy responds after configurationDone
-            let seq = broker.next_sequence().await;
-            let request = crate::Request {
-                seq,
-                command: "attach".to_string(),
-                arguments: Some(attach_args),
-            };
+            // Send attach without blocking but detect an immediate failure response.
+            // debugpy normally responds only after configurationDone, so the 500ms window
+            // passes without a response in the happy path.  If debugpy immediately
+            // returns success: false (e.g. bad host/port), we surface it here.
             broker
-                .send_message_no_wait(crate::ProtocolMessage::Request(request))
+                .send_and_detect_failure(
+                    requests::ATTACH,
+                    Some(attach_args),
+                    resolve_failure_window(connection_config),
+                )
                 .await?;
-            debug!(
-                "Attach request sent (seq={}), not waiting for response",
-                seq
-            );
+            debug!("Attach request sent (failure-detection window passed)");
         }
         ConnectionMode::AttachRemote { host, port } => {
             // For headless servers like `dlv exec --headless`, send attach request
@@ -92,7 +113,9 @@ pub async fn initialize_dap(
             debug!("Sending remote attach request to {}:{}", host, port);
 
             // Send attach request and wait for response (Delve responds immediately)
-            let response = broker.send_request("attach", Some(attach_args)).await?;
+            let response = broker
+                .send_request(requests::ATTACH, Some(attach_args))
+                .await?;
 
             if !response.success {
                 return Err(Error::InitializationFailed(
@@ -104,9 +127,9 @@ pub async fn initialize_dap(
             debug!("Remote attach successful");
         }
         ConnectionMode::Launch => {
-            // For launch mode, the launch request would be sent separately
-            // TODO: actual implementation of launch mode deferred for later
-            debug!("Launch mode - launch request would be sent separately");
+            return Err(crate::error::Error::InitializationFailed(
+                "Launch mode is not yet implemented".to_string(),
+            ));
         }
         ConnectionMode::LaunchProgram {
             host,
@@ -154,21 +177,23 @@ pub async fn initialize_dap(
                 host, port, program
             );
 
-            // Send launch request and wait for response
-            let response = broker.send_request("launch", Some(launch_args)).await?;
-
-            if !response.success {
-                return Err(Error::InitializationFailed(
-                    response
-                        .message
-                        .unwrap_or_else(|| "Launch failed".to_string()),
-                ));
-            }
-            debug!("Launch successful");
+            // Send launch with failure detection (same pattern as Attach/AttachPid).
+            //
+            // lldb-dap 22.x won't respond to `launch` at all (emits events instead),
+            // so the failure window times out harmlessly. But if the adapter responds
+            // with success: false (e.g. bad program path), we surface the error immediately.
+            broker
+                .send_and_detect_failure(
+                    requests::LAUNCH,
+                    Some(launch_args),
+                    resolve_failure_window(connection_config),
+                )
+                .await?;
+            debug!("Launch request sent (failure-detection window passed)");
         }
         ConnectionMode::AttachPid {
-            host,
-            port,
+            host: _,
+            port: _,
             pid,
             program,
             wait_for,
@@ -201,27 +226,52 @@ pub async fn initialize_dap(
                 attach_args["initCommands"] = serde_json::json!(init_commands);
             }
 
-            debug!(
-                "Sending attach request to {}:{} with pid={:?}, program={:?}, waitFor={}, init_commands={}",
-                host, port, pid, program, wait_for, init_commands.len()
+            // Send attach without blocking but detect an immediate failure response.
+            //
+            // lldb-dap 22.x does not send an `attach` response — it processes the
+            // attach, emits `module` events for each loaded library, and eventually
+            // handles `configurationDone`.  The 500ms failure-detection window passes
+            // without a response in that case, which is normal.
+            //
+            // lldb-dap 21.x sends an `attach` response.  If `success: false` arrives
+            // within the window (e.g. bad PID, ptrace permission denied), we surface
+            // the error immediately instead of waiting for the configurationDone timeout.
+            broker
+                .send_and_detect_failure(
+                    requests::ATTACH,
+                    Some(attach_args),
+                    resolve_failure_window(connection_config),
+                )
+                .await?;
+            info!(
+                "AttachPid: attach request sent (failure-detection window passed), \
+                 pid={:?} init_commands={}",
+                pid,
+                init_commands.len()
             );
-
-            // Send attach request and wait for response
-            let response = broker.send_request("attach", Some(attach_args)).await?;
-
-            if !response.success {
-                return Err(Error::InitializationFailed(
-                    response
-                        .message
-                        .unwrap_or_else(|| "Attach failed".to_string()),
-                ));
-            }
-            debug!("Attach successful");
         }
     }
 
-    // Send configurationDone request to signal we're ready
-    let config_done_response = broker.send_request("configurationDone", None).await?;
+    // Send configurationDone request to signal we're ready.
+    //
+    // For AttachPid mode, configurationDone is queued behind the attach processing
+    // inside lldb-dap (module enumeration, ptrace setup, etc.).
+    // Use a long timeout to cover the full cycle.
+    let config_done_response = if matches!(config.connection_mode, ConnectionMode::AttachPid { .. })
+    {
+        let timeout = resolve_attach_timeout(connection_config);
+        info!(
+            "AttachPid: waiting for configurationDone (timeout={}s, covers attach processing)",
+            timeout.as_secs()
+        );
+        broker
+            .send_request_with_timeout(requests::CONFIGURATION_DONE, None, timeout)
+            .await?
+    } else {
+        broker
+            .send_request(requests::CONFIGURATION_DONE, None)
+            .await?
+    };
     if !config_done_response.success {
         return Err(Error::InitializationFailed(
             config_done_response
@@ -239,10 +289,12 @@ pub async fn initialize_dap(
         debug!("AttachRemote mode: sending continue request to resume program execution");
 
         let continue_args = serde_json::json!({
-            "threadId": 1  // Use main thread
+            "threadId": defaults::THREAD_ID
         });
 
-        let continue_response = broker.send_request("continue", Some(continue_args)).await?;
+        let continue_response = broker
+            .send_request(requests::CONTINUE, Some(continue_args))
+            .await?;
 
         if continue_response.success {
             info!("Program execution resumed after attach (required for logpoints to fire)");
@@ -257,4 +309,25 @@ pub async fn initialize_dap(
 
     debug!("DAP connection initialized for {}", config.adapter_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_attach_timeout_default() {
+        let config = detrix_config::AdapterConnectionConfig::default();
+        assert_eq!(config.attach_config_done_timeout_secs, None);
+        let timeout = resolve_attach_timeout(&config);
+        assert_eq!(timeout, Duration::from_secs(defaults::ATTACH_TIMEOUT_SECS));
+    }
+
+    #[test]
+    fn test_resolve_attach_timeout_custom_override() {
+        let mut config = detrix_config::AdapterConnectionConfig::default();
+        config.attach_config_done_timeout_secs = Some(42);
+        let timeout = resolve_attach_timeout(&config);
+        assert_eq!(timeout, Duration::from_secs(42));
+    }
 }

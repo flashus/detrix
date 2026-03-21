@@ -1,0 +1,90 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    command: start-dev --import-realm --health-enabled=true
+    ports:
+      - "18080:8080"
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      # Fix issuer URL in JWTs to use Docker-internal hostname.
+      # Without this, Keycloak uses the request URL (localhost:18080) which
+      # differs from the issuer the daemon validates (keycloak:8080).
+      KC_HOSTNAME_URL: http://keycloak:8080
+    volumes:
+      - ./keycloak/detrix-realm.json:/opt/keycloak/data/import/detrix-realm.json:ro
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '200 OK'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # Init container: fetches a long-lived service JWT from Keycloak and writes
+  # it to a shared volume. Both detrix-keycloak and test-app-go read this token.
+  token-init:
+    image: alpine:3.20
+    command: sh -c "apk add --no-cache curl > /dev/null 2>&1 && sh /scripts/fetch-token.sh"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: detrix
+      KEYCLOAK_CLIENT_ID: detrix-service
+      KEYCLOAK_USERNAME: go-service
+      KEYCLOAK_PASSWORD: go-service-pass
+      TOKEN_FILE: /shared/service-token
+    volumes:
+      - shared-token:/shared
+      - ./keycloak/fetch-token.sh:/scripts/fetch-token.sh:ro
+
+  detrix-keycloak:
+    build:
+      context: ../..
+      dockerfile: fixtures/docker/Dockerfile.server-keycloak
+    ports:
+      - "8098:8090"
+      - "50067:50061"
+    volumes:
+      - detrix-keycloak-data:/data/detrix
+      - ./detrix-keycloak.toml:/data/detrix/detrix.toml:ro
+      - shared-token:/shared:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      TOKEN_FILE: /shared/service-token
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      token-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/detrix", "status", "--config", "/data/detrix/detrix.toml", "-q"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  test-app-go:
+    build:
+      context: ../..
+      dockerfile: fixtures/docker/Dockerfile.go-keycloak
+    depends_on:
+      detrix-keycloak:
+        condition: service_healthy
+      token-init:
+        condition: service_completed_successfully
+    volumes:
+      - shared-token:/shared:ro
+    environment:
+      DETRIX_CLIENT_ENABLED: "1"
+      DETRIX_DAEMON_URL: http://detrix-keycloak:8090
+      DETRIX_CONTROL_HOST: "0.0.0.0"
+      DETRIX_HOST: test-app-go
+      DETRIX_CONTROL_PORT: "8091"
+      DETRIX_REGISTER_TIMEOUT: "30"
+      TOKEN_FILE: /shared/service-token
+
+volumes:
+  detrix-keycloak-data:
+  shared-token:

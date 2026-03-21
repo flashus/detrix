@@ -28,7 +28,7 @@ pub mod routes;
 pub mod server;
 pub mod websocket;
 
-pub use error::{ErrorResponse, HttpError, ToHttpOption, ToHttpResult};
+pub use error::{ErrorResponse, HttpError, ToHttpBadRequest, ToHttpOption, ToHttpResult};
 pub use middleware::{auth_middleware, AuthState};
 pub use routes::{create_router, RouterConfigError};
 pub use server::HttpServer;

@@ -22,7 +22,7 @@ use detrix_application::{
     EventRepositoryRef, JwksValidator, McpUsageRepositoryRef, SystemEventRepositoryRef,
     SystemEventService,
 };
-use detrix_config::{PortRegistry, ServiceType};
+use detrix_config::{PortRegistry, ServiceType, AUTO_AUTH_DEFAULT_USER_ID};
 use detrix_core::ParseLanguageExt;
 #[allow(unused_imports)]
 use detrix_logging::{debug, error, info, warn};
@@ -78,6 +78,19 @@ pub async fn run(
         Some(guard)
     } else {
         None
+    };
+
+    // DETRIX_CONFIG env var overrides the --config flag (useful for Docker restart tests
+    // that need to switch config without rebuilding the image).
+    let config_path_override;
+    let config_path = if let Some(env_path) = std::env::var("DETRIX_CONFIG")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        config_path_override = env_path;
+        &config_path_override
+    } else {
+        config_path
     };
 
     // Load configuration early to check port_fallback setting
@@ -148,9 +161,13 @@ pub async fn run(
             our_written_token = Some(auto_token.clone());
         }
 
-        // Enable auth with the token
+        // Enable auth with the auto-generated token as default admin user
         config.api.auth.mode = Some(detrix_config::AuthMode::Simple);
-        config.api.auth.bearer_token = Some(auto_token);
+        config.api.auth.users = vec![detrix_config::StaticUser::new(
+            auto_token,
+            AUTO_AUTH_DEFAULT_USER_ID.to_string(),
+            detrix_config::UserRole::Admin,
+        )];
     }
 
     // Determine if gRPC should be enabled (CLI flag OR config setting)
@@ -375,7 +392,8 @@ pub async fn run(
                 condition: metric_def.condition.clone(),
                 safety_level: metric_def.safety_level,
                 created_at: Some(chrono::Utc::now().timestamp_micros()),
-                created_by: None,
+                user_id: None,
+                agent_id: None,
                 // Default values for introspection fields (loaded from config later if needed)
                 capture_stack_trace: false,
                 stack_trace_ttl: None,

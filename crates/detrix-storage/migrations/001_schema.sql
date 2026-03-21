@@ -105,7 +105,7 @@ CREATE INDEX IF NOT EXISTS idx_metrics_enabled ON metrics(enabled);
 CREATE INDEX IF NOT EXISTS idx_metrics_language ON metrics(language);
 CREATE INDEX IF NOT EXISTS idx_metrics_connection_id ON metrics(connection_id);
 CREATE INDEX IF NOT EXISTS idx_metrics_connection_name ON metrics(connection_id, name);
--- Unique index on location + connection_id prevents multiple metrics at same file:line per connection
+-- NOTE: This index is superseded by migration 002_multiuser.sql which recreates it with user_id
 CREATE UNIQUE INDEX IF NOT EXISTS idx_metrics_location_connection ON metrics(location, connection_id);
 -- Anchor indexes
 CREATE INDEX IF NOT EXISTS idx_metrics_anchor_status ON metrics(anchor_status);

@@ -47,6 +47,7 @@ pub mod daemon_discovery;
 pub mod dap_scenarios;
 pub mod executor;
 pub mod jwt;
+pub mod mcp_bridge;
 pub mod port_registry;
 pub mod reporter;
 pub mod scenarios;
@@ -100,6 +101,9 @@ pub use grpc::{GrpcClient, GrpcStreamHandle};
 pub use mcp::McpClient;
 pub use rest::RestClient;
 pub use websocket::{EventMessage, WebSocketClient, WebSocketError, WebSocketHandle};
+
+// MCP bridge subprocess
+pub use mcp_bridge::{extract_text, McpBridgeProcess};
 
 // JWT testing utilities
 pub use jwt::{JwtBuilder, JwtKeyPair, MockJwksServer, TestClaims};

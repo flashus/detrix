@@ -21,6 +21,18 @@ pub use interceptor::{create_auth_interceptor, AuthInterceptorState};
 pub use metrics::MetricsServiceImpl;
 pub use streaming::StreamingServiceImpl;
 
+/// Extract AuthenticatedUser from gRPC request extensions.
+/// Always present — the interceptor injects a default Admin when auth is disabled.
+pub(crate) fn extract_user<T>(
+    request: &tonic::Request<T>,
+) -> Result<interceptor::AuthenticatedUser, tonic::Status> {
+    request
+        .extensions()
+        .get::<interceptor::AuthenticatedUser>()
+        .cloned()
+        .ok_or_else(|| tonic::Status::unauthenticated("Missing authentication"))
+}
+
 /// Extract and validate client_id from `x-detrix-client-id` gRPC metadata.
 ///
 /// Returns `Ok(None)` if the metadata key is absent (backwards compatible).

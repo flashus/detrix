@@ -13,7 +13,9 @@ pub async fn handle_toggle_metric(
     state: &Arc<ApiState>,
     request: Request<ToggleMetricRequest>,
 ) -> Result<Response<ToggleMetricResponse>, Status> {
+    let user = crate::grpc::extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
+    let scope = user.scope(client_id.clone());
     let req = request.into_inner();
     tracing::info!(
         metric_id = req.metric_id,
@@ -36,7 +38,7 @@ pub async fn handle_toggle_metric(
     let result = state
         .context
         .metric_service
-        .toggle_metric(metric_id, req.enabled)
+        .toggle_metric(metric_id, req.enabled, &scope)
         .await
         .to_status()?;
 
@@ -58,7 +60,9 @@ pub async fn handle_enable_group(
     state: &Arc<ApiState>,
     request: Request<GroupRequest>,
 ) -> Result<Response<GroupResponse>, Status> {
+    let user = crate::grpc::extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
+    let scope = user.scope(client_id.clone());
     let req = request.into_inner();
     tracing::info!(group = %req.group_name, ?client_id, "gRPC: enable_group");
 
@@ -66,7 +70,7 @@ pub async fn handle_enable_group(
     let result = state
         .context
         .metric_service
-        .enable_group(&req.group_name)
+        .enable_group(&req.group_name, &scope)
         .await
         .to_status()?;
 
@@ -93,7 +97,9 @@ pub async fn handle_disable_group(
     state: &Arc<ApiState>,
     request: Request<GroupRequest>,
 ) -> Result<Response<GroupResponse>, Status> {
+    let user = crate::grpc::extract_user(&request)?;
     let client_id = crate::grpc::extract_client_id(&request)?;
+    let scope = user.scope(client_id.clone());
     let req = request.into_inner();
     tracing::info!(group = %req.group_name, ?client_id, "gRPC: disable_group");
 
@@ -101,7 +107,7 @@ pub async fn handle_disable_group(
     let result = state
         .context
         .metric_service
-        .disable_group(&req.group_name)
+        .disable_group(&req.group_name, &scope)
         .await
         .to_status()?;
 

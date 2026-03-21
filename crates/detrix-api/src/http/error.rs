@@ -183,6 +183,9 @@ fn sanitize_error_message(err: &detrix_application::Error) -> String {
         // Auth errors - provide generic message
         Error::Auth(_) => "Authentication error".to_string(),
 
+        // Access denied - safe to expose reason
+        Error::AccessDenied(reason) => format!("Access denied: {}", reason),
+
         // Core domain errors - delegate to core error handling
         Error::Core(core_err) => sanitize_core_error(core_err),
     }
@@ -214,8 +217,40 @@ fn sanitize_core_error(err: &detrix_core::Error) -> String {
         // Configuration errors - don't expose paths
         Error::InvalidConfig(_) => "Configuration error".to_string(),
 
+        // Tenant ID validation - safe to expose
+        Error::InvalidTenantId(msg) => format!("Invalid tenant ID: {}", msg),
+
         // All other core errors - generic message
         _ => "An internal error occurred".to_string(),
+    }
+}
+
+/// Convert core domain errors to HTTP errors
+impl From<detrix_core::Error> for HttpError {
+    fn from(err: detrix_core::Error) -> Self {
+        use detrix_core::Error;
+
+        error!(error = %err, "API error occurred");
+
+        let error_code = err.code();
+        let message = sanitize_core_error(&err);
+        let status = match &err {
+            Error::MetricNotFound(_) => StatusCode::NOT_FOUND,
+            Error::InvalidLocation(_)
+            | Error::InvalidMetricName(_)
+            | Error::InvalidExpression(_)
+            | Error::DuplicateMetric(_)
+            | Error::MetricLocationConflict { .. }
+            | Error::SafetyViolation { .. }
+            | Error::InvalidTenantId(_) => StatusCode::BAD_REQUEST,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+
+        HttpError {
+            status,
+            message,
+            error_code,
+        }
     }
 }
 
@@ -250,6 +285,7 @@ impl From<detrix_application::Error> for HttpError {
                 | detrix_core::Error::DuplicateMetric(_)
                 | detrix_core::Error::MetricLocationConflict { .. } => StatusCode::BAD_REQUEST,
                 detrix_core::Error::SafetyViolation { .. } => StatusCode::BAD_REQUEST,
+                detrix_core::Error::InvalidTenantId(_) => StatusCode::BAD_REQUEST,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
 
@@ -258,6 +294,9 @@ impl From<detrix_application::Error> for HttpError {
 
             // 401 Unauthorized
             Error::Auth(_) => StatusCode::UNAUTHORIZED,
+
+            // 403 Forbidden
+            Error::AccessDenied(_) => StatusCode::FORBIDDEN,
 
             // 500 Internal Server Error (default)
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -271,41 +310,76 @@ impl From<detrix_application::Error> for HttpError {
     }
 }
 
-/// Extension trait for converting Results to HTTP results
-///
-/// Provides ergonomic error conversion for handlers:
-/// ```ignore
-/// let metrics = service.list_metrics().await.http_context("Failed to list metrics")?;
-/// ```
-pub trait ToHttpResult<T> {
-    /// Convert to HTTP result with context message (internal server error)
-    fn http_context(self, context: &str) -> Result<T, HttpError>;
-
-    /// Convert to HTTP result without additional context (internal server error)
-    fn http_err(self) -> Result<T, HttpError>;
-
-    /// Convert to HTTP bad request error with context
-    fn http_bad_request_context(self, context: &str) -> Result<T, HttpError>;
-
-    /// Convert to HTTP bad request error
-    fn http_bad_request(self) -> Result<T, HttpError>;
+/// Convert proto/gRPC conversion errors to HTTP 500.
+impl From<crate::grpc::conversions::ConversionError> for HttpError {
+    fn from(err: crate::grpc::conversions::ConversionError) -> Self {
+        HttpError::internal(format!("Conversion error: {err}"))
+    }
 }
 
-impl<T, E: std::fmt::Display> ToHttpResult<T> for Result<T, E> {
+/// Extension trait for converting `Result<T, E: Into<HttpError>>` to HTTP results.
+///
+/// Preserves the typed HTTP status code from the error conversion:
+/// `AccessDenied` → 403, `MetricNotFound` → 404, etc.
+///
+/// - `http_context`: adds a context prefix to 5xx messages; 4xx pass through as-is.
+/// - `http_err`: converts without adding context.
+///
+/// ```ignore
+/// service.remove_metric(id, &scope).await.http_context("Failed to delete metric")?;
+/// ```
+pub trait ToHttpResult<T> {
+    /// Convert to HTTP result, preserving 4xx status codes.
+    /// For 5xx errors, `context` is prepended to the message.
+    fn http_context(self, context: &str) -> Result<T, HttpError>;
+
+    /// Convert to HTTP result using typed error conversion, without added context.
+    fn http_err(self) -> Result<T, HttpError>;
+}
+
+impl<T, E: Into<HttpError>> ToHttpResult<T> for Result<T, E> {
     fn http_context(self, context: &str) -> Result<T, HttpError> {
-        self.map_err(|e| HttpError::internal(format!("{}: {}", context, e)))
+        self.map_err(|e| {
+            let http_err = e.into();
+            if http_err.status.is_server_error() {
+                HttpError {
+                    message: format!("{}: {}", context, http_err.message),
+                    ..http_err
+                }
+            } else {
+                http_err
+            }
+        })
     }
 
     fn http_err(self) -> Result<T, HttpError> {
-        self.map_err(|e| HttpError::internal(e.to_string()))
+        self.map_err(|e| e.into())
+    }
+}
+
+/// Extension trait for converting any `Result<T, E: Display>` to a 400 Bad Request.
+///
+/// Use this for parse/validation errors on non-application types (port parsing,
+/// language strings, safety levels, etc.).
+///
+/// ```ignore
+/// parse_language(&payload.language).http_bad_request()?;
+/// ```
+pub trait ToHttpBadRequest<T> {
+    /// Convert to a 400 Bad Request error.
+    fn http_bad_request(self) -> Result<T, HttpError>;
+
+    /// Convert to a 400 Bad Request error with a context prefix.
+    fn http_bad_request_context(self, context: &str) -> Result<T, HttpError>;
+}
+
+impl<T, E: std::fmt::Display> ToHttpBadRequest<T> for Result<T, E> {
+    fn http_bad_request(self) -> Result<T, HttpError> {
+        self.map_err(|e| HttpError::bad_request(e.to_string()))
     }
 
     fn http_bad_request_context(self, context: &str) -> Result<T, HttpError> {
         self.map_err(|e| HttpError::bad_request(format!("{}: {}", context, e)))
-    }
-
-    fn http_bad_request(self) -> Result<T, HttpError> {
-        self.map_err(|e| HttpError::bad_request(e.to_string()))
     }
 }
 
@@ -361,13 +435,35 @@ mod tests {
     }
 
     #[test]
-    fn test_to_http_result_with_context() {
-        let result: Result<(), &str> = Err("database error");
-        let http_result = result.http_context("Failed to query");
+    fn test_to_http_bad_request_with_context() {
+        let result: Result<(), &str> = Err("invalid input");
+        let http_result = result.http_bad_request_context("Failed to parse");
         assert!(http_result.is_err());
         let err = http_result.unwrap_err();
-        assert!(err.message.contains("Failed to query"));
-        assert!(err.message.contains("database error"));
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("Failed to parse"));
+        assert!(err.message.contains("invalid input"));
+    }
+
+    #[test]
+    fn test_to_http_result_typed_preserves_4xx() {
+        let app_err = detrix_application::Error::AccessDenied("not your metric".to_string());
+        let result: detrix_application::Result<()> = Err(app_err);
+        let http_result = result.http_context("Failed to delete");
+        let err = http_result.unwrap_err();
+        // 4xx is preserved as-is — context prefix is NOT added
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert!(!err.message.contains("Failed to delete"));
+    }
+
+    #[test]
+    fn test_to_http_result_typed_adds_context_on_5xx() {
+        let app_err = detrix_application::Error::Storage("disk full".to_string());
+        let result: detrix_application::Result<()> = Err(app_err);
+        let http_result = result.http_context("Failed to save");
+        let err = http_result.unwrap_err();
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(err.message.contains("Failed to save"));
     }
 
     #[test]

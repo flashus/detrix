@@ -216,6 +216,11 @@ busy_timeout_ms = 3000
 # Longer values are truncated with "..." suffix
 # max_value_length = 100
 
+# Timeout in seconds for the configurationDone response in AttachPid mode.
+# lldb-dap may take minutes to enumerate shared libraries during ptrace attach.
+# Default: 120 (from defaults::ATTACH_TIMEOUT_SECS)
+# attach_config_done_timeout_secs = 300
+
 # Automatic reconnection configuration
 [adapter.reconnect]
 # Enable automatic reconnection
@@ -315,14 +320,22 @@ max_age_seconds = 3600
 # ============================================================================
 # Authentication modes:
 # - disabled: No authentication (default)
-# - simple: Static bearer token from config
+# - simple: Per-user static tokens from config
 # - external: JWT validation via JWKS endpoint
 [api.auth]
 # Authentication mode
 # mode = "disabled"
 
-# Bearer token for simple mode
-# bearer_token = "your-secret-token"
+# Per-user static tokens for simple mode
+# [[api.auth.users]]
+# token = "dtx_alice_secret"
+# user_id = "alice"
+# role = "user"
+#
+# [[api.auth.users]]
+# token = "dtx_admin_secret"
+# user_id = "admin"
+# role = "admin"
 
 # Public endpoints excluded from authentication
 # public_endpoints = ["/health", "/status", "/metrics", "/api/health", "/api/status"]
@@ -333,6 +346,8 @@ max_age_seconds = 3600
 # issuer = "https://auth.example.com"
 # audience = "detrix"
 # cache_ttl_seconds = 300
+# admin_role_claim = "roles"
+# admin_role_value = "detrix-admin"
 
 # ============================================================================
 # Streaming Configuration (WebSocket and gRPC)

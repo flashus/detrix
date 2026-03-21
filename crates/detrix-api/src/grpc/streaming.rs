@@ -7,8 +7,10 @@ use crate::error::ToStatusResult;
 use crate::generated::detrix::v1::{streaming_service_server::StreamingService, *};
 use crate::grpc::conversions::core_event_to_proto;
 use crate::state::ApiState;
+use detrix_application::{MetricFilter, MetricScope};
 use futures::Stream;
 use regex::Regex;
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -24,6 +26,22 @@ impl StreamingServiceImpl {
     pub fn new(state: Arc<ApiState>) -> Self {
         Self { state }
     }
+
+    /// Build a set of metric IDs the given scope is allowed to read.
+    async fn allowed_metric_ids(&self, scope: &MetricScope) -> Result<HashSet<u64>, Status> {
+        let filter = MetricFilter {
+            user_id: scope.user_id().map(|s| s.to_string()),
+            ..Default::default()
+        };
+        let (metrics, _) = self
+            .state
+            .context
+            .metric_service
+            .list_metrics_filtered(&filter, usize::MAX, 0)
+            .await
+            .to_status()?;
+        Ok(metrics.iter().filter_map(|m| m.id.map(|id| id.0)).collect())
+    }
 }
 
 #[tonic::async_trait]
@@ -36,8 +54,23 @@ impl StreamingService for StreamingServiceImpl {
         &self,
         request: Request<StreamRequest>,
     ) -> Result<Response<Self::StreamMetricsStream>, Status> {
+        // Extract user BEFORE into_inner() consumes the request
+        let user = crate::grpc::extract_user(&request)?;
+        let client_id = crate::grpc::extract_client_id(&request)?;
+        let scope = user.scope(client_id);
+
         let req = request.into_inner();
-        let metric_ids: Vec<u64> = req.metric_ids;
+        let mut metric_ids: Vec<u64> = req.metric_ids;
+
+        // Non-admin scope: filter to only allowed metric IDs
+        if scope.user_id().is_some() {
+            let allowed = self.allowed_metric_ids(&scope).await?;
+            if metric_ids.is_empty() {
+                metric_ids = allowed.into_iter().collect();
+            } else {
+                metric_ids.retain(|id| allowed.contains(id));
+            }
+        }
 
         // Subscribe to event broadcast
         let mut rx = self.state.subscribe_events();
@@ -74,15 +107,25 @@ impl StreamingService for StreamingServiceImpl {
         &self,
         request: Request<GroupStreamRequest>,
     ) -> Result<Response<Self::StreamGroupStream>, Status> {
+        // Extract user BEFORE into_inner() consumes the request
+        let user = crate::grpc::extract_user(&request)?;
+        let client_id = crate::grpc::extract_client_id(&request)?;
+        let scope = user.scope(client_id);
+
         let req = request.into_inner();
         let group_name = req.group_name;
 
-        // Get all metrics in this group
-        let metrics = self
+        // Get all metrics in this group — push user_id filter to DB level
+        let filter = detrix_application::ports::MetricFilter {
+            user_id: scope.user_id().map(String::from),
+            group: Some(group_name.clone()),
+            ..Default::default()
+        };
+        let (metrics, _) = self
             .state
             .context
             .metric_service
-            .list_metrics_by_group(&group_name)
+            .list_metrics_filtered(&filter, usize::MAX, 0)
             .await
             .to_status()?;
 
@@ -128,7 +171,19 @@ impl StreamingService for StreamingServiceImpl {
         &self,
         request: Request<StreamAllRequest>,
     ) -> Result<Response<Self::StreamAllStream>, Status> {
+        // Extract user BEFORE into_inner() consumes the request
+        let user = crate::grpc::extract_user(&request)?;
+        let client_id = crate::grpc::extract_client_id(&request)?;
+        let scope = user.scope(client_id);
+
         let req = request.into_inner();
+
+        // Non-admin scope: build allowed metric ID set
+        let allowed_ids: Option<std::collections::HashSet<u64>> = if scope.user_id().is_some() {
+            Some(self.allowed_metric_ids(&scope).await?)
+        } else {
+            None
+        };
 
         // Compile thread filter regex if provided
         let thread_filter = req
@@ -145,11 +200,18 @@ impl StreamingService for StreamingServiceImpl {
         // Subscribe to event broadcast
         let mut rx = self.state.subscribe_events();
 
-        // Create a stream that filters events by thread name
+        // Create a stream that filters events by thread name and scope
         let stream = async_stream::stream! {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
+                        // Apply scope filter for non-admin users
+                        if let Some(ref allowed) = allowed_ids {
+                            if !allowed.contains(&event.metric_id.0) {
+                                continue;
+                            }
+                        }
+
                         // Apply thread filter if provided
                         let matches = match (&thread_filter, &event.thread_name) {
                             (Some(regex), Some(name)) => regex.is_match(name),
@@ -182,6 +244,11 @@ impl StreamingService for StreamingServiceImpl {
         &self,
         request: Request<QueryRequest>,
     ) -> Result<Response<QueryResponse>, Status> {
+        // Extract user BEFORE into_inner() consumes the request
+        let user = crate::grpc::extract_user(&request)?;
+        let client_id = crate::grpc::extract_client_id(&request)?;
+        let scope = user.scope(client_id);
+
         let req = request.into_inner();
 
         // Get query limits from ConfigService (hot-reload support)
@@ -196,11 +263,21 @@ impl StreamingService for StreamingServiceImpl {
         let cursor_filter = req.cursor.as_ref().and_then(|c| parse_cursor(c));
 
         // Convert metric IDs
-        let metric_ids: Vec<detrix_core::MetricId> = req
+        let mut metric_ids: Vec<detrix_core::MetricId> = req
             .metric_ids
             .iter()
             .map(|&id| detrix_core::MetricId(id))
             .collect();
+
+        // Non-admin scope: filter to only allowed metric IDs
+        if scope.user_id().is_some() {
+            let allowed = self.allowed_metric_ids(&scope).await?;
+            if metric_ids.is_empty() {
+                metric_ids = allowed.into_iter().map(detrix_core::MetricId).collect();
+            } else {
+                metric_ids.retain(|id| allowed.contains(&id.0));
+            }
+        }
 
         // Query events - fetch extra to determine has_more
         let fetch_limit = limit + 1;

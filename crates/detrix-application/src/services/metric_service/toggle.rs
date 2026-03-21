@@ -1,8 +1,9 @@
 //! Toggle and group operations for MetricService
 
 use crate::ports::{GroupSummary, ToggleMetricResult};
+use crate::scope::MetricScope;
 use crate::{GroupOperationResult, Result};
-use detrix_core::{GroupInfo, MetricId, SystemEvent};
+use detrix_core::{ConnectionId, GroupInfo, MetricId, SystemEvent};
 use std::collections::HashMap;
 
 use super::MetricService;
@@ -10,17 +11,21 @@ use super::MetricService;
 impl MetricService {
     /// Toggle metric enabled status
     ///
-    /// Updates storage first, then adapter. If adapter fails, storage is rolled back.
+    /// Checks scope permission, updates storage, then syncs the DAP logpoint.
     /// Returns rich result with both storage and DAP confirmation status.
     pub async fn toggle_metric(
         &self,
         metric_id: MetricId,
         enabled: bool,
+        scope: &MetricScope,
     ) -> Result<ToggleMetricResult> {
         let mut metric =
             self.storage.find_by_id(metric_id).await?.ok_or_else(|| {
                 detrix_core::Error::MetricNotFound(format!("Metric {}", metric_id))
             })?;
+
+        // Scope check
+        Self::check_mutate_access(scope, &metric)?;
 
         let was_enabled = metric.enabled;
         if was_enabled == enabled {
@@ -32,36 +37,64 @@ impl MetricService {
         // Update in storage first
         self.storage.update(&metric).await?;
 
-        // Get connection-specific adapter
-        let adapter = self
-            .get_adapter_for_connection(&metric.connection_id)
-            .await?;
+        // Build the merged logpoint for this location (same logic as sync_logpoint)
+        // and apply it via the adapter — propagating errors for rollback.
+        // We inline the merge instead of calling sync_logpoint because toggle is
+        // user-initiated and must fail+rollback on adapter errors, whereas sync_logpoint
+        // is fire-and-forget (used by delete where the metric is already gone from storage).
+        let toggle_result = async {
+            let adapter = self
+                .get_adapter_for_connection(&metric.connection_id)
+                .await?;
 
-        // Update in DAP adapter and capture the result
-        let toggle_result = if enabled {
-            match adapter.set_metric(&metric).await {
-                Ok(set_result) => Ok(ToggleMetricResult::enabled(&set_result)),
-                Err(e) => Err(e),
-            }
-        } else {
-            match adapter.remove_metric(&metric).await {
-                Ok(remove_result) => Ok(ToggleMetricResult::disabled(&remove_result)),
-                Err(e) => Err(e),
-            }
-        };
+            let all_at_loc = self
+                .storage
+                .find_all_at_location(
+                    &metric.connection_id,
+                    &metric.location.file,
+                    metric.location.line,
+                )
+                .await?;
 
-        // Rollback storage if adapter fails
+            let enabled_at_loc: Vec<&detrix_core::Metric> =
+                all_at_loc.iter().filter(|m| m.enabled).collect();
+
+            if !enabled {
+                // Disabling: remove this metric from adapter's active_metrics first.
+                // Without this, the adapter still tracks the disabled metric and includes
+                // its stale breakpoint in setBreakpoints calls.
+                adapter.remove_metric(&metric).await?;
+            }
+
+            if enabled_at_loc.is_empty() {
+                // remove_metric above already handled the DAP cleanup
+            } else {
+                // Merge expressions from all enabled metrics at this location
+                let merged_exprs: Vec<String> = enabled_at_loc
+                    .iter()
+                    .flat_map(|m| m.expressions.iter().cloned())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let mut merged = enabled_at_loc[0].clone();
+                merged.expressions = merged_exprs;
+                adapter.set_metric(&merged).await?;
+            }
+            Ok::<(), crate::Error>(())
+        }
+        .await;
+
         if let Err(e) = toggle_result {
+            // Rollback storage on adapter failure
             metric.enabled = was_enabled;
             if let Err(rollback_err) = self.storage.update(&metric).await {
-                // Return compound error with both primary and rollback failure
                 return Err(crate::Error::OperationWithRollbackFailure {
                     primary: e.to_string(),
                     rollback: rollback_err.to_string(),
                     context: format!("toggle metric '{}'", metric.name),
                 });
             }
-            return Err(e.into());
+            return Err(e);
         }
 
         // Emit metric toggled event
@@ -75,7 +108,16 @@ impl MetricService {
             tracing::warn!("No subscribers for metric_toggled event: {e}");
         }
 
-        Ok(toggle_result?)
+        Ok(ToggleMetricResult {
+            storage_updated: true,
+            dap_confirmed: true,
+            actual_line: if enabled {
+                Some(metric.location.line)
+            } else {
+                None
+            },
+            dap_message: None,
+        })
     }
 
     /// Enable all metrics in a group
@@ -91,20 +133,28 @@ impl MetricService {
     /// let result = service.enable_group("trading").await?;
     /// result.ensure_complete()?;  // Err if any metrics failed
     /// ```
-    pub async fn enable_group(&self, group: &str) -> Result<GroupOperationResult> {
+    pub async fn enable_group(
+        &self,
+        group: &str,
+        scope: &MetricScope,
+    ) -> Result<GroupOperationResult> {
         let metrics = self.storage.find_by_group(group).await?;
         let mut succeeded = 0;
         let mut failed: Vec<(String, String)> = Vec::new();
+        let mut skipped = 0u64;
 
-        // Filter metrics that need enabling and group by connection
+        // Update storage for each metric that needs enabling, collect affected locations.
         //
         // NOTE: Individual storage.update() calls are intentional here (not N+1 anti-pattern).
         // This allows partial success - if one metric fails to update, others still get enabled.
-        // A batch update would be all-or-nothing, which is worse for user experience in group
-        // operations where partial success is preferred over complete failure.
-        let mut by_connection: HashMap<detrix_core::ConnectionId, Vec<detrix_core::Metric>> =
+        let mut locations: HashMap<(ConnectionId, String, u32), detrix_core::Metric> =
             HashMap::new();
         for mut metric in metrics {
+            // Scope check: skip metrics the caller can't mutate
+            if !scope.can_mutate(&metric) {
+                skipped += 1;
+                continue;
+            }
             if !metric.enabled {
                 metric.enabled = true;
 
@@ -114,76 +164,46 @@ impl MetricService {
                     continue;
                 }
 
-                by_connection
-                    .entry(metric.connection_id.clone())
-                    .or_default()
-                    .push(metric);
+                let key = (
+                    metric.connection_id.clone(),
+                    metric.location.file.clone(),
+                    metric.location.line,
+                );
+                locations.entry(key).or_insert(metric);
+                succeeded += 1;
             }
         }
 
-        // Process each connection's metrics using batch operations
-        for (connection_id, metrics_to_enable) in by_connection {
-            let adapter = match self.get_adapter_for_connection(&connection_id).await {
-                Ok(a) => a,
-                Err(e) => {
-                    // Rollback storage for all metrics in this connection
-                    for mut metric in metrics_to_enable {
-                        metric.enabled = false;
-                        let error_msg =
-                            if let Err(rollback_err) = self.storage.update(&metric).await {
-                                format!(
-                                    "No adapter: {}. Additionally, rollback failed: {}",
-                                    e, rollback_err
-                                )
-                            } else {
-                                format!("No adapter: {}", e)
-                            };
-                        failed.push((metric.name.clone(), error_msg));
-                    }
-                    continue;
-                }
-            };
-
-            // Build O(1) lookup map for metrics by name (for rollback)
-            let metrics_by_name: HashMap<String, detrix_core::Metric> = metrics_to_enable
-                .iter()
-                .map(|m| (m.name.clone(), m.clone()))
-                .collect();
-
-            // Use batch set operation
-            let batch_result = adapter
-                .set_metrics_batch(
-                    &metrics_to_enable,
-                    self.batch_threshold(),
-                    self.batch_concurrency(),
-                )
-                .await;
-            succeeded += batch_result.success_count();
-
-            // Handle failures with rollback (O(1) lookup per failure)
-            for failed_metric in batch_result.failed {
-                if let Some(metric) = metrics_by_name.get(&failed_metric.name) {
-                    let mut metric = metric.clone();
-                    metric.enabled = false;
-                    if let Err(rollback_err) = self.storage.update(&metric).await {
-                        failed.push((
-                            metric.name.clone(),
-                            format!(
-                                "Adapter error: {}. Additionally, rollback failed: {}",
-                                failed_metric.error, rollback_err
-                            ),
-                        ));
-                    } else {
-                        failed.push((
-                            metric.name.clone(),
-                            format!("Adapter error: {}", failed_metric.error),
-                        ));
-                    }
-                }
+        // Sync merged logpoints for each affected location
+        for ((conn_id, file, line), fallback) in &locations {
+            if let Err(e) = self
+                .sync_logpoint(conn_id, file, *line, Some(fallback))
+                .await
+            {
+                tracing::warn!(
+                    file = %file,
+                    line = line,
+                    error = %e,
+                    "sync_logpoint failed during enable_group"
+                );
             }
         }
 
-        Ok(GroupOperationResult { succeeded, failed })
+        if skipped > 0 {
+            tracing::info!(
+                group,
+                succeeded,
+                failed = failed.len(),
+                skipped,
+                "enable_group: metrics skipped due to scope restrictions"
+            );
+        }
+
+        Ok(GroupOperationResult {
+            succeeded,
+            failed,
+            skipped,
+        })
     }
 
     /// Disable all metrics in a group
@@ -199,19 +219,28 @@ impl MetricService {
     /// let result = service.disable_group("trading").await?;
     /// result.ensure_complete()?;  // Err if any metrics failed
     /// ```
-    pub async fn disable_group(&self, group: &str) -> Result<GroupOperationResult> {
+    pub async fn disable_group(
+        &self,
+        group: &str,
+        scope: &MetricScope,
+    ) -> Result<GroupOperationResult> {
         let metrics = self.storage.find_by_group(group).await?;
         let mut succeeded = 0;
         let mut failed: Vec<(String, String)> = Vec::new();
+        let mut skipped = 0u64;
 
-        // Filter metrics that need disabling and group by connection
+        // Update storage for each metric that needs disabling, collect affected locations.
         //
         // NOTE: Individual storage.update() calls are intentional here (not N+1 anti-pattern).
         // This allows partial success - if one metric fails to update, others still get disabled.
-        // See enable_group() for full explanation.
-        let mut by_connection: HashMap<detrix_core::ConnectionId, Vec<detrix_core::Metric>> =
+        let mut locations: HashMap<(ConnectionId, String, u32), detrix_core::Metric> =
             HashMap::new();
         for mut metric in metrics {
+            // Scope check: skip metrics the caller can't mutate
+            if !scope.can_mutate(&metric) {
+                skipped += 1;
+                continue;
+            }
             if metric.enabled {
                 metric.enabled = false;
 
@@ -221,76 +250,46 @@ impl MetricService {
                     continue;
                 }
 
-                by_connection
-                    .entry(metric.connection_id.clone())
-                    .or_default()
-                    .push(metric);
+                let key = (
+                    metric.connection_id.clone(),
+                    metric.location.file.clone(),
+                    metric.location.line,
+                );
+                locations.entry(key).or_insert(metric);
+                succeeded += 1;
             }
         }
 
-        // Process each connection's metrics using batch operations
-        for (connection_id, metrics_to_disable) in by_connection {
-            let adapter = match self.get_adapter_for_connection(&connection_id).await {
-                Ok(a) => a,
-                Err(e) => {
-                    // Rollback storage for all metrics in this connection
-                    for mut metric in metrics_to_disable {
-                        metric.enabled = true;
-                        let error_msg =
-                            if let Err(rollback_err) = self.storage.update(&metric).await {
-                                format!(
-                                    "No adapter: {}. Additionally, rollback failed: {}",
-                                    e, rollback_err
-                                )
-                            } else {
-                                format!("No adapter: {}", e)
-                            };
-                        failed.push((metric.name.clone(), error_msg));
-                    }
-                    continue;
-                }
-            };
-
-            // Build O(1) lookup map for metrics by name (for rollback)
-            let metrics_by_name: HashMap<String, detrix_core::Metric> = metrics_to_disable
-                .iter()
-                .map(|m| (m.name.clone(), m.clone()))
-                .collect();
-
-            // Use batch remove operation
-            let batch_result = adapter
-                .remove_metrics_batch(
-                    &metrics_to_disable,
-                    self.batch_threshold(),
-                    self.batch_concurrency(),
-                )
-                .await;
-            succeeded += batch_result.succeeded;
-
-            // Handle failures with rollback (O(1) lookup per failure)
-            for failed_metric in batch_result.failed {
-                if let Some(metric) = metrics_by_name.get(&failed_metric.name) {
-                    let mut metric = metric.clone();
-                    metric.enabled = true;
-                    if let Err(rollback_err) = self.storage.update(&metric).await {
-                        failed.push((
-                            metric.name.clone(),
-                            format!(
-                                "Adapter error: {}. Additionally, rollback failed: {}",
-                                failed_metric.error, rollback_err
-                            ),
-                        ));
-                    } else {
-                        failed.push((
-                            metric.name.clone(),
-                            format!("Adapter error: {}", failed_metric.error),
-                        ));
-                    }
-                }
+        // Sync merged logpoints for each affected location
+        for ((conn_id, file, line), fallback) in &locations {
+            if let Err(e) = self
+                .sync_logpoint(conn_id, file, *line, Some(fallback))
+                .await
+            {
+                tracing::warn!(
+                    file = %file,
+                    line = line,
+                    error = %e,
+                    "sync_logpoint failed during disable_group"
+                );
             }
         }
 
-        Ok(GroupOperationResult { succeeded, failed })
+        if skipped > 0 {
+            tracing::info!(
+                group,
+                succeeded,
+                failed = failed.len(),
+                skipped,
+                "disable_group: metrics skipped due to scope restrictions"
+            );
+        }
+
+        Ok(GroupOperationResult {
+            succeeded,
+            failed,
+            skipped,
+        })
     }
 
     /// List all groups with metric counts (PERF-02 N+1 fix)
@@ -328,28 +327,58 @@ impl MetricService {
         Ok(summaries)
     }
 
+    /// List group summaries respecting multi-tenant scope.
+    ///
+    /// Admin scope: uses efficient SQL GROUP BY from storage.
+    /// User/Agent scope: uses SQL GROUP BY with user_id filter for efficient tenant-scoped aggregation.
+    pub async fn list_group_summaries_scoped(
+        &self,
+        scope: &MetricScope,
+    ) -> Result<Vec<GroupSummary>> {
+        match scope.user_id() {
+            None => {
+                // Admin: all groups
+                let summaries = self.storage.get_group_summaries().await?;
+                Ok(summaries)
+            }
+            Some(uid) => {
+                // User: SQL-level GROUP BY with user_id filter
+                let summaries = self.storage.get_group_summaries_by_user(uid).await?;
+                Ok(summaries)
+            }
+        }
+    }
+
     /// Disable all metrics created by a specific client.
     ///
     /// Used by switch_daemon(disable_metrics=true) for user-scoped cleanup.
-    /// Only disables metrics where `created_by` matches the given client identity.
+    /// Only disables metrics where `user_id` matches the given client identity.
     ///
     /// # Returns
     /// Number of metrics that were disabled.
     pub async fn disable_metrics_by_owner(&self, client_identity: &str) -> Result<u64> {
-        let all_metrics = self.list_metrics().await?;
+        use detrix_ports::MetricFilter;
+
+        let filter = MetricFilter {
+            user_id: Some(client_identity.to_string()),
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let (metrics, _) = self.list_metrics_filtered(&filter, usize::MAX, 0).await?;
         let mut disabled = 0u64;
 
-        for metric in all_metrics {
-            if metric.created_by.as_deref() == Some(client_identity) && metric.enabled {
-                if let Some(metric_id) = metric.id {
-                    if let Err(e) = self.toggle_metric(metric_id, false).await {
-                        tracing::warn!(
-                            "Failed to disable metric {} for client {}: {e}",
-                            metric_id,
-                            client_identity
-                        );
-                    }
-                    disabled += 1;
+        // Use Admin scope — this is an internal operation triggered by disconnect
+        let scope = MetricScope::Admin;
+
+        for metric in metrics {
+            if let Some(metric_id) = metric.id {
+                match self.toggle_metric(metric_id, false, &scope).await {
+                    Ok(_) => disabled += 1,
+                    Err(e) => tracing::warn!(
+                        "Failed to disable metric {} for client {}: {e}",
+                        metric_id,
+                        client_identity
+                    ),
                 }
             }
         }

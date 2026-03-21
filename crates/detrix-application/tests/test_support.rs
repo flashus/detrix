@@ -1,8 +1,8 @@
 use detrix_application::{
-    DapAdapter, DapAdapterFactory, DapAdapterRef, EventRepository, MetricRepository,
-    RemoveMetricResult, SetMetricResult,
+    DapAdapter, DapAdapterFactory, DapAdapterRef, EventRepository, RemoveMetricResult,
+    SetMetricResult,
 };
-use detrix_core::{ConnectionId, Metric, MetricEvent, MetricId, Result};
+use detrix_core::{Metric, MetricEvent, MetricId, Result};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -15,8 +15,9 @@ use tokio::sync::{Mutex, RwLock};
 use std::sync::Mutex as StdMutex;
 use tokio::sync::mpsc;
 
-// Use canonical MockConnectionRepository from detrix-testing
+// Use canonical mocks from detrix-testing
 pub use detrix_testing::MockConnectionRepository;
+pub use detrix_testing::MockMetricRepository;
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -248,91 +249,6 @@ impl DapAdapterFactory for SimpleMockAdapterFactory {
         _pid: Option<u32>,
     ) -> Result<DapAdapterRef> {
         Ok(Arc::new(SimpleMockDapAdapter::new(host, port)))
-    }
-}
-
-pub struct MockMetricRepository;
-
-impl MockMetricRepository {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait::async_trait]
-impl MetricRepository for MockMetricRepository {
-    async fn save_with_options(&self, _metric: &Metric, _upsert: bool) -> Result<MetricId> {
-        Ok(MetricId(1))
-    }
-
-    async fn find_by_id(&self, _id: MetricId) -> Result<Option<Metric>> {
-        Ok(None)
-    }
-
-    async fn find_by_name(&self, _name: &str) -> Result<Option<Metric>> {
-        Ok(None)
-    }
-
-    async fn find_all(&self) -> Result<Vec<Metric>> {
-        Ok(Vec::new())
-    }
-
-    async fn find_paginated(&self, _limit: usize, _offset: usize) -> Result<(Vec<Metric>, u64)> {
-        Ok((Vec::new(), 0))
-    }
-
-    async fn count_all(&self) -> Result<u64> {
-        Ok(0)
-    }
-
-    async fn find_by_group(&self, _group: &str) -> Result<Vec<Metric>> {
-        Ok(Vec::new())
-    }
-
-    async fn find_by_connection_id(&self, _connection_id: &ConnectionId) -> Result<Vec<Metric>> {
-        Ok(Vec::new())
-    }
-
-    async fn update(&self, _metric: &Metric) -> Result<()> {
-        Ok(())
-    }
-
-    async fn delete(&self, _id: MetricId) -> Result<()> {
-        Ok(())
-    }
-
-    async fn exists_by_name(&self, _name: &str) -> Result<bool> {
-        Ok(false)
-    }
-
-    async fn find_by_location(
-        &self,
-        _connection_id: &ConnectionId,
-        _file: &str,
-        _line: u32,
-    ) -> Result<Option<Metric>> {
-        Ok(None)
-    }
-
-    async fn find_filtered(
-        &self,
-        _filter: &detrix_application::ports::MetricFilter,
-        _limit: usize,
-        _offset: usize,
-    ) -> Result<(Vec<Metric>, u64)> {
-        Ok((Vec::new(), 0))
-    }
-
-    async fn get_group_summaries(&self) -> Result<Vec<detrix_application::ports::GroupSummary>> {
-        Ok(Vec::new())
-    }
-
-    async fn delete_by_connection_id(&self, _connection_id: &ConnectionId) -> Result<u64> {
-        Ok(0)
-    }
-
-    async fn migrate_connection_id(&self, _from: &ConnectionId, _to: &ConnectionId) -> Result<u64> {
-        Ok(0)
     }
 }
 

@@ -81,7 +81,7 @@ go install github.com/go-delve/delve/cmd/dlv@latest
 Add to your `Cargo.toml`:
 ```toml
 [dependencies]
-detrix-rs = "1.1.1"
+detrix-rs = "1.2.0"
 ```
 
 **Requires:** `lldb-dap` installed (macOS/Linux). On Windows, Detrix uses CodeLLDB which is downloaded automatically. See [Rust Client README](../clients/rust/README.md#requirements) for install instructions per platform.

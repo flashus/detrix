@@ -4,11 +4,13 @@
 
 use crate::grpc::conversions::core_event_to_proto;
 use crate::http::error::{HttpError, ToHttpOption, ToHttpResult};
+use crate::http::middleware::AuthenticatedUser;
 use crate::state::ApiState;
 use crate::types::ProtoMetricEvent;
 use axum::{
     extract::{Path, Query, State},
-    Json,
+    http::HeaderMap,
+    Extension, Json,
 };
 use detrix_core::MetricId;
 use serde::{Deserialize, Serialize};
@@ -41,9 +43,14 @@ pub struct MetricValueResponse {
 /// - 404 Not Found: Metric or events not found
 pub async fn get_metric_value(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(id): Path<u64>,
 ) -> Result<Json<MetricValueResponse>, HttpError> {
     info!("REST: get_metric_value (id={})", id);
+
+    let client_id = super::extract_client_id(&headers)?;
+    let scope = user.scope(client_id);
 
     // Get metric first for its name
     let metric = state
@@ -53,6 +60,11 @@ pub async fn get_metric_value(
         .await
         .http_context("Failed to get metric")?
         .http_not_found(&format!("Metric {}", id))?;
+
+    // Enforce read scope — return not_found to avoid leaking existence
+    if !scope.can_read(&metric) {
+        return Err(HttpError::not_found(format!("Metric {}", id)));
+    }
 
     // Query latest event
     let events = state
@@ -90,8 +102,10 @@ pub struct MetricHistoryParams {
     pub until: Option<i64>,
 }
 
+const DEFAULT_HISTORY_LIMIT: i64 = 100;
+
 fn default_history_limit() -> i64 {
-    100
+    DEFAULT_HISTORY_LIMIT
 }
 
 /// Metric history response
@@ -126,6 +140,8 @@ pub struct MetricHistoryResponse {
 /// - 404 Not Found: Metric with given ID does not exist
 pub async fn get_metric_history(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(id): Path<u64>,
     Query(params): Query<MetricHistoryParams>,
 ) -> Result<Json<MetricHistoryResponse>, HttpError> {
@@ -133,6 +149,9 @@ pub async fn get_metric_history(
         "REST: get_metric_history (id={}, limit={}, offset={:?})",
         id, params.limit, params.offset
     );
+
+    let client_id = super::extract_client_id(&headers)?;
+    let scope = user.scope(client_id);
 
     // Get metric first for its name
     let metric = state
@@ -142,6 +161,11 @@ pub async fn get_metric_history(
         .await
         .http_context("Failed to get metric")?
         .http_not_found(&format!("Metric {}", id))?;
+
+    // Enforce read scope — return not_found to avoid leaking existence
+    if !scope.can_read(&metric) {
+        return Err(HttpError::not_found(format!("Metric {}", id)));
+    }
 
     // Query events with limit + 1 to check has_more
     let limit_plus_one = params.limit + 1;

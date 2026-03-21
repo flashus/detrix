@@ -2,79 +2,40 @@
 //!
 //! Provides authentication for gRPC services, matching the REST API auth behavior.
 //! Supports two authentication modes:
-//! - Simple: Static bearer token from config (like Prometheus)
+//! - Simple: Per-user static tokens from config
 //! - External: JWT validation via JWKS endpoint (for enterprise SSO)
 
-use detrix_application::JwksValidator;
-use detrix_config::{AuthConfig, AuthMode};
-use std::sync::Arc;
+use detrix_config::AuthMode;
 use tonic::{Request, Status};
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use detrix_config::constants::{AUTHORIZATION_METADATA_KEY, BEARER_PREFIX};
 
-/// Auth interceptor state (shared across all interceptor clones)
-#[derive(Clone)]
-pub struct AuthInterceptorState {
-    pub config: Arc<AuthConfig>,
-    /// JWT validator for external mode (optional - only needed for external auth)
-    pub jwt_validator: Option<Arc<JwksValidator>>,
-}
+/// Re-export the shared `AuthenticatedUser` type from `crate::common`.
+pub use crate::common::AuthenticatedUser;
 
-impl AuthInterceptorState {
-    /// Create new auth state from config (simple mode or disabled)
-    pub fn new(config: AuthConfig) -> Self {
-        Self {
-            config: Arc::new(config),
-            jwt_validator: None,
-        }
-    }
-
-    /// Create auth state with JWT validator for external mode
-    pub fn with_jwt_validator(config: AuthConfig, validator: JwksValidator) -> Self {
-        Self {
-            config: Arc::new(config),
-            jwt_validator: Some(Arc::new(validator)),
-        }
-    }
-}
+/// Type alias — gRPC interceptor uses the same auth state as HTTP middleware.
+pub type AuthInterceptorState = crate::common::auth::AuthState;
 
 /// Create an auth interceptor function for gRPC services
 ///
 /// This returns a closure that can be used with tonic's `with_interceptor` method.
-/// The interceptor validates Bearer tokens from the `authorization` metadata key.
-///
-/// # Note on External Mode
-///
-/// For External mode (JWT validation), the interceptor uses blocking validation
-/// within the tokio runtime. This works well for moderate traffic but for very
-/// high-throughput scenarios, consider implementing a tower-based async layer.
-///
-/// # Example
-///
-/// ```ignore
-/// let auth_state = AuthInterceptorState::new(config);
-/// let interceptor = create_auth_interceptor(auth_state);
-///
-/// Server::builder()
-///     .add_service(MetricsServiceServer::with_interceptor(metrics_service, interceptor))
-/// ```
+/// The interceptor validates Bearer tokens from the `authorization` metadata key
+/// and injects `AuthenticatedUser` into request extensions on success.
 pub fn create_auth_interceptor(
     state: AuthInterceptorState,
 ) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone + Send + Sync + 'static {
     move |request: Request<()>| {
         let config = &state.config;
 
-        // Skip auth if disabled or not configured
+        // When auth is disabled: inject default Admin user so handlers always have scope
         if config.effective_mode() == AuthMode::Disabled {
+            let mut request = request;
+            request
+                .extensions_mut()
+                .insert(AuthenticatedUser::default_admin());
             return Ok(request);
         }
-
-        // NOTE: gRPC public endpoint check is configured via `grpc_public_methods` in config,
-        // but the actual method path is not easily accessible in tonic interceptors.
-        // The HTTP/2 :path pseudo-header is not exposed through standard metadata.
-        // For now, all gRPC methods require auth when auth is enabled.
-        // Future: Consider using a tower layer for more fine-grained path-based auth.
 
         // Extract Authorization header from metadata
         let auth_value = request
@@ -90,56 +51,36 @@ pub fn create_auth_interceptor(
                     Status::unauthenticated("Authorization header must use Bearer scheme")
                 })?;
 
-                match config.effective_mode() {
-                    AuthMode::Simple => {
-                        // Validate against static bearer_token
-                        let expected_token = config.bearer_token.as_deref().ok_or_else(|| {
-                            warn!("Auth enabled but no bearer_token configured");
-                            // Return 401 rather than 500 - this is an auth failure from client perspective
-                            Status::unauthenticated("Authentication not configured")
-                        })?;
+                // Delegate to shared authenticate_token via a scoped thread
+                // (tonic interceptors are sync; authenticate_token is async).
+                let state_clone = state.clone();
+                let token_owned = token.to_string();
+                #[allow(clippy::expect_used)]
+                let auth_result = std::thread::scope(|s| {
+                    s.spawn(|| {
+                        tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("tokio runtime construction cannot fail")
+                            .block_on(crate::common::authenticate_token(
+                                &token_owned,
+                                &state_clone,
+                            ))
+                    })
+                    .join()
+                    .expect("Auth thread panicked")
+                });
 
-                        if token == expected_token {
-                            debug!("Bearer token authentication successful");
-                            Ok(request)
-                        } else {
-                            warn!("Invalid Bearer token");
-                            Err(Status::unauthenticated("Invalid token"))
-                        }
-                    }
-                    AuthMode::External => {
-                        // Validate JWT via JWKS
-                        let validator = state.jwt_validator.as_ref().ok_or_else(|| {
-                            error!("JWT validator not configured for external mode");
-                            // Return 401 rather than 500 - this is an auth failure from client perspective
-                            Status::unauthenticated("Authentication not configured")
-                        })?;
-
-                        // Use block_in_place to run async validation in sync interceptor
-                        // This is safe because we're already in a tokio runtime context
-                        let result = tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current()
-                                .block_on(validator.validate_token(token))
-                        });
-
-                        match result {
-                            Ok(claims) => {
-                                debug!(
-                                    sub = ?claims.sub,
-                                    email = ?claims.email,
-                                    "JWT authentication successful"
-                                );
-                                Ok(request)
-                            }
-                            Err(e) => {
-                                warn!(error = %e, "JWT validation failed");
-                                Err(Status::unauthenticated("Invalid token"))
-                            }
-                        }
-                    }
-                    AuthMode::Disabled => {
-                        // Should not reach here, but handle gracefully
+                match auth_result {
+                    Ok(authenticated) => {
+                        debug!(user_id = %authenticated.user_id, "gRPC authentication successful");
+                        let mut request = request;
+                        request.extensions_mut().insert(authenticated);
                         Ok(request)
+                    }
+                    Err(crate::common::AuthError::Internal(msg)) => Err(Status::internal(msg)),
+                    Err(crate::common::AuthError::Unauthenticated(msg)) => {
+                        Err(Status::unauthenticated(msg))
                     }
                 }
             }
@@ -154,28 +95,41 @@ pub fn create_auth_interceptor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use detrix_config::{AuthConfig, StaticUser, UserRole};
+
+    fn test_users() -> Vec<StaticUser> {
+        vec![StaticUser::new(
+            "dtx_valid_token_xxxx".to_string(),
+            "test-user".to_string(),
+            UserRole::User,
+        )]
+    }
+
+    /// Create an AuthConfig with test users (token hashes computed in `StaticUser::new()`).
+    fn test_auth_config() -> AuthConfig {
+        AuthConfig {
+            mode: Some(AuthMode::Simple),
+            users: test_users(),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_auth_state_new() {
-        let config = AuthConfig {
-            mode: Some(AuthMode::Simple),
-            bearer_token: Some("test-token".to_string()),
-            ..Default::default()
-        };
+        let config = test_auth_config();
 
-        let state = AuthInterceptorState::new(config.clone());
+        let state = AuthInterceptorState::new(config);
         assert_eq!(state.config.mode, Some(AuthMode::Simple));
-        assert_eq!(state.config.bearer_token, Some("test-token".to_string()));
+        assert_eq!(state.config.users.len(), 1);
         assert!(state.jwt_validator.is_none());
     }
 
     #[test]
     fn test_auth_disabled() {
-        let config = AuthConfig::default(); // mode = None → effective_mode() = Disabled
+        let config = AuthConfig::default();
         let state = AuthInterceptorState::new(config);
         let interceptor = create_auth_interceptor(state);
 
-        // Request without auth should pass when auth is disabled
         let request = Request::new(());
         let result = interceptor(request);
         assert!(result.is_ok());
@@ -190,7 +144,6 @@ mod tests {
         let state = AuthInterceptorState::new(config);
         let interceptor = create_auth_interceptor(state);
 
-        // Explicit Some(Disabled) should also allow all requests
         let request = Request::new(());
         let result = interceptor(request);
         assert!(result.is_ok());
@@ -198,19 +151,15 @@ mod tests {
 
     #[test]
     fn test_simple_mode_valid_token() {
-        let config = AuthConfig {
-            mode: Some(AuthMode::Simple),
-            bearer_token: Some("valid-token".to_string()),
-            ..Default::default()
-        };
-        let state = AuthInterceptorState::new(config);
+        let state = AuthInterceptorState::new(test_auth_config());
         let interceptor = create_auth_interceptor(state);
 
-        // Request with valid token should pass
         let mut request = Request::new(());
         request.metadata_mut().insert(
             AUTHORIZATION_METADATA_KEY,
-            format!("{}valid-token", BEARER_PREFIX).parse().unwrap(),
+            format!("{}dtx_valid_token_xxxx", BEARER_PREFIX)
+                .parse()
+                .unwrap(),
         );
 
         let result = interceptor(request);
@@ -219,15 +168,9 @@ mod tests {
 
     #[test]
     fn test_simple_mode_invalid_token() {
-        let config = AuthConfig {
-            mode: Some(AuthMode::Simple),
-            bearer_token: Some("valid-token".to_string()),
-            ..Default::default()
-        };
-        let state = AuthInterceptorState::new(config);
+        let state = AuthInterceptorState::new(test_auth_config());
         let interceptor = create_auth_interceptor(state);
 
-        // Request with invalid token should fail
         let mut request = Request::new(());
         request.metadata_mut().insert(
             AUTHORIZATION_METADATA_KEY,
@@ -241,15 +184,9 @@ mod tests {
 
     #[test]
     fn test_missing_auth_header() {
-        let config = AuthConfig {
-            mode: Some(AuthMode::Simple),
-            bearer_token: Some("valid-token".to_string()),
-            ..Default::default()
-        };
-        let state = AuthInterceptorState::new(config);
+        let state = AuthInterceptorState::new(test_auth_config());
         let interceptor = create_auth_interceptor(state);
 
-        // Request without auth header should fail
         let request = Request::new(());
         let result = interceptor(request);
         assert!(result.is_err());
@@ -258,15 +195,9 @@ mod tests {
 
     #[test]
     fn test_wrong_auth_scheme() {
-        let config = AuthConfig {
-            mode: Some(AuthMode::Simple),
-            bearer_token: Some("valid-token".to_string()),
-            ..Default::default()
-        };
-        let state = AuthInterceptorState::new(config);
+        let state = AuthInterceptorState::new(test_auth_config());
         let interceptor = create_auth_interceptor(state);
 
-        // Request with Basic auth instead of Bearer should fail
         let mut request = Request::new(());
         request.metadata_mut().insert(
             AUTHORIZATION_METADATA_KEY,
@@ -284,11 +215,9 @@ mod tests {
             mode: Some(AuthMode::External),
             ..Default::default()
         };
-        // Create without validator
         let state = AuthInterceptorState::new(config);
         let interceptor = create_auth_interceptor(state);
 
-        // Request should fail with unauthenticated (401) error, not internal (500)
         let mut request = Request::new(());
         request.metadata_mut().insert(
             AUTHORIZATION_METADATA_KEY,
@@ -297,11 +226,6 @@ mod tests {
 
         let result = interceptor(request);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), tonic::Code::Unauthenticated);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Internal);
     }
-
-    // NOTE: Tests for gRPC public method bypass are not included because
-    // tonic interceptors don't have access to the HTTP/2 :path pseudo-header.
-    // The `grpc_public_methods` config option is reserved for future use
-    // when implementing this via a tower layer.
 }

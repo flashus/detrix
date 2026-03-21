@@ -106,19 +106,25 @@ pub(crate) fn default_mode() -> String {
 
 /// Parse mode string to MetricMode
 pub(crate) fn parse_metric_mode(mode: &str) -> Result<MetricMode, String> {
-    use detrix_config::{DEFAULT_MAX_PER_SECOND, DEFAULT_SAMPLE_INTERVAL_SECONDS};
+    use detrix_config::{
+        DEFAULT_MAX_PER_SECOND, DEFAULT_SAMPLE_INTERVAL_SECONDS, DEFAULT_SAMPLE_RATE,
+    };
     match mode.to_lowercase().as_str() {
         MODE_STREAM => Ok(MetricMode::Stream),
         MODE_FIRST => Ok(MetricMode::First),
         MODE_THROTTLE => Ok(MetricMode::Throttle {
             max_per_second: DEFAULT_MAX_PER_SECOND,
         }),
-        MODE_SAMPLE | MODE_SAMPLE_INTERVAL => Ok(MetricMode::SampleInterval {
+        // "sample" = rate-based (every Nth hit); "sample_interval" = time-based (every N seconds)
+        MODE_SAMPLE => Ok(MetricMode::Sample {
+            rate: DEFAULT_SAMPLE_RATE,
+        }),
+        MODE_SAMPLE_INTERVAL => Ok(MetricMode::SampleInterval {
             seconds: DEFAULT_SAMPLE_INTERVAL_SECONDS,
         }),
         _ => Err(format!(
-            "Invalid mode '{}'. Valid modes: {}, {}, {}, {}",
-            mode, MODE_STREAM, MODE_FIRST, MODE_THROTTLE, MODE_SAMPLE
+            "Invalid mode '{}'. Valid modes: {}, {}, {}, {}, {}",
+            mode, MODE_STREAM, MODE_FIRST, MODE_THROTTLE, MODE_SAMPLE, MODE_SAMPLE_INTERVAL
         )),
     }
 }

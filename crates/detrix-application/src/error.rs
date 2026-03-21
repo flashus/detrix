@@ -253,6 +253,10 @@ pub enum Error {
     /// Authentication/authorization error
     #[error("Auth error: {0}")]
     Auth(String),
+
+    /// Access denied (scope violation)
+    #[error("Access denied: {0}")]
+    AccessDenied(String),
 }
 
 impl Error {
@@ -273,6 +277,7 @@ impl Error {
             Error::OperationWithRollbackFailure { .. } => ErrorCode::RollbackFailure,
             Error::SubprocessTimeout { .. } => ErrorCode::SubprocessTimeout,
             Error::Auth(_) => ErrorCode::Unauthorized,
+            Error::AccessDenied(_) => ErrorCode::Forbidden,
         }
     }
 
@@ -651,6 +656,8 @@ pub struct GroupOperationResult {
     pub succeeded: usize,
     /// Metrics that failed: (metric_name, error_message)
     pub failed: Vec<(String, String)>,
+    /// Number of metrics skipped due to scope restrictions
+    pub skipped: u64,
 }
 
 impl GroupOperationResult {
@@ -659,6 +666,7 @@ impl GroupOperationResult {
         Self {
             succeeded: count,
             failed: vec![],
+            skipped: 0,
         }
     }
 
@@ -672,9 +680,9 @@ impl GroupOperationResult {
         !self.failed.is_empty()
     }
 
-    /// Total number of metrics processed (succeeded + failed)
+    /// Total number of metrics in the group (succeeded + failed + skipped)
     pub fn total(&self) -> usize {
-        self.succeeded + self.failed.len()
+        self.succeeded + self.failed.len() + self.skipped as usize
     }
 
     /// Convert to error if there were any failures.

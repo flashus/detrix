@@ -135,6 +135,10 @@ impl LldbManager {
     }
 
     /// Wait for lldb-dap to accept connections.
+    ///
+    /// Uses a bind-based port check instead of TcpStream::connect to avoid
+    /// consuming lldb-dap's single-connection slot (lldb-dap 22+ in
+    /// `--connection listen://` mode accepts exactly one client connection).
     fn wait_for_ready(&self, host: &str, port: u16, child: &mut Child) -> Result<()> {
         let deadline = Instant::now() + self.timeout;
         let check_interval = Duration::from_millis(100);
@@ -162,12 +166,16 @@ impl LldbManager {
                 )));
             }
 
-            // Try to connect
-            let addr = format!("{}:{}", host, port);
-            if TcpStream::connect_timeout(&addr.parse().lldb("invalid address")?, check_interval)
-                .is_ok()
-            {
-                trace!("lldb-dap accepting connections on {}", addr);
+            // Check if the port is in use by attempting to bind it.
+            // If binding FAILS (EADDRINUSE), lldb-dap is listening — ready.
+            // If binding SUCCEEDS, nothing is listening yet.
+            //
+            // IMPORTANT: Do NOT use TcpStream::connect() here — lldb-dap 22+ in
+            // `--connection listen://` mode accepts exactly one TCP connection before
+            // exiting.  A probe connect() would consume that slot, leaving nothing
+            // for the Detrix daemon to connect to.
+            if is_port_in_use(port) {
+                trace!("lldb-dap listening on {}:{}", host, port);
                 return Ok(());
             }
 
@@ -342,6 +350,20 @@ fn allocate_port(host: &str) -> Result<u16> {
     drop(listener);
 
     Ok(port)
+}
+
+/// Check if a port is currently in use (something is listening on it).
+///
+/// Uses TcpListener::bind as a non-connecting probe: binding fails with
+/// EADDRINUSE when the port is already occupied, succeeds when it is free.
+/// This avoids consuming lldb-dap's single connection slot.
+fn is_port_in_use(port: u16) -> bool {
+    use std::net::TcpListener;
+    // NOTE: On macOS, binding 127.0.0.1:port fails when something else is ALREADY
+    // bound to 127.0.0.1:port. This works because both lldb-dap and our probe
+    // use 127.0.0.1. Do NOT rely on this to detect 0.0.0.0 listeners on macOS
+    // (macOS allows a specific-address bind alongside a wildcard bind).
+    TcpListener::bind(("127.0.0.1", port)).is_err()
 }
 
 /// Check if the error indicates a port bind failure.

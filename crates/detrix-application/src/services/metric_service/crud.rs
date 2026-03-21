@@ -2,6 +2,7 @@
 
 use crate::error::{OperationOutcome, OperationWarning};
 use crate::ports::MetricFilter;
+use crate::scope::MetricScope;
 use crate::{Error, Result};
 use detrix_core::entities::AnchorStatus;
 use detrix_core::{ConnectionId, Metric, MetricId};
@@ -134,17 +135,25 @@ impl MetricService {
         // Validate SafeMode constraints (stack trace/memory snapshot in SafeMode)
         self.validate_safe_mode(&metric)?;
 
+        // Validate tenant ID lengths (security boundary fields)
+        Metric::validate_tenant_ids(metric.user_id.as_deref(), metric.agent_id.as_deref())?;
+
         // Validate metric (may produce warnings)
         let mut warnings = self.validate_metric(&metric)?;
 
         // Check for existing metric at the same location (file:line)
         // DAP only supports one logpoint per line
+        let owner = match metric.user_id.as_deref() {
+            Some(uid) => crate::ports::OwnerFilter::User(uid),
+            None => crate::ports::OwnerFilter::System,
+        };
         if let Some(existing) = self
             .storage
             .find_by_location(
                 &metric.connection_id,
                 &metric.location.file,
                 metric.location.line,
+                owner,
             )
             .await?
         {
@@ -353,29 +362,43 @@ impl MetricService {
     }
 
     /// Remove a metric by ID
-    pub async fn remove_metric(&self, metric_id: MetricId) -> Result<()> {
-        // Get metric before deleting (needed for adapter call)
+    ///
+    /// Checks scope permission before deletion.
+    /// After removal, syncs the DAP logpoint at the location (other users may still have metrics there).
+    pub async fn remove_metric(&self, metric_id: MetricId, scope: &MetricScope) -> Result<()> {
+        // Get metric before deleting (needed for adapter call + scope check)
         let metric =
             self.storage.find_by_id(metric_id).await?.ok_or_else(|| {
                 detrix_core::Error::MetricNotFound(format!("Metric {}", metric_id))
             })?;
 
-        // Remove from DAP adapter if currently set (using connection-specific adapter)
-        if metric.enabled {
-            if let Ok(adapter) = self.get_adapter_for_connection(&metric.connection_id).await {
-                adapter.remove_metric(&metric).await?;
-            }
-            // If no adapter found, metric wasn't set in any adapter - that's fine
-        }
+        // Scope check: caller must be allowed to mutate this metric
+        Self::check_mutate_access(scope, &metric)?;
 
-        // Delete from storage
+        let connection_id = metric.connection_id.clone();
+        let file = metric.location.file.clone();
+        let line = metric.location.line;
+
+        // Delete from storage first so find_all_at_location returns only remaining users.
         self.storage.delete(metric_id).await?;
+
+        // Sync the DAP logpoint. Pass the just-deleted metric as fallback so that
+        // sync_logpoint can call adapter.remove_metric() when no remaining metrics exist
+        // (the deleted metric is no longer in storage but is a valid location reference).
+        //
+        // Multi-tenant (other user B has metric at same location):
+        //   sync_logpoint finds B → adapter.set_metric(merged_B) — single call, no gap
+        //
+        // Single-tenant (deleted metric was the only one):
+        //   sync_logpoint finds nothing → adapter.remove_metric(fallback) — single call
+        self.sync_logpoint(&connection_id, &file, line, Some(&metric))
+            .await?;
 
         // Emit metric removed event
         let event = detrix_core::SystemEvent::metric_removed(
             metric_id.0,
             metric.name.clone(),
-            metric.connection_id.clone(),
+            connection_id,
         );
         if let Err(e) = self.system_event_tx.send(event) {
             tracing::warn!("No subscribers for metric_removed event: {e}");
@@ -386,11 +409,19 @@ impl MetricService {
 
     /// Update an existing metric
     ///
+    /// Checks scope permission before update.
     /// Returns `OperationOutcome<()>` containing any warnings encountered.
     /// Warnings are generated when non-critical operations fail (e.g., fetching
     /// old metric for comparison).
-    pub async fn update_metric(&self, metric: &Metric) -> Result<OperationOutcome<()>> {
+    pub async fn update_metric(
+        &self,
+        metric: &Metric,
+        scope: &MetricScope,
+    ) -> Result<OperationOutcome<()>> {
         let mut warnings = Vec::new();
+
+        // Scope check: verify caller can mutate this metric
+        Self::check_mutate_access(scope, metric)?;
 
         // Validate SafeMode constraints (stack trace/memory snapshot in SafeMode)
         self.validate_safe_mode(metric)?;
@@ -466,10 +497,33 @@ impl MetricService {
         Ok(metric)
     }
 
+    /// Get a metric by ID with scope enforcement (defense-in-depth).
+    ///
+    /// Returns `Ok(None)` if the metric exists but the scope denies read access,
+    /// preventing information leakage about other tenants' metrics.
+    pub async fn get_metric_scoped(
+        &self,
+        metric_id: MetricId,
+        scope: &MetricScope,
+    ) -> Result<Option<Metric>> {
+        let metric = self.storage.find_by_id(metric_id).await?;
+        Ok(metric.filter(|m| scope.can_read(m)))
+    }
+
     /// Get a metric by name
     pub async fn get_metric_by_name(&self, name: &str) -> Result<Option<Metric>> {
         let metric = self.storage.find_by_name(name).await?;
         Ok(metric)
+    }
+
+    /// Get a metric by name with scope enforcement (defense-in-depth).
+    pub async fn get_metric_by_name_scoped(
+        &self,
+        name: &str,
+        scope: &MetricScope,
+    ) -> Result<Option<Metric>> {
+        let metric = self.storage.find_by_name(name).await?;
+        Ok(metric.filter(|m| scope.can_read(m)))
     }
 
     /// List all metrics

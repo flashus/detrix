@@ -3813,8 +3813,10 @@ async fn test_daemon_pid_file_lock_persists() {
         while let Ok(Some(_)) = reader.next_line().await {}
     });
 
-    // Wait for daemon to be healthy with PID + port in PID file
-    let daemon_info = timeout(Duration::from_secs(15), async {
+    // Wait for daemon to be healthy with PID + port in PID file.
+    // Use 60s to match DEFAULT_MCP_DAEMON_SPAWN_TIMEOUT_SECS — under heavy
+    // parallel test load daemon init can take 30–60s (HeartbeatPreset::Patient).
+    let daemon_info = timeout(Duration::from_secs(60), async {
         loop {
             if let Some(info) = read_daemon_info(&pid_path) {
                 return info;
@@ -3837,9 +3839,27 @@ async fn test_daemon_pid_file_lock_persists() {
             ));
         }
         Err(_) => {
-            reporter.error("Timed out waiting for daemon to start");
+            reporter.error("Timed out waiting for daemon to start (60s)");
+            // Dump bridge stderr for diagnostics
+            let startup_log = detrix_config::paths::default_daemon_startup_log_path();
+            if let Ok(content) = std::fs::read_to_string(&startup_log) {
+                let tail: Vec<&str> = content
+                    .lines()
+                    .rev()
+                    .take(20)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                reporter.info(&format!("Daemon startup log tail:\n{}", tail.join("\n")));
+            }
+            reporter.info(&format!(
+                "PID file exists: {}, bridge alive: {}",
+                pid_path.exists(),
+                matches!(bridge_process.try_wait(), Ok(None))
+            ));
             let _ = bridge_process.kill().await;
-            panic!("Daemon did not start within timeout");
+            panic!("Daemon did not start within 60s timeout");
         }
     }
 

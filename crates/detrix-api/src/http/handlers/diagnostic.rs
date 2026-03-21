@@ -9,7 +9,7 @@ use super::parse_safety_level;
 use crate::generated::detrix::v1::{
     InspectFileRequest as ProtoInspectFileRequest, ValidateExpressionRequest,
 };
-use crate::http::error::{HttpError, ToHttpResult};
+use crate::http::error::{HttpError, ToHttpBadRequest, ToHttpResult};
 use crate::state::ApiState;
 use axum::{extract::State, Json};
 use detrix_application::services::{ErrorCount, UsageSnapshot, WorkflowStats};

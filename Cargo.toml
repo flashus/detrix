@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.1.0"
+version = "1.2.0"
 authors = ["Ilya Dyachenko"]
 edition = "2021"
 rust-version = "1.89"
@@ -66,6 +66,7 @@ schemars = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
+subtle = "2"
 socket2 = { version = "0.5", features = ["all"] }  # TCP keep-alive configuration
 # Database
 sqlx = { version = "0.8", features = [

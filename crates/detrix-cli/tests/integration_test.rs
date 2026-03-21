@@ -132,7 +132,8 @@ async fn test_metric_storage_initialization() -> Result<()> {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: Some(chrono::Utc::now().timestamp_micros()),
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         // Default values for introspection fields
         capture_stack_trace: false,
         stack_trace_ttl: None,
@@ -188,7 +189,8 @@ async fn test_event_storage() -> Result<()> {
         condition: None,
         safety_level: SafetyLevel::Strict,
         created_at: Some(chrono::Utc::now().timestamp_micros()),
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         // Default values for introspection fields
         capture_stack_trace: false,
         stack_trace_ttl: None,
@@ -301,7 +303,8 @@ async fn test_full_config_to_storage_workflow() -> Result<()> {
             condition: metric_def.condition.clone(),
             safety_level: metric_def.safety_level,
             created_at: Some(chrono::Utc::now().timestamp_micros()),
-            created_by: None,
+            user_id: None,
+            agent_id: None,
             // Default values for introspection fields
             capture_stack_trace: false,
             stack_trace_ttl: None,

@@ -7,6 +7,9 @@ use detrix_core::{
     SnapshotScope, StackTraceSlice as CoreStackTraceSlice, SAFETY_STRICT, SAFETY_TRUSTED,
 };
 
+/// Error code returned in proto `ErrorResult` for expression evaluation errors.
+const EVAL_ERROR_CODE: &str = "EVAL_ERROR";
+
 /// Convert proto Location to core Location
 pub fn proto_to_core_location(loc: &Location) -> CoreLocation {
     CoreLocation {
@@ -175,7 +178,8 @@ pub fn add_request_to_metric(req: &AddMetricRequest) -> Result<Metric, Error> {
         condition: req.condition.clone(),
         safety_level: proto_to_safety_level(&req.safety_level),
         created_at: None,
-        created_by: None,
+        user_id: None,
+        agent_id: None,
         // Introspection fields from proto
         capture_stack_trace: req.capture_stack_trace.unwrap_or(false),
         stack_trace_ttl: req.stack_trace_ttl,
@@ -243,7 +247,8 @@ pub fn metric_to_info_with_stats(
         snapshot_ttl: _,   // Not included in MetricInfo
         anchor: _,         // Anchor tracking - not exposed via gRPC yet
         anchor_status: _,  // Anchor tracking - not exposed via gRPC yet
-        created_by: _,     // Client identity - not exposed via gRPC yet
+        user_id,
+        agent_id,
     } = metric;
 
     // Metric should always have ID when converting to proto (comes from storage)
@@ -266,6 +271,8 @@ pub fn metric_to_info_with_stats(
         connection_id: connection_id.0.clone(),
         capture_stack_trace: *capture_stack_trace,
         capture_memory_snapshot: *capture_memory_snapshot,
+        user_id: user_id.clone().unwrap_or_default(),
+        agent_id: agent_id.clone().unwrap_or_default(),
     })
 }
 
@@ -365,7 +372,7 @@ pub fn core_event_to_proto_with_location(
     let error = if *is_error {
         Some(crate::generated::detrix::v1::ErrorResult {
             error: true,
-            error_code: "EVAL_ERROR".to_string(),
+            error_code: EVAL_ERROR_CODE.to_string(),
             error_type: error_type.clone().unwrap_or_default(),
             error_message: error_message.clone().unwrap_or_default(),
             traceback: None,
@@ -466,7 +473,7 @@ pub fn connection_to_info(
         control_plane_url: _,
         build_commit: _,
         build_tag: _,
-        created_by: _,
+        user_id: _,
         created_at,
         last_connected_at,
         last_active,
@@ -681,7 +688,16 @@ pub fn proto_to_core_metric(
         condition: None,          // Not in proto MetricInfo
         safety_level: SafetyLevel::Strict, // Not in proto MetricInfo
         created_at: Some(proto.created_at),
-        created_by: None,
+        user_id: if proto.user_id.is_empty() {
+            None
+        } else {
+            Some(proto.user_id.clone())
+        },
+        agent_id: if proto.agent_id.is_empty() {
+            None
+        } else {
+            Some(proto.agent_id.clone())
+        },
         capture_stack_trace: proto.capture_stack_trace,
         stack_trace_ttl: None,   // Not in proto MetricInfo
         stack_trace_slice: None, // Not in proto MetricInfo
@@ -743,7 +759,7 @@ pub fn proto_to_core_connection(
         control_plane_url: None,
         build_commit: None,
         build_tag: None,
-        created_by: None,
+        user_id: None,
         created_at: proto.created_at,
         last_connected_at: proto.connected_at,
         last_active: proto.last_active_at.unwrap_or(0),

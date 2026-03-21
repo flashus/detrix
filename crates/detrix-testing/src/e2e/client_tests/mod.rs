@@ -62,7 +62,7 @@
 mod config;
 mod process_tester;
 mod python_tester;
-mod scenarios;
+pub mod scenarios;
 
 // Unified exports
 pub use config::{ClientLanguage, ClientTestConfig};

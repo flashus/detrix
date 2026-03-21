@@ -1,0 +1,45 @@
+# Detrix server configuration for multi-tenant Docker E2E testing (Phase 10)
+# Used by restart_daemon_multiuser() in docker_cloud_e2e.rs
+
+[api.rest]
+host = "0.0.0.0"
+port = 8090
+
+[api.rest.rate_limit]
+enabled = false
+
+[api.grpc]
+host = "0.0.0.0"
+port = 50061
+
+[storage]
+path = "/data/detrix/data.db"
+
+[vfs]
+source_priority = ["bridge", "control_plane", "disk"]
+fetch_timeout_seconds = 10
+
+[api.auth]
+mode = "simple"
+
+[[api.auth.users]]
+token = "dtx_alice_cloud_xx"
+user_id = "alice"
+role = "user"
+
+[[api.auth.users]]
+token = "dtx_bob_cloud_xxxx"
+user_id = "bob"
+role = "user"
+
+[[api.auth.users]]
+token = "dtx_admin_cloud_xx"
+user_id = "admin"
+role = "admin"
+
+# docker-test-token: used by test-app-* containers (their DETRIX_TOKEN env var).
+# Must remain in multi-user config so the apps can register connections.
+[[api.auth.users]]
+token = "docker-test-token"
+user_id = "app-agent"
+role = "admin"

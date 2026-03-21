@@ -1,8 +1,11 @@
 //! Common utilities shared across API layers (MCP, REST, gRPC)
 
+pub mod auth;
 pub mod diff_parser;
 pub mod expression_extractor;
 pub mod parsing;
+
+pub use auth::{authenticate_token, AuthError, AuthState};
 
 pub use diff_parser::{parse_diff, DiffParseResult, ParsedDiffLine, UnparseableLine};
 pub use expression_extractor::{
@@ -14,6 +17,34 @@ pub use parsing::{
     parse_location_flexible, parse_location_str, parse_location_with_expression,
     ParsedLocationWithExpression,
 };
+
+/// Authenticated user identity, shared across HTTP and gRPC authentication layers.
+///
+/// Injected into request extensions after successful authentication.
+/// HTTP handlers extract it via `Extension<AuthenticatedUser>`;
+/// gRPC handlers extract it via `request.extensions().get::<AuthenticatedUser>()`.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedUser {
+    /// User identity (from StaticUser.user_id or JWT `sub` claim)
+    pub user_id: String,
+    /// User role (Admin or User)
+    pub role: detrix_config::UserRole,
+}
+
+impl AuthenticatedUser {
+    /// Create the default admin user (used when auth is disabled or for public endpoints).
+    pub fn default_admin() -> Self {
+        Self {
+            user_id: detrix_config::AUTO_AUTH_DEFAULT_USER_ID.to_string(),
+            role: detrix_config::UserRole::Admin,
+        }
+    }
+
+    /// Build a `MetricScope` from this user, optionally scoped to a client_id.
+    pub fn scope(&self, client_id: Option<String>) -> detrix_application::MetricScope {
+        detrix_application::extract_scope(&self.user_id, &self.role, client_id)
+    }
+}
 
 /// HTTP header / gRPC metadata key for client identity.
 ///

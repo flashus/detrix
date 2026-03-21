@@ -258,7 +258,7 @@ pub fn find_metric_for_error(
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(path);
-            let location_key = format!("{}:{}", filename, line);
+            let location_key = format!("{}#{}", filename, line);
             metrics.get(&location_key)
         } else {
             None

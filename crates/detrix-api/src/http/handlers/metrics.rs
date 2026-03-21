@@ -6,13 +6,14 @@ use super::{default_mode, metric_to_rest_response};
 use crate::constants::status;
 use crate::generated::detrix::v1::Location;
 use crate::grpc::conversions::core_event_to_proto;
-use crate::http::error::{HttpError, ToHttpOption, ToHttpResult};
+use crate::http::error::{HttpError, ToHttpBadRequest, ToHttpOption, ToHttpResult};
+use crate::http::middleware::AuthenticatedUser;
 use crate::state::ApiState;
 use crate::types::{MetricInfo, ProtoMetricEvent};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 use detrix_application::MetricFilter;
 use detrix_config::DEFAULT_QUERY_LIMIT;
@@ -156,6 +157,8 @@ fn default_limit() -> i64 {
 /// Metrics that fail conversion are silently skipped with a warning logged.
 pub async fn list_metrics(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<ListMetricsQuery>,
 ) -> Result<Json<PaginatedMetricsResponse>, HttpError> {
     // Use configured defaults for pagination (from ConfigService for hot-reload support)
@@ -166,16 +169,22 @@ pub async fn list_metrics(
     let limit = params.limit.unwrap_or(default_limit).min(max_limit);
     let offset = params.offset.unwrap_or(0);
 
+    let client_id = super::extract_client_id(&headers)?;
+    let scope = user.scope(client_id);
+
     info!(
         "REST: list_metrics (connection_id={:?}, enabled={:?}, limit={}, offset={})",
         params.connection_id, params.enabled, limit, offset
     );
 
     // Build filter for DB-level filtering (PERF-02 N+1 fix)
+    // Admin scope (user_id = None) returns all metrics; User/Agent scope filters to own metrics.
     let filter = MetricFilter {
         connection_id: params.connection_id.map(ConnectionId),
         enabled: params.enabled,
         group: None,
+        user_id: scope.user_id().map(|s| s.to_string()),
+        agent_id: None,
     };
 
     // Use DB-level filtering for efficient queries
@@ -224,9 +233,14 @@ pub async fn list_metrics(
 /// - 404 Not Found: Metric with given ID does not exist
 pub async fn get_metric(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<u64>,
 ) -> Result<Json<MetricInfo>, HttpError> {
     info!("REST: get_metric (id={})", id);
+
+    let client_id = super::extract_client_id(&headers)?;
+    let scope = user.scope(client_id);
 
     let metric = state
         .context
@@ -235,6 +249,11 @@ pub async fn get_metric(
         .await
         .http_context("Failed to get metric")?
         .http_not_found(&format!("Metric {}", id))?;
+
+    // Enforce scope — return 404 (not 403) to avoid leaking existence of other users' metrics
+    if !scope.can_read(&metric) {
+        return Err(HttpError::not_found(format!("Metric {}", id)));
+    }
 
     // Single metric should always have ID - error if missing (database integrity issue)
     Ok(Json(metric_to_rest_response(&metric).http_err()?))
@@ -264,6 +283,7 @@ pub async fn get_metric(
 /// - 409 Conflict: Metric already exists at location (when `replace=false`)
 pub async fn add_metric(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: axum::http::HeaderMap,
     Json(mut payload): Json<CreateMetricRequest>,
 ) -> Result<(StatusCode, Json<CreateMetricResponse>), HttpError> {
@@ -318,7 +338,8 @@ pub async fn add_metric(
 
     // 2. Convert Proto → Core Metric (shared conversion from grpc/conversions.rs)
     let mut metric = add_request_to_metric(&proto_request).http_bad_request()?;
-    metric.created_by = client_id;
+    metric.user_id = Some(user.user_id.clone());
+    metric.agent_id = client_id;
 
     // Call service (ALL business logic happens here)
     let outcome = state
@@ -370,16 +391,18 @@ pub async fn add_metric(
 /// - 404 Not Found: Metric with given ID does not exist
 pub async fn delete_metric(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: axum::http::HeaderMap,
     Path(id): Path<u64>,
 ) -> Result<StatusCode, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
+    let scope = user.scope(client_id.clone());
     info!("REST: delete_metric (id={}, client_id={:?})", id, client_id);
 
     state
         .context
         .metric_service
-        .remove_metric(MetricId(id))
+        .remove_metric(MetricId(id), &scope)
         .await
         .http_context("Failed to delete metric")?;
 
@@ -397,6 +420,8 @@ pub async fn delete_metric(
 /// data from previous sessions. Pass `since=0` to explicitly request all events.
 pub async fn query_events(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<QueryEventsParams>,
 ) -> Result<Json<Vec<ProtoMetricEvent>>, HttpError> {
     info!(
@@ -404,11 +429,27 @@ pub async fn query_events(
         params.metric_id, params.metric_name, params.limit, params.since
     );
 
-    // If metric_name provided, look up the metric ID first
+    let client_id = super::extract_client_id(&headers)?;
+    let scope = user.scope(client_id);
+
+    // If metric_name provided, look up the metric ID first; enforce scope on lookup
     let metric_id = match (&params.metric_id, &params.metric_name) {
-        (Some(id), _) => Some(MetricId(*id)),
+        (Some(id), _) => {
+            // Scope-check by metric ID: fetch the metric to verify ownership
+            let metric = state
+                .context
+                .metric_service
+                .get_metric(MetricId(*id))
+                .await
+                .http_context("Failed to look up metric")?
+                .http_not_found(&format!("Metric {}", id))?;
+            if !scope.can_read(&metric) {
+                return Err(HttpError::not_found(format!("Metric {}", id)));
+            }
+            Some(MetricId(*id))
+        }
         (None, Some(name)) => {
-            // Look up by name via MetricService
+            // Look up by name via MetricService, then enforce scope
             let metric = state
                 .context
                 .metric_service
@@ -416,9 +457,20 @@ pub async fn query_events(
                 .await
                 .http_context("Failed to look up metric")?
                 .http_not_found(&format!("Metric {}", name))?;
+            if !scope.can_read(&metric) {
+                return Err(HttpError::not_found(format!("Metric {}", name)));
+            }
             metric.id
         }
-        (None, None) => None,
+        (None, None) => {
+            // Non-admin users must specify a metric to prevent cross-user data leaks
+            if scope.user_id().is_some() {
+                return Err(HttpError::bad_request(
+                    "metric_id or metric_name filter required for non-admin users",
+                ));
+            }
+            None
+        }
     };
 
     // Query events via StreamingService (Clean Architecture - delegate to application layer)
@@ -429,8 +481,7 @@ pub async fn query_events(
             .await
             .http_context("Failed to query events")?,
         None => {
-            // Return recent events from all metrics
-            // Note: since filter not applied to "all events" query for simplicity
+            // Admin-only: return recent events from all metrics
             streaming_service
                 .query_all_events(Some(params.limit))
                 .await

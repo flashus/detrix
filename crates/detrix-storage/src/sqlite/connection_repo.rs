@@ -8,17 +8,18 @@ use detrix_core::{Connection, ConnectionId, ConnectionStatus, SourceLanguage};
 use sqlx::Row;
 use tracing::debug;
 
-/// Column list for SELECT queries on the connections table.
+/// Column list for SELECT/INSERT queries on the connections table.
 const CONNECTION_COLUMNS: &str =
-    "id, name, workspace_root, hostname, host, port, language, status, auto_reconnect, safe_mode, created_at, last_connected_at, last_active, control_plane_url, build_commit, build_tag, created_by";
+    "id, name, workspace_root, hostname, host, port, language, status, auto_reconnect, safe_mode, created_at, last_connected_at, last_active, control_plane_url, build_commit, build_tag, user_id";
+
+/// One `?` placeholder per column in [`CONNECTION_COLUMNS`] (17 columns).
+const CONNECTION_PLACEHOLDERS: &str = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
 
 #[async_trait]
 impl ConnectionRepository for SqliteStorage {
     async fn save(&self, connection: &Connection) -> Result<ConnectionId> {
-        sqlx::query(
-            r#"
-            INSERT INTO connections (id, name, workspace_root, hostname, host, port, language, status, auto_reconnect, safe_mode, created_at, last_connected_at, last_active, control_plane_url, build_commit, build_tag, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        let insert_sql = format!(
+            "INSERT INTO connections ({}) VALUES ({})
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 workspace_root = excluded.workspace_root,
@@ -34,28 +35,29 @@ impl ConnectionRepository for SqliteStorage {
                 control_plane_url = excluded.control_plane_url,
                 build_commit = excluded.build_commit,
                 build_tag = excluded.build_tag,
-                created_by = COALESCE(excluded.created_by, connections.created_by)
-            "#,
-        )
-        .bind(&connection.id.0)
-        .bind(&connection.name)
-        .bind(&connection.workspace_root)
-        .bind(&connection.hostname)
-        .bind(&connection.host)
-        .bind(connection.port as i64)
-        .bind(connection.language.as_str())
-        .bind(connection.status.to_string())
-        .bind(connection.auto_reconnect)
-        .bind(connection.safe_mode)
-        .bind(connection.created_at)
-        .bind(connection.last_connected_at)
-        .bind(connection.last_active)
-        .bind(&connection.control_plane_url)
-        .bind(&connection.build_commit)
-        .bind(&connection.build_tag)
-        .bind(&connection.created_by)
-        .execute(self.pool())
-        .await?;
+                user_id = COALESCE(excluded.user_id, connections.user_id)",
+            CONNECTION_COLUMNS, CONNECTION_PLACEHOLDERS
+        );
+        sqlx::query(&insert_sql)
+            .bind(&connection.id.0)
+            .bind(&connection.name)
+            .bind(&connection.workspace_root)
+            .bind(&connection.hostname)
+            .bind(&connection.host)
+            .bind(connection.port as i64)
+            .bind(connection.language.as_str())
+            .bind(connection.status.to_string())
+            .bind(connection.auto_reconnect)
+            .bind(connection.safe_mode)
+            .bind(connection.created_at)
+            .bind(connection.last_connected_at)
+            .bind(connection.last_active)
+            .bind(&connection.control_plane_url)
+            .bind(&connection.build_commit)
+            .bind(&connection.build_tag)
+            .bind(&connection.user_id)
+            .execute(self.pool())
+            .await?;
 
         debug!(connection_id = %connection.id.0, "Connection saved");
 
@@ -395,7 +397,7 @@ fn row_to_connection(row: &sqlx::sqlite::SqliteRow) -> Result<Connection> {
     let control_plane_url: Option<String> = row.try_get("control_plane_url")?;
     let build_commit: Option<String> = row.try_get("build_commit")?;
     let build_tag: Option<String> = row.try_get("build_tag")?;
-    let created_by: Option<String> = row.try_get("created_by")?;
+    let user_id: Option<String> = row.try_get("user_id")?;
 
     // Parse status string to enum (case-insensitive for compatibility)
     let status = match status_str.to_lowercase().as_str() {
@@ -439,7 +441,7 @@ fn row_to_connection(row: &sqlx::sqlite::SqliteRow) -> Result<Connection> {
         control_plane_url,
         build_commit,
         build_tag,
-        created_by,
+        user_id,
         created_at,
         last_connected_at,
         last_active,

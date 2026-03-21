@@ -108,6 +108,9 @@ pub struct TestClaims {
     /// Name (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Roles (optional, for admin role testing)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<String>>,
 }
 
 impl TestClaims {
@@ -126,6 +129,7 @@ impl TestClaims {
             iat: now,
             email: None,
             name: None,
+            roles: None,
         }
     }
 
@@ -147,6 +151,12 @@ impl TestClaims {
         self
     }
 
+    /// Set roles
+    pub fn with_roles(mut self, roles: Vec<String>) -> Self {
+        self.roles = Some(roles);
+        self
+    }
+
     /// Create expired claims (for testing token rejection)
     pub fn expired(sub: &str, iss: &str) -> Self {
         let now = SystemTime::now()
@@ -162,6 +172,7 @@ impl TestClaims {
             iat: now - 7200, // 2 hours ago
             email: None,
             name: None,
+            roles: None,
         }
     }
 }

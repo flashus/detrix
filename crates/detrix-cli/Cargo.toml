@@ -42,7 +42,7 @@ rmcp.workspace = true
 tokio = { workspace = true, features = ["full"] }
 
 # CLI
-clap = { workspace = true, features = ["derive"] }
+clap = { workspace = true, features = ["derive", "env"] }
 
 # Error handling
 anyhow = { workspace = true }

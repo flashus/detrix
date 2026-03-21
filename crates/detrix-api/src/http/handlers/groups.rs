@@ -6,14 +6,15 @@
 
 use super::metric_to_rest_response;
 use crate::http::error::{HttpError, ToHttpResult};
+use crate::http::middleware::AuthenticatedUser;
 use crate::state::ApiState;
 use crate::types::{GroupInfo, MetricInfo};
 use axum::{
     extract::{Path, State},
     http::HeaderMap,
-    Json,
+    Extension, Json,
 };
-use detrix_application::{GroupOperationResult, GroupSummary};
+use detrix_application::{GroupOperationResult, GroupSummary, MetricFilter};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -21,7 +22,9 @@ use tracing::{info, warn};
 impl From<GroupSummary> for GroupInfo {
     fn from(summary: GroupSummary) -> Self {
         Self {
-            name: summary.name.unwrap_or_else(|| "default".to_string()),
+            name: summary
+                .name
+                .unwrap_or_else(|| detrix_core::DEFAULT_GROUP_NAME.to_string()),
             metric_count: summary.metric_count as u32,
             enabled_count: summary.enabled_count as u32,
         }
@@ -74,18 +77,21 @@ impl GroupOperationResponse {
 /// - `enabledCount`: Enabled metrics in the group
 pub async fn list_groups(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<GroupInfo>>, HttpError> {
     info!("REST: list_groups");
 
-    // Use efficient GROUP BY query (PERF-02 N+1 fix)
+    let client_id = super::extract_client_id(&headers)?;
+    let scope = user.scope(client_id);
+
     let summaries = state
         .context
         .metric_service
-        .list_group_summaries()
+        .list_group_summaries_scoped(&scope)
         .await
         .http_context("Failed to list group summaries")?;
 
-    // Convert using From trait (GroupSummary → proto GroupInfo)
     Ok(Json(summaries.into_iter().map(GroupInfo::from).collect()))
 }
 
@@ -99,25 +105,31 @@ pub async fn list_groups(
 /// Returns empty array if no metrics in the group.
 pub async fn list_group_metrics(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(group_name): Path<String>,
 ) -> Result<Json<Vec<MetricInfo>>, HttpError> {
     info!("REST: list_group_metrics (group={})", group_name);
 
-    let metrics = state
+    let client_id = super::extract_client_id(&headers)?;
+    let scope = user.scope(client_id);
+
+    let filter = MetricFilter {
+        user_id: scope.user_id().map(|s| s.to_string()),
+        group: Some(group_name.clone()),
+        ..Default::default()
+    };
+    let (metrics, _) = state
         .context
         .metric_service
-        .list_metrics()
+        .list_metrics_filtered(&filter, usize::MAX, 0)
         .await
         .http_context("Failed to list metrics")?;
 
-    // Filter by group and convert to proto DTOs
+    // Convert to proto DTOs
     // Caller decides: skip invalid metrics with logging
     let filtered: Vec<MetricInfo> = metrics
         .iter()
-        .filter(|m| {
-            let metric_group = m.group.clone().unwrap_or_else(|| "default".to_string());
-            metric_group == group_name
-        })
         .filter_map(|m| {
             metric_to_rest_response(m)
                 .inspect_err(|e| warn!(metric_name = %m.name, "Skipping metric: {}", e))
@@ -140,10 +152,12 @@ pub async fn list_group_metrics(
 /// Returns `GroupOperationResponse` with success/failure counts and any errors.
 pub async fn enable_group(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(group_name): Path<String>,
 ) -> Result<Json<GroupOperationResponse>, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
+    let scope = user.scope(client_id.clone());
     info!(
         "REST: enable_group (group={}, client_id={:?})",
         group_name, client_id
@@ -152,7 +166,7 @@ pub async fn enable_group(
     let result = state
         .context
         .metric_service
-        .enable_group(&group_name)
+        .enable_group(&group_name, &scope)
         .await
         .http_context("Failed to enable group")?;
 
@@ -173,10 +187,12 @@ pub async fn enable_group(
 /// Returns `GroupOperationResponse` with success/failure counts and any errors.
 pub async fn disable_group(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(group_name): Path<String>,
 ) -> Result<Json<GroupOperationResponse>, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
+    let scope = user.scope(client_id.clone());
     info!(
         "REST: disable_group (group={}, client_id={:?})",
         group_name, client_id
@@ -185,7 +201,7 @@ pub async fn disable_group(
     let result = state
         .context
         .metric_service
-        .disable_group(&group_name)
+        .disable_group(&group_name, &scope)
         .await
         .http_context("Failed to disable group")?;
 

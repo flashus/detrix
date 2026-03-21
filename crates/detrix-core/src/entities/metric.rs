@@ -44,6 +44,14 @@ pub const SAFETY_TRUSTED: &str = "trusted";
 /// Maximum length of a metric name (1-255 characters)
 pub const MAX_METRIC_NAME_LEN: usize = 255;
 
+/// Maximum length of a `user_id` or `agent_id` field (security-boundary fields).
+///
+/// Set to 256 because JWT `sub` claims can be up to 255 characters (per RFC 7519
+/// there is no formal limit, but 255 is the practical maximum seen in OIDC providers).
+/// 256 provides one byte of headroom and aligns with common OS/database username
+/// length limits (e.g. Linux `LOGIN_NAME_MAX`).
+pub const MAX_USER_ID_LEN: usize = 256;
+
 /// Delimiter for multi-expression values in logpoint output and hashing.
 /// ASCII Unit Separator (0x1F) - safe to use since it never appears in expression values.
 pub const MULTI_EXPR_DELIMITER: char = '\x1F';
@@ -146,6 +154,8 @@ impl std::str::FromStr for SafetyLevel {
     }
 }
 
+// validate_tenant_id is defined in entities/mod.rs (shared by Metric and Connection)
+
 /// Core metric entity
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Metric {
@@ -164,10 +174,15 @@ pub struct Metric {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>, // Microseconds since epoch
 
-    /// Client identity of the creator (from X-Detrix-Client-Id header).
-    /// Used for user-scoped disable_metrics on daemon switch.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_by: Option<String>,
+    /// Authenticated user identity (from token or JWT sub claim).
+    /// Used for multi-tenant metric ownership and access control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+
+    /// Agent/session identity (from MCP client_id or X-Detrix-Agent-Id header).
+    /// Identifies which agent/session created this metric within a user's scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 
     // Stack trace capture options
     #[serde(default)]
@@ -290,7 +305,8 @@ impl Metric {
             condition: None,
             safety_level: SafetyLevel::default(),
             created_at: None,
-            created_by: None,
+            user_id: None,
+            agent_id: None,
             // Stack trace defaults
             capture_stack_trace: false,
             stack_trace_ttl: None,
@@ -322,6 +338,14 @@ impl Metric {
             Self::validate_expression_length(expr, max_length)?;
         }
         Ok(())
+    }
+
+    /// Validate that `user_id` and `agent_id` do not exceed the maximum length.
+    ///
+    /// These are security-boundary fields used for multi-tenant access control.
+    pub fn validate_tenant_ids(user_id: Option<&str>, agent_id: Option<&str>) -> Result<()> {
+        super::validate_tenant_id("user_id", user_id)?;
+        super::validate_tenant_id("agent_id", agent_id)
     }
 }
 
@@ -540,6 +564,140 @@ mod tests {
 
         let deserialized: MetricMode = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, mode);
+    }
+
+    #[test]
+    fn test_metric_user_id_agent_id_default_to_none() {
+        let metric = Metric::new(
+            "test_metric".to_string(),
+            ConnectionId::from("conn"),
+            Location {
+                file: "f.py".to_string(),
+                line: 1,
+            },
+            vec!["x".to_string()],
+            SourceLanguage::Python,
+        )
+        .unwrap();
+        assert!(metric.user_id.is_none());
+        assert!(metric.agent_id.is_none());
+    }
+
+    #[test]
+    fn test_metric_user_id_agent_id_serde_round_trip() {
+        let mut metric = Metric::new(
+            "m".to_string(),
+            ConnectionId::from("c"),
+            Location {
+                file: "f.py".to_string(),
+                line: 1,
+            },
+            vec!["x".to_string()],
+            SourceLanguage::Python,
+        )
+        .unwrap();
+        metric.user_id = Some("alice".to_string());
+        metric.agent_id = Some("agent-42".to_string());
+
+        let serialized = serde_json::to_string(&metric).unwrap();
+        let deserialized: Metric = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.user_id, Some("alice".to_string()));
+        assert_eq!(deserialized.agent_id, Some("agent-42".to_string()));
+        // Confirm the json contains the user_id and agent_id
+        assert!(serialized.contains("alice"));
+        assert!(serialized.contains("agent-42"));
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_both_none() {
+        assert!(Metric::validate_tenant_ids(None, None).is_ok());
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_valid() {
+        assert!(Metric::validate_tenant_ids(Some("alice"), Some("agent1")).is_ok());
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_at_max_length() {
+        let max_str = "a".repeat(MAX_USER_ID_LEN);
+        assert!(Metric::validate_tenant_ids(Some(&max_str), Some(&max_str)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_user_id_too_long() {
+        let long_str = "a".repeat(MAX_USER_ID_LEN + 1);
+        let result = Metric::validate_tenant_ids(Some(&long_str), None);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("user_id exceeds maximum length"));
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_agent_id_too_long() {
+        let long_str = "a".repeat(MAX_USER_ID_LEN + 1);
+        let result = Metric::validate_tenant_ids(None, Some(&long_str));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("agent_id exceeds maximum length"));
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_empty_strings() {
+        let result = Metric::validate_tenant_ids(Some(""), Some("agent1"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must not be empty"));
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_reserved_system() {
+        let result = Metric::validate_tenant_ids(Some("__system__"), None);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("reserved __*__ pattern"));
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_reserved_pattern() {
+        // Any __*__ pattern is reserved
+        let result = Metric::validate_tenant_ids(Some("__admin__"), None);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("reserved __*__ pattern"));
+
+        // Too short (just "____") is not matched by len > 4 guard
+        assert!(Metric::validate_tenant_ids(Some("____"), None).is_ok());
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_whitespace_only() {
+        let result = Metric::validate_tenant_ids(Some("   "), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("whitespace-only"));
+
+        let result = Metric::validate_tenant_ids(Some("\t"), None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_control_chars() {
+        let result = Metric::validate_tenant_ids(Some("user\0id"), None);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("control characters"));
     }
 }
 

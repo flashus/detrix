@@ -1,0 +1,30 @@
+# Detrix server configuration for JWT/JWKS Docker E2E testing
+# Used by the detrix-jwt service in docker-compose.yml
+
+[api.rest]
+host = "0.0.0.0"
+port = 8090
+
+[api.rest.rate_limit]
+enabled = false
+
+[api.grpc]
+host = "0.0.0.0"
+port = 50061
+
+[storage]
+path = "/data/detrix/data-jwt.db"
+
+[vfs]
+source_priority = ["bridge", "control_plane", "disk"]
+fetch_timeout_seconds = 10
+
+[api.auth]
+mode = "external"
+
+[api.auth.jwt]
+jwks_url = "http://mock-jwks:8080/jwks"
+issuer = "detrix-test"
+audience = "detrix"
+admin_role_claim = "roles"
+admin_role_value = "admin"

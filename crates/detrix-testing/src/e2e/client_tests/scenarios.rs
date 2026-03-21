@@ -12,7 +12,50 @@ use std::sync::Arc;
 /// These scenarios implement the test cases defined in `clients/specs/conformance/test_cases.yaml`.
 /// They are designed to be run against any client implementation that implements the
 /// `ClientTester` trait.
+/// Timeout in seconds for waiting for an adapter connection to reach "connected" status.
+pub const ADAPTER_CONNECT_TIMEOUT_SECS: u64 = 600;
+
 pub struct ClientTestScenarios;
+
+impl ClientTestScenarios {
+    /// Poll the daemon until the given connection reaches "connected" status.
+    ///
+    /// The daemon's `POST /api/v1/connections` now returns the `connection_id` immediately
+    /// and starts the DAP adapter in a background task (to avoid blocking the caller while
+    /// lldb-dap ptrace-attaches to the target process, which can take 60–180 s on macOS).
+    /// Tests that need the adapter to be fully ready must call this helper after `wake()`.
+    ///
+    /// Returns `true` if the connection reached "connected" within `timeout_secs`, `false`
+    /// if it timed out or the connection transitioned to "failed".
+    pub async fn wait_for_connection_connected<D: ApiClient>(
+        daemon: &D,
+        connection_id: &str,
+        timeout_secs: u64,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
+        loop {
+            match daemon.get_connection(connection_id).await {
+                Ok(resp) => {
+                    let status = resp.data.status.to_lowercase();
+                    if status == "connected" {
+                        return true;
+                    }
+                    if status.starts_with("failed") || status == "disconnected" {
+                        return false;
+                    }
+                    // "connecting" or "reconnecting" — keep waiting
+                }
+                Err(_) => {
+                    // Connection record not found yet; keep waiting
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        }
+    }
+}
 
 impl ClientTestScenarios {
     /// ST001: Initial state is SLEEPING
@@ -63,6 +106,29 @@ impl ClientTestScenarios {
         if result.debug_port == 0 {
             reporter.step_failed(step, "debug_port should be > 0");
             return Err("debug_port should be > 0".to_string());
+        }
+
+        // Wait for the DAP adapter to fully connect before querying the fixture.
+        // The daemon returns connection_id immediately and starts the adapter in a background
+        // task, so the connection may still be in "connecting" state here.  On macOS with
+        // lldb-dap 22.x the attach phase takes 60–420 s (ptrace dylib enumeration on macOS
+        // Sequoia with 400+ system dylibs), after which the fixture process is unfrozen
+        // and its HTTP server becomes responsive again.
+        if !Self::wait_for_connection_connected(
+            daemon,
+            &result.connection_id,
+            ADAPTER_CONNECT_TIMEOUT_SECS,
+        )
+        .await
+        {
+            reporter.step_failed(
+                step,
+                &format!(
+                    "Connection did not reach 'connected' status within {} s",
+                    ADAPTER_CONNECT_TIMEOUT_SECS
+                ),
+            );
+            return Err("Connection timed out waiting for 'connected' status".to_string());
         }
 
         // Verify state is now awake
@@ -394,10 +460,12 @@ impl ClientTestScenarios {
         // Count successful wakes (should be exactly one "awake", rest "already_awake")
         let mut awake_count = 0;
         let mut already_awake_count = 0;
+        let mut awake_connection_id: Option<String> = None;
         for result in results {
             if let Ok(Ok(wake_resp)) = result {
                 if wake_resp.status == "awake" {
                     awake_count += 1;
+                    awake_connection_id = Some(wake_resp.connection_id.clone());
                 } else if wake_resp.status == "already_awake" {
                     already_awake_count += 1;
                 }
@@ -410,6 +478,13 @@ impl ClientTestScenarios {
                 &format!("Expected exactly 1 'awake', got {}", awake_count),
             );
             return Err(format!("Expected exactly 1 'awake', got {}", awake_count));
+        }
+
+        // Wait for the adapter background task to complete so the connection reaches
+        // "connected" status before we check the daemon's connection list.
+        if let Some(ref conn_id) = awake_connection_id {
+            Self::wait_for_connection_connected(daemon, conn_id, ADAPTER_CONNECT_TIMEOUT_SECS)
+                .await;
         }
 
         // Verify only one connected connection in daemon

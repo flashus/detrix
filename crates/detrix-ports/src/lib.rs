@@ -49,7 +49,7 @@ pub use purity::PurityAnalyzer;
 pub use remote_app::{RemoteAppControl, RemoteSleepResponse, RemoteWakeResponse};
 pub use repository::{
     ConnectionLookup, ConnectionReferenceRepository, ConnectionRepository, EventRepository,
-    GroupSummary, MetricFilter, MetricRepository, SystemEventRepository,
+    GroupSummary, MetricFilter, MetricRepository, OwnerFilter, SystemEventRepository,
 };
 
 // Type aliases for convenience

@@ -18,6 +18,11 @@ use detrix_logging::{debug, info, instrument};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+/// Outer timeout for background adapter start (9 minutes).
+/// Must exceed inner DAP timeout (attach_config_done_timeout_secs, default 120s)
+/// plus connection retry budget to avoid resource leaks.
+const ADAPTER_START_TIMEOUT_SECS: u64 = 540;
+
 /// Service for managing debugger connections
 ///
 /// This service handles the business logic for:
@@ -28,6 +33,10 @@ use tokio::sync::broadcast;
 ///
 /// Uses dependency injection via trait objects for testability.
 /// Delegates adapter lifecycle management to AdapterLifecycleManager.
+///
+/// All fields are `Arc` handles, so `Clone` is cheap and enables the background
+/// `tokio::spawn` task (AttachPid mode) to share the same service instance.
+#[derive(Clone)]
 pub struct ConnectionService {
     /// Repository for persisting connections
     connection_repo: ConnectionRepositoryRef,
@@ -125,7 +134,7 @@ impl ConnectionService {
     /// * `control_plane_url` - App control plane URL for transparent file fetching
     /// * `build_commit` - Git commit SHA at build time
     /// * `build_tag` - Build version tag
-    /// * `created_by` - Client identity of the creator (from X-Detrix-Client-Id header)
+    /// * `user_id` - Authenticated user identity (from token or JWT sub claim)
     #[allow(clippy::too_many_arguments)]
     #[instrument(skip(self), fields(host = %host, port = port, name = %identity.name, language = %identity.language, workspace_root = %identity.workspace_root, hostname = %identity.hostname, pid = ?pid, safe_mode = safe_mode))]
     pub async fn create_connection_with_metadata(
@@ -139,7 +148,7 @@ impl ConnectionService {
         control_plane_url: Option<String>,
         build_commit: Option<String>,
         build_tag: Option<String>,
-        created_by: Option<String>,
+        user_id: Option<String>,
     ) -> Result<ConnectionId> {
         // 1. Create Connection entity from identity (validates identity, host, port, language + generates UUID)
         let mut connection = Connection::new_with_identity(identity, host, port)?;
@@ -147,21 +156,26 @@ impl ConnectionService {
         connection.control_plane_url = control_plane_url;
         connection.build_commit = build_commit;
         connection.build_tag = build_tag;
-        connection.created_by = created_by.clone();
+        Connection::validate_user_id(user_id.as_deref())?;
+        connection.user_id = user_id.clone();
         let connection_id = connection.id.clone();
 
         // 2. Check if connection with same UUID already exists and is connected
         //    UUID is deterministic from identity, so find_by_id is equivalent to find_by_identity
         //    This handles idempotency and the case where restore_connections is running
         if let Ok(Some(existing)) = self.connection_repo.find_by_id(&connection_id).await {
-            if existing.status == ConnectionStatus::Connected
+            let is_connected = existing.status == ConnectionStatus::Connected
                 && self
                     .adapter_lifecycle_manager
                     .has_adapter(&existing.id)
-                    .await
-            {
-                // Even if already connected, ensure the caller holds a reference
-                if let Some(ref client_id) = created_by {
+                    .await;
+            // Connecting = background start_adapter task is still running; return early to
+            // avoid spawning a second concurrent task for the same connection.
+            let is_starting = existing.status == ConnectionStatus::Connecting;
+
+            if is_connected || is_starting {
+                // Even if already connected/starting, ensure the caller holds a reference
+                if let Some(ref client_id) = user_id {
                     let reference = ConnectionReference::new(
                         existing.id.clone(),
                         ClientIdentity::bridge(client_id),
@@ -175,12 +189,12 @@ impl ConnectionService {
                     }
                 }
                 info!(
-                    "Connection already exists and is connected (UUID={}), returning existing",
-                    connection_id.0
+                    "Connection already exists (status={}, UUID={}), returning existing",
+                    existing.status, connection_id.0
                 );
                 return Ok(existing.id);
             }
-            // Connection exists but not connected - will be restarted below
+            // Connection exists but not connected/starting - will be restarted below
             info!(
                 "Connection exists but not connected (UUID={}), will restart adapter",
                 connection_id.0
@@ -249,28 +263,169 @@ impl ConnectionService {
             }
         }
 
-        // 4. Start adapter via lifecycle manager (handles everything: start, subscribe, route events)
-        //    Note: start_adapter returns degradation info (sync_failed, resume_failed) which is logged internally
-        let _start_result = self
-            .adapter_lifecycle_manager
-            .start_adapter(
-                connection_id.clone(),
+        // 4. Start the DAP adapter.
+        //
+        //    AttachPid mode (pid.is_some()) — used by the Rust client with lldb-dap —
+        //    triggers a ptrace(PTRACE_ATTACH) call that freezes ALL threads of the target
+        //    process for 60–180 s on macOS while lldb-dap enumerates 400+ system dylibs.
+        //    If we awaited start_adapter synchronously here, the target's HTTP server would
+        //    be frozen and unable to send the HTTP 200 response for the POST /api/v1/connections
+        //    request, causing the client to time out.  We therefore set the status to
+        //    "Connecting" and spawn the adapter startup in a background task so that the
+        //    HTTP response is returned before ptrace freezes the process.
+        //
+        //    All other modes (Attach/AttachRemote/LaunchProgram) connect in under 5 s and
+        //    do not freeze the caller, so they run synchronously and return "Connected".
+        if pid.is_some() {
+            // --- Background path (AttachPid / lldb-dap only) ---
+            self.connection_repo
+                .update_status(&connection_id, ConnectionStatus::Connecting)
+                .await?;
+
+            // Clone self (cheap: all fields are Arc handles) for the background task.
+            let this = self.clone();
+            let connection_id_bg = connection_id.clone();
+            let host_bg = connection.host.clone();
+            let port_bg = connection.port;
+            let language_bg = connection.language; // Copy
+            let safe_mode_bg = connection.safe_mode; // Copy
+
+            tokio::spawn(async move {
+                info!(
+                    connection_id = %connection_id_bg.0,
+                    host = %host_bg,
+                    port = port_bg,
+                    pid = ?pid,
+                    "Background adapter task started"
+                );
+
+                // 5. Start adapter (may block 60–420 s for ptrace dylib enumeration).
+                //
+                // Inner timeouts per stage:
+                //   connect 30 s + initialize 30 s + attach 420 s (macOS) / 120 s (Linux)
+                //   + configurationDone 30 s = 510 s (macOS) / 210 s (Linux) max.
+                // The outer 540 s timeout is a safety net in case any inner timeout
+                // fails to fire, guaranteeing the task terminates before the
+                // 600 s wait_for_connection_connected polling window expires.
+                let start_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(ADAPTER_START_TIMEOUT_SECS),
+                    this.adapter_lifecycle_manager.start_adapter(
+                        connection_id_bg.clone(),
+                        &host_bg,
+                        port_bg,
+                        language_bg,
+                        program,
+                        pid,
+                        safe_mode_bg,
+                    ),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::error!(
+                        connection_id = %connection_id_bg.0,
+                        "Background adapter task outer timeout ({ADAPTER_START_TIMEOUT_SECS} s) exceeded — \
+                         inner DAP timeouts did not fire; forcing Failed status"
+                    );
+                    Err(detrix_core::Error::Adapter(
+                        format!("adapter start timed out after {ADAPTER_START_TIMEOUT_SECS} s (outer safety limit)"),
+                    ))
+                });
+
+                match start_result {
+                    Ok(_) => {
+                        // 6–8. Update status, add reference, emit event.
+                        if let Err(e) = this
+                            .finalize_connection_start(
+                                &connection_id_bg,
+                                &host_bg,
+                                port_bg,
+                                language_bg,
+                                &user_id,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                connection_id = %connection_id_bg.0,
+                                error = %e,
+                                "Background adapter: failed to finalize connection start"
+                            );
+                        } else {
+                            info!(
+                                "Adapter started for connection {} (background task)",
+                                connection_id_bg.0
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            connection_id = %connection_id_bg.0,
+                            error = %e,
+                            "Background adapter start failed"
+                        );
+                        if let Err(update_err) = this
+                            .connection_repo
+                            .update_status(
+                                &connection_id_bg,
+                                ConnectionStatus::Failed(e.to_string()),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "Background adapter: also failed to update status to Failed: {update_err}"
+                            );
+                        }
+                    }
+                }
+            });
+        } else {
+            // --- Synchronous path (all non-AttachPid modes) ---
+            self.adapter_lifecycle_manager
+                .start_adapter(
+                    connection_id.clone(),
+                    &connection.host,
+                    connection.port,
+                    connection.language,
+                    program,
+                    pid,
+                    connection.safe_mode,
+                )
+                .await?;
+
+            // 5–7. Update status, add reference, emit event.
+            self.finalize_connection_start(
+                &connection_id,
                 &connection.host,
                 connection.port,
                 connection.language,
-                program,
-                pid,
-                connection.safe_mode,
+                &user_id,
             )
             .await?;
+        }
 
-        // 5. Update connection status to Connected
+        Ok(connection_id)
+    }
+
+    /// Finalize a successful adapter start: update status to Connected, add client
+    /// reference, and emit the connection-created system event.
+    ///
+    /// Returns `Err` only when the status update fails so callers can propagate
+    /// (sync path) or log (background task) accordingly. Reference add and event
+    /// emit failures are non-fatal and logged as warnings.
+    async fn finalize_connection_start(
+        &self,
+        connection_id: &ConnectionId,
+        host: &str,
+        port: u16,
+        language: detrix_core::SourceLanguage,
+        user_id: &Option<String>,
+    ) -> Result<()> {
+        // Update connection status to Connected
         self.connection_repo
-            .update_status(&connection_id, ConnectionStatus::Connected)
+            .update_status(connection_id, ConnectionStatus::Connected)
             .await?;
 
-        // 6. Add client reference if created_by is provided
-        if let Some(ref client_id) = created_by {
+        // Add client reference if caller identity is provided
+        if let Some(ref client_id) = user_id {
             let reference = ConnectionReference::new(
                 connection_id.clone(),
                 ClientIdentity::bridge(client_id),
@@ -286,18 +441,14 @@ impl ConnectionService {
             }
         }
 
-        // 7. Emit connection created event
-        let event = SystemEvent::connection_created(
-            connection_id.clone(),
-            &connection.host,
-            connection.port,
-            connection.language.as_str(),
-        );
+        // Emit connection created event
+        let event =
+            SystemEvent::connection_created(connection_id.clone(), host, port, language.as_str());
         if let Err(e) = self.system_event_tx.send(event) {
             tracing::warn!("No subscribers for connection_created event: {e}");
         }
 
-        Ok(connection_id)
+        Ok(())
     }
 
     /// Disconnect from a debugger server

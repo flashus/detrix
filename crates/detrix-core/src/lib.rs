@@ -35,6 +35,8 @@ pub use connection_reference::{
     ClientIdentity, ConnectionReference, ReferenceKind, DAEMON_IDENTITY,
 };
 pub use entities::{
+    // Tenant ID validation
+    validate_tenant_id,
     AnchorStatus,
     CapturedStackTrace,
     CapturedVariable,
@@ -62,8 +64,9 @@ pub use entities::{
     StackFrame,
     StackTraceSlice,
     TypedValue,
-    // Metric name constants
+    // Metric/tenant ID length constants
     MAX_METRIC_NAME_LEN,
+    MAX_USER_ID_LEN,
     // Mode type constants
     MODE_FIRST,
     MODE_SAMPLE,
@@ -85,7 +88,12 @@ pub use formatting::{
 };
 pub use system_event::{SystemEvent, SystemEventType};
 
-// Port traits are in detrix-application crate:
-// use detrix_application::{
-//     DapAdapter, DapAdapterFactory, MetricRepository, EventRepository, ConnectionRepository
-// };
+/// Default group name for ungrouped metrics.
+pub const DEFAULT_GROUP_NAME: &str = "default";
+
+/// Sentinel `user_id` substituted for `None` in storage to ensure uniqueness
+/// constraint correctness (e.g. SQL `ON CONFLICT` treats NULLs as distinct).
+///
+/// Also rejected by [`validate_tenant_id`] to prevent API callers from
+/// impersonating the "no owner" state.
+pub const SYSTEM_USER_ID: &str = "__system__";

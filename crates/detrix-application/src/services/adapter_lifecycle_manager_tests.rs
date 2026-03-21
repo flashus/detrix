@@ -5,8 +5,8 @@
 use super::adapter_lifecycle_manager::{AdapterLifecycleManager, ManagedAdapterStatus};
 use crate::ports::{
     ConnectionRepository, ConnectionRepositoryRef, DapAdapter, DapAdapterFactory,
-    DapAdapterFactoryRef, DapAdapterRef, EventRepository, MetricRepository, MetricRepositoryRef,
-    RemoveMetricResult, SetMetricResult, VfsRef,
+    DapAdapterFactoryRef, DapAdapterRef, EventRepository, MetricRepositoryRef, RemoveMetricResult,
+    SetMetricResult, VfsRef,
 };
 use crate::services::EventCaptureService;
 use async_trait::async_trait;
@@ -14,7 +14,7 @@ use detrix_config::constants::DEFAULT_EVENT_FLUSH_INTERVAL_MS;
 use detrix_core::{
     Connection, ConnectionId, Metric, MetricEvent, MetricId, Result, SourceLanguage, SystemEvent,
 };
-use detrix_testing::{MockConnectionRepository, MockVfs};
+use detrix_testing::{MockConnectionRepository, MockMetricRepository, MockVfs};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -327,97 +327,7 @@ impl EventRepository for MockEventRepository {
     }
 }
 
-/// Mock metric repository for testing (always returns empty - no pre-existing metrics)
-pub struct MockMetricRepository;
-
-impl MockMetricRepository {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for MockMetricRepository {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl MetricRepository for MockMetricRepository {
-    async fn save_with_options(&self, _metric: &Metric, _upsert: bool) -> Result<MetricId> {
-        Ok(MetricId(1))
-    }
-
-    async fn find_by_id(&self, _id: MetricId) -> Result<Option<Metric>> {
-        Ok(None)
-    }
-
-    async fn find_by_name(&self, _name: &str) -> Result<Option<Metric>> {
-        Ok(None)
-    }
-
-    async fn find_all(&self) -> Result<Vec<Metric>> {
-        Ok(Vec::new())
-    }
-
-    async fn find_paginated(&self, _limit: usize, _offset: usize) -> Result<(Vec<Metric>, u64)> {
-        Ok((Vec::new(), 0))
-    }
-
-    async fn count_all(&self) -> Result<u64> {
-        Ok(0)
-    }
-
-    async fn find_by_group(&self, _group: &str) -> Result<Vec<Metric>> {
-        Ok(Vec::new())
-    }
-
-    async fn find_by_connection_id(&self, _connection_id: &ConnectionId) -> Result<Vec<Metric>> {
-        Ok(Vec::new())
-    }
-
-    async fn update(&self, _metric: &Metric) -> Result<()> {
-        Ok(())
-    }
-
-    async fn delete(&self, _id: MetricId) -> Result<()> {
-        Ok(())
-    }
-
-    async fn exists_by_name(&self, _name: &str) -> Result<bool> {
-        Ok(false)
-    }
-
-    async fn find_by_location(
-        &self,
-        _connection_id: &ConnectionId,
-        _file: &str,
-        _line: u32,
-    ) -> Result<Option<Metric>> {
-        Ok(None)
-    }
-
-    async fn find_filtered(
-        &self,
-        _filter: &crate::ports::MetricFilter,
-        _limit: usize,
-        _offset: usize,
-    ) -> Result<(Vec<Metric>, u64)> {
-        Ok((Vec::new(), 0))
-    }
-
-    async fn get_group_summaries(&self) -> Result<Vec<crate::ports::GroupSummary>> {
-        Ok(Vec::new())
-    }
-
-    async fn delete_by_connection_id(&self, _connection_id: &ConnectionId) -> Result<u64> {
-        Ok(0)
-    }
-
-    async fn migrate_connection_id(&self, _from: &ConnectionId, _to: &ConnectionId) -> Result<u64> {
-        Ok(0)
-    }
-}
+// MockMetricRepository is imported from detrix_testing (canonical mock).
 
 // =============================================================================
 // Helper Functions

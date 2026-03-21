@@ -98,20 +98,25 @@ impl OutputParser for PythonOutputParser {
 
         // Add stack trace capture if requested
         if metric.capture_stack_trace {
-            // Get stack trace slice config (default: last 10 frames)
+            /// Maximum stack frames to capture when full trace is requested.
+            const MAX_STACK_FRAMES_FULL: usize = 100;
+            /// Default number of stack frames to capture (tail slice).
+            const DEFAULT_STACK_FRAMES: usize = 10;
+
+            // Get stack trace slice config (default: last DEFAULT_STACK_FRAMES frames)
             let max_frames = match &metric.stack_trace_slice {
                 Some(slice) => {
                     if slice.full {
-                        100
+                        MAX_STACK_FRAMES_FULL
                     } else if let Some(tail) = slice.tail {
                         tail as usize
                     } else if let Some(head) = slice.head {
                         head as usize
                     } else {
-                        10
+                        DEFAULT_STACK_FRAMES
                     }
                 }
-                None => 10,
+                None => DEFAULT_STACK_FRAMES,
             };
 
             // Python expression to capture stack trace as JSON
@@ -348,7 +353,8 @@ mod tests {
             condition: None,
             safety_level: SafetyLevel::Strict,
             created_at: None,
-            created_by: None,
+            user_id: None,
+            agent_id: None,
             capture_stack_trace: false,
             stack_trace_ttl: None,
             stack_trace_slice: None,
@@ -826,7 +832,8 @@ mod proptest_tests {
             condition: None,
             safety_level: SafetyLevel::Strict,
             created_at: None,
-            created_by: None,
+            user_id: None,
+            agent_id: None,
             capture_stack_trace: false,
             stack_trace_ttl: None,
             stack_trace_slice: None,

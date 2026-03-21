@@ -141,8 +141,8 @@ async fn test_metric_exists_by_name() {
 async fn test_metric_duplicate_location_fails_by_default() {
     let storage = create_test_storage().await;
 
-    // Create first metric at a specific location
-    let metric1 = Metric::new(
+    // Create first metric at a specific location (same user_id to trigger conflict)
+    let mut metric1 = Metric::new(
         "first_metric".to_string(),
         ConnectionId::from("default"),
         Location {
@@ -153,12 +153,13 @@ async fn test_metric_duplicate_location_fails_by_default() {
         SourceLanguage::Python,
     )
     .unwrap();
+    metric1.user_id = Some("alice".to_string());
 
     // Save first metric
     MetricRepository::save(&storage, &metric1).await.unwrap();
 
-    // Create second metric with different name but SAME location
-    let metric2 = Metric::new(
+    // Create second metric with different name but SAME location and SAME user_id
+    let mut metric2 = Metric::new(
         "second_metric".to_string(),
         ConnectionId::from("default"),
         Location {
@@ -169,6 +170,7 @@ async fn test_metric_duplicate_location_fails_by_default() {
         SourceLanguage::Python,
     )
     .unwrap();
+    metric2.user_id = Some("alice".to_string());
 
     // Default save (upsert=false) should fail due to location UNIQUE constraint
     let result = MetricRepository::save(&storage, &metric2).await;
@@ -179,8 +181,8 @@ async fn test_metric_duplicate_location_fails_by_default() {
 async fn test_metric_duplicate_location_upserts_when_enabled() {
     let storage = create_test_storage().await;
 
-    // Create first metric at a specific location
-    let metric1 = Metric::new(
+    // Create first metric at a specific location (same user_id to trigger conflict)
+    let mut metric1 = Metric::new(
         "first_metric".to_string(),
         ConnectionId::from("default"),
         Location {
@@ -191,13 +193,14 @@ async fn test_metric_duplicate_location_upserts_when_enabled() {
         SourceLanguage::Python,
     )
     .unwrap();
+    metric1.user_id = Some("alice".to_string());
 
     // Save first metric
     let id1 = MetricRepository::save(&storage, &metric1).await.unwrap();
     assert!(id1.0 > 0);
 
-    // Create second metric with different name but SAME location and different expression
-    let metric2 = Metric::new(
+    // Create second metric with different name but SAME location, expression, and user_id
+    let mut metric2 = Metric::new(
         "second_metric".to_string(),
         ConnectionId::from("default"),
         Location {
@@ -208,6 +211,7 @@ async fn test_metric_duplicate_location_upserts_when_enabled() {
         SourceLanguage::Python,
     )
     .unwrap();
+    metric2.user_id = Some("alice".to_string());
 
     // Explicit upsert should succeed and return same ID
     let id2 = MetricRepository::save_with_options(&storage, &metric2, true)
@@ -525,6 +529,8 @@ async fn test_find_filtered_by_connection_id() {
         connection_id: Some(ConnectionId::from("conn-alpha")),
         enabled: None,
         group: None,
+        user_id: None,
+        agent_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -539,6 +545,8 @@ async fn test_find_filtered_by_connection_id() {
         connection_id: Some(ConnectionId::from("conn-beta")),
         enabled: None,
         group: None,
+        user_id: None,
+        agent_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -575,6 +583,8 @@ async fn test_find_filtered_by_enabled() {
         connection_id: None,
         enabled: Some(true),
         group: None,
+        user_id: None,
+        agent_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -589,6 +599,8 @@ async fn test_find_filtered_by_enabled() {
         connection_id: None,
         enabled: Some(false),
         group: None,
+        user_id: None,
+        agent_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -626,6 +638,8 @@ async fn test_find_filtered_by_group() {
         connection_id: None,
         enabled: None,
         group: Some("authentication".to_string()),
+        user_id: None,
+        agent_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -642,6 +656,8 @@ async fn test_find_filtered_by_group() {
         connection_id: None,
         enabled: None,
         group: Some("payments".to_string()),
+        user_id: None,
+        agent_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -690,6 +706,8 @@ async fn test_find_filtered_combined_filters() {
         connection_id: Some(ConnectionId::from("conn-1")),
         enabled: Some(true),
         group: Some("group-a".to_string()),
+        user_id: None,
+        agent_id: None,
     };
     let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
         .await
@@ -938,4 +956,335 @@ async fn test_get_group_summaries_integration_with_list_groups() {
             group_name
         );
     }
+}
+
+// ========================================================================
+// Multi-tenant storage tests
+// ========================================================================
+
+#[tokio::test]
+async fn test_find_by_location_with_user_id() {
+    let storage = create_test_storage().await;
+
+    let loc = Location {
+        file: "tenant.py".to_string(),
+        line: 42,
+    };
+    let conn = ConnectionId::from("conn1");
+
+    // Alice's metric at (tenant.py, 42)
+    let mut m_alice = Metric::new(
+        "alice_metric".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["x".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    m_alice.user_id = Some("alice".to_string());
+    MetricRepository::save_with_options(&storage, &m_alice, true)
+        .await
+        .unwrap();
+
+    // Bob's metric at same location
+    let mut m_bob = Metric::new(
+        "bob_metric".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["y".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    m_bob.user_id = Some("bob".to_string());
+    MetricRepository::save_with_options(&storage, &m_bob, true)
+        .await
+        .unwrap();
+
+    // Alice's lookup finds alice's metric only
+    let found = MetricRepository::find_by_location(
+        &storage,
+        &conn,
+        &loc.file,
+        loc.line,
+        detrix_ports::OwnerFilter::User("alice"),
+    )
+    .await
+    .unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().user_id.as_deref(), Some("alice"));
+
+    // Bob's lookup finds bob's metric only
+    let found = MetricRepository::find_by_location(
+        &storage,
+        &conn,
+        &loc.file,
+        loc.line,
+        detrix_ports::OwnerFilter::User("bob"),
+    )
+    .await
+    .unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().user_id.as_deref(), Some("bob"));
+}
+
+#[tokio::test]
+async fn test_find_by_location_system_owner() {
+    let storage = create_test_storage().await;
+
+    let loc = Location {
+        file: "legacy.py".to_string(),
+        line: 10,
+    };
+    let conn = ConnectionId::from("conn1");
+
+    // Create a system metric (no user_id → sentinel __system__ in DB)
+    let system_metric = Metric::new(
+        "system_metric".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["a".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    // user_id is None → save_with_options(upsert=true) stores as SYSTEM_USER_ID
+    MetricRepository::save_with_options(&storage, &system_metric, true)
+        .await
+        .unwrap();
+
+    // Create a user metric at the same location
+    let mut user_metric = Metric::new(
+        "user_metric".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["b".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    user_metric.user_id = Some("alice".to_string());
+    MetricRepository::save_with_options(&storage, &user_metric, true)
+        .await
+        .unwrap();
+
+    // OwnerFilter::System finds only the system metric
+    let found = MetricRepository::find_by_location(
+        &storage,
+        &conn,
+        &loc.file,
+        loc.line,
+        detrix_ports::OwnerFilter::System,
+    )
+    .await
+    .unwrap();
+    assert!(found.is_some());
+    // System metric comes back with user_id = None (sentinel mapped back)
+    assert_eq!(found.unwrap().user_id, None);
+
+    // OwnerFilter::User("alice") finds only alice's metric
+    let found = MetricRepository::find_by_location(
+        &storage,
+        &conn,
+        &loc.file,
+        loc.line,
+        detrix_ports::OwnerFilter::User("alice"),
+    )
+    .await
+    .unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().user_id.as_deref(), Some("alice"));
+}
+
+#[tokio::test]
+async fn test_find_filtered_with_user_id() {
+    use detrix_application::ports::MetricFilter;
+
+    let storage = create_test_storage().await;
+
+    // Create metrics for alice and bob
+    let mut m1 = create_test_metric("alice_m1").await;
+    m1.user_id = Some("alice".to_string());
+    MetricRepository::save(&storage, &m1).await.unwrap();
+
+    let mut m2 = create_test_metric("alice_m2").await;
+    m2.user_id = Some("alice".to_string());
+    MetricRepository::save(&storage, &m2).await.unwrap();
+
+    let mut m3 = create_test_metric("bob_m1").await;
+    m3.user_id = Some("bob".to_string());
+    MetricRepository::save(&storage, &m3).await.unwrap();
+
+    // Filter by alice's user_id
+    let filter = MetricFilter {
+        user_id: Some("alice".to_string()),
+        ..Default::default()
+    };
+    let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
+        .await
+        .unwrap();
+
+    assert_eq!(total, 2);
+    assert_eq!(metrics.len(), 2);
+    assert!(metrics
+        .iter()
+        .all(|m| m.user_id.as_deref() == Some("alice")));
+
+    // Filter by bob's user_id
+    let filter = MetricFilter {
+        user_id: Some("bob".to_string()),
+        ..Default::default()
+    };
+    let (metrics, total) = MetricRepository::find_filtered(&storage, &filter, 10, 0)
+        .await
+        .unwrap();
+
+    assert_eq!(total, 1);
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0].user_id.as_deref(), Some("bob"));
+}
+
+#[tokio::test]
+async fn test_null_user_id_upsert_updates_correctly() {
+    // Verifies that the SYSTEM_USER_ID sentinel makes NULL user_id upserts
+    // deterministic: a second save at the same location+connection_id updates
+    // the existing row instead of creating a duplicate.
+    let storage = create_test_storage().await;
+
+    let loc = Location {
+        file: "null_test.py".to_string(),
+        line: 1,
+    };
+    let conn = ConnectionId::from("conn1");
+
+    let m1 = Metric::new(
+        "null_user_1".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["x".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    // user_id defaults to None
+
+    let id1 = MetricRepository::save_with_options(&storage, &m1, true)
+        .await
+        .unwrap();
+
+    let m2 = Metric::new(
+        "null_user_2".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["y".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    // user_id also None — same location+connection_id should upsert
+
+    let id2 = MetricRepository::save_with_options(&storage, &m2, true)
+        .await
+        .unwrap();
+
+    // With SYSTEM_USER_ID sentinel, upsert should update the existing row
+    assert_eq!(id1, id2, "NULL user_id upsert should update, not duplicate");
+
+    let all = MetricRepository::find_all(&storage).await.unwrap();
+    assert_eq!(all.len(), 1, "Only one row should exist after upsert");
+
+    // The row should have the second metric's name and expression
+    let metric = all.first().unwrap();
+    assert_eq!(metric.name, "null_user_2");
+    assert_eq!(metric.expressions, vec!["y".to_string()]);
+    // user_id should still be None (sentinel mapped back)
+    assert!(
+        metric.user_id.is_none(),
+        "user_id should be None, not SYSTEM_USER_ID"
+    );
+}
+
+#[tokio::test]
+async fn test_agent_id_round_trip() {
+    let storage = create_test_storage().await;
+
+    let mut metric = create_test_metric("agent_rt").await;
+    metric.user_id = Some("alice".to_string());
+    metric.agent_id = Some("claude-code-1".to_string());
+
+    let id = MetricRepository::save(&storage, &metric).await.unwrap();
+
+    let found = MetricRepository::find_by_id(&storage, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.user_id.as_deref(), Some("alice"));
+    assert_eq!(found.agent_id.as_deref(), Some("claude-code-1"));
+}
+
+#[tokio::test]
+async fn test_find_all_at_location_multi_user() {
+    let storage = create_test_storage().await;
+
+    let file = "shared.py";
+    let line = 77u32;
+    let conn = ConnectionId::from("conn-multi");
+
+    let loc = Location {
+        file: file.to_string(),
+        line,
+    };
+
+    // Alice's metric at (shared.py, 77)
+    let mut m_alice = Metric::new(
+        "alice_shared".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["alice.value".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    m_alice.user_id = Some("alice".to_string());
+    MetricRepository::save_with_options(&storage, &m_alice, true)
+        .await
+        .unwrap();
+
+    // Bob's metric at the same (shared.py, 77, conn-multi)
+    let mut m_bob = Metric::new(
+        "bob_shared".to_string(),
+        conn.clone(),
+        loc.clone(),
+        vec!["bob.value".to_string()],
+        SourceLanguage::Python,
+    )
+    .unwrap();
+    m_bob.user_id = Some("bob".to_string());
+    MetricRepository::save_with_options(&storage, &m_bob, true)
+        .await
+        .unwrap();
+
+    // find_all_at_location should return both metrics
+    let found = MetricRepository::find_all_at_location(&storage, &conn, file, line)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        found.len(),
+        2,
+        "Both alice's and bob's metrics should be returned"
+    );
+
+    let user_ids: Vec<&str> = found.iter().filter_map(|m| m.user_id.as_deref()).collect();
+    assert!(
+        user_ids.contains(&"alice"),
+        "alice's metric should be in the result"
+    );
+    assert!(
+        user_ids.contains(&"bob"),
+        "bob's metric should be in the result"
+    );
+
+    // Non-existent location returns empty vec
+    let empty = MetricRepository::find_all_at_location(&storage, &conn, "nonexistent.py", 9999)
+        .await
+        .unwrap();
+    assert!(
+        empty.is_empty(),
+        "Non-existent location should return empty vec"
+    );
 }

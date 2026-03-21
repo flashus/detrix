@@ -239,6 +239,10 @@ message MetricInfo {
   // Introspection settings
   bool capture_stack_trace = 13;
   bool capture_memory_snapshot = 14;
+
+  // Multi-tenant identity
+  string user_id = 15;
+  string agent_id = 16;
 }
 
 message ToggleMetricRequest {

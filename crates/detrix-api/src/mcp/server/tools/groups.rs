@@ -33,11 +33,12 @@ impl EnableGroupResult {
 pub async fn enable_group_impl(
     state: &Arc<ApiState>,
     params: GroupParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<EnableGroupResult, McpError> {
     let result = state
         .context
         .metric_service
-        .enable_group(&params.group)
+        .enable_group(&params.group, scope)
         .await
         .mcp_context("Failed to enable group")?;
 
@@ -71,11 +72,12 @@ impl DisableGroupResult {
 pub async fn disable_group_impl(
     state: &Arc<ApiState>,
     params: GroupParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<DisableGroupResult, McpError> {
     let result = state
         .context
         .metric_service
-        .disable_group(&params.group)
+        .disable_group(&params.group, scope)
         .await
         .mcp_context("Failed to disable group")?;
 
@@ -106,19 +108,20 @@ impl ListGroupsResult {
 pub async fn list_groups_impl(
     state: &Arc<ApiState>,
     params: ListGroupsParams,
+    scope: &detrix_application::MetricScope,
 ) -> Result<ListGroupsResult, McpError> {
     let groups = state
         .context
         .metric_service
-        .list_groups()
+        .list_group_summaries_scoped(scope)
         .await
-        .mcp_context("Failed to list groups")?;
+        .mcp_context("Failed to list group summaries")?;
 
     let group_infos: Vec<_> = groups
         .iter()
         .map(|g| {
             serde_json::json!({
-                "name": g.name,
+                "name": g.name.as_deref().unwrap_or(detrix_core::DEFAULT_GROUP_NAME),
                 "metric_count": g.metric_count,
                 "enabled_count": g.enabled_count,
             })

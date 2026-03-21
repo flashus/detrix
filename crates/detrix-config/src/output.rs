@@ -47,6 +47,9 @@ pub struct GelfOutputConfig {
     pub port: u16,
 
     /// Hostname to include in GELF messages (defaults to "detrix")
+    // NOTE: `#[serde(default)]` on `Option<T>` is technically redundant (serde
+    // already deserializes missing keys as `None`), but kept for explicitness —
+    // signals "optional in TOML config" to readers. Same convention throughout.
     #[serde(default)]
     pub source_host: Option<String>,
 

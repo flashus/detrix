@@ -5,12 +5,13 @@
 //! Uses From trait for clean conversion from service types to proto DTOs.
 
 use super::{metric_to_rest_response, parse_metric_mode, parse_safety_level};
-use crate::http::error::{HttpError, ToHttpOption, ToHttpResult};
+use crate::http::error::{HttpError, ToHttpBadRequest, ToHttpOption, ToHttpResult};
+use crate::http::middleware::AuthenticatedUser;
 use crate::state::ApiState;
 use crate::types::{MetricInfo, ToggleMetricResponse};
 use axum::{
     extract::{Path, State},
-    Json,
+    Extension, Json,
 };
 use detrix_application::ToggleMetricResult as ServiceToggleResult;
 use detrix_core::MetricId;
@@ -56,16 +57,18 @@ fn toggle_response_from_result(
 /// - 404 Not Found: Metric with given ID does not exist
 pub async fn enable_metric(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: axum::http::HeaderMap,
     Path(id): Path<u64>,
 ) -> Result<Json<ToggleMetricResponse>, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
+    let scope = user.scope(client_id.clone());
     info!("REST: enable_metric (id={}, client_id={:?})", id, client_id);
 
     let result = state
         .context
         .metric_service
-        .toggle_metric(MetricId(id), true)
+        .toggle_metric(MetricId(id), true, &scope)
         .await
         .http_context("Failed to enable metric")?;
 
@@ -101,10 +104,12 @@ pub async fn enable_metric(
 /// - 404 Not Found: Metric with given ID does not exist
 pub async fn disable_metric(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: axum::http::HeaderMap,
     Path(id): Path<u64>,
 ) -> Result<Json<ToggleMetricResponse>, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
+    let scope = user.scope(client_id.clone());
     info!(
         "REST: disable_metric (id={}, client_id={:?})",
         id, client_id
@@ -113,7 +118,7 @@ pub async fn disable_metric(
     let result = state
         .context
         .metric_service
-        .toggle_metric(MetricId(id), false)
+        .toggle_metric(MetricId(id), false, &scope)
         .await
         .http_context("Failed to disable metric")?;
 
@@ -171,11 +176,13 @@ pub struct UpdateMetricRequest {
 /// - 404 Not Found: Metric with given ID does not exist
 pub async fn update_metric(
     State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: axum::http::HeaderMap,
     Path(id): Path<u64>,
     Json(payload): Json<UpdateMetricRequest>,
 ) -> Result<Json<MetricInfo>, HttpError> {
     let client_id = super::extract_client_id(&headers)?;
+    let scope = user.scope(client_id.clone());
     info!("REST: update_metric (id={}, client_id={:?})", id, client_id);
 
     // Get existing metric
@@ -211,7 +218,7 @@ pub async fn update_metric(
     state
         .context
         .metric_service
-        .update_metric(&metric)
+        .update_metric(&metric, &scope)
         .await
         .http_context("Failed to update metric")?;
 

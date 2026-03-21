@@ -1,6 +1,6 @@
 # Detrix Architecture
 
-**Version:** 1.1.0 | **Last Updated:** February 2026
+**Version:** 1.2.0 | **Last Updated:** March 2026
 
 Detrix is an LLM-first dynamic observability platform that enables developers and AI agents to add metrics to any line of code without redeployment or code changes.
 
@@ -187,6 +187,10 @@ detrix-testing    → detrix-ports, detrix-core, detrix-application (test mocks)
   - `RemoteAppService` - Remote application wake/sleep orchestration
   - `JwksValidator` - JWT validation for external auth mode
 
+- **Access Control:**
+  - `MetricScope` enum - Multi-tenant access control (Admin/User/Agent)
+  - `extract_scope()` - Builds scope from authenticated user + agent identity
+
 - **Safety:**
   - `ExpressionValidator` trait - Expression safety validation interface
   - `BaseValidator` trait - Shared validation logic (purity classification)
@@ -270,11 +274,15 @@ Metric {
     expressions: vec!["user.id", "user.role"],
     mode: CaptureMode::Stream,
     enabled: true,
+    user_id: Some("alice"),       // authenticated owner
+    agent_id: Some("uuid-1234"),  // creating agent/session
     ...
 }
 ```
 
 A single metric can capture multiple expressions simultaneously. Each captured event contains an `ExpressionValue` per expression with typed projections (numeric, string, boolean).
+
+**Ownership fields:** `user_id` identifies the authenticated user who created the metric; `agent_id` identifies which agent or session created it. Both are used for multi-tenant access control — see [AUTH.md](AUTH.md).
 
 ### Logpoint
 A DAP breakpoint with `logMessage` that captures values **without pausing execution**. Detrix converts metrics to logpoints using DAP protocol.
@@ -292,6 +300,23 @@ Captured values when a logpoint fires. Contains:
 - Optional: stack trace, memory snapshot
 
 Each `ExpressionValue` includes the expression string, raw JSON value, and an optional typed projection (numeric, string, or boolean).
+
+## Authentication & Authorization
+
+Detrix supports multi-tenant access control. See [AUTH.md](AUTH.md) for full documentation.
+
+**Auth modes:**
+- **Auto** — secure by default: auto-generates token saved to `~/detrix/auth-token` (default when no config)
+- **Disabled** — no auth, single-user Admin (explicit `mode = "disabled"`)
+- **Simple** — per-user static bearer tokens in `detrix.toml`
+- **External** — JWT validation via JWKS endpoint (Keycloak, Auth0, etc.)
+
+**MetricScope** (`detrix-application/src/scope.rs`) enforces access control:
+- `Admin` — full access to all metrics
+- `User(uid)` — read/mutate own metrics
+- `Agent { user_id, agent_id }` — read all user's metrics, mutate only own agent's metrics
+
+**Two-tier metric/logpoint model:** Each user owns their own metric at a code location. Detrix merges all enabled metrics into a single shared DAP logpoint with unioned expressions.
 
 ## DAP Adapter Pattern
 
@@ -475,8 +500,10 @@ detrix/
 │   │       ├── mcp_usage.rs   # McpUsageRepository trait
 │   │       ├── output.rs      # EventOutput trait
 │   │       └── purity.rs      # PurityAnalyzer trait
-│   ├── detrix-application/    # Business logic + safety
-│   │   └── src/safety/
+│   ├── detrix-application/    # Business logic + safety + access control
+│   │   └── src/
+│   │       ├── scope.rs           # MetricScope (multi-tenant access control)
+│   │       └── safety/
 │   │       ├── mod.rs             # ExpressionValidator trait, ValidatorRegistry
 │   │       ├── base_validator.rs  # BaseValidator trait (shared logic)
 │   │       ├── validation_result.rs # ValidationResult type
@@ -513,6 +540,7 @@ detrix/
 ├── skills/                    # Claude Code skill
 └── docs/
     ├── ARCHITECTURE.md        # This file
+    ├── AUTH.md                # Authentication & authorization guide
     ├── ADD_LANGUAGE.md        # Guide for adding languages
     ├── INSTALL.md             # Installation guide
     ├── PUBLISHING.md          # Client publishing guide
@@ -570,6 +598,7 @@ When contributing to Detrix:
 ## Resources
 
 - [Installation Guide](INSTALL.md)
+- [Authentication & Authorization](AUTH.md)
 - [CLI Reference](CLI.md)
 - [Publishing Guide](PUBLISHING.md)
 - [Adding Languages](ADD_LANGUAGE.md)

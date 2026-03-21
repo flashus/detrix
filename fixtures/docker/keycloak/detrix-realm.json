@@ -1,0 +1,123 @@
+{
+  "realm": "detrix",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "accessTokenLifespan": 30,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "roles": {
+    "realm": [
+      {
+        "name": "detrix-admin",
+        "description": "Detrix administrator role"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "detrix-api",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "detrix-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "detrix-service",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "attributes": {
+        "access.token.lifespan": "3600"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "detrix-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@detrix-test.local",
+      "firstName": "Alice",
+      "lastName": "Test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "alice-pass",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@detrix-test.local",
+      "firstName": "Bob",
+      "lastName": "Test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "bob-pass",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "admin-user",
+      "enabled": true,
+      "email": "admin@detrix-test.local",
+      "firstName": "Admin",
+      "lastName": "Test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin-pass",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "detrix-admin"
+      ]
+    },
+    {
+      "username": "go-service",
+      "enabled": true,
+      "email": "go-service@detrix-test.local",
+      "firstName": "Go",
+      "lastName": "Service",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "go-service-pass",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

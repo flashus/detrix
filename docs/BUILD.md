@@ -395,7 +395,7 @@ detrix.init(name="my-service")
 ```
 
 ```rust
-// Rust (Cargo.toml: detrix-rs = "1.1.1")
+// Rust (Cargo.toml: detrix-rs = "1.2.0")
 detrix_rs::init(detrix_rs::Config {
     name: "my-service".into(),
     daemon_url: std::env::var("DETRIX_DAEMON_URL").unwrap_or_default(),
