@@ -202,7 +202,7 @@ detrix.Init(detrix.Config{
 ```
 
 ```rust
-// Rust (Cargo.toml: detrix-rs = "1.1.1")
+// Rust (Cargo.toml: detrix-rs = "1.2.0")
 detrix_rs::init(detrix_rs::Config {
     name: "my-service".into(),
     daemon_url: std::env::var("DETRIX_DAEMON_URL").unwrap_or_default(),
@@ -245,7 +245,9 @@ See `examples/docker-demo/` for a complete working example.
 
 ## Authentication
 
-By default, auth is disabled for local development. For cloud and multi-user deployments, enable authentication in `detrix.toml`:
+Detrix is **secure by default**. When no `[api.auth]` section is configured, the daemon auto-generates a token saved to `~/detrix/auth-token`. The MCP bridge discovers it automatically — no setup needed for single-user local development.
+
+For cloud and multi-user deployments, configure explicit authentication in `detrix.toml`:
 
 ```toml
 [api.auth]
@@ -275,7 +277,7 @@ Or per-daemon in `~/detrix/credentials.toml`:
 token = "dtx_alice_secret"
 ```
 
-Detrix also supports JWT/JWKS for enterprise SSO. See the full [Authentication Guide](AUTH.md) for details on auth modes, access control, and multi-tenant configuration.
+Detrix also supports JWT/JWKS for enterprise SSO. See the full [Authentication Guide](AUTH.md) for details on auth modes, access control, tenant ID validation, and multi-tenant configuration.
 
 ---
 

@@ -8,11 +8,27 @@ Detrix supports multi-tenant access control with per-user identity, role-based a
 
 | Mode | Config | Description |
 |------|--------|-------------|
-| **Disabled** | `mode = "disabled"` or absent | No authentication. All requests get Admin access. Default for local development. |
+| **Auto** | `[api.auth]` section absent | Secure by default. Daemon auto-generates a token saved to `~/detrix/auth-token`. MCP bridge discovers it automatically. |
+| **Disabled** | `mode = "disabled"` | No authentication. All requests get Admin access. Use only for local development. |
 | **Simple** | `mode = "simple"` | Per-user static bearer tokens defined in `detrix.toml`. Each token maps to a user identity and role. |
 | **External** | `mode = "external"` | JWT validation via a JWKS endpoint. For enterprise SSO (Keycloak, Auth0, etc.). |
 
-When the `[api.auth]` section is omitted entirely, auth is disabled and the daemon operates in single-user Admin mode.
+### Auto-Auth (Default)
+
+When the `[api.auth]` section is omitted entirely, the daemon automatically:
+
+1. Generates a cryptographically secure 64-character hex token (256 bits of entropy)
+2. Saves it to `~/detrix/auth-token` (permissions `0600`)
+3. Enables Simple mode with the generated token as a single Admin user
+
+The MCP bridge (`detrix mcp`) discovers this token automatically via the `~/detrix/auth-token` file. No configuration needed for single-user local development.
+
+You can override the auto-generated token with the `DETRIX_TOKEN` environment variable:
+
+```bash
+# Use a specific token instead of auto-generated
+DETRIX_TOKEN=my-custom-token detrix serve
+```
 
 ---
 
@@ -54,6 +70,26 @@ DETRIX_TOKEN=dtx_alice_3f9a... detrix mcp
 - `user` — can create, read, and manage their own metrics
 - `admin` — full access to all metrics across all users
 
+### Token Requirements
+
+- Minimum length: 16 characters
+- Maximum length: 512 characters
+- Tokens must be unique across all users
+- User IDs must be unique across all users
+- Tokens are compared using constant-time SHA-256 comparison to prevent timing side-channels
+
+### Tenant ID Validation
+
+The `user_id` field (and `agent_id`) are validated at API boundaries:
+
+- Must not be empty
+- Must not be whitespace-only (e.g., `"   "`, `"\t"`)
+- Must not contain control characters (e.g., null bytes, newlines)
+- Must not use the reserved `__*__` pattern (e.g., `__system__`, `__admin__`)
+- Maximum length: 256 characters
+
+Invalid tenant IDs return HTTP 400 / gRPC `INVALID_ARGUMENT` with error code `1008` (`INVALID_TENANT_ID`).
+
 ---
 
 ## External Mode (JWT/JWKS)
@@ -75,9 +111,9 @@ admin_role_claim = "roles"          # claim name (e.g. "roles", "realm_access.ro
 admin_role_value = "detrix-admin"   # value that grants admin access
 ```
 
-The JWT `sub` claim becomes the `user_id` on metrics. JWKS keys are cached for `cache_ttl_seconds` (default: 300s / 5 minutes).
+The JWT `sub` claim becomes the `user_id` on metrics. JWTs without a `sub` claim are rejected with HTTP 401. JWKS keys are cached for `cache_ttl_seconds` (default: 300s / 5 minutes).
 
-**Admin role mapping:** If `admin_role_claim` and `admin_role_value` are set, the daemon checks the specified claim in the JWT. If the claim contains the configured value, the user gets Admin access. Otherwise, they get User access.
+**Admin role mapping:** If `admin_role_claim` and `admin_role_value` are both set, the daemon checks the specified claim in the JWT. Nested claims are supported with dot notation (e.g., `realm_access.roles`). If the claim contains the configured value, the user gets Admin access. Otherwise, they get User access. Both fields must be set together or both omitted.
 
 ---
 
@@ -90,7 +126,7 @@ Every metric carries two identity fields:
 | `user_id` | Authenticated user (from token or JWT `sub`) | Owns the metric. Used for access control. |
 | `agent_id` | MCP client name or `X-Detrix-Client-Id` header | Tracks which agent/session created the metric. |
 
-Both are `Option<String>` — `None` for metrics created before auth was enabled or when auth is disabled.
+Both are `Option<String>` — `None` for metrics created before auth was enabled or when auth is disabled. Metrics with no `user_id` are treated as system metrics internally (stored with the `__system__` sentinel in the database, mapped back to `None` on read).
 
 ### How identity is stamped
 
@@ -125,6 +161,20 @@ MetricScope::Agent { user_id: "alice", agent_id: "uuid-1234" }  — agent-level 
 - Agents within the same user can **see** each other's metrics but **cannot modify** them
 - Admin bypasses all access checks
 - Unauthorized mutations return HTTP 403 / gRPC `PERMISSION_DENIED`
+- Listing endpoints push `user_id` filtering to the database level (not in-memory filtering)
+
+### Scope Enforcement by Protocol
+
+All metric-touching endpoints are scope-enforced across all protocols:
+
+| Protocol | List/Query | Get | Create | Mutate | Stream |
+|----------|-----------|-----|--------|--------|--------|
+| **REST** | `MetricFilter.user_id` | `scope.can_read()` | `user_id` stamped | `scope` checked | `allowed_ids` at connect |
+| **gRPC** | `MetricFilter.user_id` | `scope.can_read()` | `user_id` stamped | `scope` checked | `allowed_ids` filter |
+| **MCP** | `MetricFilter.user_id` | `scope.can_read()` | `user_id` stamped | `scope` checked | N/A |
+| **WebSocket** | N/A | N/A | N/A | N/A | `allowed_ids` at connect |
+
+**Known limitation:** WebSocket `allowed_ids` are computed once at connection time. Metrics created after the WebSocket upgrade are invisible to non-admin users. Reconnect the WebSocket after creating new metrics to see their events.
 
 ---
 
@@ -138,7 +188,7 @@ User A: metric{line:42, exprs:[x, y]}  ─┐
 User B: metric{line:42, exprs:[y, z]}  ─┘
 ```
 
-**Storage:** One metric per `(location, connection_id, user_id)`. Each user owns their own metric entity.
+**Storage:** One metric per `(location, connection_id, user_id)`. Each user owns their own metric entity. System metrics (no user) use an internal `__system__` sentinel in the database to ensure the unique index works correctly.
 
 **DAP:** One logpoint per `(file, line)` per connection. Expressions from all enabled metrics at that location are unioned and deduplicated.
 
@@ -156,6 +206,21 @@ Some endpoints are exempt from authentication even when auth is enabled:
 public_endpoints = ["/health", "/status", "/metrics", "/api/health", "/api/status"]
 grpc_public_methods = ["GetStatus"]
 ```
+
+Additional default public endpoints (for MCP bridge lifecycle):
+- `/detrix/mcp/heartbeat`
+- `/detrix/mcp/disconnect`
+- `/api/v1/connections/touch`
+
+---
+
+## Error Codes
+
+| Code | Name | HTTP | gRPC | Description |
+|------|------|------|------|-------------|
+| 1008 | `INVALID_TENANT_ID` | 400 | `INVALID_ARGUMENT` | Invalid `user_id` or `agent_id` (empty, control chars, reserved pattern) |
+| 6001 | `UNAUTHORIZED` | 401 | `UNAUTHENTICATED` | Missing or invalid token / JWT |
+| 6002 | `FORBIDDEN` | 403 | `PERMISSION_DENIED` | Scope violation (e.g., mutating another user's metric) |
 
 ---
 
@@ -214,6 +279,20 @@ Or per-daemon in `~/detrix/credentials.toml`:
 token = "dtx_alice_secret"
 ```
 
+### File Server Host
+
+When debugging Docker containers, the MCP bridge runs a file server so the daemon can fetch source files from the host. The file server host can be configured via:
+
+```bash
+# CLI argument
+detrix mcp --file-server-host host.docker.internal
+
+# Environment variable
+DETRIX_FILE_SERVER_HOST=host.docker.internal detrix mcp
+```
+
+The CLI argument takes priority over the environment variable.
+
 ---
 
 ## Configuration Reference
@@ -222,7 +301,7 @@ token = "dtx_alice_secret"
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `mode` | `"disabled"` / `"simple"` / `"external"` | absent (disabled) | Authentication mode |
+| `mode` | `"disabled"` / `"simple"` / `"external"` | absent (auto-auth) | Authentication mode |
 | `users` | array of `StaticUser` | `[]` | Per-user tokens (simple mode) |
 | `jwt` | `JwtConfig` | — | JWT settings (external mode) |
 | `public_endpoints` | array of strings | `["/health", ...]` | Paths exempt from auth |
@@ -232,8 +311,8 @@ token = "dtx_alice_secret"
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `token` | string | Bearer token for this user |
-| `user_id` | string | User identity stamped on metrics |
+| `token` | string | Bearer token (16-512 chars, unique across users) |
+| `user_id` | string | User identity stamped on metrics (unique, max 256 chars) |
 | `role` | `"admin"` / `"user"` | Access role |
 
 ### JwtConfig
@@ -244,5 +323,5 @@ token = "dtx_alice_secret"
 | `issuer` | string | optional | Expected `iss` claim |
 | `audience` | string | optional | Expected `aud` claim |
 | `cache_ttl_seconds` | u64 | `300` | JWKS key cache TTL |
-| `admin_role_claim` | string | optional | JWT claim containing roles |
+| `admin_role_claim` | string | optional | JWT claim containing roles (supports dot notation) |
 | `admin_role_value` | string | optional | Value that grants admin access |

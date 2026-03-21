@@ -3,7 +3,7 @@ name: Detrix Dynamic Observability
 description: This skill should be used when the user asks to "debug without print", "debug", "observe running code", "add metric", "inspect variables at runtime", "see what a variable is", or mentions "detrix", "logpoint", "dynamic metrics", "debugpy", "observe code". Debugger for agents.
 license: MIT
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
   languages: ["Python", "Go", "Rust"]
 ---
 

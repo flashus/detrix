@@ -5,7 +5,7 @@ All notable changes to Detrix will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — feat/multi-tenant-auth
+## [1.2.0] 2026-03-21 — Multi-Tenant Authentication
 
 > **⚠️ BREAKING CHANGES** — This release introduces multi-tenant authentication.
 > Existing single-user configurations require migration (see below).
@@ -84,6 +84,30 @@ renames the column automatically on startup.
 - Token length is now limited to 512 characters.
 - Starting with the old `bearer_token = "..."` config now produces a clear error
   message pointing to the migration guide, instead of a confusing startup failure.
+- **Tenant ID hardening** — `user_id` and `agent_id` now reject whitespace-only
+  strings, control characters, and the reserved `__*__` pattern (e.g., `__system__`,
+  `__admin__`). Invalid values return HTTP 400 / gRPC `INVALID_ARGUMENT` with
+  error code `1008` (`INVALID_TENANT_ID`).
+
+### Performance
+
+- **Pre-computed token hashes** — SHA-256 hashes of static user tokens are computed
+  at construction time instead of on every auth request, eliminating per-request
+  allocation in the authentication hot path.
+- **Zero-allocation public endpoint matching** — `is_public_endpoint()` no longer
+  allocates a `String` per endpoint per request.
+- **SQL-level group summaries** — `list_group_summaries_scoped` for non-admin users
+  now uses a SQL `GROUP BY … WHERE user_id = ?` query instead of fetching all user
+  metrics into memory.
+
+### Infrastructure
+
+- **`DETRIX_FILE_SERVER_HOST` env var** — The MCP bridge `--file-server-host` CLI
+  argument can now also be set via the `DETRIX_FILE_SERVER_HOST` environment variable
+  (CLI argument takes priority).
+- **Configurable attach failure window** — The DAP attach/launch failure detection
+  timeout (default 500ms) can now be configured via `attach_failure_window_ms` in
+  `[adapter]` config. Useful for high-latency remote/Docker scenarios.
 
 ### Notes
 

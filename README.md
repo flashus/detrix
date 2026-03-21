@@ -214,7 +214,7 @@ detrix.init(name="my-app")   # That's it. Agent controls the rest.
 |----------|---------|------|
 | Python | `pip install detrix-py` | [Python Client](clients/python/README.md) |
 | Go | `go get github.com/flashus/detrix/clients/go` | [Go Client](clients/go/README.md) |
-| Rust | `detrix-rs = "1.1.1"` in Cargo.toml | [Rust Client](clients/rust/README.md) |
+| Rust | `detrix-rs = "1.2.0"` in Cargo.toml | [Rust Client](clients/rust/README.md) |
 
 > **Production pattern:** Build one service instance with debug symbols and a Detrix client. Route suspect traffic to it via Kafka, a sidecar, or your load balancer. The rest of your fleet runs unaffected — full-speed, no instrumentation overhead. You get deep observability on one instance without touching production.
 

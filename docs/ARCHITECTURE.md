@@ -1,6 +1,6 @@
 # Detrix Architecture
 
-**Version:** 1.1.0 | **Last Updated:** February 2026
+**Version:** 1.2.0 | **Last Updated:** March 2026
 
 Detrix is an LLM-first dynamic observability platform that enables developers and AI agents to add metrics to any line of code without redeployment or code changes.
 
@@ -306,7 +306,8 @@ Each `ExpressionValue` includes the expression string, raw JSON value, and an op
 Detrix supports multi-tenant access control. See [AUTH.md](AUTH.md) for full documentation.
 
 **Auth modes:**
-- **Disabled** — no auth, single-user Admin (default for local dev)
+- **Auto** — secure by default: auto-generates token saved to `~/detrix/auth-token` (default when no config)
+- **Disabled** — no auth, single-user Admin (explicit `mode = "disabled"`)
 - **Simple** — per-user static bearer tokens in `detrix.toml`
 - **External** — JWT validation via JWKS endpoint (Keycloak, Auth0, etc.)
 
