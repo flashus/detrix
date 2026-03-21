@@ -660,7 +660,44 @@ mod tests {
     fn test_validate_tenant_ids_reserved_system() {
         let result = Metric::validate_tenant_ids(Some("__system__"), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("reserved value"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("reserved __*__ pattern"));
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_reserved_pattern() {
+        // Any __*__ pattern is reserved
+        let result = Metric::validate_tenant_ids(Some("__admin__"), None);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("reserved __*__ pattern"));
+
+        // Too short (just "____") is not matched by len > 4 guard
+        assert!(Metric::validate_tenant_ids(Some("____"), None).is_ok());
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_whitespace_only() {
+        let result = Metric::validate_tenant_ids(Some("   "), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("whitespace-only"));
+
+        let result = Metric::validate_tenant_ids(Some("\t"), None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_tenant_ids_control_chars() {
+        let result = Metric::validate_tenant_ids(Some("user\0id"), None);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("control characters"));
     }
 }
 

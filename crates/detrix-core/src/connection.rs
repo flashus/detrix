@@ -367,10 +367,10 @@ impl Connection {
             )
     }
 
-    /// Validate that `user_id` does not exceed [`MAX_USER_ID_LEN`].
+    /// Validate that `user_id` is not empty, not reserved, and does not exceed [`MAX_USER_ID_LEN`].
     ///
-    /// Delegates to the shared [`validate_tenant_id`] helper so the same length
-    /// limit applies to both metrics and connections.
+    /// Delegates to the shared [`validate_tenant_id`] helper so the same
+    /// validation rules apply to both metrics and connections.
     pub fn validate_user_id(user_id: Option<&str>) -> Result<()> {
         validate_tenant_id("connection user_id", user_id)
     }

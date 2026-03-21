@@ -4,7 +4,7 @@ use crate::ports::{GroupSummary, ToggleMetricResult};
 use crate::scope::MetricScope;
 use crate::{GroupOperationResult, Result};
 use detrix_core::{ConnectionId, GroupInfo, MetricId, SystemEvent};
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use super::MetricService;
 
@@ -147,7 +147,8 @@ impl MetricService {
         //
         // NOTE: Individual storage.update() calls are intentional here (not N+1 anti-pattern).
         // This allows partial success - if one metric fails to update, others still get enabled.
-        let mut locations: HashSet<(ConnectionId, String, u32)> = HashSet::new();
+        let mut locations: HashMap<(ConnectionId, String, u32), detrix_core::Metric> =
+            HashMap::new();
         for mut metric in metrics {
             // Scope check: skip metrics the caller can't mutate
             if !scope.can_mutate(&metric) {
@@ -163,18 +164,22 @@ impl MetricService {
                     continue;
                 }
 
-                locations.insert((
+                let key = (
                     metric.connection_id.clone(),
                     metric.location.file.clone(),
                     metric.location.line,
-                ));
+                );
+                locations.entry(key).or_insert(metric);
                 succeeded += 1;
             }
         }
 
         // Sync merged logpoints for each affected location
-        for (conn_id, file, line) in &locations {
-            if let Err(e) = self.sync_logpoint(conn_id, file, *line, None).await {
+        for ((conn_id, file, line), fallback) in &locations {
+            if let Err(e) = self
+                .sync_logpoint(conn_id, file, *line, Some(fallback))
+                .await
+            {
                 tracing::warn!(
                     file = %file,
                     line = line,
@@ -228,7 +233,8 @@ impl MetricService {
         //
         // NOTE: Individual storage.update() calls are intentional here (not N+1 anti-pattern).
         // This allows partial success - if one metric fails to update, others still get disabled.
-        let mut locations: HashSet<(ConnectionId, String, u32)> = HashSet::new();
+        let mut locations: HashMap<(ConnectionId, String, u32), detrix_core::Metric> =
+            HashMap::new();
         for mut metric in metrics {
             // Scope check: skip metrics the caller can't mutate
             if !scope.can_mutate(&metric) {
@@ -244,18 +250,22 @@ impl MetricService {
                     continue;
                 }
 
-                locations.insert((
+                let key = (
                     metric.connection_id.clone(),
                     metric.location.file.clone(),
                     metric.location.line,
-                ));
+                );
+                locations.entry(key).or_insert(metric);
                 succeeded += 1;
             }
         }
 
         // Sync merged logpoints for each affected location
-        for (conn_id, file, line) in &locations {
-            if let Err(e) = self.sync_logpoint(conn_id, file, *line, None).await {
+        for ((conn_id, file, line), fallback) in &locations {
+            if let Err(e) = self
+                .sync_logpoint(conn_id, file, *line, Some(fallback))
+                .await
+            {
                 tracing::warn!(
                     file = %file,
                     line = line,
@@ -320,40 +330,23 @@ impl MetricService {
     /// List group summaries respecting multi-tenant scope.
     ///
     /// Admin scope: uses efficient SQL GROUP BY from storage.
-    /// User/Agent scope: fetches the user's metrics and computes summaries in-memory.
+    /// User/Agent scope: uses SQL GROUP BY with user_id filter for efficient tenant-scoped aggregation.
     pub async fn list_group_summaries_scoped(
         &self,
         scope: &MetricScope,
     ) -> Result<Vec<GroupSummary>> {
-        if scope.user_id().is_none() {
-            let summaries = self.storage.get_group_summaries().await?;
-            return Ok(summaries);
-        }
-
-        let filter = crate::ports::MetricFilter {
-            user_id: scope.user_id().map(|s| s.to_string()),
-            ..Default::default()
-        };
-        let (metrics, _) = self.list_metrics_filtered(&filter, usize::MAX, 0).await?;
-
-        let mut group_map: std::collections::HashMap<Option<String>, (u64, u64)> =
-            std::collections::HashMap::new();
-        for m in &metrics {
-            let entry = group_map.entry(m.group.clone()).or_insert((0, 0));
-            entry.0 += 1;
-            if m.enabled {
-                entry.1 += 1;
+        match scope.user_id() {
+            None => {
+                // Admin: all groups
+                let summaries = self.storage.get_group_summaries().await?;
+                Ok(summaries)
+            }
+            Some(uid) => {
+                // User: SQL-level GROUP BY with user_id filter
+                let summaries = self.storage.get_group_summaries_by_user(uid).await?;
+                Ok(summaries)
             }
         }
-
-        Ok(group_map
-            .into_iter()
-            .map(|(name, (metric_count, enabled_count))| GroupSummary {
-                name,
-                metric_count,
-                enabled_count,
-            })
-            .collect())
     }
 
     /// Disable all metrics created by a specific client.

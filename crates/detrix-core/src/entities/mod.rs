@@ -51,9 +51,19 @@ pub fn validate_tenant_id(field: &str, value: Option<&str>) -> Result<()> {
         if v.is_empty() {
             return Err(Error::InvalidTenantId(format!("{field} must not be empty")));
         }
-        if v == crate::SYSTEM_USER_ID {
+        if v.chars().all(|c| c.is_whitespace()) {
             return Err(Error::InvalidTenantId(format!(
-                "{field} uses reserved value"
+                "{field} must not be whitespace-only"
+            )));
+        }
+        if v.chars().any(|c| c.is_control()) {
+            return Err(Error::InvalidTenantId(format!(
+                "{field} contains control characters"
+            )));
+        }
+        if v.starts_with("__") && v.ends_with("__") && v.len() > 4 {
+            return Err(Error::InvalidTenantId(format!(
+                "{field} uses reserved __*__ pattern"
             )));
         }
         if v.len() > MAX_USER_ID_LEN {

@@ -680,9 +680,9 @@ impl GroupOperationResult {
         !self.failed.is_empty()
     }
 
-    /// Total number of metrics processed (succeeded + failed)
+    /// Total number of metrics in the group (succeeded + failed + skipped)
     pub fn total(&self) -> usize {
-        self.succeeded + self.failed.len()
+        self.succeeded + self.failed.len() + self.skipped as usize
     }
 
     /// Convert to error if there were any failures.

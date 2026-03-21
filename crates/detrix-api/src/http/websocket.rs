@@ -98,7 +98,10 @@ pub async fn websocket_handler(
 ) -> Response {
     info!("WebSocket: Client connecting");
 
-    // Build per-user allowed metric IDs (computed at connection time)
+    // Build per-user allowed metric IDs (computed at connection time).
+    // KNOWN LIMITATION: For non-admin users, metrics created after the WebSocket
+    // upgrade are invisible because allowed_ids is frozen at connection time.
+    // Clients should reconnect after creating new metrics to see their events.
     let scope = user.scope(None);
     let allowed_ids: Option<HashSet<u64>> = if scope.user_id().is_some() {
         let filter = MetricFilter {

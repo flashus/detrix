@@ -115,20 +115,21 @@ impl StreamingService for StreamingServiceImpl {
         let req = request.into_inner();
         let group_name = req.group_name;
 
-        // Get all metrics in this group, filtered by scope
-        let metrics = self
+        // Get all metrics in this group — push user_id filter to DB level
+        let filter = detrix_application::ports::MetricFilter {
+            user_id: scope.user_id().map(String::from),
+            group: Some(group_name.clone()),
+            ..Default::default()
+        };
+        let (metrics, _) = self
             .state
             .context
             .metric_service
-            .list_metrics_by_group(&group_name)
+            .list_metrics_filtered(&filter, usize::MAX, 0)
             .await
             .to_status()?;
 
-        let metric_ids: Vec<u64> = metrics
-            .iter()
-            .filter(|m| scope.can_read(m))
-            .filter_map(|m| m.id.map(|id| id.0))
-            .collect();
+        let metric_ids: Vec<u64> = metrics.iter().filter_map(|m| m.id.map(|id| id.0)).collect();
 
         if metric_ids.is_empty() {
             return Err(Status::not_found(format!(

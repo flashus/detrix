@@ -468,19 +468,20 @@ pub async fn query_metrics_impl(
             )),
         }
     } else if let Some(ref group_name) = params.group {
-        // Query by group
-        let metrics = state
+        // Query by group — push user_id filter to DB level instead of in-memory scope check
+        let filter = detrix_application::ports::MetricFilter {
+            user_id: scope.user_id().map(String::from),
+            group: Some(group_name.clone()),
+            ..Default::default()
+        };
+        let (metrics, _) = state
             .context
             .metric_service
-            .list_metrics_by_group(group_name)
+            .list_metrics_filtered(&filter, usize::MAX, 0)
             .await
             .mcp_context("Failed to list metrics")?;
 
-        let metric_ids: Vec<_> = metrics
-            .iter()
-            .filter(|m| scope.can_read(m))
-            .filter_map(|m| m.id)
-            .collect();
+        let metric_ids: Vec<_> = metrics.iter().filter_map(|m| m.id).collect();
 
         let events = state
             .event_repository
