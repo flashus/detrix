@@ -21,7 +21,10 @@
 use detrix_testing::e2e::{
     cleanup_orphaned_e2e_processes,
     client::{AddMetricRequest, ApiClient},
-    client_tests::{ClientProcessTester, ClientTestConfig, ClientTestScenarios, ClientTester},
+    client_tests::{
+        scenarios::ADAPTER_CONNECT_TIMEOUT_SECS, ClientProcessTester, ClientTestConfig,
+        ClientTestScenarios, ClientTester,
+    },
     executor::{find_detrix_binary, get_workspace_root},
     require_tool, RestClient, TestExecutor, TestReporter,
 };
@@ -142,10 +145,20 @@ async fn test_rust_reconnection_different_port() {
     // Wait for the adapter to finish connecting (lldb-dap attach + module enumeration).
     // On macOS Sequoia this can take 60–300+ s due to dyld shared cache enumeration.
     let step = reporter.step_start("Wait connect 1", "Wait for adapter to connect");
-    if !ClientTestScenarios::wait_for_connection_connected(&daemon_client, &connection_id_1, 600)
-        .await
+    if !ClientTestScenarios::wait_for_connection_connected(
+        &daemon_client,
+        &connection_id_1,
+        ADAPTER_CONNECT_TIMEOUT_SECS,
+    )
+    .await
     {
-        reporter.step_failed(step, "Connection did not reach 'connected' within 600 s");
+        reporter.step_failed(
+            step,
+            &format!(
+                "Connection did not reach 'connected' within {} s",
+                ADAPTER_CONNECT_TIMEOUT_SECS
+            ),
+        );
         client1.print_logs(50);
         executor.print_daemon_logs(50);
         reporter.print_footer(false);
@@ -407,10 +420,20 @@ async fn test_rust_reconnection_different_port() {
 
     // Wait for the adapter to finish connecting before adding metrics.
     let step = reporter.step_start("Wait connect 2", "Wait for adapter to connect (session 2)");
-    if !ClientTestScenarios::wait_for_connection_connected(&daemon_client, &connection_id_2, 600)
-        .await
+    if !ClientTestScenarios::wait_for_connection_connected(
+        &daemon_client,
+        &connection_id_2,
+        ADAPTER_CONNECT_TIMEOUT_SECS,
+    )
+    .await
     {
-        reporter.step_failed(step, "Connection did not reach 'connected' within 600 s");
+        reporter.step_failed(
+            step,
+            &format!(
+                "Connection did not reach 'connected' within {} s",
+                ADAPTER_CONNECT_TIMEOUT_SECS
+            ),
+        );
         client2.print_logs(50);
         executor.print_daemon_logs(50);
         reporter.print_footer(false);

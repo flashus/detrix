@@ -28,7 +28,10 @@
 
 use detrix_testing::e2e::{
     cleanup_orphaned_e2e_processes,
-    client_tests::{ClientProcessTester, ClientTestConfig, ClientTestScenarios, ClientTester},
+    client_tests::{
+        scenarios::ADAPTER_CONNECT_TIMEOUT_SECS, ClientProcessTester, ClientTestConfig,
+        ClientTestScenarios, ClientTester,
+    },
     executor::{find_detrix_binary, get_workspace_root},
     require_tool, RestClient, TestExecutor, TestReporter,
 };
@@ -384,11 +387,20 @@ async fn test_rust_client_no_duplicate_events() {
     // so the connection may be "connecting" for up to 420 s on macOS Sequoia (lldb-dap 22.x
     // enumerates 400+ system dylibs from the dyld shared cache during attach).
     let step = reporter.step_start("Phase1b", "Wait for adapter to connect");
-    let connected =
-        ClientTestScenarios::wait_for_connection_connected(&daemon_client, &connection_id, 600)
-            .await;
+    let connected = ClientTestScenarios::wait_for_connection_connected(
+        &daemon_client,
+        &connection_id,
+        ADAPTER_CONNECT_TIMEOUT_SECS,
+    )
+    .await;
     if !connected {
-        reporter.step_failed(step, "Connection did not reach 'connected' within 600 s");
+        reporter.step_failed(
+            step,
+            &format!(
+                "Connection did not reach 'connected' within {} s",
+                ADAPTER_CONNECT_TIMEOUT_SECS
+            ),
+        );
         client.print_logs(50);
         executor.print_daemon_logs(50);
         reporter.print_footer(false);

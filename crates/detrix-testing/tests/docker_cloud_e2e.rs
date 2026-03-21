@@ -14,9 +14,11 @@
 
 use detrix_testing::e2e::client::ApiClient;
 use detrix_testing::e2e::dap_scenarios::go_lines;
-use detrix_testing::e2e::{find_detrix_binary, get_workspace_root, McpClient};
+use detrix_testing::e2e::{
+    extract_text, find_detrix_binary, get_workspace_root, McpBridgeProcess, McpClient,
+};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -227,7 +229,7 @@ async fn restart_daemon_with_env(envs: &[(&str, &str)]) {
 }
 
 /// Sleep an app (stops its debugger) and wait briefly for cleanup.
-/// NOTE: Used only by Phase 7/8 (kept as-is). Other phases use BridgeProcess::sleep_app.
+/// NOTE: Used only by Phase 7/8 (kept as-is). Other phases use McpBridgeProcess::sleep_app.
 async fn sleep_app(client: &McpClient, app_url: &str) {
     let _ = client.sleep(app_url).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -312,216 +314,38 @@ async fn force_recreate_with_env(service: &str, envs: &[(&str, &str)]) {
 }
 
 // =============================================================================
-// BridgeProcess — manages a `detrix mcp` child process (stdin/stdout JSON-RPC)
+// DockerBridgeExt — docker-specific high-level methods on McpBridgeProcess
 // =============================================================================
 
-/// Manages a `detrix mcp` bridge subprocess for E2E testing.
-/// Communicates via JSON-RPC over stdin/stdout, matching the real agent experience.
-struct BridgeProcess {
-    child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
-    reader: BufReader<tokio::process::ChildStdout>,
-    next_id: u64,
+/// Extension methods on McpBridgeProcess for docker cloud E2E tests.
+#[async_trait::async_trait]
+trait DockerBridgeExt {
+    async fn wake(&mut self, app_url: &str) -> Result<String, String>;
+    async fn sleep_app(&mut self, app_url: &str);
+    async fn add_metric(
+        &mut self,
+        name: &str,
+        location: &str,
+        expressions: &[&str],
+        connection_id: &str,
+    ) -> Result<(), String>;
+    async fn observe(&mut self, args: Value) -> Result<ObserveInfo, String>;
+    async fn remove_metric(&mut self, name: &str) -> Result<(), String>;
+    async fn list_metrics_names(&mut self) -> Vec<String>;
 }
 
-impl BridgeProcess {
-    /// Spawn a bridge process pointing at the given daemon.
-    async fn spawn(daemon_url: &str, token: &str, file_server_host: Option<&str>) -> Self {
-        Self::spawn_inner(daemon_url, token, file_server_host, None).await
-    }
-
-    /// Spawn a bridge process with a custom CWD (needed for git-pinned tests
-    /// where the bridge's file server must serve from a temp repo directory).
-    async fn spawn_in_dir(
-        daemon_url: &str,
-        token: &str,
-        file_server_host: Option<&str>,
-        cwd: &Path,
-    ) -> Self {
-        Self::spawn_inner(daemon_url, token, file_server_host, Some(cwd)).await
-    }
-
-    async fn spawn_inner(
-        daemon_url: &str,
-        token: &str,
-        file_server_host: Option<&str>,
-        cwd: Option<&Path>,
-    ) -> Self {
-        let ws_root = get_workspace_root();
-        let detrix_bin = find_detrix_binary(&ws_root)
-            .expect("detrix binary not found — run `cargo build` first");
-
-        let mut args = vec![
-            "mcp".to_string(),
-            "--daemon-url".to_string(),
-            daemon_url.to_string(),
-        ];
-        if let Some(host) = file_server_host {
-            args.push("--file-server-host".to_string());
-            args.push(host.to_string());
-        }
-
-        let mut cmd = tokio::process::Command::new(&detrix_bin);
-        cmd.args(&args)
-            .env("DETRIX_TOKEN", token)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
-
-        let mut child = cmd.spawn().expect("spawn detrix mcp failed");
-        let stdin = child.stdin.take().expect("stdin");
-        let stdout = child.stdout.take().expect("stdout");
-        let reader = BufReader::new(stdout);
-
-        let mut bridge = Self {
-            child,
-            stdin,
-            reader,
-            next_id: 1,
-        };
-
-        // Perform MCP initialization handshake
-        bridge.initialize().await;
-        bridge
-    }
-
-    async fn initialize(&mut self) {
-        // Send initialize request
-        let id = self.next_id;
-        self.next_id += 1;
-        let init_req = json!({
-            "jsonrpc": "2.0",
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": { "name": "e2e-bridge", "version": "1.0" }
-            },
-            "id": id
-        });
-        self.write_message(&init_req).await;
-        let resp = self.read_response(10).await;
-        assert!(
-            resp.get("result").is_some(),
-            "initialize should succeed: {}",
-            resp
-        );
-
-        // Send initialized notification (required by MCP protocol)
-        let initialized = json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized"
-        });
-        self.write_message(&initialized).await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-
-    async fn write_message(&mut self, msg: &Value) {
-        let line = format!("{}\n", msg);
-        self.stdin
-            .write_all(line.as_bytes())
-            .await
-            .expect("write to bridge stdin");
-        self.stdin.flush().await.expect("flush bridge stdin");
-    }
-
-    /// Read a JSON-RPC response (skips notifications).
-    async fn read_response(&mut self, timeout_secs: u64) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-        loop {
-            let mut line = String::new();
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                panic!("Bridge response timeout ({}s)", timeout_secs);
-            }
-            let n = tokio::time::timeout(remaining, self.reader.read_line(&mut line))
-                .await
-                .unwrap_or_else(|_| panic!("Bridge response timeout ({}s)", timeout_secs))
-                .expect("read bridge response");
-            assert!(
-                n > 0,
-                "EOF from bridge (response timeout {}s)",
-                timeout_secs
-            );
-            if let Ok(parsed) = serde_json::from_str::<Value>(line.trim()) {
-                // Skip notifications (no "id" or "id":null)
-                if parsed.get("id").is_some_and(|v| !v.is_null()) {
-                    return parsed;
-                }
-            }
-        }
-    }
-
-    /// Call an MCP tool and return the result object. Returns Err on JSON-RPC error or isError.
-    async fn call_tool(&mut self, name: &str, args: Value) -> Result<Value, String> {
-        let id = self.next_id;
-        self.next_id += 1;
-
-        let request = json!({
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {
-                "name": name,
-                "arguments": args
-            },
-            "id": id
-        });
-
-        self.write_message(&request).await;
-        let resp = self.read_response(60).await;
-
-        // Check for JSON-RPC error
-        if let Some(error) = resp.get("error") {
-            return Err(format!("JSON-RPC error: {}", error));
-        }
-
-        let result = resp
-            .get("result")
-            .cloned()
-            .ok_or_else(|| "no result in response".to_string())?;
-
-        // Check for isError flag
-        if result.get("isError") == Some(&Value::Bool(true)) {
-            let text = Self::extract_text(&result);
-            return Err(format!("Tool error: {}", text));
-        }
-
-        Ok(result)
-    }
-
-    /// Extract concatenated text from MCP result.content array.
-    fn extract_text(result: &Value) -> String {
-        result
-            .get("content")
-            .and_then(|c| c.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default()
-    }
-
-    // ── High-level tool wrappers ──
-
-    /// Wake an app. Returns response text.
+#[async_trait::async_trait]
+impl DockerBridgeExt for McpBridgeProcess {
     async fn wake(&mut self, app_url: &str) -> Result<String, String> {
         let result = self.call_tool("wake", json!({"app_url": app_url})).await?;
-        Ok(Self::extract_text(&result))
+        Ok(extract_text(&result))
     }
 
-    /// Sleep an app (stops its debugger) and wait briefly for cleanup.
     async fn sleep_app(&mut self, app_url: &str) {
         let _ = self.call_tool("sleep", json!({"app_url": app_url})).await;
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    /// Add a metric with a single expression.
     async fn add_metric(
         &mut self,
         name: &str,
@@ -542,27 +366,24 @@ impl BridgeProcess {
         Ok(())
     }
 
-    /// Observe (auto-find line, auto-select connection). Returns parsed ObserveInfo.
     async fn observe(&mut self, args: Value) -> Result<ObserveInfo, String> {
         let result = self.call_tool("observe", args).await?;
-        let text = Self::extract_text(&result);
+        let text = extract_text(&result);
         ObserveInfo::parse(&text)
     }
 
-    /// Remove a metric by name.
     async fn remove_metric(&mut self, name: &str) -> Result<(), String> {
         self.call_tool("remove_metric", json!({"name": name}))
             .await?;
         Ok(())
     }
 
-    /// List metric names (for cleanup).
     async fn list_metrics_names(&mut self) -> Vec<String> {
         if let Ok(result) = self
             .call_tool("list_metrics", json!({"format": "json"}))
             .await
         {
-            let text = Self::extract_text(&result);
+            let text = extract_text(&result);
             if let Some(start) = text.find('[') {
                 if let Ok(arr) = serde_json::from_str::<Vec<Value>>(&text[start..]) {
                     return arr
@@ -577,11 +398,6 @@ impl BridgeProcess {
             }
         }
         vec![]
-    }
-
-    /// Kill the bridge process.
-    async fn kill(&mut self) {
-        let _ = self.child.kill().await;
     }
 }
 
@@ -673,17 +489,17 @@ impl ObserveInfo {
     }
 }
 
-/// Poll `list_connections` via BridgeProcess until a connected connection with the given language.
+/// Poll `list_connections` via McpBridgeProcess until a connected connection with the given language.
 /// Returns the connection_id.
 async fn poll_for_connection_bridge(
-    bridge: &mut BridgeProcess,
+    bridge: &mut McpBridgeProcess,
     language: &str,
     timeout: Duration,
 ) -> Option<String> {
     let start = Instant::now();
     loop {
         if let Ok(result) = bridge.call_tool("list_connections", json!({})).await {
-            let text = BridgeProcess::extract_text(&result);
+            let text = extract_text(&result);
             // Parse TOON-format CSV lines (same format as daemon returns)
             for line in text.lines() {
                 if line.contains(',') && !line.starts_with('[') && !line.starts_with("Found") {
@@ -706,9 +522,9 @@ async fn poll_for_connection_bridge(
     }
 }
 
-/// Poll `query_metrics` via BridgeProcess until events appear. Returns event count (0 = timeout).
+/// Poll `query_metrics` via McpBridgeProcess until events appear. Returns event count (0 = timeout).
 async fn poll_for_events_bridge(
-    bridge: &mut BridgeProcess,
+    bridge: &mut McpBridgeProcess,
     metric_name: &str,
     timeout: Duration,
 ) -> usize {
@@ -721,7 +537,7 @@ async fn poll_for_events_bridge(
             )
             .await
         {
-            let text = BridgeProcess::extract_text(&result);
+            let text = extract_text(&result);
             // Look for JSON array in text (format=json returns "Found N events...\n[{...}, ...]")
             if let Some(arr_start) = text.find('[') {
                 if let Ok(arr) = serde_json::from_str::<Vec<Value>>(&text[arr_start..]) {
@@ -775,7 +591,7 @@ async fn admin_get_metric_id(
 #[ignore]
 async fn test_cloud_e2e() {
     // Docker Compose assumed running (Taskfile manages lifecycle).
-    // McpClient kept only for Phase 7/8 (kept as-is); all other phases use BridgeProcess.
+    // McpClient kept only for Phase 7/8 (kept as-is); all other phases use McpBridgeProcess.
     let client = McpClient::with_auth(DAEMON_HTTP_PORT, DOCKER_AUTH_TOKEN);
 
     // Print daemon build datetime (docker exec) to verify the image is fresh.
@@ -818,7 +634,7 @@ async fn test_cloud_e2e() {
     println!("Phase 1: Basic observation");
     println!("{}", "=".repeat(60));
 
-    let mut bridge = BridgeProcess::spawn(&daemon_url, DOCKER_AUTH_TOKEN, None).await;
+    let mut bridge = McpBridgeProcess::spawn(&daemon_url, DOCKER_AUTH_TOKEN).await;
 
     // ── Phase 1a: Python ──
     println!("\n--- Phase 1a: Python ---");
@@ -959,7 +775,7 @@ async fn test_cloud_e2e() {
     println!("Phase 2: Control plane file serving (Python)");
     println!("{}", "=".repeat(60));
 
-    let mut bridge = BridgeProcess::spawn(&daemon_url, DOCKER_AUTH_TOKEN, None).await;
+    let mut bridge = McpBridgeProcess::spawn(&daemon_url, DOCKER_AUTH_TOKEN).await;
 
     // Wake Python and use explicit connection_id
     println!("\n--- Phase 2: waking Python ---");
@@ -1022,10 +838,10 @@ async fn test_cloud_e2e() {
     println!("{}", "=".repeat(60));
 
     let ws_root = get_workspace_root();
-    let mut bridge = BridgeProcess::spawn_in_dir(
+    let mut bridge = McpBridgeProcess::spawn_in_dir_with_file_server(
         &daemon_url,
         DOCKER_AUTH_TOKEN,
-        Some("host.docker.internal"),
+        "host.docker.internal",
         &ws_root,
     )
     .await;
@@ -1119,10 +935,10 @@ async fn test_cloud_e2e() {
 
     // 4. Spawn bridge with CWD = temp git repo so the bridge file server
     //    can serve files from the repo and the auto-mapping finds /app → repo path.
-    let mut bridge = BridgeProcess::spawn_in_dir(
+    let mut bridge = McpBridgeProcess::spawn_in_dir_with_file_server(
         &daemon_url,
         DOCKER_AUTH_TOKEN,
-        Some("host.docker.internal"),
+        "host.docker.internal",
         git_dir.path(),
     )
     .await;
@@ -1355,7 +1171,7 @@ async fn test_cloud_e2e() {
     // ── Phase 6a: Python (control plane file serving) ──
     println!("\n--- Phase 6a: Python (control plane file serving) ---");
     {
-        let mut bridge = BridgeProcess::spawn(&daemon_url, DOCKER_AUTH_TOKEN, None).await;
+        let mut bridge = McpBridgeProcess::spawn(&daemon_url, DOCKER_AUTH_TOKEN).await;
 
         let wake_text = bridge
             .wake(PYTHON_APP_URL)
@@ -1407,10 +1223,10 @@ async fn test_cloud_e2e() {
     // ── Phase 6b: Go (bridge file serving) ──
     println!("\n--- Phase 6b: Go (bridge file serving) ---");
     {
-        let mut bridge = BridgeProcess::spawn_in_dir(
+        let mut bridge = McpBridgeProcess::spawn_in_dir_with_file_server(
             &daemon_url,
             DOCKER_AUTH_TOKEN,
-            Some("host.docker.internal"),
+            "host.docker.internal",
             &ws_root,
         )
         .await;
@@ -1461,7 +1277,7 @@ async fn test_cloud_e2e() {
     // ── Phase 6c: Rust (explicit line, no file serving needed, skip if unavailable) ──
     println!("\n--- Phase 6c: Rust (explicit line) ---");
     let rust_adv_available = {
-        let mut bridge = BridgeProcess::spawn(&daemon_url, DOCKER_AUTH_TOKEN, None).await;
+        let mut bridge = McpBridgeProcess::spawn(&daemon_url, DOCKER_AUTH_TOKEN).await;
 
         match bridge.wake(RUST_APP_URL).await {
             Ok(rust_wake_text) => {
@@ -1992,10 +1808,10 @@ async fn test_cloud_e2e() {
     println!("  Daemon restarted");
 
     let ws_root_9 = get_workspace_root();
-    let mut bridge = BridgeProcess::spawn_in_dir(
+    let mut bridge = McpBridgeProcess::spawn_in_dir_with_file_server(
         &daemon_url,
         DOCKER_AUTH_TOKEN,
-        Some("host.docker.internal"),
+        "host.docker.internal",
         &ws_root_9,
     )
     .await;
@@ -2104,7 +1920,7 @@ async fn test_cloud_e2e() {
 
     // ── Phase 10a: Alice wakes Python and adds a metric ──
     println!("\n--- Phase 10a: Alice adds Python metric ---");
-    let mut alice_bridge = BridgeProcess::spawn(&daemon_url_10, ALICE_TOKEN, None).await;
+    let mut alice_bridge = McpBridgeProcess::spawn(&daemon_url_10, ALICE_TOKEN).await;
     alice_bridge
         .wake(PYTHON_APP_URL)
         .await
@@ -2202,7 +2018,7 @@ async fn test_cloud_e2e() {
     // Note: Bob uses line 65 (pnl calculation) to get his own independent logpoint.
     // Each user gets their own metric in storage; admin sees both (multi-tenant storage verified).
     println!("\n--- Phase 10c: Bob adds metric at different Python location ---");
-    let mut bob_bridge = BridgeProcess::spawn(&daemon_url_10, BOB_TOKEN, None).await;
+    let mut bob_bridge = McpBridgeProcess::spawn(&daemon_url_10, BOB_TOKEN).await;
     bob_bridge
         .wake(PYTHON_APP_URL)
         .await
@@ -2283,7 +2099,7 @@ async fn test_cloud_e2e() {
     println!("  Alice disabled her metric");
 
     // Bob's metric at same line should still fire — open a new bridge to check
-    let mut bob_bridge2 = BridgeProcess::spawn(&daemon_url_10, BOB_TOKEN, None).await;
+    let mut bob_bridge2 = McpBridgeProcess::spawn(&daemon_url_10, BOB_TOKEN).await;
     let bob_events2 = poll_for_events_bridge(
         &mut bob_bridge2,
         "cloud-bob-metric",
@@ -2330,8 +2146,8 @@ async fn test_cloud_e2e() {
     // ── Type 1: Non-overlapping (Alice: price, Bob: quantity) ──
     println!("\n--- 10e-Type1: Non-overlapping expressions (Alice:price, Bob:quantity) ---");
     {
-        let mut alice_b = BridgeProcess::spawn(&daemon_url_10, ALICE_TOKEN, None).await;
-        let mut bob_b = BridgeProcess::spawn(&daemon_url_10, BOB_TOKEN, None).await;
+        let mut alice_b = McpBridgeProcess::spawn(&daemon_url_10, ALICE_TOKEN).await;
+        let mut bob_b = McpBridgeProcess::spawn(&daemon_url_10, BOB_TOKEN).await;
 
         // Step 1: Both add metrics at line 60
         alice_b
@@ -2413,8 +2229,8 @@ async fn test_cloud_e2e() {
     // ── Type 2: Identical expressions (Alice: price, Bob: price) ──
     println!("\n--- 10e-Type2: Identical expressions (Alice:price, Bob:price) ---");
     {
-        let mut alice_b = BridgeProcess::spawn(&daemon_url_10, ALICE_TOKEN, None).await;
-        let mut bob_b = BridgeProcess::spawn(&daemon_url_10, BOB_TOKEN, None).await;
+        let mut alice_b = McpBridgeProcess::spawn(&daemon_url_10, ALICE_TOKEN).await;
+        let mut bob_b = McpBridgeProcess::spawn(&daemon_url_10, BOB_TOKEN).await;
 
         // Step 1: Both add metrics at line 60 with same expression
         alice_b
@@ -2496,8 +2312,8 @@ async fn test_cloud_e2e() {
     // ── Type 3: Partially overlapping (Alice: price, Bob: price + quantity) ──
     println!("\n--- 10e-Type3: Partial overlap (Alice:[price], Bob:[price,quantity]) ---");
     {
-        let mut alice_b = BridgeProcess::spawn(&daemon_url_10, ALICE_TOKEN, None).await;
-        let mut bob_b = BridgeProcess::spawn(&daemon_url_10, BOB_TOKEN, None).await;
+        let mut alice_b = McpBridgeProcess::spawn(&daemon_url_10, ALICE_TOKEN).await;
+        let mut bob_b = McpBridgeProcess::spawn(&daemon_url_10, BOB_TOKEN).await;
 
         // Step 1: Alice: [price], Bob: [price, quantity] at same line
         alice_b
@@ -2612,7 +2428,7 @@ async fn test_cloud_e2e() {
             .await;
     }
     // Sleep Python app
-    let mut cleanup_bridge = BridgeProcess::spawn(&daemon_url_10, ADMIN_TOKEN, None).await;
+    let mut cleanup_bridge = McpBridgeProcess::spawn(&daemon_url_10, ADMIN_TOKEN).await;
     cleanup_bridge.sleep_app(PYTHON_APP_URL).await;
     cleanup_bridge.kill().await;
     println!("  Phase 10 cleaned up");

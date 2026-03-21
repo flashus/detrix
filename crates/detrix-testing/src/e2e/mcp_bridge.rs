@@ -38,6 +38,16 @@ impl McpBridgeProcess {
         Self::spawn_inner(daemon_url, token, Some(file_server_host), None).await
     }
 
+    /// Spawn with both a working directory and a file-server host.
+    pub async fn spawn_in_dir_with_file_server(
+        daemon_url: &str,
+        token: &str,
+        file_server_host: &str,
+        cwd: &Path,
+    ) -> Self {
+        Self::spawn_inner(daemon_url, token, Some(file_server_host), Some(cwd)).await
+    }
+
     async fn spawn_inner(
         daemon_url: &str,
         token: &str,
@@ -148,7 +158,7 @@ impl McpBridgeProcess {
             "id": id
         });
         self.write_message(&request).await;
-        let resp = self.read_response(30).await;
+        let resp = self.read_response(60).await;
         if let Some(error) = resp.get("error") {
             return Err(format!("JSON-RPC error: {}", error));
         }

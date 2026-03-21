@@ -12,6 +12,9 @@ use std::sync::Arc;
 /// These scenarios implement the test cases defined in `clients/specs/conformance/test_cases.yaml`.
 /// They are designed to be run against any client implementation that implements the
 /// `ClientTester` trait.
+/// Timeout in seconds for waiting for an adapter connection to reach "connected" status.
+pub const ADAPTER_CONNECT_TIMEOUT_SECS: u64 = 600;
+
 pub struct ClientTestScenarios;
 
 impl ClientTestScenarios {
@@ -111,10 +114,19 @@ impl ClientTestScenarios {
         // lldb-dap 22.x the attach phase takes 60–420 s (ptrace dylib enumeration on macOS
         // Sequoia with 400+ system dylibs), after which the fixture process is unfrozen
         // and its HTTP server becomes responsive again.
-        if !Self::wait_for_connection_connected(daemon, &result.connection_id, 600).await {
+        if !Self::wait_for_connection_connected(
+            daemon,
+            &result.connection_id,
+            ADAPTER_CONNECT_TIMEOUT_SECS,
+        )
+        .await
+        {
             reporter.step_failed(
                 step,
-                "Connection did not reach 'connected' status within 600 s",
+                &format!(
+                    "Connection did not reach 'connected' status within {} s",
+                    ADAPTER_CONNECT_TIMEOUT_SECS
+                ),
             );
             return Err("Connection timed out waiting for 'connected' status".to_string());
         }
@@ -471,7 +483,8 @@ impl ClientTestScenarios {
         // Wait for the adapter background task to complete so the connection reaches
         // "connected" status before we check the daemon's connection list.
         if let Some(ref conn_id) = awake_connection_id {
-            Self::wait_for_connection_connected(daemon, conn_id, 600).await;
+            Self::wait_for_connection_connected(daemon, conn_id, ADAPTER_CONNECT_TIMEOUT_SECS)
+                .await;
         }
 
         // Verify only one connected connection in daemon

@@ -102,5 +102,8 @@ pub use mcp::McpClient;
 pub use rest::RestClient;
 pub use websocket::{EventMessage, WebSocketClient, WebSocketError, WebSocketHandle};
 
+// MCP bridge subprocess
+pub use mcp_bridge::{extract_text, McpBridgeProcess};
+
 // JWT testing utilities
 pub use jwt::{JwtBuilder, JwtKeyPair, MockJwksServer, TestClaims};
