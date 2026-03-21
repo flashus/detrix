@@ -10,11 +10,17 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-/// How long to wait for an early `success: false` response after sending an attach/launch
-/// request without blocking.  Adapters that don't respond at all (lldb-dap 22.x) will
-/// simply not reply within this window, so we proceed normally.  Adapters that respond
-/// immediately (lldb-dap 21.x on error, debugpy) will be caught within this window.
-const ATTACH_FAILURE_WINDOW: Duration = Duration::from_millis(500);
+/// Default failure detection window (500ms). Overridden by config `attach_failure_window_ms`.
+const DEFAULT_ATTACH_FAILURE_WINDOW_MS: u64 = 500;
+
+/// Resolve the failure detection window from config, falling back to the default.
+fn resolve_failure_window(config: &detrix_config::AdapterConnectionConfig) -> Duration {
+    Duration::from_millis(
+        config
+            .attach_failure_window_ms
+            .unwrap_or(DEFAULT_ATTACH_FAILURE_WINDOW_MS),
+    )
+}
 
 /// Resolve the attach configurationDone timeout from config, falling back to the default.
 pub(crate) fn resolve_attach_timeout(config: &detrix_config::AdapterConnectionConfig) -> Duration {
@@ -87,7 +93,11 @@ pub async fn initialize_dap(
             // passes without a response in the happy path.  If debugpy immediately
             // returns success: false (e.g. bad host/port), we surface it here.
             broker
-                .send_and_detect_failure(requests::ATTACH, Some(attach_args), ATTACH_FAILURE_WINDOW)
+                .send_and_detect_failure(
+                    requests::ATTACH,
+                    Some(attach_args),
+                    resolve_failure_window(connection_config),
+                )
                 .await?;
             debug!("Attach request sent (failure-detection window passed)");
         }
@@ -173,7 +183,11 @@ pub async fn initialize_dap(
             // so the failure window times out harmlessly. But if the adapter responds
             // with success: false (e.g. bad program path), we surface the error immediately.
             broker
-                .send_and_detect_failure(requests::LAUNCH, Some(launch_args), ATTACH_FAILURE_WINDOW)
+                .send_and_detect_failure(
+                    requests::LAUNCH,
+                    Some(launch_args),
+                    resolve_failure_window(connection_config),
+                )
                 .await?;
             debug!("Launch request sent (failure-detection window passed)");
         }
@@ -223,7 +237,11 @@ pub async fn initialize_dap(
             // within the window (e.g. bad PID, ptrace permission denied), we surface
             // the error immediately instead of waiting for the configurationDone timeout.
             broker
-                .send_and_detect_failure(requests::ATTACH, Some(attach_args), ATTACH_FAILURE_WINDOW)
+                .send_and_detect_failure(
+                    requests::ATTACH,
+                    Some(attach_args),
+                    resolve_failure_window(connection_config),
+                )
                 .await?;
             info!(
                 "AttachPid: attach request sent (failure-detection window passed), \

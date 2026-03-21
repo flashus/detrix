@@ -634,16 +634,16 @@ mod tests {
     fn test_config_redacted_masks_user_tokens() {
         let mut config = Config::default();
         config.api.auth.users = vec![
-            crate::api::StaticUser {
-                token: "super-secret-token-abc".to_string(),
-                user_id: "alice".to_string(),
-                role: crate::api::UserRole::User,
-            },
-            crate::api::StaticUser {
-                token: "another-secret-xyz".to_string(),
-                user_id: "bob".to_string(),
-                role: crate::api::UserRole::Admin,
-            },
+            crate::api::StaticUser::new(
+                "super-secret-token-abc".to_string(),
+                "alice".to_string(),
+                crate::api::UserRole::User,
+            ),
+            crate::api::StaticUser::new(
+                "another-secret-xyz".to_string(),
+                "bob".to_string(),
+                crate::api::UserRole::Admin,
+            ),
         ];
 
         let redacted = config.redacted();

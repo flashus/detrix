@@ -224,16 +224,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_health_rest_returns_true_on_200() {
-        use wiremock::matchers::method;
+        use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
+            .and(path("/health"))
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
 
         assert!(check_health_rest(&server.uri()).await);
+    }
+
+    #[tokio::test]
+    async fn test_check_health_rest_returns_false_on_500() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        assert!(!check_health_rest(&server.uri()).await);
     }
 
     #[tokio::test]

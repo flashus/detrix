@@ -396,7 +396,7 @@ pub enum UserRole {
 ///
 /// # Note
 /// Intentionally no `Default` impl — all fields must be explicit.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
 pub struct StaticUser {
     /// Bearer token (constant-time compared; redacted in Debug output)
     pub token: String,
@@ -404,6 +404,51 @@ pub struct StaticUser {
     pub user_id: String,
     /// Role: admin or user
     pub role: UserRole,
+    /// Pre-computed SHA-256 hash of `token` for constant-time lookup.
+    #[serde(skip)]
+    pub(crate) token_hash: [u8; 32],
+}
+
+// Custom Deserialize that computes token_hash after deserialization.
+// The derived Deserialize would leave token_hash as [0; 32] since it's #[serde(skip)].
+impl<'de> serde::Deserialize<'de> for StaticUser {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            token: String,
+            user_id: String,
+            role: UserRole,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(StaticUser::new(raw.token, raw.user_id, raw.role))
+    }
+}
+
+impl PartialEq for StaticUser {
+    fn eq(&self, other: &Self) -> bool {
+        self.token == other.token && self.user_id == other.user_id && self.role == other.role
+    }
+}
+
+impl Eq for StaticUser {}
+
+impl StaticUser {
+    /// Create a new StaticUser with pre-computed token hash.
+    pub fn new(token: String, user_id: String, role: UserRole) -> Self {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(token.as_bytes());
+        let mut token_hash = [0u8; 32];
+        token_hash.copy_from_slice(&hash);
+        Self {
+            token,
+            user_id,
+            role,
+            token_hash,
+        }
+    }
 }
 
 impl std::fmt::Debug for StaticUser {
@@ -525,7 +570,7 @@ impl AuthConfig {
         self.mode.clone().unwrap_or(AuthMode::Disabled)
     }
 
-    /// Validate authentication configuration
+    /// Validate authentication configuration.
     ///
     /// Ensures that valid credentials are provided when authentication is enabled.
     pub fn validate(&self) -> Result<(), String> {
@@ -627,8 +672,8 @@ impl AuthConfig {
         let input_hash = Sha256::digest(token.as_bytes());
         let mut result: Option<&StaticUser> = None;
         for user in &self.users {
-            let stored_hash = Sha256::digest(user.token.as_bytes());
-            if bool::from(input_hash.ct_eq(&stored_hash)) {
+            // Use pre-computed hash (populated by validate()) to avoid per-request hashing
+            if bool::from(input_hash.ct_eq(&user.token_hash)) {
                 result = Some(user);
             }
         }
@@ -637,9 +682,10 @@ impl AuthConfig {
 
     /// Check if a path is a public endpoint (no auth required)
     pub fn is_public_endpoint(&self, path: &str) -> bool {
-        self.public_endpoints
-            .iter()
-            .any(|p| path == p || path.starts_with(&format!("{p}/")))
+        self.public_endpoints.iter().any(|p| {
+            path == p
+                || (path.starts_with(p.as_str()) && path.as_bytes().get(p.len()) == Some(&b'/'))
+        })
     }
 
     /// Check if a gRPC method is public (no auth required)
@@ -903,19 +949,19 @@ mod tests {
     }
 
     fn alice_user() -> StaticUser {
-        StaticUser {
-            token: "dtx_alice_secret".to_string(),
-            user_id: "alice".to_string(),
-            role: UserRole::User,
-        }
+        StaticUser::new(
+            "dtx_alice_secret".to_string(),
+            "alice".to_string(),
+            UserRole::User,
+        )
     }
 
     fn admin_user() -> StaticUser {
-        StaticUser {
-            token: "dtx_admin_secret".to_string(),
-            user_id: "admin".to_string(),
-            role: UserRole::Admin,
-        }
+        StaticUser::new(
+            "dtx_admin_secret".to_string(),
+            "admin".to_string(),
+            UserRole::Admin,
+        )
     }
 
     #[test]
@@ -943,11 +989,11 @@ mod tests {
     fn test_auth_config_simple_mode_empty_token() {
         let config = AuthConfig {
             mode: Some(AuthMode::Simple),
-            users: vec![StaticUser {
-                token: "".to_string(),
-                user_id: "alice".to_string(),
-                role: UserRole::User,
-            }],
+            users: vec![StaticUser::new(
+                "".to_string(),
+                "alice".to_string(),
+                UserRole::User,
+            )],
             ..Default::default()
         };
         assert!(config.validate().is_err());
@@ -957,11 +1003,11 @@ mod tests {
     fn test_auth_config_simple_mode_short_token() {
         let config = AuthConfig {
             mode: Some(AuthMode::Simple),
-            users: vec![StaticUser {
-                token: "short".to_string(),
-                user_id: "alice".to_string(),
-                role: UserRole::User,
-            }],
+            users: vec![StaticUser::new(
+                "short".to_string(),
+                "alice".to_string(),
+                UserRole::User,
+            )],
             ..Default::default()
         };
         let err = config.validate().unwrap_err();
@@ -972,11 +1018,11 @@ mod tests {
     fn test_auth_config_simple_mode_empty_user_id() {
         let config = AuthConfig {
             mode: Some(AuthMode::Simple),
-            users: vec![StaticUser {
-                token: "dtx_token_longtoken".to_string(),
-                user_id: "".to_string(),
-                role: UserRole::User,
-            }],
+            users: vec![StaticUser::new(
+                "dtx_token_longtoken".to_string(),
+                "".to_string(),
+                UserRole::User,
+            )],
             ..Default::default()
         };
         assert!(config.validate().is_err());
@@ -1305,16 +1351,8 @@ bearer_token = "old_secret_token"
         let config = AuthConfig {
             mode: Some(AuthMode::Simple),
             users: vec![
-                StaticUser {
-                    token: shared_token.clone(),
-                    user_id: "alice".to_string(),
-                    role: UserRole::User,
-                },
-                StaticUser {
-                    token: shared_token,
-                    user_id: "bob".to_string(),
-                    role: UserRole::User,
-                },
+                StaticUser::new(shared_token.clone(), "alice".to_string(), UserRole::User),
+                StaticUser::new(shared_token, "bob".to_string(), UserRole::User),
             ],
             ..Default::default()
         };
@@ -1333,16 +1371,16 @@ bearer_token = "old_secret_token"
         let config = AuthConfig {
             mode: Some(AuthMode::Simple),
             users: vec![
-                StaticUser {
-                    token: "dtx_token_aaaa_xxxx".to_string(),
-                    user_id: "alice".to_string(),
-                    role: UserRole::User,
-                },
-                StaticUser {
-                    token: "dtx_token_bbbb_xxxx".to_string(),
-                    user_id: "alice".to_string(), // same user_id
-                    role: UserRole::Admin,
-                },
+                StaticUser::new(
+                    "dtx_token_aaaa_xxxx".to_string(),
+                    "alice".to_string(),
+                    UserRole::User,
+                ),
+                StaticUser::new(
+                    "dtx_token_bbbb_xxxx".to_string(),
+                    "alice".to_string(), // same user_id
+                    UserRole::Admin,
+                ),
             ],
             ..Default::default()
         };

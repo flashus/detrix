@@ -163,11 +163,11 @@ pub async fn run(
 
         // Enable auth with the auto-generated token as default admin user
         config.api.auth.mode = Some(detrix_config::AuthMode::Simple);
-        config.api.auth.users = vec![detrix_config::StaticUser {
-            token: auto_token,
-            user_id: AUTO_AUTH_DEFAULT_USER_ID.to_string(),
-            role: detrix_config::UserRole::Admin,
-        }];
+        config.api.auth.users = vec![detrix_config::StaticUser::new(
+            auto_token,
+            AUTO_AUTH_DEFAULT_USER_ID.to_string(),
+            detrix_config::UserRole::Admin,
+        )];
     }
 
     // Determine if gRPC should be enabled (CLI flag OR config setting)

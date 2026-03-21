@@ -78,6 +78,13 @@ pub struct AdapterConnectionConfig {
     /// ```
     #[serde(default)]
     pub attach_config_done_timeout_secs: Option<u64>,
+    /// Failure detection window in milliseconds for attach/launch requests.
+    ///
+    /// After sending an attach or launch request, the broker waits this long for
+    /// an early failure response. Adapters that don't acknowledge (e.g., lldb-dap 22.x)
+    /// will simply time out. Default: 500ms. Increase for high-latency remote/Docker scenarios.
+    #[serde(default)]
+    pub attach_failure_window_ms: Option<u64>,
 }
 
 fn default_adapter_host() -> String {
@@ -150,6 +157,7 @@ impl Default for AdapterConnectionConfig {
             reconnect: ReconnectConfig::default(),
             max_value_length: default_max_value_length(),
             attach_config_done_timeout_secs: None,
+            attach_failure_window_ms: None,
         }
     }
 }

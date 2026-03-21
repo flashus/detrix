@@ -216,6 +216,7 @@ impl DapBroker {
         let seq = self.next_sequence().await;
         debug!(command = %cmd, seq, "Sending DAP request (no-wait with failure detection)");
 
+        let cmd_name = cmd.clone();
         let request = Request {
             seq,
             command: cmd,
@@ -253,7 +254,7 @@ impl DapBroker {
                 } else {
                     let msg = response
                         .message
-                        .unwrap_or_else(|| "Request failed".to_string());
+                        .unwrap_or_else(|| format!("{} request failed", cmd_name));
                     warn!(seq, error = %msg, "Adapter returned failure response");
                     Err(Error::InitializationFailed(msg))
                 }

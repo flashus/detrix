@@ -132,11 +132,11 @@ mod tests {
     fn test_config_simple(token: &str) -> AuthConfig {
         AuthConfig {
             mode: Some(AuthMode::Simple),
-            users: vec![StaticUser {
-                token: token.to_string(),
-                user_id: "test-user".to_string(),
-                role: UserRole::User,
-            }],
+            users: vec![StaticUser::new(
+                token.to_string(),
+                "test-user".to_string(),
+                UserRole::User,
+            )],
             public_endpoints: vec!["/health".to_string()],
             ..Default::default()
         }
@@ -185,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_enabled_public_endpoint() {
-        let config = test_config_simple("secret");
+        let config = test_config_simple("dtx_secret_token_x");
         let auth_state = AuthState::new(config);
         let router = create_test_router(auth_state);
 
@@ -204,7 +204,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_enabled_protected_without_token() {
-        let config = test_config_simple("secret");
+        let config = test_config_simple("dtx_secret_token_x");
         let auth_state = AuthState::new(config);
         let router = create_test_router(auth_state);
 
@@ -223,7 +223,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_enabled_protected_with_valid_token() {
-        let config = test_config_simple("secret");
+        let config = test_config_simple("dtx_secret_token_x");
         let auth_state = AuthState::new(config);
         let router = create_test_router(auth_state);
 
@@ -231,7 +231,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/protected")
-                    .header(AUTHORIZATION_HEADER, format!("{}secret", BEARER_PREFIX))
+                    .header(
+                        AUTHORIZATION_HEADER,
+                        format!("{}dtx_secret_token_x", BEARER_PREFIX),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -243,7 +246,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_enabled_protected_with_invalid_token() {
-        let config = test_config_simple("secret");
+        let config = test_config_simple("dtx_secret_token_x");
         let auth_state = AuthState::new(config);
         let router = create_test_router(auth_state);
 
@@ -266,7 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_enabled_wrong_scheme() {
-        let config = test_config_simple("secret");
+        let config = test_config_simple("dtx_secret_token_x");
         let auth_state = AuthState::new(config);
         let router = create_test_router(auth_state);
 
@@ -315,16 +318,16 @@ mod tests {
         let config = AuthConfig {
             mode: Some(AuthMode::Simple),
             users: vec![
-                StaticUser {
-                    token: "alice-token".to_string(),
-                    user_id: "alice".to_string(),
-                    role: UserRole::User,
-                },
-                StaticUser {
-                    token: "admin-token".to_string(),
-                    user_id: "admin".to_string(),
-                    role: UserRole::Admin,
-                },
+                StaticUser::new(
+                    "dtx_alice_token_xxxx".to_string(),
+                    "alice".to_string(),
+                    UserRole::User,
+                ),
+                StaticUser::new(
+                    "dtx_admin_token_xxxx".to_string(),
+                    "admin".to_string(),
+                    UserRole::Admin,
+                ),
             ],
             public_endpoints: vec!["/health".to_string()],
             ..Default::default()
@@ -340,7 +343,7 @@ mod tests {
                     .uri("/protected")
                     .header(
                         AUTHORIZATION_HEADER,
-                        format!("{}alice-token", BEARER_PREFIX),
+                        format!("{}dtx_alice_token_xxxx", BEARER_PREFIX),
                     )
                     .body(Body::empty())
                     .unwrap(),
@@ -357,7 +360,7 @@ mod tests {
                     .uri("/protected")
                     .header(
                         AUTHORIZATION_HEADER,
-                        format!("{}admin-token", BEARER_PREFIX),
+                        format!("{}dtx_admin_token_xxxx", BEARER_PREFIX),
                     )
                     .body(Body::empty())
                     .unwrap(),

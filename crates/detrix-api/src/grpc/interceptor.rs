@@ -98,20 +98,25 @@ mod tests {
     use detrix_config::{AuthConfig, StaticUser, UserRole};
 
     fn test_users() -> Vec<StaticUser> {
-        vec![StaticUser {
-            token: "valid-token".to_string(),
-            user_id: "test-user".to_string(),
-            role: UserRole::User,
-        }]
+        vec![StaticUser::new(
+            "dtx_valid_token_xxxx".to_string(),
+            "test-user".to_string(),
+            UserRole::User,
+        )]
+    }
+
+    /// Create an AuthConfig with test users (token hashes computed in `StaticUser::new()`).
+    fn test_auth_config() -> AuthConfig {
+        AuthConfig {
+            mode: Some(AuthMode::Simple),
+            users: test_users(),
+            ..Default::default()
+        }
     }
 
     #[test]
     fn test_auth_state_new() {
-        let config = AuthConfig {
-            mode: Some(AuthMode::Simple),
-            users: test_users(),
-            ..Default::default()
-        };
+        let config = test_auth_config();
 
         let state = AuthInterceptorState::new(config);
         assert_eq!(state.config.mode, Some(AuthMode::Simple));
@@ -146,18 +151,15 @@ mod tests {
 
     #[test]
     fn test_simple_mode_valid_token() {
-        let config = AuthConfig {
-            mode: Some(AuthMode::Simple),
-            users: test_users(),
-            ..Default::default()
-        };
-        let state = AuthInterceptorState::new(config);
+        let state = AuthInterceptorState::new(test_auth_config());
         let interceptor = create_auth_interceptor(state);
 
         let mut request = Request::new(());
         request.metadata_mut().insert(
             AUTHORIZATION_METADATA_KEY,
-            format!("{}valid-token", BEARER_PREFIX).parse().unwrap(),
+            format!("{}dtx_valid_token_xxxx", BEARER_PREFIX)
+                .parse()
+                .unwrap(),
         );
 
         let result = interceptor(request);
@@ -166,12 +168,7 @@ mod tests {
 
     #[test]
     fn test_simple_mode_invalid_token() {
-        let config = AuthConfig {
-            mode: Some(AuthMode::Simple),
-            users: test_users(),
-            ..Default::default()
-        };
-        let state = AuthInterceptorState::new(config);
+        let state = AuthInterceptorState::new(test_auth_config());
         let interceptor = create_auth_interceptor(state);
 
         let mut request = Request::new(());
@@ -187,12 +184,7 @@ mod tests {
 
     #[test]
     fn test_missing_auth_header() {
-        let config = AuthConfig {
-            mode: Some(AuthMode::Simple),
-            users: test_users(),
-            ..Default::default()
-        };
-        let state = AuthInterceptorState::new(config);
+        let state = AuthInterceptorState::new(test_auth_config());
         let interceptor = create_auth_interceptor(state);
 
         let request = Request::new(());
@@ -203,12 +195,7 @@ mod tests {
 
     #[test]
     fn test_wrong_auth_scheme() {
-        let config = AuthConfig {
-            mode: Some(AuthMode::Simple),
-            users: test_users(),
-            ..Default::default()
-        };
-        let state = AuthInterceptorState::new(config);
+        let state = AuthInterceptorState::new(test_auth_config());
         let interceptor = create_auth_interceptor(state);
 
         let mut request = Request::new(());
