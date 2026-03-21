@@ -1,6 +1,6 @@
 [project]
 name = "detrix-py"
-version = "1.1.1"
+version = "1.2.0"
 description = "Python client for Detrix - debug-on-demand observability with zero overhead"
 readme = "README.md"
 license = "MIT"
