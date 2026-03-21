@@ -155,11 +155,13 @@ impl MetricRepository for SqliteStorage {
         // so ON CONFLICT(location, connection_id, user_id) would never fire when
         // user_id is NULL.  We substitute SYSTEM_USER_ID ("__system__") for NULL
         // to make the upsert deterministic.  row_to_metric maps it back to None.
-        let effective_user_id = metric.user_id.as_deref().or(if upsert {
-            Some(detrix_core::SYSTEM_USER_ID)
-        } else {
-            None
-        });
+        // Always substitute SYSTEM_USER_ID for NULL user_id, not just in upsert mode.
+        // This ensures the UNIQUE index on (location, connection_id, user_id) works
+        // consistently for both plain INSERT and ON CONFLICT paths.
+        let effective_user_id = metric
+            .user_id
+            .as_deref()
+            .or(Some(detrix_core::SYSTEM_USER_ID));
 
         let id = if upsert {
             let query = metric_insert_query(true);
@@ -487,32 +489,26 @@ impl MetricRepository for SqliteStorage {
         connection_id: &ConnectionId,
         file: &str,
         line: u32,
-        user_id: Option<&str>,
+        owner: detrix_application::ports::OwnerFilter<'_>,
     ) -> Result<Option<Metric>> {
+        use detrix_application::ports::OwnerFilter;
+
         // Location is stored as "@file#line" format
         let location_pattern = format!("@{}#{}", file, line);
 
-        let row = match user_id {
-            Some(uid) => {
-                sqlx::query(
-                    "SELECT * FROM metrics WHERE connection_id = ? AND location = ? AND user_id = ? LIMIT 1",
-                )
-                .bind(&connection_id.0)
-                .bind(&location_pattern)
-                .bind(uid)
-                .fetch_optional(self.pool())
-                .await?
-            }
-            None => {
-                sqlx::query(
-                    "SELECT * FROM metrics WHERE connection_id = ? AND location = ? ORDER BY created_at ASC LIMIT 1",
-                )
-                .bind(&connection_id.0)
-                .bind(&location_pattern)
-                .fetch_optional(self.pool())
-                .await?
-            }
+        let uid = match &owner {
+            OwnerFilter::User(uid) => *uid,
+            OwnerFilter::System => detrix_core::SYSTEM_USER_ID,
         };
+
+        let row = sqlx::query(
+            "SELECT * FROM metrics WHERE connection_id = ? AND location = ? AND user_id = ? LIMIT 1",
+        )
+        .bind(&connection_id.0)
+        .bind(&location_pattern)
+        .bind(uid)
+        .fetch_optional(self.pool())
+        .await?;
 
         match row {
             Some(ref r) => Ok(Some(row_to_metric(r)?)),
@@ -653,6 +649,51 @@ impl MetricRepository for SqliteStorage {
 
         let summaries = summaries?;
         debug!(group_count = summaries.len(), "Group summaries query");
+
+        Ok(summaries)
+    }
+
+    async fn get_group_summaries_by_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<detrix_application::ports::GroupSummary>> {
+        let query = r#"
+            SELECT
+                group_name,
+                COUNT(*) as metric_count,
+                SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as enabled_count
+            FROM metrics
+            WHERE user_id = ?
+            GROUP BY group_name
+            ORDER BY COALESCE(group_name, 'default')
+        "#;
+
+        let rows = sqlx::query(query)
+            .bind(user_id)
+            .fetch_all(self.pool())
+            .await?;
+
+        let summaries: Result<Vec<detrix_application::ports::GroupSummary>> = rows
+            .iter()
+            .map(|row| {
+                let name: Option<String> = row.try_get("group_name")?;
+                let metric_count: i64 = row.try_get("metric_count")?;
+                let enabled_count: i64 = row.try_get("enabled_count")?;
+
+                Ok(detrix_application::ports::GroupSummary {
+                    name,
+                    metric_count: metric_count as u64,
+                    enabled_count: enabled_count as u64,
+                })
+            })
+            .collect();
+
+        let summaries = summaries?;
+        debug!(
+            user_id,
+            group_count = summaries.len(),
+            "User group summaries query"
+        );
 
         Ok(summaries)
     }

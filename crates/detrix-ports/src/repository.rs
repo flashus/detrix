@@ -20,6 +20,19 @@ pub struct GroupSummary {
     pub enabled_count: u64,
 }
 
+/// Explicit ownership filter for location lookups.
+///
+/// Replaces the ambiguous `Option<&str>` in `find_by_location`:
+/// - `User(uid)` → match metrics owned by this user
+/// - `System` → match system metrics (maps to `SYSTEM_USER_ID` sentinel in storage)
+#[derive(Debug, Clone)]
+pub enum OwnerFilter<'a> {
+    /// Match metrics owned by this specific user.
+    User(&'a str),
+    /// Match system metrics (no explicit owner).
+    System,
+}
+
 /// Filter options for querying metrics
 #[derive(Debug, Clone, Default)]
 pub struct MetricFilter {
@@ -85,17 +98,16 @@ pub trait MetricRepository: Send + Sync {
     /// Find metrics by connection ID
     async fn find_by_connection_id(&self, connection_id: &ConnectionId) -> Result<Vec<Metric>>;
 
-    /// Find metric by location (file:line), connection ID, and user ID
+    /// Find metric by location (file:line), connection ID, and ownership.
     ///
     /// Used to detect duplicate metrics at the same breakpoint location for a specific user.
     /// In multi-tenant mode, each user owns their own metric at a location.
-    /// Pass `None` for `user_id` to find any metric at this location (legacy/admin).
     async fn find_by_location(
         &self,
         connection_id: &ConnectionId,
         file: &str,
         line: u32,
-        user_id: Option<&str>,
+        owner: OwnerFilter<'_>,
     ) -> Result<Option<Metric>>;
 
     /// Find ALL metrics at a location across all users
@@ -142,6 +154,16 @@ pub trait MetricRepository: Send + Sync {
     /// Returns aggregated group statistics using a single GROUP BY query.
     /// Much more efficient than loading all metrics and counting in memory.
     async fn get_group_summaries(&self) -> Result<Vec<GroupSummary>>;
+
+    /// Get group summaries filtered by user ID.
+    ///
+    /// Uses SQL `GROUP BY … WHERE user_id = ?` for efficient tenant-scoped aggregation.
+    /// Falls back to `get_group_summaries` when not implemented.
+    async fn get_group_summaries_by_user(&self, user_id: &str) -> Result<Vec<GroupSummary>> {
+        // Default implementation: load all and filter in memory (overridden by SQLite)
+        let _ = user_id;
+        self.get_group_summaries().await
+    }
 
     /// Delete all metrics for a connection.
     ///

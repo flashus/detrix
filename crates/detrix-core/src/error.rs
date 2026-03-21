@@ -13,7 +13,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Machine-readable error codes for API consumers.
 ///
 /// Error code ranges:
-/// - 1xxx: Metric errors
+/// - 1xxx: Metric/input validation errors
 /// - 2xxx: Safety errors
 /// - 3xxx: Config errors
 /// - 4xxx: Connection errors
@@ -38,6 +38,8 @@ pub enum ErrorCode {
     MetricInvalidExpression = 1006,
     /// Expression too long (1007)
     MetricExpressionTooLong = 1007,
+    /// Invalid tenant ID (user_id or agent_id) (1008)
+    InvalidTenantId = 1008,
 
     // Safety errors (2xxx)
     /// Safety violation detected (2001)
@@ -122,8 +124,6 @@ pub enum ErrorCode {
     Unauthorized = 6001,
     /// Forbidden (6002)
     Forbidden = 6002,
-    /// Invalid tenant ID (user_id or agent_id) (6003)
-    InvalidTenantId = 6003,
 
     // Remote app errors (7xxx)
     /// Remote app error (7001)
@@ -209,6 +209,7 @@ impl ErrorCode {
             ErrorCode::MetricLocationConflict => ErrorCategory::Terminal,
             ErrorCode::MetricInvalidExpression => ErrorCategory::Terminal,
             ErrorCode::MetricExpressionTooLong => ErrorCategory::Terminal,
+            ErrorCode::InvalidTenantId => ErrorCategory::Terminal,
             ErrorCode::SafetyViolation => ErrorCategory::Terminal,
             ErrorCode::SafetyAstFailed => ErrorCategory::Terminal,
             ErrorCode::SafetyError => ErrorCategory::Terminal,
@@ -241,7 +242,6 @@ impl ErrorCode {
             // Security - authentication/authorization failures
             ErrorCode::Unauthorized => ErrorCategory::Security,
             ErrorCode::Forbidden => ErrorCategory::Security,
-            ErrorCode::InvalidTenantId => ErrorCategory::Terminal,
 
             // Remote app - retryable (network calls to remote apps)
             ErrorCode::RemoteAppError => ErrorCategory::Retryable,
@@ -267,6 +267,7 @@ impl ErrorCode {
             ErrorCode::MetricLocationConflict => "METRIC_LOCATION_CONFLICT",
             ErrorCode::MetricInvalidExpression => "METRIC_INVALID_EXPRESSION",
             ErrorCode::MetricExpressionTooLong => "METRIC_EXPRESSION_TOO_LONG",
+            ErrorCode::InvalidTenantId => "INVALID_TENANT_ID",
 
             // Safety errors (2xxx)
             ErrorCode::SafetyViolation => "SAFETY_VIOLATION",
@@ -315,7 +316,6 @@ impl ErrorCode {
             // Auth errors (6xxx)
             ErrorCode::Unauthorized => "UNAUTHORIZED",
             ErrorCode::Forbidden => "FORBIDDEN",
-            ErrorCode::InvalidTenantId => "INVALID_TENANT_ID",
 
             // Remote app errors (7xxx)
             ErrorCode::RemoteAppError => "REMOTE_APP_ERROR",

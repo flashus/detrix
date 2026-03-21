@@ -1001,24 +1001,34 @@ async fn test_find_by_location_with_user_id() {
         .unwrap();
 
     // Alice's lookup finds alice's metric only
-    let found =
-        MetricRepository::find_by_location(&storage, &conn, &loc.file, loc.line, Some("alice"))
-            .await
-            .unwrap();
+    let found = MetricRepository::find_by_location(
+        &storage,
+        &conn,
+        &loc.file,
+        loc.line,
+        detrix_ports::OwnerFilter::User("alice"),
+    )
+    .await
+    .unwrap();
     assert!(found.is_some());
     assert_eq!(found.unwrap().user_id.as_deref(), Some("alice"));
 
     // Bob's lookup finds bob's metric only
-    let found =
-        MetricRepository::find_by_location(&storage, &conn, &loc.file, loc.line, Some("bob"))
-            .await
-            .unwrap();
+    let found = MetricRepository::find_by_location(
+        &storage,
+        &conn,
+        &loc.file,
+        loc.line,
+        detrix_ports::OwnerFilter::User("bob"),
+    )
+    .await
+    .unwrap();
     assert!(found.is_some());
     assert_eq!(found.unwrap().user_id.as_deref(), Some("bob"));
 }
 
 #[tokio::test]
-async fn test_find_by_location_none_user_id() {
+async fn test_find_by_location_system_owner() {
     let storage = create_test_storage().await;
 
     let loc = Location {
@@ -1027,38 +1037,60 @@ async fn test_find_by_location_none_user_id() {
     };
     let conn = ConnectionId::from("conn1");
 
-    // Create two metrics at same location for different users
-    let mut m1 = Metric::new(
-        "user_a".to_string(),
+    // Create a system metric (no user_id → sentinel __system__ in DB)
+    let system_metric = Metric::new(
+        "system_metric".to_string(),
         conn.clone(),
         loc.clone(),
         vec!["a".to_string()],
         SourceLanguage::Python,
     )
     .unwrap();
-    m1.user_id = Some("alice".to_string());
-    MetricRepository::save_with_options(&storage, &m1, true)
+    // user_id is None → save_with_options(upsert=true) stores as SYSTEM_USER_ID
+    MetricRepository::save_with_options(&storage, &system_metric, true)
         .await
         .unwrap();
 
-    let mut m2 = Metric::new(
-        "user_b".to_string(),
+    // Create a user metric at the same location
+    let mut user_metric = Metric::new(
+        "user_metric".to_string(),
         conn.clone(),
         loc.clone(),
         vec!["b".to_string()],
         SourceLanguage::Python,
     )
     .unwrap();
-    m2.user_id = Some("bob".to_string());
-    MetricRepository::save_with_options(&storage, &m2, true)
+    user_metric.user_id = Some("alice".to_string());
+    MetricRepository::save_with_options(&storage, &user_metric, true)
         .await
         .unwrap();
 
-    // None user_id returns first metric at location (admin/legacy behavior)
-    let found = MetricRepository::find_by_location(&storage, &conn, &loc.file, loc.line, None)
-        .await
-        .unwrap();
+    // OwnerFilter::System finds only the system metric
+    let found = MetricRepository::find_by_location(
+        &storage,
+        &conn,
+        &loc.file,
+        loc.line,
+        detrix_ports::OwnerFilter::System,
+    )
+    .await
+    .unwrap();
     assert!(found.is_some());
+    // System metric comes back with user_id = None (sentinel mapped back)
+    assert_eq!(found.unwrap().user_id, None);
+
+    // OwnerFilter::User("alice") finds only alice's metric
+    let found = MetricRepository::find_by_location(
+        &storage,
+        &conn,
+        &loc.file,
+        loc.line,
+        detrix_ports::OwnerFilter::User("alice"),
+    )
+    .await
+    .unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().user_id.as_deref(), Some("alice"));
 }
 
 #[tokio::test]

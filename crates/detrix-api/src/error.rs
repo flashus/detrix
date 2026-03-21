@@ -191,6 +191,9 @@ impl From<Error> for tonic::Status {
             Error::Core(detrix_core::Error::RemoteApp(msg)) => {
                 tonic::Status::unavailable(format!("Remote app error: {}", msg))
             }
+            Error::Core(detrix_core::Error::InvalidTenantId(msg)) => {
+                tonic::Status::invalid_argument(format!("Invalid tenant ID: {}", msg))
+            }
             Error::Unauthorized(msg) => tonic::Status::unauthenticated(msg),
             Error::Forbidden(msg) => tonic::Status::permission_denied(msg),
             _ => {

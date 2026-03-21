@@ -217,6 +217,9 @@ fn sanitize_core_error(err: &detrix_core::Error) -> String {
         // Configuration errors - don't expose paths
         Error::InvalidConfig(_) => "Configuration error".to_string(),
 
+        // Tenant ID validation - safe to expose
+        Error::InvalidTenantId(msg) => format!("Invalid tenant ID: {}", msg),
+
         // All other core errors - generic message
         _ => "An internal error occurred".to_string(),
     }
@@ -238,7 +241,8 @@ impl From<detrix_core::Error> for HttpError {
             | Error::InvalidExpression(_)
             | Error::DuplicateMetric(_)
             | Error::MetricLocationConflict { .. }
-            | Error::SafetyViolation { .. } => StatusCode::BAD_REQUEST,
+            | Error::SafetyViolation { .. }
+            | Error::InvalidTenantId(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
@@ -281,6 +285,7 @@ impl From<detrix_application::Error> for HttpError {
                 | detrix_core::Error::DuplicateMetric(_)
                 | detrix_core::Error::MetricLocationConflict { .. } => StatusCode::BAD_REQUEST,
                 detrix_core::Error::SafetyViolation { .. } => StatusCode::BAD_REQUEST,
+                detrix_core::Error::InvalidTenantId(_) => StatusCode::BAD_REQUEST,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
 

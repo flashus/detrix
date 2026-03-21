@@ -60,22 +60,30 @@ impl MetricRepository for MockMetricRepository {
     async fn save_with_options(&self, metric: &Metric, upsert: bool) -> Result<MetricId> {
         // Check for a conflicting entry by (location.file, location.line, connection_id, user_id),
         // mirroring SQLite's UNIQUE index on those four columns.
-        // Per SQL NULL semantics: NULL != NULL, so skip conflict detection when user_id is None.
-        let conflict_id: Option<MetricId> = if metric.user_id.is_some() {
-            self.metrics
-                .read()
-                .unwrap()
-                .iter()
-                .find(|(_, existing)| {
-                    existing.location.file == metric.location.file
-                        && existing.location.line == metric.location.line
-                        && existing.connection_id == metric.connection_id
-                        && existing.user_id == metric.user_id
-                })
-                .map(|(id, _)| *id)
-        } else {
-            None
-        };
+        //
+        // Mirror SQLite sentinel logic: when user_id is None, use SYSTEM_USER_ID for
+        // conflict detection (just like the real storage does in the upsert path).
+        let effective_user_id = metric
+            .user_id
+            .clone()
+            .or_else(|| Some(detrix_core::SYSTEM_USER_ID.to_string()));
+
+        let conflict_id: Option<MetricId> = self
+            .metrics
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(_, existing)| {
+                let existing_effective = existing
+                    .user_id
+                    .clone()
+                    .or_else(|| Some(detrix_core::SYSTEM_USER_ID.to_string()));
+                existing.location.file == metric.location.file
+                    && existing.location.line == metric.location.line
+                    && existing.connection_id == metric.connection_id
+                    && existing_effective == effective_user_id
+            })
+            .map(|(id, _)| *id);
 
         match conflict_id {
             Some(_) if !upsert => Err(Error::Database("UNIQUE constraint failed".into())),
@@ -176,7 +184,7 @@ impl MetricRepository for MockMetricRepository {
         connection_id: &ConnectionId,
         file: &str,
         line: u32,
-        user_id: Option<&str>,
+        owner: detrix_ports::OwnerFilter<'_>,
     ) -> Result<Option<Metric>> {
         Ok(self
             .metrics
@@ -187,7 +195,10 @@ impl MetricRepository for MockMetricRepository {
                 m.connection_id == *connection_id
                     && m.location.file == file
                     && m.location.line == line
-                    && m.user_id.as_deref() == user_id
+                    && match &owner {
+                        detrix_ports::OwnerFilter::User(uid) => m.user_id.as_deref() == Some(*uid),
+                        detrix_ports::OwnerFilter::System => m.user_id.is_none(),
+                    }
             })
             .cloned())
     }
@@ -278,6 +289,36 @@ impl MetricRepository for MockMetricRepository {
             .collect();
 
         Ok(summaries)
+    }
+
+    async fn get_group_summaries_by_user(
+        &self,
+        user_id: &str,
+    ) -> detrix_core::error::Result<Vec<detrix_ports::GroupSummary>> {
+        let metrics = self.metrics.read().unwrap();
+
+        let mut groups: HashMap<Option<String>, (u64, u64)> = HashMap::new();
+        for metric in metrics.values() {
+            // Match user_id directly, or match system metrics (None) against SYSTEM_USER_ID
+            let matches = metric.user_id.as_deref() == Some(user_id)
+                || (metric.user_id.is_none() && user_id == detrix_core::SYSTEM_USER_ID);
+            if matches {
+                let entry = groups.entry(metric.group.clone()).or_insert((0, 0));
+                entry.0 += 1;
+                if metric.enabled {
+                    entry.1 += 1;
+                }
+            }
+        }
+
+        Ok(groups
+            .into_iter()
+            .map(|(name, (total, enabled))| detrix_ports::GroupSummary {
+                name,
+                metric_count: total,
+                enabled_count: enabled,
+            })
+            .collect())
     }
 
     async fn delete_by_connection_id(&self, connection_id: &ConnectionId) -> Result<u64> {

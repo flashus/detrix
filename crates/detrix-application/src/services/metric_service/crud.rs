@@ -143,13 +143,17 @@ impl MetricService {
 
         // Check for existing metric at the same location (file:line)
         // DAP only supports one logpoint per line
+        let owner = match metric.user_id.as_deref() {
+            Some(uid) => crate::ports::OwnerFilter::User(uid),
+            None => crate::ports::OwnerFilter::System,
+        };
         if let Some(existing) = self
             .storage
             .find_by_location(
                 &metric.connection_id,
                 &metric.location.file,
                 metric.location.line,
-                metric.user_id.as_deref(),
+                owner,
             )
             .await?
         {

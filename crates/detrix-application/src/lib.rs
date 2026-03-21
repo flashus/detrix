@@ -101,10 +101,11 @@ pub use detrix_ports::{
     EventOutputRef, EventRepository, EventRepositoryRef, FetchResult, FileEvent, FileSource,
     FileSourceRef, FileWatcher, FileWatcherConfig, FileWatcherRef, GroupSummary,
     McpUsageRepository, McpUsageRepositoryRef, MetricFilter, MetricRepository, MetricRepositoryRef,
-    NullFileWatcher, NullOutput, PurityAnalyzer, PurityAnalyzerRef, PurityCache, PurityCacheEntry,
-    PurityCacheKey, PurityCacheRef, PurityCacheStats, RemoveMetricResult, SetMetricResult,
-    SourceContext, SourceMetadata, SymbolInfo, SystemEventRepository, SystemEventRepositoryRef,
-    ToggleMetricResult, ToolCountRow, UsageStats, VfsRef, VirtualFileSystem,
+    NullFileWatcher, NullOutput, OwnerFilter, PurityAnalyzer, PurityAnalyzerRef, PurityCache,
+    PurityCacheEntry, PurityCacheKey, PurityCacheRef, PurityCacheStats, RemoveMetricResult,
+    SetMetricResult, SourceContext, SourceMetadata, SymbolInfo, SystemEventRepository,
+    SystemEventRepositoryRef, ToggleMetricResult, ToolCountRow, UsageStats, VfsRef,
+    VirtualFileSystem,
 };
 
 // Thread-safe reference to expression validator (defined here since ExpressionValidator is in this crate)
