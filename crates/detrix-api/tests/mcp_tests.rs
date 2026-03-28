@@ -21,6 +21,7 @@ use detrix_core::{
 use detrix_storage::{SqliteConfig, SqliteStorage};
 use detrix_testing::fixtures::test_py_path;
 use detrix_testing::MockDapAdapterFactory;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -71,6 +72,7 @@ impl McpTestFixture {
             vfs,
             file_source_chain,
             Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
+            HashMap::new(),
         );
 
         let state = Arc::new(

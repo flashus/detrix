@@ -25,6 +25,7 @@ use detrix_storage::{SqliteConfig, SqliteStorage};
 use detrix_testing::fixtures::{app_py_path, test_py_path};
 use detrix_testing::MockDapAdapterFactory;
 use rmcp::ServerHandler;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -78,6 +79,7 @@ impl McpE2eFixture {
             vfs,
             file_source_chain,
             Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
+            HashMap::new(),
         );
 
         let state = Arc::new(ApiState::builder(context, storage).build());

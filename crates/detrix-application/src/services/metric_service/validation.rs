@@ -123,7 +123,10 @@ impl MetricService {
     /// or safe mode constraints.
     ///
     /// Returns warnings (like missing safety validator) that should be reported to CLI.
-    pub(super) fn validate_metric_fields(&self, metric: &Metric) -> Result<Vec<OperationWarning>> {
+    pub(super) async fn validate_metric_fields(
+        &self,
+        metric: &Metric,
+    ) -> Result<Vec<OperationWarning>> {
         let mut warnings = Vec::new();
 
         // Validate name
@@ -158,14 +161,37 @@ impl MetricService {
         if self.validators.supports_language(language_str) {
             // Use language-specific validator for full AST-based safety check on each expression
             for expr in &metric.expressions {
-                let result = self
-                    .validators
-                    .validate(language_str, expr, metric.safety_level)?;
+                let mut result =
+                    self.validators
+                        .validate(language_str, expr, metric.safety_level)?;
+
+                // Phase 1: Tree-sitter + static classification
                 if !result.is_safe {
                     return Err(detrix_core::Error::SafetyViolation {
                         violations: result.errors,
                     }
                     .into());
+                }
+
+                // Phase 2: LSP purity resolution (Trusted mode, unknown functions only)
+                if metric.safety_level == SafetyLevel::Trusted
+                    && !result.unknown_functions.is_empty()
+                {
+                    self.validators
+                        .resolve_purity(
+                            &mut result,
+                            metric.language,
+                            &metric.location.file,
+                            &self.purity_analyzers,
+                        )
+                        .await;
+
+                    if !result.is_safe {
+                        return Err(detrix_core::Error::SafetyViolation {
+                            violations: result.errors,
+                        }
+                        .into());
+                    }
                 }
             }
         } else {
@@ -187,8 +213,8 @@ impl MetricService {
     /// (e.g., config-file imports at startup before LSP/files are guaranteed available).
     ///
     /// Returns warnings (like missing safety validator) that should be reported to CLI.
-    pub(super) fn validate_metric(&self, metric: &Metric) -> Result<Vec<OperationWarning>> {
-        let warnings = self.validate_metric_fields(metric)?;
+    pub(super) async fn validate_metric(&self, metric: &Metric) -> Result<Vec<OperationWarning>> {
+        let warnings = self.validate_metric_fields(metric).await?;
 
         // Validate expression variables are in scope (Python only, for now)
         self.validate_expression_scope(metric)?;

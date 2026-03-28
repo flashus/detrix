@@ -829,6 +829,9 @@ pub enum OperationWarning {
         /// The error message
         error: String,
     },
+
+    /// LSP purity analysis informational message
+    LspPurityInfo(String),
 }
 
 impl std::fmt::Display for OperationWarning {
@@ -936,6 +939,9 @@ impl std::fmt::Display for OperationWarning {
                     "Anchor capture failed for metric '{}' at {}: {}",
                     metric_name, location, error
                 )
+            }
+            Self::LspPurityInfo(msg) => {
+                write!(f, "LSP purity: {}", msg)
             }
         }
     }

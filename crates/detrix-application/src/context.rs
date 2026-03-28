@@ -34,8 +34,9 @@ use detrix_config::{
     AdapterConnectionConfig, AnchorConfig, ApiConfig, DaemonConfig, LimitsConfig, SafetyConfig,
     StorageConfig,
 };
-use detrix_core::{MetricEvent, SystemEvent};
-use detrix_ports::VfsRef;
+use detrix_core::{MetricEvent, SourceLanguage, SystemEvent};
+use detrix_ports::{PurityAnalyzerRef, VfsRef};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -99,6 +100,7 @@ impl AppContext {
     /// * `auth_token` - Optional authentication token for remote app control (e.g. from DETRIX_TOKEN env var, read in CLI layer)
     /// * `vfs` - Virtual File System for source file access (cache + disk fallback)
     /// * `file_source_chain` - Pluggable file source chain for transparent remote file fetching
+    /// * `purity_analyzers` - LSP purity analyzers per language (empty map = disabled)
     ///
     /// Note: In practice, `metric_storage` and `event_storage` often point to the
     /// same underlying storage (e.g., SqliteStorage), but they're separate parameters
@@ -123,6 +125,7 @@ impl AppContext {
         vfs: VfsRef,
         file_source_chain: Arc<FileSourceChain>,
         reference_repo: ConnectionReferenceRepositoryRef,
+        purity_analyzers: HashMap<SourceLanguage, PurityAnalyzerRef>,
     ) -> Self {
         // Create broadcast channels for real-time events
         let (event_tx, _) = broadcast::channel::<MetricEvent>(api_config.event_buffer_capacity);
@@ -204,6 +207,7 @@ impl AppContext {
                     system_event_tx.clone(),
                 )
                 .validators(validators)
+                .purity_analyzers(purity_analyzers)
                 .adapter_config(adapter_config.clone())
                 .limits_config(limits_config.clone())
                 .anchor_service(anchor_service)
@@ -251,6 +255,7 @@ impl AppContext {
             vfs,
             file_source_chain,
             reference_repo,
+            HashMap::new(), // No LSP purity analyzers
         )
     }
 

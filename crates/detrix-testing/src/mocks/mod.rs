@@ -20,12 +20,14 @@
 
 mod adapters;
 mod file_system;
+mod purity;
 mod repositories;
 
 pub use adapters::{
     MockDapAdapter, MockDapAdapterFactory, MockRemoteAppControl, StatefulMockDapAdapter,
 };
 pub use file_system::MockVfs;
+pub use purity::MockPurityAnalyzer;
 pub use repositories::{
     MockConnectionReferenceRepository, MockConnectionRepository, MockDlqRepository,
     MockEventRepository, MockMetricRepository, MockSystemEventRepository,

@@ -19,7 +19,7 @@ impl MetricService {
     /// before saving. Skips `validate_safe_mode()` (no active connection at import time)
     /// and `validate_expression_scope()` (LSP/file inspection may not be available).
     pub async fn import_metric(&self, metric: Metric) -> Result<MetricId> {
-        self.validate_metric_fields(&metric)?;
+        self.validate_metric_fields(&metric).await?;
         let metric_id = self.storage.save(&metric).await?;
         Ok(metric_id)
     }
@@ -139,7 +139,7 @@ impl MetricService {
         Metric::validate_tenant_ids(metric.user_id.as_deref(), metric.agent_id.as_deref())?;
 
         // Validate metric (may produce warnings)
-        let mut warnings = self.validate_metric(&metric)?;
+        let mut warnings = self.validate_metric(&metric).await?;
 
         // Check for existing metric at the same location (file:line)
         // DAP only supports one logpoint per line
@@ -427,7 +427,7 @@ impl MetricService {
         self.validate_safe_mode(metric)?;
 
         // Validate changes
-        self.validate_metric(metric)?;
+        self.validate_metric(metric).await?;
 
         // Get old metric to check if enabled status changed
         let old_metric = if let Some(id) = metric.id {

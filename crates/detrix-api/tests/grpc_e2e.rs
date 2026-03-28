@@ -18,6 +18,7 @@
 
 #![cfg(feature = "e2e_tests")]
 
+use std::collections::HashMap;
 use std::sync::Once;
 static INIT: Once = Once::new();
 
@@ -162,6 +163,7 @@ impl E2ETestServer {
             None, // No auth token in tests
             vfs,
             file_source_chain,
+            HashMap::new(),
         );
 
         // Connect to debugpy using ConnectionService

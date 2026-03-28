@@ -19,6 +19,7 @@ use detrix_config::{
 use detrix_dap::DapAdapterFactoryImpl;
 use detrix_logging::{debug, info};
 use detrix_storage::{DlqStorage, SqliteConfig, SqliteStorage};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -114,6 +115,42 @@ impl InfrastructureComponents {
             &vfs_config.source_priority,
         ));
 
+        // Instantiate LSP purity analyzers for languages with lsp.enabled = true
+        let mut purity_analyzers = HashMap::new();
+        if safety_config.python.lsp.enabled {
+            match detrix_lsp::PythonPurityAnalyzer::new(&safety_config.python.lsp) {
+                Ok(a) => {
+                    purity_analyzers.insert(
+                        detrix_core::SourceLanguage::Python,
+                        Arc::new(a) as detrix_application::PurityAnalyzerRef,
+                    );
+                }
+                Err(e) => detrix_logging::warn!("Python LSP purity analyzer init failed: {e}"),
+            }
+        }
+        if safety_config.go.lsp.enabled {
+            match detrix_lsp::GoPurityAnalyzer::new(&safety_config.go.lsp) {
+                Ok(a) => {
+                    purity_analyzers.insert(
+                        detrix_core::SourceLanguage::Go,
+                        Arc::new(a) as detrix_application::PurityAnalyzerRef,
+                    );
+                }
+                Err(e) => detrix_logging::warn!("Go LSP purity analyzer init failed: {e}"),
+            }
+        }
+        if safety_config.rust.lsp.enabled {
+            match detrix_lsp::RustPurityAnalyzer::new(&safety_config.rust.lsp) {
+                Ok(a) => {
+                    purity_analyzers.insert(
+                        detrix_core::SourceLanguage::Rust,
+                        Arc::new(a) as detrix_application::PurityAnalyzerRef,
+                    );
+                }
+                Err(e) => detrix_logging::warn!("Rust LSP purity analyzer init failed: {e}"),
+            }
+        }
+
         let app_context = AppContext::new(
             Arc::clone(&self.storage) as MetricRepositoryRef,
             Arc::clone(&self.storage) as EventRepositoryRef,
@@ -133,6 +170,7 @@ impl InfrastructureComponents {
             vfs,
             file_source_chain,
             Arc::clone(&self.storage) as detrix_application::ConnectionReferenceRepositoryRef,
+            purity_analyzers,
         );
         AppContextWithStorage {
             app_context,

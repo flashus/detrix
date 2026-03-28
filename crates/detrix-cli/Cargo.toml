@@ -33,6 +33,7 @@ detrix-dap = { path = "../detrix-dap" }
 detrix-storage = { path = "../detrix-storage" }
 detrix-application = { path = "../detrix-application" }
 detrix-api = { path = "../detrix-api" }
+detrix-lsp = { path = "../detrix-lsp" }
 detrix-output = { path = "../detrix-output" }
 
 # MCP (Model Context Protocol)

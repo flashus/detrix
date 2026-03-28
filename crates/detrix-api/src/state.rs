@@ -343,6 +343,7 @@ mod tests {
     use detrix_config::ApiConfig;
     use detrix_storage::{SqliteConfig, SqliteStorage};
     use detrix_testing::MockDapAdapterFactory;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     async fn create_test_context() -> (AppContext, EventRepositoryRef, TempDir) {
@@ -384,6 +385,7 @@ mod tests {
             vfs,
             file_source_chain,
             Arc::clone(&storage) as detrix_application::ConnectionReferenceRepositoryRef,
+            HashMap::new(),
         );
 
         (context, storage as EventRepositoryRef, temp_dir)

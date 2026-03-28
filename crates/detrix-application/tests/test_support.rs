@@ -16,7 +16,9 @@ use std::sync::Mutex as StdMutex;
 use tokio::sync::mpsc;
 
 // Use canonical mocks from detrix-testing
+#[allow(unused_imports)]
 pub use detrix_testing::MockConnectionRepository;
+#[allow(unused_imports)]
 pub use detrix_testing::MockMetricRepository;
 
 #[allow(dead_code)]
@@ -259,6 +261,7 @@ pub struct MockEventRepository {
 }
 
 impl MockEventRepository {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             events: RwLock::new(Vec::new()),

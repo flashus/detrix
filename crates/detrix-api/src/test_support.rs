@@ -13,6 +13,7 @@ use detrix_application::{
 use detrix_config::ApiConfig;
 use detrix_storage::{SqliteConfig, SqliteStorage};
 use detrix_testing::MockDapAdapterFactory;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -50,6 +51,7 @@ pub async fn create_test_state() -> (Arc<ApiState>, TempDir) {
         vfs,
         file_source_chain,
         Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
+        HashMap::new(),
     );
 
     let state = Arc::new(ApiState::builder(context, storage).build());

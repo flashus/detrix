@@ -961,6 +961,7 @@ dependencies = [
  "detrix-core",
  "detrix-dap",
  "detrix-logging",
+ "detrix-lsp",
  "detrix-output",
  "detrix-storage",
  "detrix-testing",
