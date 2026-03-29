@@ -134,9 +134,19 @@ pub fn init(config: Config) -> Result<()> {
     // Apply environment variable overrides
     let config = config.with_env_overrides();
 
-    // Find lldb-dap binary
-    let lldb_dap_path = lldb::find_lldb_dap(config.lldb_dap_path.as_deref())?;
-    debug!("Found lldb-dap at {:?}", lldb_dap_path);
+    // Find debug adapter binary (lldb-dap or CodeLLDB depending on config)
+    let lldb_dap_path = match config.debug_adapter {
+        config::DebugAdapter::CodeLLDB => {
+            let path = lldb::find_codelldb(config.lldb_dap_path.as_deref())?;
+            debug!("Found CodeLLDB at {:?}", path);
+            path
+        }
+        config::DebugAdapter::LldbDap => {
+            let path = lldb::find_lldb_dap(config.lldb_dap_path.as_deref())?;
+            debug!("Found lldb-dap at {:?}", path);
+            path
+        }
+    };
 
     // Initialize global state
     {
@@ -206,7 +216,11 @@ pub fn init(config: Config) -> Result<()> {
     }
 
     // Initialize LLDB manager (resettable via Mutex<Option<T>>)
-    let lldb_manager = LldbManager::new(lldb_dap_path.clone(), config.lldb_start_timeout);
+    let lldb_manager = LldbManager::new(
+        lldb_dap_path.clone(),
+        config.debug_adapter.clone(),
+        config.lldb_start_timeout,
+    );
     let lm_holder = LLDB_MANAGER.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(mut guard) = lm_holder.lock() {
         *guard = Some(lldb_manager);

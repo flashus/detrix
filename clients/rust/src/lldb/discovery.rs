@@ -90,6 +90,70 @@ pub fn find_lldb_dap(explicit_path: Option<&Path>) -> Result<PathBuf> {
     ))
 }
 
+/// Find the CodeLLDB (vadimcn.vscode-lldb) adapter binary.
+///
+/// Search order:
+/// 1. Explicit path if provided
+/// 2. VS Code extensions directory
+/// 3. VS Code Insiders extensions directory
+pub fn find_codelldb(explicit_path: Option<&Path>) -> Result<PathBuf> {
+    // 1. Check explicit path
+    if let Some(path) = explicit_path {
+        if path.exists() && is_executable(path) {
+            return Ok(path.to_path_buf());
+        }
+        return Err(Error::LldbNotFound(format!(
+            "CodeLLDB not found at {:?}",
+            path
+        )));
+    }
+
+    // 2. Search VS Code extensions
+    if let Some(home) = dirs::home_dir() {
+        let extension_dirs = [
+            home.join(".vscode/extensions"),
+            home.join(".vscode-insiders/extensions"),
+        ];
+
+        for ext_dir in &extension_dirs {
+            if !ext_dir.exists() {
+                continue;
+            }
+
+            if let Ok(entries) = std::fs::read_dir(ext_dir) {
+                // Collect and sort to get latest version
+                let mut codelldb_dirs: Vec<_> = entries
+                    .flatten()
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .starts_with("vadimcn.vscode-lldb")
+                    })
+                    .collect();
+                codelldb_dirs.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
+
+                for entry in codelldb_dirs {
+                    #[cfg(target_os = "windows")]
+                    let binary_name = "codelldb.exe";
+                    #[cfg(not(target_os = "windows"))]
+                    let binary_name = "codelldb";
+
+                    let adapter_path = entry.path().join("adapter").join(binary_name);
+                    if adapter_path.exists() && is_executable(&adapter_path) {
+                        return Ok(adapter_path);
+                    }
+                }
+            }
+        }
+    }
+
+    Err(Error::LldbNotFound(
+        "CodeLLDB not found. Install the CodeLLDB VS Code extension \
+         (vadimcn.vscode-lldb) or set DETRIX_LLDB_DAP_PATH."
+            .to_string(),
+    ))
+}
+
 /// Check if a path is executable.
 #[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
@@ -122,5 +186,32 @@ mod tests {
         // This test may pass or fail depending on whether lldb-dap is installed
         // Just verify it doesn't panic
         let _ = find_lldb_dap(None);
+    }
+
+    #[test]
+    fn test_find_codelldb_explicit_nonexistent() {
+        let result = find_codelldb(Some(Path::new("/nonexistent/codelldb")));
+        assert!(result.is_err());
+        if let Err(Error::LldbNotFound(msg)) = result {
+            assert!(msg.contains("not found"));
+        }
+    }
+
+    #[test]
+    fn test_find_codelldb_explicit_existing() {
+        // Create a temp executable to test explicit path lookup
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        // Make it executable
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = find_codelldb(Some(tmp.path()));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), tmp.path());
+    }
+
+    #[test]
+    fn test_find_codelldb_discovery_no_panic() {
+        // Discovery may find or not find CodeLLDB; just verify no panic
+        let _ = find_codelldb(None);
     }
 }

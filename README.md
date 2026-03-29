@@ -222,6 +222,89 @@ See the [Clients Manual](docs/CLIENTS.md) for full documentation.
 
 ---
 
+## Build Configuration for Observability
+
+Detrix uses debugger logpoints to observe variables. For expressions to evaluate successfully, the binary needs **debug symbols** (DWARF info). The good news: you don't need a debug build. Each language has a production-friendly strategy that preserves most variable visibility with minimal performance impact.
+
+### Go
+
+Go's default `go build` already produces an **optimized binary with DWARF debug symbols**. Delve attaches to it and evaluates logpoint expressions on most variables — especially heap-allocated struct fields. No special flags needed.
+
+```bash
+# This is already debuggable. Nothing to change.
+go build -o myservice ./cmd/myservice
+```
+
+If the optimizer hides a specific local variable (`<optimized out>`), use **per-package debug flags** to disable optimizations only where you need visibility:
+
+```bash
+# Disable optimizations in the payments package only.
+# net/http, encoding/json, and all other packages stay fully optimized.
+go build -gcflags="myservice/internal/payments=-N -l" -o myservice ./cmd/myservice
+```
+
+| Build | Performance | Variable visibility |
+|---|---|---|
+| `go build` (default) | Full speed | High — struct fields, most locals |
+| `go build -gcflags="pkg=-N -l"` | One package slower | ~100% in that package |
+| `go build -gcflags="all=-N -l"` | All packages slower | 100% everywhere (dev only) |
+
+**Stripping symbols** (`-ldflags="-s -w"`) removes DWARF info and makes debugging impossible. If you strip for production, keep one instance with symbols for Detrix.
+
+### Rust
+
+Rust debug builds (`cargo build`) are 10-100x slower than release — unusable in production. Instead, use a **custom Cargo profile** that compiles your dependencies at full optimization (O3) and your code at a lower level (O1) that preserves most variable visibility:
+
+```toml
+# Cargo.toml — add a "detrix" profile for observable production builds
+
+[profile.detrix]
+inherits = "release"
+opt-level = 1              # Your code: light optimization, most variables visible
+debug = 2                  # Full DWARF debug info
+codegen-units = 16         # Default parallelism
+
+[profile.detrix.package."*"]
+opt-level = 3              # All dependencies: full optimization
+debug = false              # No debug info needed for deps (smaller binary)
+```
+
+```bash
+cargo build --profile detrix
+```
+
+| Profile | Your code | Dependencies | Performance vs release | Variable visibility |
+|---|---|---|---|---|
+| `release` | O3, no debug | O3, no debug | Baseline | Cannot observe |
+| `release` + `debug = 2` | O3, DWARF | O3, no debug | ~0-2% overhead | Low — many locals optimized out |
+| **`detrix` (recommended)** | **O1, DWARF** | **O3, no debug** | **~5-15% overhead** | **High — most variables visible** |
+| `dev` (debug) | O0, DWARF | O0, DWARF | 10-100x slower | 100% (dev only) |
+
+**Generics caveat:** Generic code from dependencies (serde, tokio, axum) is monomorphized in your crate and compiles at **your** opt-level (O1), not the dependency's (O3). For most services this is negligible since I/O dominates, but serialization-heavy hot paths may see a larger impact.
+
+For functions you want to keep fully visible regardless of optimization:
+```rust
+#[inline(never)]  // Prevents inlining — always visible as a separate stack frame
+fn process_order(order: &Order) -> Result<ProcessedOrder> {
+    // Detrix can always set logpoints here
+}
+```
+
+### Python
+
+No special build configuration needed. CPython is always debuggable — debugpy attaches to the running interpreter as-is.
+
+```python
+import detrix
+detrix.init(name="my-app")  # Works on any Python 3.10+ installation
+```
+
+---
+
+See the [Clients Manual](docs/CLIENTS.md) for full documentation.
+
+---
+
 ## Features
 
 **No code changes.** The agent instruments your running code via observation points — nothing gets committed, nothing ships to prod.

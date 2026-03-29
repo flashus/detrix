@@ -8,6 +8,7 @@ use detrix_core::connection::{Connection, ConnectionId, ConnectionStatus};
 use detrix_core::entities::{Metric, MetricEvent, MetricId};
 use detrix_core::error::Result;
 use detrix_core::system_event::{SystemEvent, SystemEventType};
+use std::collections::HashMap;
 
 /// Summary of a metric group (for GROUP BY queries)
 #[derive(Debug, Clone)]
@@ -231,6 +232,13 @@ pub trait EventRepository: Send + Sync {
 
     /// Count events for metric
     async fn count_by_metric_id(&self, metric_id: MetricId) -> Result<i64>;
+
+    /// Batch count events per metric. Returns map of metric_id → (count, last_timestamp_micros).
+    /// Only metrics with at least one event are included in the result.
+    async fn count_by_metric_ids(
+        &self,
+        metric_ids: &[MetricId],
+    ) -> Result<HashMap<MetricId, (u64, Option<i64>)>>;
 
     /// Count all events across all metrics
     async fn count_all(&self) -> Result<i64>;

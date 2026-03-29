@@ -15,6 +15,31 @@ const DEFAULT_UNREGISTER_TIMEOUT: Duration = Duration::from_secs(2);
 /// Default timeout for lldb-dap to start.
 const DEFAULT_LLDB_START_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Which debug adapter to use for Rust debugging.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DebugAdapter {
+    /// LLVM's lldb-dap (default on macOS/Linux).
+    /// Uses `--connection listen://host:port` CLI arg.
+    LldbDap,
+    /// vadimcn's CodeLLDB (VS Code extension adapter).
+    /// Uses `--port <port>` CLI arg.
+    /// Required on Windows (PDB support). Also useful on macOS when
+    /// lldb-dap has logpoint regressions (e.g., LLVM 22.x).
+    CodeLLDB,
+}
+
+impl Default for DebugAdapter {
+    fn default() -> Self {
+        // Windows defaults to CodeLLDB (better PDB support)
+        // macOS/Linux default to lldb-dap
+        if cfg!(target_os = "windows") {
+            DebugAdapter::CodeLLDB
+        } else {
+            DebugAdapter::LldbDap
+        }
+    }
+}
+
 /// Configuration for the Detrix client.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -39,7 +64,13 @@ pub struct Config {
     /// Detrix daemon URL (default: "http://127.0.0.1:8090")
     pub daemon_url: String,
 
-    /// Path to lldb-dap binary (default: searches PATH)
+    /// Which debug adapter to use (default: LldbDap on macOS/Linux, CodeLLDB on Windows).
+    /// Set to CodeLLDB to work around lldb-dap logpoint regressions in LLVM 22.x.
+    pub debug_adapter: DebugAdapter,
+
+    /// Path to debug adapter binary (default: searches PATH / VS Code extensions).
+    /// For LldbDap: path to lldb-dap binary.
+    /// For CodeLLDB: path to codelldb binary.
     pub lldb_dap_path: Option<PathBuf>,
 
     /// Detrix home directory (default: ~/detrix)
@@ -81,6 +112,7 @@ impl Default for Config {
             control_port: 0,
             debug_port: 0,
             daemon_url: "http://127.0.0.1:8090".to_string(),
+            debug_adapter: DebugAdapter::default(),
             lldb_dap_path: None,
             detrix_home: None,
             workspace_root: None,
@@ -161,7 +193,20 @@ impl Config {
             }
         }
 
-        // lldb-dap path
+        // Debug adapter selection
+        if let Ok(adapter) = env::var("DETRIX_DEBUG_ADAPTER") {
+            match adapter.to_lowercase().as_str() {
+                "codelldb" | "code-lldb" | "code_lldb" => {
+                    self.debug_adapter = DebugAdapter::CodeLLDB;
+                }
+                "lldb-dap" | "lldb_dap" | "lldbdap" => {
+                    self.debug_adapter = DebugAdapter::LldbDap;
+                }
+                _ => {} // Ignore unknown values, keep default
+            }
+        }
+
+        // lldb-dap / codelldb path
         if self.lldb_dap_path.is_none() {
             if let Ok(path) = env::var("DETRIX_LLDB_DAP_PATH") {
                 if !path.is_empty() {
@@ -339,5 +384,30 @@ mod tests {
     fn test_tls_config_validate_no_ca_bundle() {
         let config = TlsConfig::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_debug_adapter_default_platform() {
+        let adapter = DebugAdapter::default();
+        if cfg!(target_os = "windows") {
+            assert_eq!(adapter, DebugAdapter::CodeLLDB);
+        } else {
+            assert_eq!(adapter, DebugAdapter::LldbDap);
+        }
+    }
+
+    #[test]
+    fn test_debug_adapter_from_env_codelldb() {
+        // env var parsing is done in with_env_overrides() — test the variants directly
+        let mut config = Config::default();
+        config.debug_adapter = DebugAdapter::CodeLLDB;
+        assert_eq!(config.debug_adapter, DebugAdapter::CodeLLDB);
+    }
+
+    #[test]
+    fn test_debug_adapter_default_in_config() {
+        let config = Config::default();
+        // Default should match platform default
+        assert_eq!(config.debug_adapter, DebugAdapter::default());
     }
 }

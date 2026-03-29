@@ -482,6 +482,22 @@ impl EventRepository for MockEventRepository {
         Ok(events.iter().filter(|e| e.metric_id == metric_id).count() as i64)
     }
 
+    async fn count_by_metric_ids(
+        &self,
+        metric_ids: &[MetricId],
+    ) -> Result<std::collections::HashMap<MetricId, (u64, Option<i64>)>> {
+        let events = self.events.read().unwrap();
+        let mut result = std::collections::HashMap::new();
+        for &id in metric_ids {
+            let matching: Vec<_> = events.iter().filter(|e| e.metric_id == id).collect();
+            if !matching.is_empty() {
+                let last_ts = matching.iter().map(|e| e.timestamp).max();
+                result.insert(id, (matching.len() as u64, last_ts));
+            }
+        }
+        Ok(result)
+    }
+
     async fn count_all(&self) -> Result<i64> {
         Ok(self.events.read().unwrap().len() as i64)
     }

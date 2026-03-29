@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Simplified metric info for CLI display
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MetricInfo {
     /// Metric ID (used when querying via gRPC)
     pub metric_id: u64,
@@ -199,4 +200,10 @@ pub struct AddMetricParams {
     pub group: Option<String>,
     pub enabled: bool,
     pub replace: bool,
+    /// Capture mode: "stream" | "sample" | "throttle" | "first" (default: "stream")
+    pub mode: Option<String>,
+    /// For sample mode: capture every Nth hit (default: 100)
+    pub sample_rate: Option<u32>,
+    /// For throttle mode: max events per second (default: 10)
+    pub throttle_rate: Option<u32>,
 }

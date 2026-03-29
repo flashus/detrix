@@ -9,6 +9,7 @@ use detrix_core::entities::{ExpressionValue, MetricEvent, MetricId};
 use detrix_core::error::Result;
 use detrix_core::ConnectionId;
 use sqlx::Row;
+use std::collections::HashMap;
 use tracing::trace;
 
 #[async_trait]
@@ -253,6 +254,43 @@ impl EventRepository for SqliteStorage {
                 .await?;
 
         Ok(count)
+    }
+
+    async fn count_by_metric_ids(
+        &self,
+        metric_ids: &[MetricId],
+    ) -> Result<HashMap<MetricId, (u64, Option<i64>)>> {
+        if metric_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Chunk to stay within SQLite variable limit
+        const CHUNK_SIZE: usize = SQLITE_MAX_VARIABLES;
+        let mut result: HashMap<MetricId, (u64, Option<i64>)> = HashMap::new();
+
+        for chunk in metric_ids.chunks(CHUNK_SIZE) {
+            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+            let query = format!(
+                "SELECT metric_id, COUNT(*) as cnt, MAX(timestamp) as last_ts \
+                 FROM metric_events WHERE metric_id IN ({}) GROUP BY metric_id",
+                placeholders.join(", ")
+            );
+
+            let mut q = sqlx::query(&query);
+            for id in chunk {
+                q = q.bind(id.0 as i64);
+            }
+
+            let rows = q.fetch_all(self.pool()).await?;
+            for row in rows {
+                let metric_id_raw: i64 = row.try_get("metric_id")?;
+                let cnt: i64 = row.try_get("cnt")?;
+                let last_ts: Option<i64> = row.try_get("last_ts")?;
+                result.insert(MetricId(metric_id_raw as u64), (cnt as u64, last_ts));
+            }
+        }
+
+        Ok(result)
     }
 
     async fn count_all(&self) -> Result<i64> {
