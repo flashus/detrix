@@ -373,13 +373,25 @@ async fn init_dlq_storage(
     Ok(Some(Arc::new(dlq_storage)))
 }
 
-/// Create adapter factory with optional reconnection middleware
+/// Create adapter factory with optional reconnection middleware.
+///
+/// On Linux, Go connections are routed to eBPF uprobes via `EbpfGoFactory`.
+/// The `host` field of a Go connection must be the path to the ELF binary.
+/// All other languages continue to use DAP adapters regardless of platform.
 fn init_adapter_factory(
     base_path: &Path,
     options: &InitOptions,
     config: &Config,
 ) -> Result<DapAdapterFactoryRef> {
-    let base_factory = Arc::new(DapAdapterFactoryImpl::new(base_path.to_path_buf()));
+    let dap_factory = Arc::new(DapAdapterFactoryImpl::new(base_path.to_path_buf()));
+
+    // On Linux, wrap with EbpfGoFactory so Go connections use eBPF uprobes.
+    #[cfg(target_os = "linux")]
+    let dap_factory: DapAdapterFactoryRef = Arc::new(
+        detrix_ebpf::EbpfGoFactory::new(dap_factory, base_path.to_path_buf()),
+    );
+    #[cfg(not(target_os = "linux"))]
+    let dap_factory: DapAdapterFactoryRef = dap_factory;
 
     let factory: DapAdapterFactoryRef = if options.enable_reconnection {
         let reconnect_config = options
@@ -388,16 +400,17 @@ fn init_adapter_factory(
             .unwrap_or_else(|| config.adapter.reconnect.clone());
 
         Arc::new(ReconnectingAdapterFactory::new(
-            base_factory,
+            dap_factory,
             reconnect_config,
         ))
     } else {
-        base_factory
+        dap_factory
     };
 
     debug!(
-        "Adapter factory initialized (reconnection: {})",
-        options.enable_reconnection
+        "Adapter factory initialized (reconnection: {}, ebpf: {})",
+        options.enable_reconnection,
+        cfg!(target_os = "linux"),
     );
     Ok(factory)
 }

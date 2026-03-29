@@ -30,6 +30,7 @@ path = "src/main.rs"
 detrix-core = { path = "../detrix-core" }
 detrix-config = { path = "../detrix-config" }
 detrix-dap = { path = "../detrix-dap" }
+detrix-ebpf = { path = "../detrix-ebpf" }
 detrix-storage = { path = "../detrix-storage" }
 detrix-application = { path = "../detrix-application" }
 detrix-api = { path = "../detrix-api" }

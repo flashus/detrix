@@ -7,6 +7,7 @@ members = [
   "crates/detrix-config",
   "crates/detrix-core",
   "crates/detrix-dap",
+  "crates/detrix-ebpf",
   "crates/detrix-logging",
   "crates/detrix-lsp",
   "crates/detrix-output",
@@ -41,6 +42,9 @@ crossterm = "0.29"
 detrix-logging = { path = "crates/detrix-logging" }
 fs2 = "0.4"  # Cross-platform file locking
 futures = "0.3"
+# DWARF / ELF parsing (for detrix-ebpf)
+gimli = { version = "0.31", default-features = false, features = ["read", "std"] }
+object = { version = "0.36", default-features = false, features = ["read", "elf", "std"] }
 hyper = "1.0"
 # Unix process management
 nix = { version = "0.30", features = ["signal", "user"] }

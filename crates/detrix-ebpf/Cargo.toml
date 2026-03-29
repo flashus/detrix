@@ -1,0 +1,45 @@
+[package]
+name = "detrix-ebpf"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "eBPF-based logpoint adapter for Go on Linux — zero-pause variable capture via uprobes"
+
+[lints]
+workspace = true
+
+[dependencies]
+detrix-core = { path = "../detrix-core" }
+detrix-application = { path = "../detrix-application" }
+detrix-config = { path = "../detrix-config" }
+detrix-logging = { path = "../detrix-logging" }
+
+# DWARF / ELF parsing (cross-platform — testable on macOS)
+gimli = { workspace = true }
+object = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
+async-trait.workspace = true
+futures.workspace = true
+
+# Error handling & serialization
+thiserror.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tempfile.workspace = true
+
+# eBPF (Linux-only, optional)
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = "0.13"
+aya-log = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+detrix-testing = { path = "../detrix-testing" }
+detrix-ports = { path = "../detrix-ports" }
+tempfile.workspace = true
