@@ -171,7 +171,7 @@ fn get_cfa_sp_delta(
     {
         Some(d) => d,
         None => {
-            detrix_logging::debug!("[DWARF CFI] .debug_frame section not found");
+            detrix_logging::warn!("[DWARF CFI] .debug_frame section not found — fbreg offsets will be SP-relative (may be wrong)");
             return 0;
         }
     };
@@ -190,11 +190,11 @@ fn get_cfa_sp_delta(
     ) {
         Ok(row) => match row.cfa() {
             CfaRule::RegisterAndOffset { offset, .. } => {
-                detrix_logging::debug!("[DWARF CFI] PC={:#x} CFA = SP + {}", pc, offset);
+                detrix_logging::info!("[DWARF CFI] PC={:#x} CFA = SP + {}", pc, offset);
                 *offset
             }
             other => {
-                detrix_logging::debug!(
+                detrix_logging::warn!(
                     "[DWARF CFI] PC={:#x} unsupported CFA rule: {:?}",
                     pc,
                     other
@@ -203,7 +203,7 @@ fn get_cfa_sp_delta(
             }
         },
         Err(e) => {
-            detrix_logging::debug!("[DWARF CFI] PC={:#x} unwind_info error: {}", pc, e);
+            detrix_logging::warn!("[DWARF CFI] PC={:#x} unwind_info error: {}", pc, e);
             0
         }
     }
@@ -463,7 +463,24 @@ fn resolve_variables_at_pc<R: Reader>(
         }
     }
 
-    Ok(resolved)
+    // Go DWARF may emit multiple DW_TAG_variable DIEs with the same name for
+    // complex heap-string assignments (compiler-generated intermediates).
+    // Keep only the FIRST occurrence per name: for `runtime.concatstring*`
+    // (used by `+` concatenation) the first DIE is the sret output slot written
+    // directly by the runtime call — it holds the correct heap ptr by the next
+    // statement. Later DIEs are compiler temporaries at stale/wrong stack slots.
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, var) in resolved.iter().enumerate() {
+        seen.entry(var.name.clone()).or_insert(i);
+    }
+    let mut deduped: Vec<ResolvedVariable> = seen
+        .values()
+        .map(|&i| resolved[i].clone())
+        .collect();
+    // Preserve the original relative order so BPF slot indices are stable.
+    deduped.sort_by_key(|v| resolved.iter().position(|r| r.name == v.name).unwrap_or(0));
+
+    Ok(deduped)
 }
 
 /// Read DW_AT_name from a DIE, handling both inline strings and .debug_str refs.
@@ -591,8 +608,8 @@ fn evaluate_location_expr<R: Reader>(
                 // CFA = SP + cfa_sp_delta, so the SP-relative offset is cfa_sp_delta + N.
                 // Example: fbreg -376 with cfa_sp_delta=408 → SP + (408 - 376) = SP + 32.
                 let sp_offset = cfa_sp_delta + offset;
-                detrix_logging::debug!(
-                    "[DWARF eval] FrameOffset {} + cfa_sp_delta {} = sp_offset {}",
+                detrix_logging::info!(
+                    "[DWARF eval] FrameOffset fbreg={} + cfa_sp_delta={} = sp_offset={}",
                     offset, cfa_sp_delta, sp_offset
                 );
                 if let Some(prev) = pending.take() {
@@ -608,7 +625,7 @@ fn evaluate_location_expr<R: Reader>(
                 // We model all base-register+offset accesses as StackOffset so
                 // the BPF program can use ctx->sp. For Go local variables this is
                 // always correct because Go only uses SP/RSP as the base register.
-                detrix_logging::debug!("[DWARF eval] RegisterOffset {}", offset);
+                detrix_logging::info!("[DWARF eval] RegisterOffset breg7={}", offset);
                 if let Some(prev) = pending.take() {
                     pieces.push(prev);
                 }

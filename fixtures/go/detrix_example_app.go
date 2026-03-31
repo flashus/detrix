@@ -124,11 +124,18 @@ func main() {
 		iteration++
 		// LINE NUMBERS: single source of truth is dap_scenarios.rs::go_lines
 		// If you add/remove lines before func main(), update go_lines::MAIN_LINE only.
-		symbol := symbols[rand.Intn(len(symbols))] // OFFSET_SYMBOL
-		quantity := rand.Intn(50) + 1              // OFFSET_QUANTITY
-		price := rand.Float64()*900 + 100          // OFFSET_PRICE
+		symbol := symbols[rand.Intn(len(symbols))]                            // OFFSET_SYMBOL
+		quantity := rand.Intn(50) + 1                                         // OFFSET_QUANTITY
+		price := rand.Float64()*900 + 100                                     // OFFSET_PRICE
+		direction := [2]string{"BUY", "SELL"}[rand.Intn(2)]                  // OFFSET_DIRECTION
+		
+		// Two different dynamic string creation methods for comprehensive testing:
+		// 1. String concatenation with + operator (uses runtime.concatstrings)
+		labelConcat := symbol + "_" + direction + "_" + fmt.Sprintf("%.0f", price) // OFFSET_LABEL_CONCAT
+		// 2. Pure fmt.Sprintf (uses different runtime path)
+		labelSprintf := fmt.Sprintf("%s_%s_%.0f", symbol, direction, price) // OFFSET_LABEL_SPRINTF
 
-		// OFFSET_ORDER_ID - place_order call (symbol, quantity, price in scope)
+		// OFFSET_ORDER_ID - place_order call (symbol, quantity, price, label in scope)
 		orderID := placeOrder(symbol, quantity, price) // OFFSET_ORDER_ID
 
 		// Calculate pnl
@@ -138,9 +145,10 @@ func main() {
 
 		// Introspection breakpoint targets (must be real statements, not `_ = x`)
 		totalPnl = totalPnl + pnl                                 // OFFSET_TOTAL_PNL (all vars in scope)
-		lastOrderID := orderID                                    // OFFSET_LAST_ORDER_ID (all vars in scope)
-		_ = lastOrderID                                           // suppress unused
-		log("  -> P&L: $%.2f (iteration %d)", pnl, iteration)    // OFFSET_LOG (all vars in scope)
+		lastOrderID := orderID                                           // OFFSET_LAST_ORDER_ID (all vars in scope)
+		_ = lastOrderID                                                  // suppress unused
+		_ = labelSprintf                                                 // suppress unused (captured by eBPF)
+		log("  -> [%s] P&L: $%.2f (iteration %d)", labelConcat, pnl, iteration) // OFFSET_LOG (all vars in scope)
 
 		time.Sleep(3 * time.Second) // Same as Python - 3 seconds
 	}

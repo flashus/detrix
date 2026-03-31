@@ -374,6 +374,47 @@ fn get_pointee_name<R: Reader>(
 ///
 /// Go emits its built-in types (string, slice headers) as struct types.
 /// We detect them by name and field count.
+///
+/// # Go string type detection
+///
+/// ## Authoritative sources
+///
+/// **Go runtime source** (`src/runtime/string.go`):
+/// ```go
+/// type stringStruct struct {
+///     str unsafe.Pointer  // 8 bytes on amd64
+///     len int             // 8 bytes on amd64
+/// }
+/// ```
+/// Total size: **16 bytes** on amd64 (verified via `unsafe.Sizeof(string(""))`)
+///
+/// **Delve debugger** (`pkg/proc/variables.go:readStringInfo`):
+/// ```go
+/// // string data structure is always two ptrs in size. Addr, followed by len
+/// // https://research.swtch.com/godata
+/// mem = cacheMemory(mem, addr, arch.PtrSize()*2)
+/// ```
+/// Delve explicitly reads `PtrSize() * 2` bytes = 16 bytes on amd64.
+///
+/// **Go DWARF emission**:
+/// Go does NOT use `DW_TAG_string_type` (reserved for Pascal-style strings).
+/// Instead, Go emits `DW_TAG_structure_type` with:
+/// - `DW_AT_name`: `"string"` or `"basic/string"` (for type aliases)
+/// - `DW_AT_byte_size`: `16` (on amd64)
+/// - Two fields: `str` (ptr) at offset 0, `len` (int) at offset 8
+///
+/// ## Type name variations
+///
+/// Go's DWARF emits string types with various names depending on creation:
+/// - `"string"` - literal strings, simple assignments
+/// - `"basic/string"` - strings from operations (concatenation, conversion)
+/// - `"string"` with `DW_AT_linkage_name` `"runtime.string"` - internal runtime type
+/// - Named type aliases: `type MyString string` → name might be `"MyString"`
+///
+/// ## Detection strategy
+///
+/// The **primary identifier** is the **16-byte size** on amd64 (2×8-byte fields).
+/// Name matching is secondary and used for additional validation.
 fn resolve_struct_type<R: Reader>(
     entry: &DebuggingInformationEntry<R>,
     _unit: &gimli::Unit<R>,
@@ -387,17 +428,24 @@ fn resolve_struct_type<R: Reader>(
         _ => 8,
     };
 
+    // Also check DW_AT_linkage_name for internal Go types like "runtime.string"
+    let linkage_name = read_attr_string(entry, dwarf, gimli::constants::DW_AT_linkage_name)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
     // Debug logging for struct type detection
     detrix_logging::debug!(
-        "[DWARF typeinfo] struct name='{}' byte_size={} is_string={} is_slice={}",
+        "[DWARF typeinfo] struct name='{}' linkage='{}' byte_size={} is_string={} is_slice={}",
         name,
+        linkage_name,
         byte_size,
-        name == "string" || (byte_size == 16 && name.contains("string")),
+        is_go_string_type_by_name_and_size(&name, &linkage_name, byte_size),
         byte_size == 24
     );
 
-    // Go string = struct with "str" field (ptr) + "len" field = 16 bytes
-    let is_string = name == "string" || (byte_size == 16 && name.contains("string"));
+    // Go string = struct with "str" field (ptr) + "len" field = 16 bytes on amd64
+    let is_string = is_go_string_type_by_name_and_size(&name, &linkage_name, byte_size);
     // Go slice = struct with array ptr + len + cap = 24 bytes
     let is_slice = byte_size == 24 && !is_string;
     // Everything else is a user-defined struct (captured as blob)
@@ -415,6 +463,62 @@ fn resolve_struct_type<R: Reader>(
         is_array: false,
         is_struct,
     })
+}
+
+/// Detect if a struct type is a Go string based on name and size.
+///
+/// # Go string memory layout (amd64)
+///
+/// ```text
+/// +0      +8      +16
+/// | ptr   | len   |
+/// | 8B    | 8B    |
+/// +-------+-------+
+/// ```
+///
+/// ## Authoritative verification
+///
+/// ```go
+/// // Go runtime: src/runtime/string.go
+/// type stringStruct struct {
+///     str unsafe.Pointer  // offset 0, 8 bytes
+///     len int             // offset 8, 8 bytes
+/// }
+/// // unsafe.Sizeof(string("")) == 16
+/// ```
+///
+/// ```go
+/// // Delve: pkg/proc/variables.go:readStringInfo
+/// // "string data structure is always two ptrs in size"
+/// mem = cacheMemory(mem, addr, arch.PtrSize()*2)  // 16 bytes on amd64
+/// ```
+///
+/// ## Detection heuristics (in priority order)
+///
+/// 1. **Size check**: `byte_size == 16` (required but not sufficient)
+/// 2. **Explicit names**: `"string"`, `"basic/string"`
+/// 3. **Path-containing names**: contains `"/string"` (e.g., `"pkg/string"`)
+/// 4. **Linkage name**: contains `"runtime.string"`
+/// 5. **Case-insensitive**: contains `"string"` (catches type aliases)
+fn is_go_string_type_by_name_and_size(name: &str, linkage_name: &str, byte_size: u64) -> bool {
+    // Primary check: 16-byte struct is almost certainly a Go string on amd64
+    // This is the most reliable indicator per Go runtime and Delve sources
+    if byte_size == 16 {
+        // Explicit string type names from Go DWARF emission
+        if name == "string"
+            || name == "basic/string"
+            || name.contains("/string")  // Package-qualified names
+            || linkage_name.contains("runtime.string")  // Internal runtime type
+        {
+            return true;
+        }
+        // Named type aliases: if it's 16 bytes and has "string" anywhere in the name
+        // This catches `type MyString string` declarations
+        if name.to_lowercase().contains("string") {
+            return true;
+        }
+    }
+    false
 }
 
 /// Read a string attribute from a DIE.

@@ -58,6 +58,9 @@ const EVENT_COLLECTION_WAIT: Duration = Duration::from_secs(20);
 /// Expected trading symbols produced by the fixture.
 const TRADING_SYMBOLS: &[&str] = &["BTCUSD", "ETHUSD", "SOLUSD"];
 
+/// Valid directions in dynamically-constructed label strings.
+const DIRECTIONS: &[&str] = &["BUY", "SELL"];
+
 // ── Main test ─────────────────────────────────────────────────────────────────
 
 /// End-to-end test: Go logpoint via eBPF uprobe
@@ -189,41 +192,38 @@ async fn test_ebpf_go_uprobe_captures_variables() {
     // Wait for EbpfAdapter to start (DWARF parse + initial uprobe setup).
     sleep(ADAPTER_START_WAIT).await;
 
-    // ── PHASE 4: Add logpoint ────────────────────────────────────────────────
-    reporter.section("PHASE 4: ADD LOGPOINT (symbol + quantity via eBPF uprobe)");
+    // ── PHASE 4: Add logpoints ───────────────────────────────────────────────
+    reporter.section("PHASE 4: ADD LOGPOINTS (symbol+quantity and dynamic label via eBPF uprobe)");
 
-    // Use find_logpoint (not find_decl): Go's DWARF often omits the declaration line
-    // for simple assignments, so we probe at the NEXT statement where the variable
-    // is already in scope. find_logpoint("quantity") = MAIN_LINE + 28 (price line).
+    // Metric 1: symbol + quantity
+    // find_logpoint("quantity") = MAIN_LINE + 28 (price line) — both in scope there.
     let logpoint_line = go_lines::CODEMAP.find_logpoint("quantity");
     let location = format!("@{fixture_source}#{logpoint_line}");
 
     let step = reporter.step_start(
-        "Add Metric",
+        "Add Metric 1",
         &format!("ebpf_symbol_qty @ {fixture_source}:{logpoint_line}"),
     );
-
-    let metric_req = serde_json::json!({
-        "name": "ebpf_symbol_qty",
-        "location": location,
-        "expressions": ["symbol", "quantity"],
-        "connectionId": connection_id,
-        "language": "go",
-        "enabled": true,
-    });
 
     let metric_resp: serde_json::Value = http
         .post(format!(
             "http://127.0.0.1:{}/api/v1/metrics",
             executor.http_port
         ))
-        .json(&metric_req)
+        .json(&serde_json::json!({
+            "name": "ebpf_symbol_qty",
+            "location": location,
+            "expressions": ["symbol", "quantity"],
+            "connectionId": connection_id,
+            "language": "go",
+            "enabled": true,
+        }))
         .send()
         .await
-        .expect("Add metric request failed")
+        .expect("Add metric 1 request failed")
         .json()
         .await
-        .expect("Failed to parse metric response");
+        .expect("Failed to parse metric 1 response");
 
     let metric_id = match metric_resp["metricId"].as_u64() {
         Some(id) => id,
@@ -234,8 +234,89 @@ async fn test_ebpf_go_uprobe_captures_variables() {
             panic!("No metricId in response: {metric_resp}");
         }
     };
-
     reporter.step_success(step, Some(&format!("metricId={metric_id}")));
+
+    // Metric 2: labelConcat (dynamic heap string via + concatenation)
+    // find_logpoint("labelConcat") = MAIN_LINE + 33 — labelConcat is in scope there.
+    let label_concat_line = go_lines::CODEMAP.find_logpoint("labelConcat");
+    let label_concat_location = format!("@{fixture_source}#{label_concat_line}");
+
+    let step = reporter.step_start(
+        "Add Metric 2 (concatenation)",
+        &format!("ebpf_label_concat @ {fixture_source}:{label_concat_line}"),
+    );
+
+    let label_concat_resp: serde_json::Value = http
+        .post(format!(
+            "http://127.0.0.1:{}/api/v1/metrics",
+            executor.http_port
+        ))
+        .json(&serde_json::json!({
+            "name": "ebpf_label_concat",
+            "location": label_concat_location,
+            "expressions": ["labelConcat"],
+            "connectionId": connection_id,
+            "language": "go",
+            "enabled": true,
+        }))
+        .send()
+        .await
+        .expect("Add metric 2 request failed")
+        .json()
+        .await
+        .expect("Failed to parse metric 2 response");
+
+    let label_concat_metric_id = match label_concat_resp["metricId"].as_u64() {
+        Some(id) => id,
+        None => {
+            reporter.step_failed(step, &label_concat_resp.to_string());
+            executor.print_daemon_logs(120);
+            kill_app(app);
+            panic!("No metricId in labelConcat response: {label_concat_resp}");
+        }
+    };
+    reporter.step_success(step, Some(&format!("metricId={label_concat_metric_id}")));
+
+    // Metric 3: labelSprintf (dynamic heap string via fmt.Sprintf)
+    // find_logpoint("labelSprintf") = MAIN_LINE + 33 — labelSprintf is in scope there.
+    let label_sprintf_line = go_lines::CODEMAP.find_logpoint("labelSprintf");
+    let label_sprintf_location = format!("@{fixture_source}#{label_sprintf_line}");
+
+    let step = reporter.step_start(
+        "Add Metric 3 (fmt.Sprintf)",
+        &format!("ebpf_label_sprintf @ {fixture_source}:{label_sprintf_line}"),
+    );
+
+    let label_sprintf_resp: serde_json::Value = http
+        .post(format!(
+            "http://127.0.0.1:{}/api/v1/metrics",
+            executor.http_port
+        ))
+        .json(&serde_json::json!({
+            "name": "ebpf_label_sprintf",
+            "location": label_sprintf_location,
+            "expressions": ["labelSprintf"],
+            "connectionId": connection_id,
+            "language": "go",
+            "enabled": true,
+        }))
+        .send()
+        .await
+        .expect("Add metric 3 request failed")
+        .json()
+        .await
+        .expect("Failed to parse metric 3 response");
+
+    let label_sprintf_metric_id = match label_sprintf_resp["metricId"].as_u64() {
+        Some(id) => id,
+        None => {
+            reporter.step_failed(step, &label_sprintf_resp.to_string());
+            executor.print_daemon_logs(120);
+            kill_app(app);
+            panic!("No metricId in labelSprintf response: {label_sprintf_resp}");
+        }
+    };
+    reporter.step_success(step, Some(&format!("metricId={label_sprintf_metric_id}")));
 
     // ── PHASE 5: Collect and verify events ───────────────────────────────────
     reporter.section("PHASE 5: COLLECT eBPF EVENTS");
@@ -246,64 +327,175 @@ async fn test_ebpf_go_uprobe_captures_variables() {
 
     sleep(EVENT_COLLECTION_WAIT).await;
 
-    let events_url = format!(
-        "http://127.0.0.1:{}/api/v1/events?metricId={metric_id}&limit=20&since=0",
-        executor.http_port
-    );
-
     let events: Vec<serde_json::Value> = http
-        .get(&events_url)
+        .get(format!(
+            "http://127.0.0.1:{}/api/v1/events?metricId={metric_id}&limit=20&since=0",
+            executor.http_port
+        ))
         .send()
         .await
         .expect("Events query failed")
         .json()
         .await
-        .expect("Failed to parse events");
+        .expect("Failed to parse symbol_qty events");
+
+    let label_concat_events: Vec<serde_json::Value> = http
+        .get(format!(
+            "http://127.0.0.1:{}/api/v1/events?metricId={label_concat_metric_id}&limit=20&since=0",
+            executor.http_port
+        ))
+        .send()
+        .await
+        .expect("Label concat events query failed")
+        .json()
+        .await
+        .expect("Failed to parse label_concat events");
+
+    let label_sprintf_events: Vec<serde_json::Value> = http
+        .get(format!(
+            "http://127.0.0.1:{}/api/v1/events?metricId={label_sprintf_metric_id}&limit=20&since=0",
+            executor.http_port
+        ))
+        .send()
+        .await
+        .expect("Label sprintf events query failed")
+        .json()
+        .await
+        .expect("Failed to parse label_sprintf events");
 
     // ── PHASE 6: Assertions ──────────────────────────────────────────────────
     reporter.section("PHASE 6: ASSERTIONS");
 
     kill_app(app);
+    executor.print_daemon_logs(100);
 
-    // Basic: at least one event arrived
+    // ── symbol + quantity metric ──────────────────────────────────────────────
     assert!(
         !events.is_empty(),
         "No eBPF events received for metric {metric_id}. \
          Check: (1) daemon has CAP_BPF, (2) clang is on PATH, \
-         (3) binary was built with -gcflags='all=-N -l'.\n\
-         Daemon logs above.",
+         (3) binary was built with -gcflags='all=-N -l'.",
     );
-    executor.print_daemon_logs(100);
+    reporter.info(&format!("Received {} symbol_qty events", events.len()));
 
-    reporter.info(&format!("Received {} eBPF events", events.len()));
-
-    // Verify `symbol` value is one of the known trading symbols
-    let first_event = &events[0];
-    let values = first_event["values"]
+    let values = events[0]["values"]
         .as_array()
-        .expect("Event has no 'values' array");
+        .expect("symbol_qty event has no 'values' array");
 
-    let symbol_entry = values.iter().find(|v| v["expression"] == "symbol");
-    assert!(
-        symbol_entry.is_some(),
-        "Event values do not contain 'symbol': {values:?}"
-    );
-
-    let symbol_val = symbol_entry.unwrap()["valueJson"]
+    let symbol_val = values
+        .iter()
+        .find(|v| v["expression"] == "symbol")
+        .expect("No 'symbol' in event values")["valueJson"]
         .as_str()
         .unwrap_or("")
-        .trim_matches('"');
+        .trim_matches('"')
+        .to_string();
 
     assert!(
         TRADING_SYMBOLS.iter().any(|&s| s == symbol_val),
-        "symbol value '{symbol_val}' is not one of {TRADING_SYMBOLS:?}. \
-         This may indicate DWARF variable resolution or ring buffer parsing is wrong."
+        "symbol='{symbol_val}' not in {TRADING_SYMBOLS:?}"
     );
 
     let step = reporter.step_start("Verify symbol", "value in TRADING_SYMBOLS");
     reporter.step_success(step, Some(&format!("symbol={symbol_val:?}")));
 
-    reporter.info("eBPF uprobe test PASSED — variables captured correctly via ring buffer");
+    // ── labelConcat metric (string concatenation with +) ─────────────────────
+    assert!(
+        !label_concat_events.is_empty(),
+        "No eBPF events received for labelConcat metric {label_concat_metric_id}. \
+         The dynamic string (heap-allocated via + concatenation) was not captured.",
+    );
+    reporter.info(&format!("Received {} labelConcat events", label_concat_events.len()));
+
+    let label_concat_values = label_concat_events[0]["values"]
+        .as_array()
+        .expect("labelConcat event has no 'values' array");
+
+    let label_concat_val = label_concat_values
+        .iter()
+        .find(|v| v["expression"] == "labelConcat")
+        .expect("No 'labelConcat' in event values")["valueJson"]
+        .as_str()
+        .unwrap_or("")
+        .trim_matches('"')
+        .to_string();
+
+    // labelConcat format: "{SYMBOL}_{BUY|SELL}_{PRICE_INT}"
+    // e.g. "BTCUSD_BUY_537" or "ETHUSD_SELL_1000"
+    let concat_parts: Vec<&str> = label_concat_val.splitn(3, '_').collect();
+    assert_eq!(
+        concat_parts.len(),
+        3,
+        "labelConcat='{label_concat_val}' does not have 3 '_'-separated parts"
+    );
+    assert!(
+        TRADING_SYMBOLS.iter().any(|&s| s == concat_parts[0]),
+        "labelConcat symbol part '{}' not in {TRADING_SYMBOLS:?} (labelConcat='{label_concat_val}')",
+        concat_parts[0]
+    );
+    assert!(
+        DIRECTIONS.iter().any(|&d| d == concat_parts[1]),
+        "labelConcat direction part '{}' not in {DIRECTIONS:?} (labelConcat='{label_concat_val}')",
+        concat_parts[1]
+    );
+    assert!(
+        concat_parts[2].chars().all(|c| c.is_ascii_digit()),
+        "labelConcat price part '{}' is not all digits (labelConcat='{label_concat_val}')",
+        concat_parts[2]
+    );
+
+    let step = reporter.step_start("Verify labelConcat", "dynamic heap string via + concatenation");
+    reporter.step_success(step, Some(&format!("labelConcat={label_concat_val:?}")));
+
+    // ── labelSprintf metric (string formatting with fmt.Sprintf) ─────────────
+    assert!(
+        !label_sprintf_events.is_empty(),
+        "No eBPF events received for labelSprintf metric {label_sprintf_metric_id}. \
+         The dynamic string (heap-allocated via fmt.Sprintf) was not captured.",
+    );
+    reporter.info(&format!("Received {} labelSprintf events", label_sprintf_events.len()));
+
+    let label_sprintf_values = label_sprintf_events[0]["values"]
+        .as_array()
+        .expect("labelSprintf event has no 'values' array");
+
+    let label_sprintf_val = label_sprintf_values
+        .iter()
+        .find(|v| v["expression"] == "labelSprintf")
+        .expect("No 'labelSprintf' in event values")["valueJson"]
+        .as_str()
+        .unwrap_or("")
+        .trim_matches('"')
+        .to_string();
+
+    // labelSprintf format: "{SYMBOL}_{BUY|SELL}_{PRICE_INT}"
+    // e.g. "BTCUSD_BUY_537" or "ETHUSD_SELL_1000"
+    let sprintf_parts: Vec<&str> = label_sprintf_val.splitn(3, '_').collect();
+    assert_eq!(
+        sprintf_parts.len(),
+        3,
+        "labelSprintf='{label_sprintf_val}' does not have 3 '_'-separated parts"
+    );
+    assert!(
+        TRADING_SYMBOLS.iter().any(|&s| s == sprintf_parts[0]),
+        "labelSprintf symbol part '{}' not in {TRADING_SYMBOLS:?} (labelSprintf='{label_sprintf_val}')",
+        sprintf_parts[0]
+    );
+    assert!(
+        DIRECTIONS.iter().any(|&d| d == sprintf_parts[1]),
+        "labelSprintf direction part '{}' not in {DIRECTIONS:?} (labelSprintf='{label_sprintf_val}')",
+        sprintf_parts[1]
+    );
+    assert!(
+        sprintf_parts[2].chars().all(|c| c.is_ascii_digit()),
+        "labelSprintf price part '{}' is not all digits (labelSprintf='{label_sprintf_val}')",
+        sprintf_parts[2]
+    );
+
+    let step = reporter.step_start("Verify labelSprintf", "dynamic heap string via fmt.Sprintf");
+    reporter.step_success(step, Some(&format!("labelSprintf={label_sprintf_val:?}")));
+
+    reporter.info("eBPF uprobe test PASSED — static strings, concatenation, and fmt.Sprintf all captured via ring buffer");
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

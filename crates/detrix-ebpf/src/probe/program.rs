@@ -169,6 +169,12 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
             let ptr_location = ptr.as_ref();
             let len_location = len.as_ref();
 
+            // Log the exact offsets so we can diagnose wrong stack reads.
+            detrix_logging::info!(
+                "[BPF gen] GoString var{idx} ({}): ptr={ptr_location:?} len={len_location:?}",
+                var.name,
+            );
+
             // Read pointer from its location
             let ptr_read = match ptr_location {
                 VariableLocation::StackOffset { offset } => {
