@@ -16,10 +16,12 @@
 //!                                                           └─ VariableSize
 //! ```
 
+pub mod nested_types;
 pub mod parser;
 pub mod typeinfo;
 pub mod types;
 
+pub use nested_types::{NestedType, NestedTypeConfig, StructField};
 pub use parser::DwarfInfo;
 pub use typeinfo::{
     canonicalize_go_type, is_go_bool_type, is_go_slice_type, is_go_string_type, TypeInfo,

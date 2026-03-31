@@ -50,7 +50,7 @@ pub const ADMIN_ROLE: &str = "detrix-admin";
 pub const GO_APP_URL: &str = "http://test-app-go:8091";
 
 /// Go fixture file path inside the container.
-pub const GO_FILE: &str = "/src/fixtures/go/detrix_example_app.go";
+pub const GO_FILE: &str = "/src/fixtures/go/string_capture/main.go";
 
 /// Go logpoint line — `symbol` variable, first safe line in scope.
 /// go_lines::MAIN_LINE (101) + offset 27 = line 128.

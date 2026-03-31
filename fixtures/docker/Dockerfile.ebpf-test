@@ -38,10 +38,17 @@ WORKDIR /src/fixtures/go
 # -compressdwarf=false: keep DWARF uncompressed so our gimli-based DWARF parser
 # (EndianSlice) can read sections without decompression. Go compresses DWARF by
 # default; the gimli EndianSlice approach needs Cow::Borrowed (raw ELF bytes).
+# Build string_capture fixture (for string capture tests)
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -gcflags="all=-N -l" -ldflags="-compressdwarf=false" \
-        -o /build/detrix_example_app .
+        -o /build/string_capture ./fixtures/go/string_capture
+
+# Build nested_types fixture (for nested struct capture tests)
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go build -gcflags="all=-N -l" -ldflags="-compressdwarf=false" \
+        -o /build/nested_types ./fixtures/go/nested_types
 
 # ---------- Stage 2: Fetch Rust dependencies (baked into layer for cache) ----------
 # rust:bookworm already has rustc + cargo + build-essential (incl. libc6-dev).
@@ -132,8 +139,9 @@ FROM detrix-ebpf-playground
 # start_daemon() uses current_dir(workspace_root) when spawning — /src must exist.
 RUN mkdir -p /src
 
-# Go fixture binary — path must match DETRIX_HOST sent by the fixture process
-COPY --from=go-builder /build/detrix_example_app /usr/local/bin/detrix_example_app
+# Go fixture binaries — paths must match DETRIX_HOST sent by the fixture process
+COPY --from=go-builder /build/string_capture /usr/local/bin/string_capture
+COPY --from=go-builder /build/nested_types /usr/local/bin/nested_types
 # Detrix daemon — started as a subprocess by the test
 COPY --from=rust-builder /out/detrix /usr/local/bin/detrix
 # eBPF integration test binary
@@ -141,8 +149,9 @@ COPY --from=rust-builder /out/ebpf_e2e_test /usr/local/bin/ebpf_e2e_test
 
 # DETRIX_BIN is read by find_detrix_binary() in executor.rs.
 ENV DETRIX_BIN=/usr/local/bin/detrix
-ENV GO_FIXTURE_BINARY=/usr/local/bin/detrix_example_app
+# Default Go fixture binary (string capture tests)
+ENV GO_FIXTURE_BINARY=/usr/local/bin/string_capture
 # DWARF source path baked into the Go binary at build time (Stage 1 WORKDIR).
-ENV GO_FIXTURE_SOURCE=/src/fixtures/go/detrix_example_app.go
+ENV GO_FIXTURE_SOURCE=/src/fixtures/go/string_capture/main.go
 
 CMD ["/usr/local/bin/ebpf_e2e_test", "--ignored", "--nocapture"]

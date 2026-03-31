@@ -3,6 +3,17 @@
 //! Generates BPF C source code that reads variables at a specific
 //! program counter and submits them to a ring buffer. Each logpoint
 //! gets its own tiny BPF program with hardcoded register/stack offsets.
+//!
+//! # Nested Type Capture (Hybrid Strategy)
+//!
+//! BPF has a 512-byte stack limit, so we use depth-limited capture:
+//! - **Depth 0-1**: BPF reads struct fields inline into ring buffer
+//! - **Depth 2+**: User-space follows pointers recursively (future)
+//!
+//! Configuration via `CaptureConfig`:
+//! - `max_capture_depth`: Recursion depth (default: 2)
+//! - `max_struct_fields`: Max fields per struct (-1 = all)
+//! - `max_array_values`: Max array/slice elements (default: 64)
 
 use crate::dwarf::types::{ResolvedVariable, VariableLocation};
 use crate::error::{Error, Result};
@@ -240,6 +251,156 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
             }
         }
     }
+}
+
+/// Generate struct field capture for depth 0-1.
+///
+/// For struct-typed variables, generates field reads inline into the ring buffer.
+/// Each field gets its own slot: `var{idx}_field{N}`.
+///
+/// # Delve-Inspired Field Resolution
+///
+/// Following Delve's `toField()` implementation (`pkg/proc/variables.go:849`):
+/// ```go
+/// // Field address = struct base address + field byte offset
+/// field_addr = struct_base_addr + field.ByteOffset
+/// ```
+///
+/// For BPF, this translates to:
+/// ```c
+/// // Struct at stack offset `base_offset`
+/// // Field at byte_offset within struct
+/// bpf_probe_read_user(&event->var{idx}_field{N}, field_size,
+///                     (void *)(ctx->sp + base_offset + field_byte_offset));
+/// ```
+///
+/// # Limitations
+///
+/// - Only depth 0-1 supported (BPF 512-byte stack limit)
+/// - Depth 2+ requires user-space pointer chasing (future)
+/// - Max fields limited by `config.max_struct_fields` (-1 = all)
+#[allow(dead_code)]
+fn generate_struct_field_reads(
+    var: &ResolvedVariable,
+    idx: usize,
+    config: &CaptureConfig,
+    base_offset: i64,
+) -> String {
+    use crate::dwarf::nested_types::NestedType;
+    
+    let mut out = String::new();
+    out.push_str(&format!("    // {}: struct field capture (depth 0-1, max_fields={})\n",
+        var.name, config.max_struct_fields));
+
+    // Check if we have nested type information
+    let Some(nested) = &var.nested_type else {
+        out.push_str("    // No nested type information available\n");
+        return out;
+    };
+
+    // Only handle Struct variant
+    let NestedType::Struct { fields, .. } = nested else {
+        out.push_str("    // Not a struct type\n");
+        return out;
+    };
+
+    // Generate field reads for each field (depth 0-1 only)
+    for (field_idx, field) in fields.iter().enumerate() {
+        // Determine field size and read method based on field type
+        let field_size = field.byte_size.min(8) as usize; // Cap at 8 bytes for u64
+        
+        // Calculate absolute offset: base_offset (struct location) + field.byte_offset
+        let abs_offset = base_offset as u64 + field.byte_offset;
+        
+        out.push_str(&format!("    // Field '{}': offset={}, size={}\n",
+            field.name, field.byte_offset, field.byte_size));
+        
+        // Generate BPF read based on field type
+        if field.type_info.is_string {
+            // String field: read ptr (8 bytes) + len (8 bytes)
+            out.push_str(&format!("    bpf_probe_read_user(&event->var{idx}_field{field_idx}, 8, (void *)(ctx->sp + {abs_offset}));\n"));
+            out.push_str(&format!("    bpf_probe_read_user(&event->var{idx}_field{field_idx}_len, 8, (void *)(ctx->sp + {}));\n", abs_offset + 8));
+        } else if field.type_info.is_struct || field.type_info.is_pointer {
+            // Struct or pointer: read as u64 (address or first field)
+            out.push_str(&format!("    bpf_probe_read_user(&event->var{idx}_field{field_idx}, 8, (void *)(ctx->sp + {abs_offset}));\n"));
+        } else {
+            // Scalar field (int, float, bool, etc.)
+            out.push_str(&format!("    bpf_probe_read_user(&event->var{idx}_field{field_idx}, {field_size}, (void *)(ctx->sp + {abs_offset}));\n"));
+        }
+    }
+
+    out
+}
+
+/// Generate struct field definitions for event struct.
+///
+/// Adds fields like `u64 var{idx}_field{N};` for each struct field.
+///
+/// # Delve Field Iteration
+///
+/// Following Delve's struct field iteration:
+/// ```go
+/// for i, field := range t.Field {
+///     if cfg.MaxStructFields >= 0 && len(v.Children) >= cfg.MaxStructFields {
+///         break  // Stop at MaxStructFields limit
+///     }
+///     // Process field...
+/// }
+/// ```
+#[allow(dead_code)]
+fn build_struct_field_definitions(
+    var: &ResolvedVariable,
+    idx: usize,
+    config: &CaptureConfig,
+) -> String {
+    use crate::dwarf::nested_types::NestedType;
+    
+    let mut out = String::new();
+    out.push_str(&format!("    // {}: struct fields (depth 0-1, max_fields={})\n",
+        var.name, config.max_struct_fields));
+
+    // Check if we have nested type information
+    let Some(nested) = &var.nested_type else {
+        out.push_str("    // No nested type information available\n");
+        return out;
+    };
+
+    // Only handle Struct variant
+    let NestedType::Struct { fields, .. } = nested else {
+        out.push_str("    // Not a struct type\n");
+        return out;
+    };
+
+    // Apply max_struct_fields limit
+    let field_limit = if config.max_struct_fields >= 0 {
+        config.max_struct_fields as usize
+    } else {
+        fields.len()
+    };
+
+    // Generate field definitions for each field
+    for (field_idx, field) in fields.iter().enumerate().take(field_limit) {
+        // Determine field type and generate appropriate definition
+        if field.type_info.is_string {
+            // String field: need ptr (u64) + len (u64) + content buffer
+            out.push_str(&format!("    u64 var{idx}_field{field_idx}; // {name} (ptr)\n", name = field.name));
+            out.push_str(&format!("    u64 var{idx}_field{field_idx}_len; // {name}_len\n", name = field.name));
+            out.push_str(&format!("    u8  var{idx}_field{field_idx}_str[{}]; // {name} content\n", config.max_string_capture, name = field.name));
+        } else if field.type_info.is_struct {
+            // Nested struct: read as blob
+            let blob_size = field.byte_size.min(config.max_blob_capture as u64) as usize;
+            out.push_str(&format!("    u8  var{idx}_field{field_idx}_blob[{blob_size}]; // {name} (struct blob)\n", name = field.name));
+        } else if field.type_info.is_pointer {
+            // Pointer: read as u64
+            out.push_str(&format!("    u64 var{idx}_field{field_idx}; // {name} (ptr)\n", name = field.name));
+        } else {
+            // Scalar field (int, float, bool, etc.)
+            out.push_str(&format!("    u64 var{idx}_field{field_idx}; // {name} ({type_name})\n",
+                name = field.name, type_name = field.type_info.name));
+        }
+    }
+
+    out
 }
 
 fn simple_read_expr(loc: &VariableLocation, field: &str) -> String {

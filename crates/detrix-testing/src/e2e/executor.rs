@@ -1761,7 +1761,7 @@ impl TestExecutor {
     pub fn go_detrix_example_app_path(&self) -> Option<PathBuf> {
         let script_path = self
             .workspace_root
-            .join("fixtures/go/detrix_example_app.go");
+            .join("fixtures/go/string_capture/main.go");
         if script_path.exists() {
             Some(script_path)
         } else {

@@ -223,7 +223,7 @@ impl VariableSize {
 ///
 /// Contains everything needed to generate a BPF read instruction:
 /// the variable name, where it lives, and how big it is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedVariable {
     /// Variable name as it appears in source code.
     pub name: String,
@@ -233,6 +233,9 @@ pub struct ResolvedVariable {
     pub size: VariableSize,
     /// Go type name (e.g., "int", "string", "*http.Request").
     pub type_name: String,
+    /// Nested type structure for structs (depth-limited).
+    /// Populated when type is a struct, contains field information.
+    pub nested_type: Option<crate::dwarf::nested_types::NestedType>,
 }
 
 /// Result of resolving a source file:line to a probe point.
@@ -366,6 +369,7 @@ mod tests {
             location: VariableLocation::Register(Register::Rax),
             size: VariableSize::QWord,
             type_name: "int64".to_string(),
+            nested_type: None,
         };
         assert_eq!(var.name, "amount");
         assert!(var.location.is_scalar());

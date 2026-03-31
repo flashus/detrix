@@ -110,12 +110,12 @@ async fn test_ebpf_go_uprobe_captures_variables() {
     });
 
     // The source file path as recorded in DWARF at build time.
-    // In the Docker image this is /src/fixtures/go/detrix_example_app.go.
+    // In the Docker image this is /src/fixtures/go/string_capture/main.go.
     // Locally it is the workspace-relative path.
     let fixture_source = env::var("GO_FIXTURE_SOURCE").unwrap_or_else(|_| {
         executor
             .workspace_root
-            .join("fixtures/go/detrix_example_app.go")
+            .join("fixtures/go/string_capture/main.go")
             .to_string_lossy()
             .into_owned()
     });

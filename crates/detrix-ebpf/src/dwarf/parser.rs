@@ -453,11 +453,25 @@ fn resolve_variables_at_pc<R: Reader>(
                     location,
                 );
 
+                // Resolve nested type structure for structs (depth-limited)
+                let nested_type = if type_info.is_struct {
+                    use crate::dwarf::nested_types::{resolve_nested_type, NestedTypeConfig};
+                    let config = NestedTypeConfig {
+                        max_depth: 2,  // Default depth limit
+                        max_struct_fields: -1,  // -1 = all fields
+                        max_elements: 64,
+                    };
+                    resolve_nested_type(entry, &unit, dwarf, &config).ok()
+                } else {
+                    None
+                };
+
                 resolved.push(ResolvedVariable {
                     name,
                     location,
                     size,
                     type_name: type_info.name,
+                    nested_type,
                 });
             }
         }

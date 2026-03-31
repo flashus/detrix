@@ -49,7 +49,7 @@ const ADVERTISE_URL: &str = "http://localhost:8095";
 
 // File paths inside containers (from DWARF debug info / runtime WORKDIR).
 const PYTHON_FILE: &str = "/app/trade_bot_forever.py";
-const GO_FILE: &str = "/src/fixtures/go/detrix_example_app.go";
+const GO_FILE: &str = "/src/fixtures/go/string_capture/main.go";
 const RUST_FILE: &str = "/src/fixtures/rust/src/main.rs";
 
 // =============================================================================

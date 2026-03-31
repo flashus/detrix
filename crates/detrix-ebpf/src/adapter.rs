@@ -138,6 +138,7 @@ impl EbpfAdapter {
                     CapturedValue::Slice { len, .. } => Some(TypedValue::Numeric(*len as f64)),
                     CapturedValue::Bytes(_) => None, // raw bytes have no single typed representation
                     CapturedValue::Error(_) => None,
+                    CapturedValue::Struct { .. } => None, // structs have no single typed value (use value_json)
                 };
                 ExpressionValue {
                     expression: var.name.clone(),
@@ -354,6 +355,7 @@ mod tests {
             location: VariableLocation::Register(Register::Rax),
             size: VariableSize::QWord,
             type_name: "int64".to_string(),
+            nested_type: None,
         }];
         let values = vec![CapturedValue::Scalar(100)];
 
@@ -379,6 +381,7 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "string".to_string(),
+            nested_type: None,
         }];
         let values = vec![CapturedValue::String {
             data: b"hello".to_vec(),
@@ -407,6 +410,7 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "[]int64".to_string(),
+            nested_type: None,
         }];
         let values = vec![CapturedValue::Slice { len: 5, cap: 10 }];
 
@@ -431,6 +435,7 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "TradeRequest".to_string(),
+            nested_type: None,
         }];
         let values = vec![CapturedValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])];
 
@@ -449,6 +454,7 @@ mod tests {
             location: VariableLocation::Register(Register::Rax),
             size: VariableSize::QWord,
             type_name: "int64".to_string(),
+            nested_type: None,
         }];
         let values = vec![CapturedValue::Error("optimized out".to_string())];
 

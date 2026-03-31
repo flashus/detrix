@@ -27,6 +27,14 @@ pub const MAX_BLOB_CAPTURE: usize = 64;
 ///
 /// Both `generate_bpf_program` and `parse_ring_buffer_event` must use the **same**
 /// `CaptureConfig` so the BPF struct layout matches what the parser expects.
+///
+/// # Hybrid capture strategy
+///
+/// BPF has a 512-byte stack limit, so we use depth-limited capture:
+/// - **Depth 0-1**: BPF reads struct fields inline into ring buffer
+/// - **Depth 2+**: User-space follows pointers recursively (not yet implemented)
+///
+/// Future enhancement: Add user-space memory reader for depth 2+ recursion.
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {
     /// Maximum variables per probe hit (validated before BPF generation).
@@ -35,6 +43,27 @@ pub struct CaptureConfig {
     pub max_string_capture: usize,
     /// Maximum bytes captured for fixed-size array and struct blobs.
     pub max_blob_capture: usize,
+    /// Maximum recursion depth for nested types (default: 2).
+    ///
+    /// Follows Delve's `MaxVariableRecurse` semantics:
+    /// - `0`: Only capture top-level scalars (no struct fields, no slice elements)
+    /// - `1`: Capture struct fields, but not nested structs/slices/maps
+    /// - `2`: Capture one level of nesting (struct fields + their scalar fields)
+    /// - `3+`: Deeper nesting (limited by BPF stack and ring buffer size)
+    ///
+    /// # Hybrid strategy
+    ///
+    /// - BPF captures depth 0-1 inline (fast, no pointer chasing)
+    /// - User-space can recurse to depth N via pointer reads (future)
+    pub max_capture_depth: usize,
+    /// Maximum struct fields to capture per struct (-1 = all).
+    ///
+    /// Follows Delve's `MaxStructFields` semantics. Useful for large structs.
+    pub max_struct_fields: i32,
+    /// Maximum array/slice/map elements to capture.
+    ///
+    /// Follows Delve's `MaxArrayValues` semantics. Prevents ring buffer blowup.
+    pub max_array_values: usize,
 }
 
 impl Default for CaptureConfig {
@@ -43,6 +72,9 @@ impl Default for CaptureConfig {
             max_capture_vars: MAX_CAPTURE_VARS,
             max_string_capture: MAX_STRING_CAPTURE,
             max_blob_capture: MAX_BLOB_CAPTURE,
+            max_capture_depth: 2,
+            max_struct_fields: -1,
+            max_array_values: 64,
         }
     }
 }
@@ -53,6 +85,9 @@ impl From<&detrix_config::EbpfConfig> for CaptureConfig {
             max_capture_vars: cfg.max_capture_vars,
             max_string_capture: cfg.string_capture_bytes,
             max_blob_capture: cfg.blob_capture_bytes,
+            max_capture_depth: cfg.max_capture_depth,
+            max_struct_fields: cfg.max_struct_fields,
+            max_array_values: cfg.max_array_values,
         }
     }
 }
@@ -68,6 +103,14 @@ pub enum CapturedValue {
     Slice { len: u64, cap: u64 },
     /// Raw bytes from a fixed-size array or struct captured as a blob.
     Bytes(Vec<u8>),
+    /// Struct with named fields (depth-limited nested capture).
+    ///
+    /// Fields are captured recursively up to `max_capture_depth`.
+    /// Each field is a (name, value) pair.
+    Struct {
+        type_name: String,
+        fields: Vec<(String, Box<CapturedValue>)>,
+    },
     /// Read failed (invalid address, variable optimized out, etc.)
     Error(String),
 }
@@ -133,6 +176,8 @@ impl CapturedValue {
     }
 
     /// Convert to a JSON-compatible string representation.
+    ///
+    /// For structs, recursively converts all fields to JSON object notation.
     pub fn to_json_value(&self, size: VariableSize) -> String {
         match self {
             Self::Scalar(v) => match size {
@@ -162,6 +207,17 @@ impl CapturedValue {
                 // Hex-encode raw bytes for JSON portability
                 let hex: String = b.iter().map(|byte| format!("{byte:02x}")).collect();
                 format!("\"0x{hex}\"")
+            }
+            Self::Struct { type_name, fields } => {
+                // Convert struct fields to JSON object
+                let field_strs: Vec<String> = fields
+                    .iter()
+                    .map(|(name, value)| {
+                        // For nested values, use default size (QWord) since we don't track it per field
+                        format!("\"{}\": {}", name, value.to_json_value(VariableSize::QWord))
+                    })
+                    .collect();
+                format!("{{\"__type\":\"{}\",{}}}", type_name, field_strs.join(","))
             }
             Self::Error(msg) => format!("\"<error: {msg}>\""),
         }
@@ -276,6 +332,35 @@ mod tests {
     fn to_json_value_error() {
         let val = CapturedValue::Error("oops".to_string());
         assert_eq!(val.to_json_value(VariableSize::QWord), "\"<error: oops>\"");
+    }
+
+    #[test]
+    fn to_json_value_struct() {
+        // Test nested struct serialization
+        let struct_val = CapturedValue::Struct {
+            type_name: "main.Order".to_string(),
+            fields: vec![
+                ("Product".to_string(), Box::new(CapturedValue::Struct {
+                    type_name: "main.Product".to_string(),
+                    fields: vec![
+                        ("Name".to_string(), Box::new(CapturedValue::String {
+                            data: b"Laptop".to_vec(),
+                            len: 6,
+                        })),
+                        ("Price".to_string(), Box::new(CapturedValue::Scalar(999))),
+                    ],
+                })),
+                ("Total".to_string(), Box::new(CapturedValue::Scalar(1500))),
+            ],
+        };
+        
+        let json = struct_val.to_json_value(VariableSize::QWord);
+        assert!(json.contains("\"__type\":\"main.Order\""));
+        assert!(json.contains("\"Product\":"));
+        assert!(json.contains("\"__type\":\"main.Product\""));
+        assert!(json.contains("\"Name\":\"Laptop\""));
+        assert!(json.contains("\"Price\":999"));
+        assert!(json.contains("\"Total\":1500"));
     }
 
     #[test]

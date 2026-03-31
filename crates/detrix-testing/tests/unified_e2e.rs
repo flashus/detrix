@@ -247,7 +247,7 @@ mod dap_workflow_tests {
         // Get script path for Go detrix_example_app.go
         let script_path = executor
             .workspace_root
-            .join("fixtures/go/detrix_example_app.go");
+            .join("fixtures/go/string_capture/main.go");
 
         // Start daemon
         if let Err(e) = executor.start_daemon().await {
@@ -343,7 +343,7 @@ mod dap_workflow_tests {
 
         let script_path = executor
             .workspace_root
-            .join("fixtures/go/detrix_example_app.go");
+            .join("fixtures/go/string_capture/main.go");
 
         // Start daemon
         if let Err(e) = executor.start_daemon().await {
@@ -564,7 +564,7 @@ mod dap_workflow_tests {
 
         let script_path = executor
             .workspace_root
-            .join("fixtures/go/detrix_example_app.go");
+            .join("fixtures/go/string_capture/main.go");
 
         // Start daemon and delve
         if let Err(e) = executor.start_daemon().await {
@@ -973,7 +973,7 @@ mod dap_workflow_tests {
 
         let script_path = executor
             .workspace_root
-            .join("fixtures/go/detrix_example_app.go");
+            .join("fixtures/go/string_capture/main.go");
 
         if let Err(e) = executor.start_daemon().await {
             reporter.error(&format!("Failed to start daemon: {}", e));
@@ -1274,7 +1274,7 @@ mod dap_workflow_tests {
         // Get script path for Go detrix_example_app.go
         let script_path = executor
             .workspace_root
-            .join("fixtures/go/detrix_example_app.go");
+            .join("fixtures/go/string_capture/main.go");
 
         // Start daemon
         if let Err(e) = executor.start_daemon().await {
@@ -2024,7 +2024,7 @@ mod grpc_dap_workflow_tests {
 
         let script_path = executor
             .workspace_root
-            .join("fixtures/go/detrix_example_app.go");
+            .join("fixtures/go/string_capture/main.go");
 
         if let Err(e) = executor.start_daemon().await {
             reporter.error(&format!("Failed to start daemon: {}", e));
@@ -2555,7 +2555,7 @@ mod rest_dap_workflow_tests {
 
         let script_path = executor
             .workspace_root
-            .join("fixtures/go/detrix_example_app.go");
+            .join("fixtures/go/string_capture/main.go");
 
         if let Err(e) = executor.start_daemon().await {
             reporter.error(&format!("Failed to start daemon: {}", e));
@@ -5196,7 +5196,7 @@ mod enable_from_diff_workflow_tests {
         // Start delve
         let script_path = executor
             .workspace_root
-            .join("fixtures/go/detrix_example_app.go");
+            .join("fixtures/go/string_capture/main.go");
 
         if let Err(e) = executor.start_delve(script_path.to_str().unwrap()).await {
             reporter.error(&format!("Failed to start delve: {}", e));

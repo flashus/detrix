@@ -114,7 +114,7 @@ impl FixtureCodeMap {
 
 // Go fixture line numbers — single source of truth.
 // Update MAIN_LINE if you add/remove lines before `func main()` in
-// fixtures/go/detrix_example_app.go
+// fixtures/go/string_capture/main.go
 pub mod go_lines {
     use super::FixtureCodeMap;
 
@@ -417,7 +417,7 @@ impl DapWorkflowConfig {
 
         Self {
             language: SourceLanguage::Go,
-            source_file: PathBuf::from("fixtures/go/detrix_example_app.go"),
+            source_file: PathBuf::from("fixtures/go/string_capture/main.go"),
             metrics: vec![
                 // Slot: pnl declaration line — orderID is already in scope here
                 MetricPoint::new("order_metric", CODEMAP.find_decl("pnl"), "orderID")

@@ -380,7 +380,7 @@ async fn test_multi_expr_go() {
         label: "Multi-Expression Go",
         language: "go",
         tool: ToolDependency::Delve,
-        fixture_path: "fixtures/go/detrix_example_app.go",
+        fixture_path: "fixtures/go/string_capture/main.go",
         line: go_lines::CODEMAP.find_decl("orderID"),
         wait_secs: 12,
     })

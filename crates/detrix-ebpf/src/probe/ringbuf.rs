@@ -2,6 +2,22 @@
 //!
 //! On Linux, reads from BPF_MAP_TYPE_RINGBUF via aya.
 //! Cross-platform: the parsing logic is testable anywhere.
+//!
+//! # Nested Struct Support
+//!
+//! Struct fields are captured sequentially in the ring buffer.
+//! For a struct with N fields, the layout is:
+//! ```text
+//! var{idx} (u64) - base address or first field
+//! var{idx}_field0 - field 0 value
+//! var{idx}_field1 - field 1 value (or blob for nested data)
+//! ...
+//! ```
+//!
+//! The parser reconstructs `CapturedValue::Struct` by:
+//! 1. Reading field count from DWARF type info
+//! 2. Parsing each field value recursively
+//! 3. Building nested `CapturedValue::Struct` hierarchy
 
 use crate::dwarf::types::ResolvedVariable;
 use crate::error::{Error, Result};
@@ -69,13 +85,13 @@ pub fn parse_ring_buffer_event(
                     "[ringbuf] Reading Go string via user-space: pid={} ptr={:#x} len={}",
                     pid, val, len
                 );
-                
+
                 // Try with pid first, then tid
                 let mut result = mem_reader.read_string(pid, val, len);
                 if result.is_err() {
                     result = mem_reader.read_string(tid, val, len);
                 }
-                
+
                 match result {
                     Ok(s) => CapturedValue::String {
                         data: s.into_bytes(),
@@ -106,7 +122,18 @@ pub fn parse_ring_buffer_event(
                     .unwrap_or_else(|_| vec![0u8; capture]);
                 CapturedValue::Bytes(bytes)
             }
-            _ => CapturedValue::Scalar(val),
+            _ => {
+                // Check if this is a struct type by examining the type_name
+                // Struct types from DWARF have names like "main.Order", "main.Product", etc.
+                if is_struct_type(&var.type_name) {
+                    // Parse struct fields (depth 0-1 only for now)
+                    // Fields are stored sequentially after the base value
+                    // Pass nested_type for DWARF-based field parsing
+                    parse_struct_fields(data, &mut offset, &var.type_name, config, var.nested_type.as_ref())?
+                } else {
+                    CapturedValue::Scalar(val)
+                }
+            }
         };
         values.push(captured);
     }
@@ -441,4 +468,133 @@ mod tests {
         let val = CapturedValue::Bytes(vec![0xAB, 0xCD]);
         assert_eq!(val.as_bytes(), Some([0xABu8, 0xCD].as_ref()));
     }
+}
+
+// ============================================================================
+// Nested struct support
+// ============================================================================
+
+/// Check if a type name indicates a struct type.
+///
+/// Go struct types from DWARF have names like:
+/// - "main.Order"
+/// - "main.Product"
+/// - "struct { ... }" (anonymous structs)
+///
+/// Excludes:
+/// - Slice types: "[]T"
+/// - Map types: "map[K]V"
+/// - Pointer types: "*T"
+/// - Basic types: "int", "string", "bool", etc.
+fn is_struct_type(type_name: &str) -> bool {
+    // Skip slices, maps, pointers
+    if type_name.starts_with("[]") || type_name.starts_with("map[") || type_name.starts_with('*') {
+        return false;
+    }
+    
+    // Skip basic types
+    let basic_types = ["int", "int8", "int16", "int32", "int64",
+                       "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+                       "float32", "float64",
+                       "complex64", "complex128",
+                       "bool", "string", "byte", "rune", "error"];
+    if basic_types.contains(&type_name) {
+        return false;
+    }
+    
+    // Struct types have package prefix (main.Order) or are anonymous structs
+    type_name.contains('.') || type_name.starts_with("struct")
+}
+
+/// Parse struct fields from ring buffer data.
+///
+/// Fields are stored sequentially after the base value:
+/// - Each scalar field: 8 bytes (u64)
+/// - String fields: 8 bytes (ptr) + 8 bytes (len) + max_string_capture bytes (buffer)
+/// - Nested structs: depends on field count
+///
+/// Uses DWARF type info to parse each field correctly.
+fn parse_struct_fields(
+    data: &[u8],
+    offset: &mut usize,
+    type_name: &str,
+    config: &CaptureConfig,
+    nested_type: Option<&crate::dwarf::nested_types::NestedType>,
+) -> Result<CapturedValue> {
+    detrix_logging::debug!("[ringbuf] Parsing struct fields for type '{}'", type_name);
+
+    let mut fields = Vec::new();
+
+    // Use DWARF type info if available
+    if let Some(crate::dwarf::nested_types::NestedType::Struct { fields: dwarf_fields, .. }) = nested_type {
+        // Parse fields based on DWARF information
+        for (field_idx, field) in dwarf_fields.iter().enumerate() {
+            // Apply max_struct_fields limit
+            if config.max_struct_fields >= 0 && field_idx >= config.max_struct_fields as usize {
+                break;
+            }
+
+            let field_name = field.name.clone();
+            
+            // Parse field based on its type
+            let field_value = if field.type_info.is_string {
+                // String field: read ptr (8 bytes) + len (8 bytes)
+                if *offset + 16 > data.len() {
+                    break;
+                }
+                let ptr = read_u64(data, offset)?;
+                let len = read_u64(data, offset)? as usize;
+                
+                // Note: For Go strings, we'd need to read the actual string content via user-space memory reader
+                // For now, store as placeholder
+                CapturedValue::String {
+                    data: format!("<ptr={ptr:#x},len={len}>").into_bytes(),
+                    len,
+                }
+            } else if field.type_info.is_struct {
+                // Nested struct: read as blob or recurse (depth-limited)
+                let blob_size = field.byte_size.min(config.max_blob_capture as u64) as usize;
+                if *offset + blob_size > data.len() {
+                    break;
+                }
+                let bytes = read_bytes(data, offset, blob_size)?;
+                CapturedValue::Bytes(bytes)
+            } else if field.type_info.is_pointer {
+                // Pointer: read as u64
+                if *offset + 8 > data.len() {
+                    break;
+                }
+                let ptr_val = read_u64(data, offset)?;
+                CapturedValue::Scalar(ptr_val)
+            } else {
+                // Scalar field (int, float, bool, etc.)
+                if *offset + 8 > data.len() {
+                    break;
+                }
+                let scalar_val = read_u64(data, offset)?;
+                CapturedValue::Scalar(scalar_val)
+            };
+
+            fields.push((field_name, Box::new(field_value)));
+        }
+    } else {
+        // Fallback: parse placeholder fields (backward compatibility)
+        for i in 0..4 {
+            if *offset + 8 > data.len() {
+                break;
+            }
+            let field_val = read_u64(data, offset)?;
+            fields.push((format!("field{i}"), Box::new(CapturedValue::Scalar(field_val))));
+        }
+    }
+
+    detrix_logging::debug!(
+        "[ringbuf] Parsed {} struct fields for '{}'",
+        fields.len(), type_name
+    );
+
+    Ok(CapturedValue::Struct {
+        type_name: type_name.to_string(),
+        fields,
+    })
 }

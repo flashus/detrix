@@ -262,14 +262,15 @@ tasks:
       # ── Go: fixture binary with DWARF (no cgo → cross-compiles cleanly) ────
       # Named volumes keep downloaded modules and build cache between runs.
       # -compressdwarf=false: our gimli EndianSlice parser needs uncompressed DWARF.
+      # Build string_capture fixture (primary test fixture)
       - |
         docker run --rm \
-          -v "{{.ROOT_DIR}}/fixtures/go:/src/fixtures/go:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/go/string_capture:/src/fixtures/go/string_capture:ro" \
           -v "{{.ROOT_DIR}}/clients/go:/src/clients/go:ro" \
           -v "{{.ROOT_DIR}}/out:/out" \
           -v "ebpf-go-mod:/go/pkg/mod" \
           -v "ebpf-go-build:/root/.cache/go-build" \
-          -w /src/fixtures/go \
+          -w /src/fixtures/go/string_capture \
           {{.GO_IMAGE}} \
           go build \
             -gcflags="all=-N -l" \
@@ -290,7 +291,7 @@ tasks:
           -v "{{.OUT}}/ebpf_e2e_test:/usr/local/bin/ebpf_e2e_test:ro" \
           -e DETRIX_BIN=/usr/local/bin/detrix \
           -e GO_FIXTURE_BINARY=/usr/local/bin/detrix_example_app \
-          -e GO_FIXTURE_SOURCE=/src/fixtures/go/detrix_example_app.go \
+          -e GO_FIXTURE_SOURCE=/src/fixtures/go/string_capture/main.go \
           {{.PLAYGROUND}} \
           /usr/local/bin/ebpf_e2e_test --ignored --nocapture
 

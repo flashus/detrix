@@ -35,6 +35,10 @@ pub enum Error {
     /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// DWARF library error (gimli).
+    #[error("DWARF library error: {0}")]
+    Gimli(#[from] gimli::Error),
 }
 
 impl From<Error> for CoreError {
