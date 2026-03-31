@@ -2614,7 +2614,7 @@ enable_ast_analysis = false
             .current_dir(&self.workspace_root)
             .env(
                 "RUST_LOG",
-                "detrix=debug,detrix_dap=debug,detrix_application=debug,detrix_api=debug,info",
+                "detrix=debug,detrix_dap=debug,detrix_application=debug,detrix_api=debug,detrix_ebpf=debug,info",
             )
             // Isolate DETRIX_HOME to the per-test temp dir so that any fallback paths
             // (auth-token, credentials.toml, default DB) don't collide across parallel tests.

@@ -40,6 +40,9 @@ mod storage_mod {
 mod tui_mod {
     pub use crate::tui::*;
 }
+mod ebpf_mod {
+    pub use crate::ebpf::*;
+}
 mod vfs_mod {
     pub use crate::vfs::*;
 }
@@ -49,6 +52,7 @@ pub use adapter_mod::*;
 pub use anchor_mod::*;
 pub use api_mod::*;
 pub use daemon_mod::*;
+pub use ebpf_mod::*;
 pub use output_mod::*;
 pub use safety_mod::*;
 pub use storage_mod::*;
@@ -105,6 +109,8 @@ pub struct Config {
     pub audit: AuditConfig,
     #[serde(default)]
     pub vfs: VfsConfig,
+    #[serde(default)]
+    pub ebpf: EbpfConfig,
     #[serde(default)]
     pub metric: Vec<MetricDefinition>,
     /// Connection TTL in calendar days. Default 7. Set to -1 for indefinite.

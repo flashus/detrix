@@ -1,0 +1,148 @@
+# eBPF Integration Test Image
+#
+# Builds the detrix daemon + Go fixture + Rust test binary, then runs the
+# ebpf_e2e integration test inside a privileged Linux container.
+#
+# Usage:
+#   # One-time setup: build (or pull) the playground base image first:
+#   task build-ebpf-playground          # slow: installs clang/llvm/libbpf once
+#
+#   # Subsequent test runs (fast: skips apt install, only compiles source):
+#   task test-ebpf
+#
+# Requirements:
+#   - Docker with privileged mode support (CAP_BPF, CAP_PERFMON, SYS_PTRACE)
+#   - Linux kernel >= 5.8 with BPF ring buffer support (docker/colima on macOS provides this)
+#   - detrix-ebpf-playground image present locally (see Dockerfile.ebpf-playground)
+#
+# Caching strategy:
+#   playground — detrix-ebpf-playground has clang/llvm/libbpf pre-installed.
+#                apt never runs in this Dockerfile; playground is built separately.
+#   rust-deps  — uses rust:bookworm (Rust pre-installed, no curl download).
+#                Fetches crates into a baked layer; invalidated only on Cargo.lock change.
+#   rust-builder — full source compile with BuildKit cache mount for incremental builds.
+#                  RUN touch after COPY fixes mtime flattening so cargo detects .rs changes.
+#   runner     — inherits from detrix-ebpf-playground (same glibc as rust:bookworm).
+
+# ---------- Stage 1: Build Go fixture with debug symbols ----------
+FROM golang:1.24.13-bookworm AS go-builder
+
+WORKDIR /src
+
+COPY clients/go /src/clients/go
+COPY fixtures/go /src/fixtures/go
+
+WORKDIR /src/fixtures/go
+
+# Build with debug symbols; CGO_ENABLED=0 for a static binary.
+# -compressdwarf=false: keep DWARF uncompressed so our gimli-based DWARF parser
+# (EndianSlice) can read sections without decompression. Go compresses DWARF by
+# default; the gimli EndianSlice approach needs Cow::Borrowed (raw ELF bytes).
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go build -gcflags="all=-N -l" -ldflags="-compressdwarf=false" \
+        -o /build/detrix_example_app .
+
+# ---------- Stage 2: Fetch Rust dependencies (baked into layer for cache) ----------
+# rust:bookworm already has rustc + cargo + build-essential (incl. libc6-dev).
+# No curl download — this layer is stable and caches well.
+FROM rust:1.94.1-bookworm AS rust-deps
+
+# Only extra dep not in rust:bookworm base is protobuf-compiler (for prost build.rs).
+# Cache mounts keep downloaded .deb files across layer rebuilds — apt never re-downloads.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler
+
+# Pin the toolchain to the exact version pre-installed in this image.
+# Without this, rustup reads the mounted workspace's rust-toolchain.toml
+# (channel = "stable") and tries to sync channel metadata on every `cargo`
+# invocation — even when the version is already correct — wasting ~10-30s.
+ENV RUSTUP_TOOLCHAIN=1.94.1
+ENV CARGO_TARGET_DIR=/build/target
+WORKDIR /src
+
+# Copy workspace manifests only — layer is invalidated only when Cargo.lock changes.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/detrix-api/Cargo.toml         crates/detrix-api/
+COPY crates/detrix-application/Cargo.toml crates/detrix-application/
+COPY crates/detrix-cli/Cargo.toml         crates/detrix-cli/
+COPY crates/detrix-config/Cargo.toml      crates/detrix-config/
+COPY crates/detrix-core/Cargo.toml        crates/detrix-core/
+COPY crates/detrix-dap/Cargo.toml         crates/detrix-dap/
+COPY crates/detrix-ebpf/Cargo.toml        crates/detrix-ebpf/
+COPY crates/detrix-logging/Cargo.toml     crates/detrix-logging/
+COPY crates/detrix-lsp/Cargo.toml         crates/detrix-lsp/
+COPY crates/detrix-output/Cargo.toml      crates/detrix-output/
+COPY crates/detrix-ports/Cargo.toml       crates/detrix-ports/
+COPY crates/detrix-storage/Cargo.toml     crates/detrix-storage/
+COPY crates/detrix-testing/Cargo.toml     crates/detrix-testing/
+COPY crates/detrix-tui/Cargo.toml         crates/detrix-tui/
+COPY clients/rust/Cargo.toml              clients/rust/
+
+# Stub src files so `cargo fetch` can parse manifests without full source.
+# Only detrix-cli needs src/main.rs (it's the actual binary crate).
+# Creating src/main.rs for other crates (e.g. detrix-testing) makes cargo
+# auto-detect a binary target with no main() — which fails to compile.
+RUN for dir in crates/*/; do \
+        mkdir -p "${dir}src" && touch "${dir}src/lib.rs"; \
+    done && \
+    touch crates/detrix-cli/src/main.rs && \
+    mkdir -p clients/rust/src && touch clients/rust/src/lib.rs
+
+# Fetch all crates into the cargo registry — baked into this layer.
+# Re-runs only when Cargo.lock changes.
+RUN cargo fetch --locked
+
+# ---------- Stage 3: Build daemon binary and test binary ----------
+FROM rust-deps AS rust-builder
+
+COPY crates crates
+COPY clients/rust clients/rust
+COPY detrix.toml detrix.minimal.toml ./
+# Docker COPY flattens all file mtimes to the image creation time, so cached
+# object files in /build/target appear newer than "just copied" source files —
+# cargo skips recompilation even when .rs files have changed.
+# Touching after COPY restores a real "now" mtime so cargo always recompiles
+# whatever actually changed since the last cache layer.
+RUN find crates clients/rust -name "*.rs" -exec touch {} +
+
+# Build daemon + extract test binary in one RUN so both share the cache mount.
+RUN --mount=type=cache,target=/build/target \
+    mkdir -p /out && \
+    cargo build --release --locked --bin detrix -p detrix && \
+    cp /build/target/release/detrix /out/detrix && \
+    cargo test --no-run --locked --package detrix-testing --test ebpf_e2e && \
+    find /build/target/debug/deps/ -maxdepth 1 -name "ebpf_e2e-*" ! -name "*.d" \
+        | head -1 | xargs -I{} cp {} /out/ebpf_e2e_test
+
+# ---------- Stage 4: Test runner — inherits from pre-built playground ----------
+# detrix-ebpf-playground already has clang/llvm/libbpf/linux-headers installed.
+# No apt install here — this stage is rebuilt only when source binaries change.
+#
+# Build the playground once before running tests:
+#   docker build -f fixtures/docker/Dockerfile.ebpf-playground -t detrix-ebpf-playground .
+# or:
+#   task build-ebpf-playground
+FROM detrix-ebpf-playground
+
+# executor.rs computes workspace_root from CARGO_MANIFEST_DIR baked at compile time:
+#   /src/crates/detrix-testing → workspace_root = /src
+# start_daemon() uses current_dir(workspace_root) when spawning — /src must exist.
+RUN mkdir -p /src
+
+# Go fixture binary — path must match DETRIX_HOST sent by the fixture process
+COPY --from=go-builder /build/detrix_example_app /usr/local/bin/detrix_example_app
+# Detrix daemon — started as a subprocess by the test
+COPY --from=rust-builder /out/detrix /usr/local/bin/detrix
+# eBPF integration test binary
+COPY --from=rust-builder /out/ebpf_e2e_test /usr/local/bin/ebpf_e2e_test
+
+# DETRIX_BIN is read by find_detrix_binary() in executor.rs.
+ENV DETRIX_BIN=/usr/local/bin/detrix
+ENV GO_FIXTURE_BINARY=/usr/local/bin/detrix_example_app
+# DWARF source path baked into the Go binary at build time (Stage 1 WORKDIR).
+ENV GO_FIXTURE_SOURCE=/src/fixtures/go/detrix_example_app.go
+
+CMD ["/usr/local/bin/ebpf_e2e_test", "--ignored", "--nocapture"]

@@ -22,7 +22,7 @@
 
 use crate::dwarf::types::ProbePoint;
 use crate::error::{Error, Result};
-use crate::probe::types::ProbeConfig;
+use crate::probe::types::{CaptureConfig, ProbeConfig};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -43,6 +43,9 @@ pub struct UprobeManager {
     /// Unused on non-Linux (the field exists to keep the API uniform).
     #[allow(dead_code)]
     raw_event_tx: Option<mpsc::UnboundedSender<(String, Vec<u8>)>>,
+    /// Capture limits — used when generating per-metric BPF programs (Linux only).
+    #[allow(dead_code)]
+    capture_config: CaptureConfig,
 }
 
 /// An attached uprobe with its BPF program and aya handles.
@@ -86,6 +89,7 @@ impl UprobeManager {
             _binary_path: binary_path.into(),
             active_probes: HashMap::new(),
             raw_event_tx: None,
+            capture_config: CaptureConfig::default(),
         }
     }
 
@@ -101,6 +105,21 @@ impl UprobeManager {
             _binary_path: binary_path.into(),
             active_probes: HashMap::new(),
             raw_event_tx: Some(tx),
+            capture_config: CaptureConfig::default(),
+        }
+    }
+
+    /// Create a manager with custom capture limits.
+    pub fn new_with_config(
+        binary_path: impl Into<PathBuf>,
+        tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
+        capture_config: CaptureConfig,
+    ) -> Self {
+        Self {
+            _binary_path: binary_path.into(),
+            active_probes: HashMap::new(),
+            raw_event_tx: Some(tx),
+            capture_config,
         }
     }
 
@@ -180,7 +199,18 @@ impl UprobeManager {
         use aya::programs::UProbe;
 
         // Step 1: Generate BPF C source from variable locations
-        let bpf_program = generate_bpf_program(&probe_point.variables, false)?;
+        let bpf_program = generate_bpf_program(
+            &probe_point.variables,
+            false,
+            &self.capture_config,
+        )?;
+
+        // Debug: log generated BPF source
+        detrix_logging::debug!(
+            "[uprobe] Generated BPF for '{}':\n{}",
+            metric_name,
+            bpf_program.source
+        );
 
         // Step 2: Compile C → ELF via clang
         let compiled = compile_bpf(&bpf_program)?;
@@ -201,9 +231,7 @@ impl UprobeManager {
         let link: UProbeLink = {
             let program: &mut UProbe = ebpf
                 .program_mut("detrix_capture")
-                .ok_or_else(|| {
-                    Error::Ebpf("BPF program 'detrix_capture' not found".to_string())
-                })?
+                .ok_or_else(|| Error::Ebpf("BPF program 'detrix_capture' not found".to_string()))?
                 .try_into()
                 .map_err(|e| Error::Ebpf(format!("Not a uprobe program: {e}")))?;
 
@@ -341,7 +369,10 @@ mod tests {
         let mut mgr = UprobeManager::new("/test/binary");
         let result = mgr.detach("nonexistent");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No probe attached"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No probe attached"));
     }
 
     #[test]

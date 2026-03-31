@@ -25,7 +25,7 @@
 //! ```
 
 use crate::dwarf::{DwarfInfo, ProbePoint, ResolvedVariable, VariableSize};
-use crate::probe::types::CapturedValue;
+use crate::probe::types::{CapturedValue, CaptureConfig};
 use crate::probe::UprobeManager;
 
 use async_trait::async_trait;
@@ -34,7 +34,7 @@ use detrix_core::{ExpressionValue, Metric, MetricEvent, MetricId, TypedValue};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{mpsc, RwLock};
 
 /// eBPF-based adapter for Go logpoints on Linux.
 ///
@@ -49,6 +49,9 @@ pub struct EbpfAdapter {
     uprobe_manager: RwLock<UprobeManager>,
     /// Active metrics keyed by name. Shared with the correlator task via Arc.
     active_metrics: Arc<RwLock<HashMap<String, ActiveMetric>>>,
+    /// Capture limits — kept here for the event correlator's ring buffer parsing (Linux only).
+    #[allow(dead_code)]
+    capture_config: CaptureConfig,
     /// Event sender — probe events are converted to MetricEvents and sent here.
     /// Cloned for the Linux correlator task in start(); field retained for future re-use.
     #[allow(dead_code)]
@@ -60,6 +63,9 @@ pub struct EbpfAdapter {
     raw_event_rx: RwLock<Option<mpsc::UnboundedReceiver<(String, Vec<u8>)>>>,
     /// Whether the adapter is started.
     started: RwLock<bool>,
+    /// Process memory reader for dereferencing Go string pointers (Linux only).
+    #[cfg(target_os = "linux")]
+    mem_reader: Arc<dyn crate::mem_reader::ProcessMemoryReader>,
 }
 
 /// A metric with its resolved probe point, ready for event correlation.
@@ -81,6 +87,10 @@ impl EbpfAdapter {
     /// The binary must be compiled with `-gcflags=all=-N -l` for
     /// reliable DWARF variable locations.
     pub fn new(binary_path: impl AsRef<Path>) -> Self {
+        Self::new_with_config(binary_path, CaptureConfig::default())
+    }
+
+    pub fn new_with_config(binary_path: impl AsRef<Path>, capture_config: CaptureConfig) -> Self {
         let path = binary_path.as_ref().to_path_buf();
         let (event_tx, event_rx) = mpsc::channel(1024);
         let (raw_tx, raw_rx) = mpsc::unbounded_channel();
@@ -94,6 +104,11 @@ impl EbpfAdapter {
             event_rx: RwLock::new(Some(event_rx)),
             raw_event_rx: RwLock::new(Some(raw_rx)),
             started: RwLock::new(false),
+            capture_config,
+            #[cfg(target_os = "linux")]
+            mem_reader: Arc::new(crate::mem_reader::LinuxProcessMemoryReader::new(
+                path.to_str().unwrap_or("/unknown")
+            )),
         }
     }
 
@@ -120,6 +135,8 @@ impl EbpfAdapter {
                             .ok()
                             .map(|s| TypedValue::Text(s.to_string()))
                     }
+                    CapturedValue::Slice { len, .. } => Some(TypedValue::Numeric(*len as f64)),
+                    CapturedValue::Bytes(_) => None, // raw bytes have no single typed representation
                     CapturedValue::Error(_) => None,
                 };
                 ExpressionValue {
@@ -162,7 +179,15 @@ impl DapAdapter for EbpfAdapter {
         if let Some(raw_rx) = self.raw_event_rx.write().await.take() {
             let active_metrics = Arc::clone(&self.active_metrics);
             let event_tx = self.event_tx.clone();
-            tokio::spawn(run_event_correlator(raw_rx, active_metrics, event_tx));
+            let capture_config = self.capture_config.clone();
+            let mem_reader = Arc::clone(&self.mem_reader);
+            tokio::spawn(run_event_correlator(
+                raw_rx,
+                active_metrics,
+                event_tx,
+                capture_config,
+                mem_reader,
+            ));
         }
 
         *self.started.write().await = true;
@@ -185,10 +210,7 @@ impl DapAdapter for EbpfAdapter {
     }
 
     fn is_connected(&self) -> bool {
-        self.started
-            .try_read()
-            .map(|guard| *guard)
-            .unwrap_or(false)
+        self.started.try_read().map(|guard| *guard).unwrap_or(false)
     }
 
     async fn set_metric(&self, metric: &Metric) -> detrix_core::Result<SetMetricResult> {
@@ -259,6 +281,8 @@ async fn run_event_correlator(
     mut raw_rx: mpsc::UnboundedReceiver<(String, Vec<u8>)>,
     active_metrics: Arc<RwLock<HashMap<String, ActiveMetric>>>,
     event_tx: mpsc::Sender<MetricEvent>,
+    capture_config: CaptureConfig,
+    mem_reader: Arc<dyn crate::mem_reader::ProcessMemoryReader>,
 ) {
     use crate::probe::ringbuf::parse_ring_buffer_event;
 
@@ -268,10 +292,15 @@ async fn run_event_correlator(
             continue;
         };
 
+        // Read PID from the event (first 4 bytes) - used by parse_ring_buffer_event internally
+        // No need to pass it separately - the function reads it from the data
+
         match parse_ring_buffer_event(
             &raw_bytes,
             &active.probe_point.variables,
             active.capture_goid,
+            &capture_config,
+            mem_reader.as_ref(),
         ) {
             Ok(probe_event) => {
                 // Prefer goroutine ID over OS thread ID for Go correlation.
@@ -292,9 +321,7 @@ async fn run_event_correlator(
                 }
             }
             Err(e) => {
-                detrix_logging::warn!(
-                    "Failed to parse ring buffer event for '{metric_name}': {e}"
-                );
+                detrix_logging::warn!("Failed to parse ring buffer event for '{metric_name}': {e}");
             }
         }
     }
@@ -358,8 +385,7 @@ mod tests {
             len: 5,
         }];
 
-        let event =
-            EbpfAdapter::probe_event_to_metric_event(&values, &variables, &metric, None);
+        let event = EbpfAdapter::probe_event_to_metric_event(&values, &variables, &metric, None);
 
         assert_eq!(event.values[0].expression, "name");
         assert_eq!(event.values[0].value_json, "\"hello\"");
@@ -367,6 +393,52 @@ mod tests {
             event.values[0].typed_value,
             Some(TypedValue::Text("hello".to_string()))
         );
+    }
+
+    #[test]
+    fn probe_event_to_metric_event_slice() {
+        let metric = test_metric();
+        let variables = vec![ResolvedVariable {
+            name: "items".to_string(),
+            location: VariableLocation::GoSlice {
+                ptr: Box::new(VariableLocation::Register(Register::Rax)),
+                len: Box::new(VariableLocation::Register(Register::Rbx)),
+                cap: Box::new(VariableLocation::Register(Register::Rcx)),
+            },
+            size: VariableSize::QWord,
+            type_name: "[]int64".to_string(),
+        }];
+        let values = vec![CapturedValue::Slice { len: 5, cap: 10 }];
+
+        let event = EbpfAdapter::probe_event_to_metric_event(&values, &variables, &metric, None);
+
+        assert_eq!(event.values[0].expression, "items");
+        assert_eq!(event.values[0].value_json, r#"{"len":5,"cap":10}"#);
+        assert_eq!(
+            event.values[0].typed_value,
+            Some(TypedValue::Numeric(5.0))
+        );
+    }
+
+    #[test]
+    fn probe_event_to_metric_event_bytes() {
+        let metric = test_metric();
+        let variables = vec![ResolvedVariable {
+            name: "req".to_string(),
+            location: VariableLocation::StackBlob {
+                offset: -32,
+                byte_size: 4,
+            },
+            size: VariableSize::QWord,
+            type_name: "TradeRequest".to_string(),
+        }];
+        let values = vec![CapturedValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])];
+
+        let event = EbpfAdapter::probe_event_to_metric_event(&values, &variables, &metric, None);
+
+        assert_eq!(event.values[0].expression, "req");
+        assert_eq!(event.values[0].value_json, "\"0xdeadbeef\"");
+        assert_eq!(event.values[0].typed_value, None);
     }
 
     #[test]
@@ -380,8 +452,7 @@ mod tests {
         }];
         let values = vec![CapturedValue::Error("optimized out".to_string())];
 
-        let event =
-            EbpfAdapter::probe_event_to_metric_event(&values, &variables, &metric, None);
+        let event = EbpfAdapter::probe_event_to_metric_event(&values, &variables, &metric, None);
 
         assert!(event.values[0].value_json.contains("error"));
         assert_eq!(event.values[0].typed_value, None);

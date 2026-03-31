@@ -37,12 +37,18 @@ pub struct TypeInfo {
     pub name: String,
     /// Size in bytes (for BPF read sizing).
     pub size: VariableSize,
+    /// Raw byte size from DWARF `DW_AT_byte_size`. Used for blob captures.
+    pub byte_size: u64,
     /// Whether this is a pointer type.
     pub is_pointer: bool,
     /// Whether this is a Go string (struct {ptr, len}).
     pub is_string: bool,
     /// Whether this is a Go slice (struct {ptr, len, cap}).
     pub is_slice: bool,
+    /// Whether this is a fixed-size array type (`[N]T`).
+    pub is_array: bool,
+    /// Whether this is a struct type (non-string, non-slice aggregate).
+    pub is_struct: bool,
 }
 
 impl TypeInfo {
@@ -51,9 +57,12 @@ impl TypeInfo {
         Self {
             name: "unknown".to_string(),
             size: VariableSize::QWord,
+            byte_size: 8,
             is_pointer: false,
             is_string: false,
             is_slice: false,
+            is_array: false,
+            is_struct: false,
         }
     }
 }
@@ -62,8 +71,8 @@ impl TypeInfo {
 ///
 /// # Arguments
 /// * `var_entry` - The variable or parameter DIE.
-/// * `unit` - The compilation unit containing the DIE.
-/// * `dwarf` - The full DWARF context (for string resolution).
+/// * `unit` - The compilation unit containing the variable DIE.
+/// * `dwarf` - The full DWARF context (for string resolution and cross-unit refs).
 ///
 /// Returns `TypeInfo::unknown()` if the type chain cannot be resolved,
 /// rather than an error — missing type info should not fail probe setup.
@@ -72,23 +81,119 @@ pub fn resolve_type_info<R: Reader>(
     unit: &gimli::Unit<R>,
     dwarf: &gimli::Dwarf<R>,
 ) -> Result<TypeInfo> {
-    let type_offset = match get_type_offset(var_entry)? {
-        Some(off) => off,
-        None => return Ok(TypeInfo::unknown()),
-    };
+    // Check for type attribute
+    let type_attr = var_entry.attr_value(DwAt(gimli::constants::DW_AT_type.0));
+    
+    match type_attr {
+        Some(AttributeValue::UnitRef(offset)) => {
+            detrix_logging::debug!(
+                "[DWARF typeinfo] resolve_type_info: UnitRef offset={:?}",
+                offset.0
+            );
+            resolve_type_at_offset(offset, unit, dwarf, 0)
+        }
+        Some(AttributeValue::DebugInfoRef(debug_info_offset)) => {
+            // Cross-unit reference — Go uses DW_FORM_ref_addr for type references.
+            // Need to find which compilation unit contains this offset.
+            detrix_logging::debug!(
+                "[DWARF typeinfo] resolve_type_info: DebugInfoRef offset={:?}",
+                debug_info_offset.0
+            );
+            resolve_type_from_debug_info_ref(debug_info_offset, unit, dwarf, 0)
+        }
+        None => {
+            detrix_logging::debug!("[DWARF typeinfo] resolve_type_info: no DW_AT_type attribute");
+            Ok(TypeInfo::unknown())
+        }
+        _ => Ok(TypeInfo::unknown()),
+    }
+}
 
-    resolve_type_at_offset(type_offset, unit, dwarf, 0)
+/// Resolve a type from a cross-unit DebugInfoRef.
+///
+/// Searches through compilation units to find the one containing the offset,
+/// then resolves the type within that unit.
+fn resolve_type_from_debug_info_ref<R: Reader>(
+    debug_info_offset: gimli::DebugInfoOffset<R::Offset>,
+    _current_unit: &gimli::Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+    depth: u8,
+) -> Result<TypeInfo> {
+    let target_offset = debug_info_offset.0;
+    detrix_logging::debug!(
+        "[DWARF typeinfo] Resolving DebugInfoRef {:?} across units",
+        target_offset
+    );
+    
+    // Collect all units first to find the one containing our offset
+    let mut units = dwarf.units();
+    let mut unit_headers = Vec::new();
+    while let Ok(Some(unit_header)) = units.next() {
+        unit_headers.push(unit_header);
+    }
+    
+    // Sort by offset to find the containing unit
+    unit_headers.sort_by_key(|h| h.offset().0);
+    
+    // Find the unit that contains our target offset
+    // The target should be >= unit_start and < next_unit_start (or end of section)
+    for (i, unit_header) in unit_headers.iter().enumerate() {
+        let unit_start = unit_header.offset().0;
+        let next_start = unit_headers.get(i + 1).map(|h| h.offset().0);
+        
+        // Check if target is within this unit's range
+        let is_in_range = if let Some(next) = next_start {
+            target_offset >= unit_start && target_offset < next
+        } else {
+            // Last unit - just check it's after the start
+            target_offset >= unit_start
+        };
+        
+        if is_in_range {
+            let unit = dwarf
+                .unit(unit_header.clone())
+                .map_err(|e| Error::DwarfParse(format!("Unit load: {e}")))?;
+            
+            let unit_local_offset_val = target_offset - unit_start;
+            let unit_local_offset = gimli::UnitOffset(unit_local_offset_val);
+            detrix_logging::debug!(
+                "[DWARF typeinfo] Found containing unit: start={:?} local_offset={:?}",
+                unit_start,
+                unit_local_offset.0
+            );
+            
+            return resolve_type_at_offset(unit_local_offset, &unit, dwarf, depth);
+        }
+    }
+    
+    detrix_logging::debug!(
+        "[DWARF typeinfo] DebugInfoRef {:?} not found in any unit range",
+        target_offset
+    );
+    Ok(TypeInfo::unknown())
 }
 
 /// Get the `DW_AT_type` unit offset from a DIE.
+///
+/// Go's DWARF uses `DW_FORM_ref_addr` (DebugInfoRef) for type references,
+/// which points to a global offset in the `.debug_info` section (cross-unit reference).
+/// Other compilers use `DW_FORM_ref1/2/4/8` (UnitRef) for unit-local references.
+/// We handle both cases.
 fn get_type_offset<R: Reader>(
     entry: &DebuggingInformationEntry<R>,
 ) -> Result<Option<gimli::UnitOffset<R::Offset>>> {
-    match entry
-        .attr_value(DwAt(gimli::constants::DW_AT_type.0))
-        .map_err(|e| Error::DwarfParse(format!("DW_AT_type read: {e}")))?
-    {
+    match entry.attr_value(DwAt(gimli::constants::DW_AT_type.0)) {
         Some(AttributeValue::UnitRef(offset)) => Ok(Some(offset)),
+        Some(AttributeValue::DebugInfoRef(_debug_info_offset)) => {
+            // Cross-unit reference — Go uses this for type references.
+            // We can't resolve it here without the full DWARF context.
+            // Return None to signal that type resolution failed.
+            // The caller should handle this case separately.
+            detrix_logging::debug!(
+                "[DWARF typeinfo] DebugInfoRef (cross-unit) not yet supported"
+            );
+            Ok(None)
+        }
         _ => Ok(None),
     }
 }
@@ -107,10 +212,12 @@ fn resolve_type_at_offset<R: Reader>(
         return Ok(TypeInfo::unknown());
     }
 
-    let mut cursor = unit.entries_at_offset(offset)
+    let mut cursor = unit
+        .entries_at_offset(offset)
         .map_err(|e| Error::DwarfParse(format!("entries_at_offset: {e}")))?;
 
-    let (_, entry) = match cursor.next_dfs()
+    let entry = match cursor
+        .next_dfs()
         .map_err(|e| Error::DwarfParse(format!("next_dfs: {e}")))?
     {
         Some(e) => e,
@@ -118,6 +225,14 @@ fn resolve_type_at_offset<R: Reader>(
     };
 
     let tag = entry.tag();
+
+    // Debug logging for type resolution chain
+    detrix_logging::debug!(
+        "[DWARF typeinfo] depth={} tag={:?} offset={:?}",
+        depth,
+        tag,
+        offset.0
+    );
 
     match tag {
         // Scalar types: int, float, bool, uint, etc.
@@ -129,14 +244,22 @@ fn resolve_type_at_offset<R: Reader>(
             Ok(TypeInfo {
                 name: format!("*{pointee_name}"),
                 size: VariableSize::QWord,
+                byte_size: 8,
                 is_pointer: true,
                 is_string: false,
                 is_slice: false,
+                is_array: false,
+                is_struct: false,
             })
         }
 
         // Typedef / named type: follow the chain
         gimli::DW_TAG_typedef => {
+            let typedef_name = read_attr_string(entry, dwarf, gimli::constants::DW_AT_name)?;
+            detrix_logging::debug!(
+                "[DWARF typeinfo] typedef name={:?} following chain",
+                typedef_name
+            );
             let inner_offset = match get_type_offset(entry)? {
                 Some(off) => off,
                 None => return Ok(TypeInfo::unknown()),
@@ -144,6 +267,12 @@ fn resolve_type_at_offset<R: Reader>(
             let mut info = resolve_type_at_offset(inner_offset, unit, dwarf, depth + 1)?;
             // Override name with the typedef name if available
             if let Some(name) = read_attr_string(entry, dwarf, gimli::constants::DW_AT_name)? {
+                detrix_logging::debug!(
+                    "[DWARF typeinfo] typedef '{}' overriding inner name='{}' is_string={}",
+                    name,
+                    info.name,
+                    info.is_string
+                );
                 info.name = name;
             }
             Ok(info)
@@ -152,21 +281,29 @@ fn resolve_type_at_offset<R: Reader>(
         // Go string is a struct with two fields (ptr + len), total 16 bytes
         gimli::DW_TAG_structure_type => resolve_struct_type(entry, unit, dwarf),
 
-        // Array type — represent as pointer-sized
+        // Fixed-size array type `[N]T` — stores N elements inline on stack.
+        // Go DWARF includes DW_AT_byte_size on the array type itself.
         gimli::DW_TAG_array_type => {
+            let byte_size = match entry.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0)) {
+                Some(AttributeValue::Udata(n)) => n,
+                _ => 0, // Unknown size — will be treated as zero-byte blob
+            };
             let name = match get_type_offset(entry)? {
                 Some(off) => {
                     let elem = resolve_type_at_offset(off, unit, dwarf, depth + 1)?;
-                    format!("[]{}", elem.name)
+                    format!("[N]{}", elem.name) // [N]T — N not yet decoded
                 }
-                None => "[]unknown".to_string(),
+                None => "[N]unknown".to_string(),
             };
             Ok(TypeInfo {
                 name,
-                size: VariableSize::QWord,
-                is_pointer: true,
+                size: VariableSize::QWord, // Header word for location; actual read uses byte_size
+                byte_size,
+                is_pointer: false,
                 is_string: false,
-                is_slice: true,
+                is_slice: false,
+                is_array: true,
+                is_struct: false,
             })
         }
 
@@ -191,10 +328,7 @@ fn resolve_base_type<R: Reader>(
     let name = read_attr_string(entry, dwarf, gimli::constants::DW_AT_name)?
         .unwrap_or_else(|| "unknown".to_string());
 
-    let byte_size = match entry
-        .attr_value(DwAt(gimli::constants::DW_AT_byte_size.0))
-        .map_err(|e| Error::DwarfParse(format!("{e}")))?
-    {
+    let byte_size = match entry.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0)) {
         Some(AttributeValue::Udata(n)) => n,
         _ => 8, // Default to 8 bytes
     };
@@ -202,12 +336,21 @@ fn resolve_base_type<R: Reader>(
     let size = VariableSize::from_byte_size(byte_size).unwrap_or(VariableSize::QWord);
     let _ = unit; // used for completeness
 
+    detrix_logging::debug!(
+        "[DWARF typeinfo] base_type name='{}' byte_size={}",
+        name,
+        byte_size
+    );
+
     Ok(TypeInfo {
         name,
         size,
+        byte_size,
         is_pointer: false,
         is_string: false,
         is_slice: false,
+        is_array: false,
+        is_struct: false,
     })
 }
 
@@ -239,32 +382,38 @@ fn resolve_struct_type<R: Reader>(
     let name = read_attr_string(entry, dwarf, gimli::constants::DW_AT_name)?
         .unwrap_or_else(|| "struct".to_string());
 
-    let byte_size = match entry
-        .attr_value(DwAt(gimli::constants::DW_AT_byte_size.0))
-        .map_err(|e| Error::DwarfParse(format!("{e}")))?
-    {
+    let byte_size = match entry.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0)) {
         Some(AttributeValue::Udata(n)) => n,
         _ => 8,
     };
 
+    // Debug logging for struct type detection
+    detrix_logging::debug!(
+        "[DWARF typeinfo] struct name='{}' byte_size={} is_string={} is_slice={}",
+        name,
+        byte_size,
+        name == "string" || (byte_size == 16 && name.contains("string")),
+        byte_size == 24
+    );
+
     // Go string = struct with "str" field (ptr) + "len" field = 16 bytes
-    let is_string = name == "string" || byte_size == 16 && name.contains("string");
+    let is_string = name == "string" || (byte_size == 16 && name.contains("string"));
     // Go slice = struct with array ptr + len + cap = 24 bytes
     let is_slice = byte_size == 24 && !is_string;
+    // Everything else is a user-defined struct (captured as blob)
+    let is_struct = !is_string && !is_slice;
 
-    let size = if is_string || is_slice {
-        // Strings and slices are captured via multi-read, report header size
-        VariableSize::from_byte_size(byte_size).unwrap_or(VariableSize::QWord)
-    } else {
-        VariableSize::from_byte_size(byte_size).unwrap_or(VariableSize::QWord)
-    };
+    let size = VariableSize::from_byte_size(byte_size).unwrap_or(VariableSize::QWord);
 
     Ok(TypeInfo {
         name,
         size,
+        byte_size,
         is_pointer: false,
         is_string,
         is_slice,
+        is_array: false,
+        is_struct,
     })
 }
 
@@ -274,10 +423,7 @@ fn read_attr_string<R: Reader>(
     dwarf: &gimli::Dwarf<R>,
     attr: gimli::constants::DwAt,
 ) -> Result<Option<String>> {
-    match entry
-        .attr_value(DwAt(attr.0))
-        .map_err(|e| Error::DwarfParse(format!("{e}")))?
-    {
+    match entry.attr_value(DwAt(attr.0)) {
         Some(AttributeValue::DebugStrRef(offset)) => {
             let s = dwarf
                 .string(offset)
@@ -364,7 +510,9 @@ mod tests {
 
     #[test]
     fn canonicalize_unsigned_ints() {
-        for t in ["uint8", "byte", "uint16", "uint32", "uint64", "uint", "uintptr"] {
+        for t in [
+            "uint8", "byte", "uint16", "uint32", "uint64", "uint", "uintptr",
+        ] {
             assert_eq!(canonicalize_go_type(t), t);
         }
     }
@@ -441,9 +589,12 @@ mod tests {
         let info = TypeInfo {
             name: "*http.Request".to_string(),
             size: VariableSize::QWord,
+            byte_size: 8,
             is_pointer: true,
             is_string: false,
             is_slice: false,
+            is_array: false,
+            is_struct: false,
         };
         assert!(info.is_pointer);
         assert_eq!(info.size.bytes(), 8);
@@ -453,10 +604,13 @@ mod tests {
     fn type_info_string() {
         let info = TypeInfo {
             name: "string".to_string(),
-            size: VariableSize::QWord, // header ptr part is 8 bytes
+            size: VariableSize::QWord,
+            byte_size: 16,
             is_pointer: false,
             is_string: true,
             is_slice: false,
+            is_array: false,
+            is_struct: false,
         };
         assert!(info.is_string);
         assert!(!info.is_slice);
@@ -467,21 +621,56 @@ mod tests {
         let info = TypeInfo {
             name: "[]int64".to_string(),
             size: VariableSize::QWord,
+            byte_size: 24,
             is_pointer: false,
             is_string: false,
             is_slice: true,
+            is_array: false,
+            is_struct: false,
         };
         assert!(info.is_slice);
         assert!(!info.is_string);
     }
 
     #[test]
+    fn type_info_array() {
+        let info = TypeInfo {
+            name: "[N]int64".to_string(),
+            size: VariableSize::QWord,
+            byte_size: 32,
+            is_pointer: false,
+            is_string: false,
+            is_slice: false,
+            is_array: true,
+            is_struct: false,
+        };
+        assert!(info.is_array);
+        assert_eq!(info.byte_size, 32);
+    }
+
+    #[test]
+    fn type_info_struct() {
+        let info = TypeInfo {
+            name: "TradeRequest".to_string(),
+            size: VariableSize::QWord,
+            byte_size: 48,
+            is_pointer: false,
+            is_string: false,
+            is_slice: false,
+            is_array: false,
+            is_struct: true,
+        };
+        assert!(info.is_struct);
+        assert_eq!(info.byte_size, 48);
+    }
+
+    #[test]
     fn variable_size_from_byte_size_roundtrip() {
         // Validate that common Go sizes resolve correctly
         let cases: &[(u64, VariableSize)] = &[
-            (1, VariableSize::Byte),   // bool, int8, uint8
-            (4, VariableSize::DWord),  // int32, float32
-            (8, VariableSize::QWord),  // int64, float64, pointer
+            (1, VariableSize::Byte),  // bool, int8, uint8
+            (4, VariableSize::DWord), // int32, float32
+            (8, VariableSize::QWord), // int64, float64, pointer
         ];
         for (bytes, expected) in cases {
             assert_eq!(VariableSize::from_byte_size(*bytes), Some(*expected));

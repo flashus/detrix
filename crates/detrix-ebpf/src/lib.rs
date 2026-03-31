@@ -39,6 +39,7 @@ pub mod adapter;
 pub mod dwarf;
 pub mod error;
 pub mod factory;
+pub mod mem_reader;
 pub mod probe;
 
 pub use adapter::EbpfAdapter;

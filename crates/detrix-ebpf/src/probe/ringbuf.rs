@@ -5,7 +5,8 @@
 
 use crate::dwarf::types::ResolvedVariable;
 use crate::error::{Error, Result};
-use crate::probe::types::{CapturedValue, ProbeEvent};
+use crate::mem_reader::ProcessMemoryReader;
+use crate::probe::types::{CapturedValue, CaptureConfig, ProbeEvent};
 
 /// Minimum event size: pid(4) + tid(4) + timestamp(8) = 16 bytes.
 const MIN_EVENT_SIZE: usize = 16;
@@ -29,6 +30,8 @@ pub fn parse_ring_buffer_event(
     data: &[u8],
     variables: &[ResolvedVariable],
     capture_goid: bool,
+    config: &CaptureConfig,
+    mem_reader: &dyn ProcessMemoryReader,
 ) -> Result<ProbeEvent> {
     if data.len() < MIN_EVENT_SIZE {
         return Err(Error::RingBuffer(format!(
@@ -55,20 +58,53 @@ pub fn parse_ring_buffer_event(
         let val = read_u64(data, &mut offset).unwrap_or(0);
         let captured = match &var.location {
             crate::dwarf::types::VariableLocation::GoString { .. } => {
+                // Read string length from the event (BPF read this from stack)
                 let len = read_u64(data, &mut offset).unwrap_or(0) as usize;
-                // For strings, var holds the pointer — actual string data
-                // would need a secondary read from user-space (not in BPF).
-                // We store pointer + length; the daemon resolves the string
-                // via /proc/PID/mem if needed.
-                CapturedValue::String {
-                    data: vec![], // Placeholder — resolved in user-space
-                    len,
+                // Skip the empty buffer (BPF doesn't read Go heap)
+                let _ = read_bytes(data, &mut offset, config.max_string_capture);
+
+                // ALWAYS use user-space memory reader for Go strings
+                // BPF cannot access Go heap memory reliably
+                detrix_logging::debug!(
+                    "[ringbuf] Reading Go string via user-space: pid={} ptr={:#x} len={}",
+                    pid, val, len
+                );
+                
+                // Try with pid first, then tid
+                let mut result = mem_reader.read_string(pid, val, len);
+                if result.is_err() {
+                    result = mem_reader.read_string(tid, val, len);
+                }
+                
+                match result {
+                    Ok(s) => CapturedValue::String {
+                        data: s.into_bytes(),
+                        len,
+                    },
+                    Err(e) => {
+                        detrix_logging::warn!(
+                            "[ringbuf] Failed to read Go string: pid={} tid={} ptr={:#x} len={}: {}",
+                            pid, tid, val, len, e
+                        );
+                        CapturedValue::String {
+                            data: b"<read-failed>".to_vec(),
+                            len,
+                        }
+                    }
                 }
             }
             crate::dwarf::types::VariableLocation::GoSlice { .. } => {
                 let len = read_u64(data, &mut offset).unwrap_or(0);
-                let _cap = read_u64(data, &mut offset).unwrap_or(0);
-                CapturedValue::Scalar(len) // Report length as the scalar value
+                let cap = read_u64(data, &mut offset).unwrap_or(0);
+                CapturedValue::Slice { len, cap }
+            }
+            crate::dwarf::types::VariableLocation::StackBlob { byte_size, .. } => {
+                // var{idx} (u64) was already read above as `val` — it is 0 (unused).
+                // The BPF program filled var{idx}_blob[N] with the actual bytes.
+                let capture = (*byte_size).min(config.max_blob_capture);
+                let bytes = read_bytes(data, &mut offset, capture)
+                    .unwrap_or_else(|_| vec![0u8; capture]);
+                CapturedValue::Bytes(bytes)
             }
             _ => CapturedValue::Scalar(val),
         };
@@ -84,15 +120,28 @@ pub fn parse_ring_buffer_event(
     })
 }
 
+fn read_bytes(data: &[u8], offset: &mut usize, count: usize) -> Result<Vec<u8>> {
+    if *offset + count > data.len() {
+        return Err(Error::RingBuffer(format!(
+            "Unexpected end of event reading {count} bytes at offset {offset}"
+        )));
+    }
+    let bytes = data[*offset..*offset + count].to_vec();
+    *offset += count;
+    Ok(bytes)
+}
+
 fn read_u32(data: &[u8], offset: &mut usize) -> Result<u32> {
     if *offset + 4 > data.len() {
         return Err(Error::RingBuffer(format!(
             "Unexpected end of event at offset {offset}"
         )));
     }
-    let val = u32::from_le_bytes(data[*offset..*offset + 4].try_into().map_err(|_| {
-        Error::RingBuffer("u32 parse failed".to_string())
-    })?);
+    let val = u32::from_le_bytes(
+        data[*offset..*offset + 4]
+            .try_into()
+            .map_err(|_| Error::RingBuffer("u32 parse failed".to_string()))?,
+    );
     *offset += 4;
     Ok(val)
 }
@@ -103,9 +152,11 @@ fn read_u64(data: &[u8], offset: &mut usize) -> Result<u64> {
             "Unexpected end of event at offset {offset}"
         )));
     }
-    let val = u64::from_le_bytes(data[*offset..*offset + 8].try_into().map_err(|_| {
-        Error::RingBuffer("u64 parse failed".to_string())
-    })?);
+    let val = u64::from_le_bytes(
+        data[*offset..*offset + 8]
+            .try_into()
+            .map_err(|_| Error::RingBuffer("u64 parse failed".to_string()))?,
+    );
     *offset += 8;
     Ok(val)
 }
@@ -114,13 +165,22 @@ fn read_u64(data: &[u8], offset: &mut usize) -> Result<u64> {
 mod tests {
     use super::*;
     use crate::dwarf::types::{Register, ResolvedVariable, VariableLocation, VariableSize};
+    use crate::probe::types::{CaptureConfig, MAX_STRING_CAPTURE};
 
-    fn build_event_bytes(
-        pid: u32,
-        tid: u32,
-        timestamp: u64,
-        var_values: &[u64],
-    ) -> Vec<u8> {
+    /// Stub memory reader for tests - returns strings based on pointer value
+    struct StubMemReader;
+    impl ProcessMemoryReader for StubMemReader {
+        fn read_string(&self, _pid: u32, ptr: u64, len: usize) -> Result<String> {
+            // Return specific test strings based on pointer address
+            match ptr {
+                0xDEADBEEF => Ok("hello".to_string()),
+                0xCAFEBABE => Ok("BTCUSD".to_string()),
+                _ => Ok(std::iter::repeat('x').take(len).collect()),
+            }
+        }
+    }
+
+    fn build_event_bytes(pid: u32, tid: u32, timestamp: u64, var_values: &[u64]) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&pid.to_le_bytes());
         buf.extend_from_slice(&tid.to_le_bytes());
@@ -161,7 +221,7 @@ mod tests {
     #[test]
     fn parse_empty_event_no_vars() {
         let data = build_event_bytes(1000, 2000, 5_000_000_000, &[]);
-        let event = parse_ring_buffer_event(&data, &[], false).unwrap();
+        let event = parse_ring_buffer_event(&data, &[], false, &CaptureConfig::default(), &StubMemReader).unwrap();
 
         assert_eq!(event.pid, 1000);
         assert_eq!(event.tid, 2000);
@@ -174,7 +234,7 @@ mod tests {
     fn parse_single_scalar_var() {
         let data = build_event_bytes(1, 2, 100, &[42]);
         let vars = vec![scalar_var("amount")];
-        let event = parse_ring_buffer_event(&data, &vars, false).unwrap();
+        let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
 
         assert_eq!(event.values.len(), 1);
         assert_eq!(event.values[0].as_u64(), Some(42));
@@ -184,7 +244,7 @@ mod tests {
     fn parse_multiple_vars() {
         let data = build_event_bytes(1, 2, 100, &[10, 20, 30]);
         let vars = vec![scalar_var("a"), scalar_var("b"), scalar_var("c")];
-        let event = parse_ring_buffer_event(&data, &vars, false).unwrap();
+        let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
 
         assert_eq!(event.values.len(), 3);
         assert_eq!(event.values[0].as_u64(), Some(10));
@@ -196,7 +256,7 @@ mod tests {
     fn parse_with_goid() {
         let data = build_event_bytes_with_goid(1, 2, 999, 100, &[42]);
         let vars = vec![scalar_var("x")];
-        let event = parse_ring_buffer_event(&data, &vars, true).unwrap();
+        let event = parse_ring_buffer_event(&data, &vars, true, &CaptureConfig::default(), &StubMemReader).unwrap();
 
         assert_eq!(event.goid, Some(999));
         assert_eq!(event.values[0].as_u64(), Some(42));
@@ -205,7 +265,7 @@ mod tests {
     #[test]
     fn parse_too_small_fails() {
         let data = vec![0u8; 10]; // Less than MIN_EVENT_SIZE
-        let result = parse_ring_buffer_event(&data, &[], false);
+        let result = parse_ring_buffer_event(&data, &[], false, &CaptureConfig::default(), &StubMemReader);
         assert!(result.is_err());
     }
 
@@ -214,7 +274,7 @@ mod tests {
         // Event with header but missing variable data
         let data = build_event_bytes(1, 2, 100, &[]);
         let vars = vec![scalar_var("x")]; // Expects 8 more bytes
-        let event = parse_ring_buffer_event(&data, &vars, false).unwrap();
+        let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
         // Should handle gracefully with default value
         assert_eq!(event.values[0].as_u64(), Some(0));
     }
@@ -222,10 +282,12 @@ mod tests {
     #[test]
     fn parse_go_string_var() {
         let mut data = build_event_bytes(1, 2, 100, &[]);
-        // String pointer
+        // String pointer - stub reader returns "hello" for this address
         data.extend_from_slice(&0xDEADBEEF_u64.to_le_bytes());
         // String length
         data.extend_from_slice(&5_u64.to_le_bytes());
+        // Skip buffer - memory reader provides content now
+        data.extend_from_slice(&vec![0u8; MAX_STRING_CAPTURE]);
 
         let vars = vec![ResolvedVariable {
             name: "name".to_string(),
@@ -237,11 +299,146 @@ mod tests {
             type_name: "string".to_string(),
         }];
 
-        let event = parse_ring_buffer_event(&data, &vars, false).unwrap();
+        let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
         assert_eq!(event.values.len(), 1);
         match &event.values[0] {
-            CapturedValue::String { len, .. } => assert_eq!(*len, 5),
+            CapturedValue::String { len, data } => {
+                assert_eq!(*len, 5);
+                assert_eq!(data, b"hello");
+            }
             other => panic!("Expected String, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_go_string_with_symbol_content() {
+        let symbol = b"BTCUSD";
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&0xCAFEBABE_u64.to_le_bytes()); // ptr - stub returns "BTCUSD"
+        data.extend_from_slice(&(symbol.len() as u64).to_le_bytes()); // len
+        // Skip buffer - memory reader provides content now
+        data.extend_from_slice(&vec![0u8; MAX_STRING_CAPTURE]);
+
+        let vars = vec![ResolvedVariable {
+            name: "symbol".to_string(),
+            location: VariableLocation::GoString {
+                ptr: Box::new(VariableLocation::Register(Register::Rax)),
+                len: Box::new(VariableLocation::Register(Register::Rbx)),
+            },
+            size: VariableSize::QWord,
+            type_name: "string".to_string(),
+        }];
+
+        let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
+        match &event.values[0] {
+            CapturedValue::String { len, data } => {
+                assert_eq!(*len, 6);
+                assert_eq!(std::str::from_utf8(data).unwrap(), "BTCUSD");
+            }
+            other => panic!("Expected String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_go_slice_returns_len_and_cap() {
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&0xDEAD_u64.to_le_bytes()); // ptr (var0)
+        data.extend_from_slice(&7_u64.to_le_bytes()); // len (var0_len)
+        data.extend_from_slice(&16_u64.to_le_bytes()); // cap (var0_cap)
+
+        let vars = vec![ResolvedVariable {
+            name: "items".to_string(),
+            location: VariableLocation::GoSlice {
+                ptr: Box::new(VariableLocation::Register(Register::Rax)),
+                len: Box::new(VariableLocation::Register(Register::Rbx)),
+                cap: Box::new(VariableLocation::Register(Register::Rcx)),
+            },
+            size: VariableSize::QWord,
+            type_name: "[]int64".to_string(),
+        }];
+
+        let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
+        match &event.values[0] {
+            CapturedValue::Slice { len, cap } => {
+                assert_eq!(*len, 7);
+                assert_eq!(*cap, 16);
+            }
+            other => panic!("Expected Slice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stack_blob_returns_bytes() {
+        let blob: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&0_u64.to_le_bytes()); // var0 (unused for blobs)
+        data.extend_from_slice(&blob); // var0_blob[4]
+
+        let vars = vec![ResolvedVariable {
+            name: "req".to_string(),
+            location: VariableLocation::StackBlob {
+                offset: -32,
+                byte_size: 4,
+            },
+            size: VariableSize::QWord,
+            type_name: "TradeRequest".to_string(),
+        }];
+
+        let config = CaptureConfig {
+            max_capture_vars: 8,
+            max_string_capture: 64,
+            max_blob_capture: 64,
+        };
+        let event = parse_ring_buffer_event(&data, &vars, false, &config, &StubMemReader).unwrap();
+        match &event.values[0] {
+            CapturedValue::Bytes(b) => {
+                assert_eq!(b.as_slice(), &blob);
+            }
+            other => panic!("Expected Bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stack_blob_clamped_to_max_blob_capture() {
+        // byte_size=32 but max_blob_capture=4 — only 4 bytes should be read
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&0_u64.to_le_bytes()); // var0 unused
+        data.extend_from_slice(&[1u8, 2, 3, 4]); // only 4 bytes in event
+
+        let vars = vec![ResolvedVariable {
+            name: "big".to_string(),
+            location: VariableLocation::StackBlob {
+                offset: 0,
+                byte_size: 32,
+            },
+            size: VariableSize::QWord,
+            type_name: "[4]int64".to_string(),
+        }];
+
+        let config = CaptureConfig {
+            max_capture_vars: 8,
+            max_string_capture: 64,
+            max_blob_capture: 4,
+        };
+        let event = parse_ring_buffer_event(&data, &vars, false, &config, &StubMemReader).unwrap();
+        match &event.values[0] {
+            CapturedValue::Bytes(b) => {
+                assert_eq!(b.len(), 4);
+                assert_eq!(b.as_slice(), &[1u8, 2, 3, 4]);
+            }
+            other => panic!("Expected Bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slice_len_accessor() {
+        let val = CapturedValue::Slice { len: 5, cap: 10 };
+        assert_eq!(val.slice_len(), Some(5));
+    }
+
+    #[test]
+    fn bytes_accessor() {
+        let val = CapturedValue::Bytes(vec![0xAB, 0xCD]);
+        assert_eq!(val.as_bytes(), Some([0xABu8, 0xCD].as_ref()));
     }
 }

@@ -387,9 +387,10 @@ fn init_adapter_factory(
 
     // On Linux, wrap with EbpfGoFactory so Go connections use eBPF uprobes.
     #[cfg(target_os = "linux")]
-    let dap_factory: DapAdapterFactoryRef = Arc::new(
-        detrix_ebpf::EbpfGoFactory::new(dap_factory, base_path.to_path_buf()),
-    );
+    let dap_factory: DapAdapterFactoryRef = Arc::new(detrix_ebpf::EbpfGoFactory::new(
+        dap_factory,
+        base_path.to_path_buf(),
+    ));
     #[cfg(not(target_os = "linux"))]
     let dap_factory: DapAdapterFactoryRef = dap_factory;
 

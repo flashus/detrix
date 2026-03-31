@@ -15,8 +15,8 @@ use detrix_api::generated::detrix::v1::{
     UpdateConfigRequest, UpdateMetricRequest, ValidateConfigRequest, ValidateExpressionRequest,
     WakeRequest,
 };
-use detrix_api::grpc::{parse_mode_string_to_proto, request_with_machine_client_id};
 use detrix_api::grpc::AuthChannel;
+use detrix_api::grpc::{parse_mode_string_to_proto, request_with_machine_client_id};
 use detrix_core::SAFETY_STRICT;
 
 /// gRPC client for metrics operations
@@ -106,7 +106,9 @@ impl MetricsClient {
         let metric_mode = if let Some(ref mode_str) = params.mode {
             parse_mode_string_to_proto(mode_str, params.sample_rate, None, params.throttle_rate)
         } else {
-            MetricMode { mode: Some(Mode::Stream(StreamMode {})) }
+            MetricMode {
+                mode: Some(Mode::Stream(StreamMode {})),
+            }
         };
 
         let request = AddMetricRequest {

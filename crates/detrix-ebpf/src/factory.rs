@@ -6,6 +6,7 @@
 
 use crate::adapter::EbpfAdapter;
 use crate::error::{Error, Result};
+use crate::probe::types::CaptureConfig;
 
 use async_trait::async_trait;
 use detrix_application::{DapAdapterFactory, DapAdapterFactoryRef, DapAdapterRef};
@@ -20,12 +21,26 @@ use std::sync::Arc;
 pub struct EbpfAdapterFactory {
     /// Base path for resolving relative binary paths.
     base_path: PathBuf,
+    /// Capture limits for generated BPF programs and ring buffer parsing.
+    capture_config: CaptureConfig,
 }
 
 impl EbpfAdapterFactory {
     pub fn new(base_path: impl Into<PathBuf>) -> Self {
         Self {
             base_path: base_path.into(),
+            capture_config: CaptureConfig::default(),
+        }
+    }
+
+    /// Create a factory with custom capture limits derived from config.
+    pub fn new_with_config(
+        base_path: impl Into<PathBuf>,
+        capture_config: CaptureConfig,
+    ) -> Self {
+        Self {
+            base_path: base_path.into(),
+            capture_config,
         }
     }
 
@@ -52,7 +67,10 @@ impl EbpfAdapterFactory {
             )));
         }
 
-        Ok(Arc::new(EbpfAdapter::new(path)))
+        Ok(Arc::new(EbpfAdapter::new_with_config(
+            path,
+            self.capture_config.clone(),
+        )))
     }
 
     /// Check if eBPF adapters are available on this platform.
@@ -142,15 +160,12 @@ impl DapAdapterFactory for EbpfGoFactory {
         self.inner.create_python_adapter(host, port).await
     }
 
-    async fn create_go_adapter(
-        &self,
-        host: &str,
-        port: u16,
-    ) -> detrix_core::Result<DapAdapterRef> {
-        // On Linux: `host` is the binary path; attach via eBPF uprobe.
+    async fn create_go_adapter(&self, host: &str, port: u16) -> detrix_core::Result<DapAdapterRef> {
+        // On Linux: `host` is the binary path; attach via eBPF uprobe. `port` unused.
         // On non-Linux: fall through to Delve/DAP as usual.
         #[cfg(target_os = "linux")]
         {
+            let _ = port;
             self.ebpf
                 .create_go_adapter(host)
                 .map_err(|e| detrix_core::Error::Adapter(e.to_string()))
@@ -168,7 +183,9 @@ impl DapAdapterFactory for EbpfGoFactory {
         program: Option<&str>,
         pid: Option<u32>,
     ) -> detrix_core::Result<DapAdapterRef> {
-        self.inner.create_rust_adapter(host, port, program, pid).await
+        self.inner
+            .create_rust_adapter(host, port, program, pid)
+            .await
     }
 }
 
@@ -212,7 +229,10 @@ mod ebpf_go_factory_tests {
     #[tokio::test]
     async fn rust_delegates_to_inner() {
         let factory = EbpfGoFactory::new(Arc::new(StubFactory), "/tmp");
-        match factory.create_rust_adapter("127.0.0.1", 1234, None, None).await {
+        match factory
+            .create_rust_adapter("127.0.0.1", 1234, None, None)
+            .await
+        {
             Err(e) => assert!(e.to_string().contains("stub rust")),
             Ok(_) => panic!("expected Err"),
         }
@@ -235,7 +255,9 @@ mod ebpf_go_factory_tests {
         let tmp = NamedTempFile::new().unwrap();
         let factory = EbpfGoFactory::new(Arc::new(StubFactory), "/tmp");
         // host = binary path on Linux
-        let result = factory.create_go_adapter(tmp.path().to_str().unwrap(), 0).await;
+        let result = factory
+            .create_go_adapter(tmp.path().to_str().unwrap(), 0)
+            .await;
         assert!(result.is_ok());
     }
 }

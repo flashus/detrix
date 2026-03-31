@@ -1,0 +1,53 @@
+# eBPF Playground Image
+#
+# A stable base image containing all Linux eBPF tooling needed to load and run
+# BPF programs. Build this image once; subsequent test runs inherit from it and
+# skip the slow apt install step entirely.
+#
+# Usage:
+#   # Build once (or when upgrading packages):
+#   docker build -f fixtures/docker/Dockerfile.ebpf-playground \
+#                -t detrix-ebpf-playground .
+#
+#   # Then run tests fast (no apt — inherits from this image):
+#   task test-ebpf
+#
+# What's inside:
+#   clang / llvm   — BPF program compilation (clang -target bpf ...)
+#   libbpf-dev     — BPF headers (vmlinux.h, bpf_helpers.h, etc.)
+#   linux-headers  — kernel headers needed by BPF programs (<linux/bpf.h>)
+#   linux-libc-dev — <asm/types.h> (required by BPF headers on amd64 + arm64)
+#
+# Architecture:
+#   linux-headers-$(dpkg --print-architecture) resolves automatically:
+#     amd64 → linux-headers-amd64
+#     arm64 → linux-headers-arm64
+#   The /usr/include/asm symlink is created to satisfy clang's header search path.
+#
+# Update cadence:
+#   Only rebuild when package versions need updating.
+#   Source code changes never invalidate this image.
+
+FROM debian:bookworm-20260316-slim
+
+# Test binaries compiled in /src have workspace_root=/src baked at compile time.
+# executor.rs uses current_dir(workspace_root) when spawning the daemon — /src must exist.
+RUN mkdir -p /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang \
+        llvm \
+        libbpf-dev \
+        linux-headers-$(dpkg --print-architecture) \
+        linux-libc-dev \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    # Clang looks for <asm/types.h> at /usr/include/asm.
+    # linux-libc-dev installs these under /usr/include/<triple>/asm/.
+    # Create the symlink that libc6-dev would normally provide.
+    && ARCH=$(dpkg --print-architecture) \
+    && case "$ARCH" in \
+           amd64) TRIPLE="x86_64-linux-gnu" ;; \
+           arm64) TRIPLE="aarch64-linux-gnu" ;; \
+       esac \
+    && ln -sf /usr/include/${TRIPLE}/asm /usr/include/asm

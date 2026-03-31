@@ -4,11 +4,58 @@
 //! before it gets converted to a `MetricEvent`.
 
 use crate::dwarf::types::VariableSize;
-/// Maximum number of variables captured per probe hit.
+
+/// Default maximum number of variables captured per probe hit.
+///
+/// Override via `detrix.toml` `[ebpf] max_capture_vars`.
 pub const MAX_CAPTURE_VARS: usize = 8;
 
-/// Maximum string data captured per variable (bytes).
-pub const MAX_STRING_CAPTURE: usize = 256;
+/// Default maximum string content bytes captured per Go string variable.
+///
+/// The BPF event struct embeds a `u8 var{i}_str[N]` buffer for each GoString variable.
+/// Larger values waste ring buffer space; 64 bytes covers most identifiers and short values.
+///
+/// Override via `detrix.toml` `[ebpf] string_capture_bytes`.
+pub const MAX_STRING_CAPTURE: usize = 64;
+
+/// Default maximum bytes captured for fixed-size array and struct blobs.
+///
+/// Override via `detrix.toml` `[ebpf] blob_capture_bytes`.
+pub const MAX_BLOB_CAPTURE: usize = 64;
+
+/// Runtime capture limits derived from `detrix_config::EbpfConfig`.
+///
+/// Both `generate_bpf_program` and `parse_ring_buffer_event` must use the **same**
+/// `CaptureConfig` so the BPF struct layout matches what the parser expects.
+#[derive(Debug, Clone)]
+pub struct CaptureConfig {
+    /// Maximum variables per probe hit (validated before BPF generation).
+    pub max_capture_vars: usize,
+    /// Fixed-size string content buffer in the BPF event struct.
+    pub max_string_capture: usize,
+    /// Maximum bytes captured for fixed-size array and struct blobs.
+    pub max_blob_capture: usize,
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self {
+            max_capture_vars: MAX_CAPTURE_VARS,
+            max_string_capture: MAX_STRING_CAPTURE,
+            max_blob_capture: MAX_BLOB_CAPTURE,
+        }
+    }
+}
+
+impl From<&detrix_config::EbpfConfig> for CaptureConfig {
+    fn from(cfg: &detrix_config::EbpfConfig) -> Self {
+        Self {
+            max_capture_vars: cfg.max_capture_vars,
+            max_string_capture: cfg.string_capture_bytes,
+            max_blob_capture: cfg.blob_capture_bytes,
+        }
+    }
+}
 
 /// Raw captured value from a single BPF read.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,6 +64,10 @@ pub enum CapturedValue {
     Scalar(u64),
     /// String value (pointer + length read, then data read).
     String { data: Vec<u8>, len: usize },
+    /// Go slice header: len and cap (ptr is captured but not returned to callers).
+    Slice { len: u64, cap: u64 },
+    /// Raw bytes from a fixed-size array or struct captured as a blob.
+    Bytes(Vec<u8>),
     /// Read failed (invalid address, variable optimized out, etc.)
     Error(String),
 }
@@ -65,6 +116,22 @@ impl CapturedValue {
         }
     }
 
+    /// Slice length if this is a `Slice` value, else `None`.
+    pub fn slice_len(&self) -> Option<u64> {
+        match self {
+            Self::Slice { len, .. } => Some(*len),
+            _ => None,
+        }
+    }
+
+    /// Raw bytes if this is a `Bytes` blob, else `None`.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Bytes(b) => Some(b),
+            _ => None,
+        }
+    }
+
     /// Convert to a JSON-compatible string representation.
     pub fn to_json_value(&self, size: VariableSize) -> String {
         match self {
@@ -89,6 +156,12 @@ impl CapturedValue {
                     Ok(s) => format!("\"{s}\""),
                     Err(_) => format!("\"<binary {actual_len} bytes>\""),
                 }
+            }
+            Self::Slice { len, cap } => format!("{{\"len\":{len},\"cap\":{cap}}}"),
+            Self::Bytes(b) => {
+                // Hex-encode raw bytes for JSON portability
+                let hex: String = b.iter().map(|byte| format!("{byte:02x}")).collect();
+                format!("\"0x{hex}\"")
             }
             Self::Error(msg) => format!("\"<error: {msg}>\""),
         }
@@ -202,10 +275,7 @@ mod tests {
     #[test]
     fn to_json_value_error() {
         let val = CapturedValue::Error("oops".to_string());
-        assert_eq!(
-            val.to_json_value(VariableSize::QWord),
-            "\"<error: oops>\""
-        );
+        assert_eq!(val.to_json_value(VariableSize::QWord), "\"<error: oops>\"");
     }
 
     #[test]

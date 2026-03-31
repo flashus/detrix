@@ -35,8 +35,9 @@ tempfile.workspace = true
 
 # eBPF (Linux-only, optional)
 [target.'cfg(target_os = "linux")'.dependencies]
-aya = "0.13"
-aya-log = "0.2"
+aya = "0.13.1"
+aya-log = "0.2.1"
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

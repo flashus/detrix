@@ -796,3 +796,22 @@ pub const TUI_LOGS_MESSAGE_MIN_WIDTH: u16 = 30;
 pub const TUI_CONNECTION_ID_TRUNCATE_LEN: usize = 15;
 /// Default truncation length for timestamps
 pub const TUI_TIMESTAMP_TRUNCATE_LEN: usize = 19;
+
+// ============================================================================
+// EBPF
+// ============================================================================
+
+/// Maximum number of variables captured per uprobe hit (default).
+pub const DEFAULT_EBPF_MAX_CAPTURE_VARS: usize = 8;
+
+/// Maximum string content bytes captured per Go string variable (default).
+///
+/// The BPF event struct embeds a `u8 var{i}_str[N]` buffer for each GoString variable.
+/// Larger values waste ring buffer space; 64 bytes covers most identifiers and short values.
+pub const DEFAULT_EBPF_STRING_CAPTURE_BYTES: usize = 64;
+
+/// Maximum bytes captured for fixed-size arrays and struct blobs (default).
+///
+/// Arrays and structs are read as raw byte blobs via `bpf_probe_read_user`. Clamped
+/// to at most this value to limit ring buffer usage. Must be a multiple of 8.
+pub const DEFAULT_EBPF_BLOB_CAPTURE_BYTES: usize = 64;

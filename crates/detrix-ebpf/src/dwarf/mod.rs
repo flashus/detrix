@@ -21,7 +21,9 @@ pub mod typeinfo;
 pub mod types;
 
 pub use parser::DwarfInfo;
-pub use typeinfo::{TypeInfo, canonicalize_go_type, is_go_bool_type, is_go_slice_type, is_go_string_type};
+pub use typeinfo::{
+    canonicalize_go_type, is_go_bool_type, is_go_slice_type, is_go_string_type, TypeInfo,
+};
 pub use types::{
     ProbePoint, ProgramCounter, Register, ResolvedVariable, VariableLocation, VariableSize,
 };

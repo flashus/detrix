@@ -190,6 +190,149 @@ tasks:
     cmds:
       - docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} build --no-cache detrix
 
+  # ── eBPF Images and Binary Compilation ───────────────────────────────────────
+  #
+  # Two Docker images are built ONCE and reused across all test runs:
+  #
+  #   detrix-ebpf-playground  — runtime: clang/llvm/libbpf/linux-headers
+  #   detrix-ebpf-builder     — compiler: rust:bookworm + protobuf-compiler
+  #                             (extracted from Dockerfile.ebpf-test rust-deps stage)
+  #
+  # Named Docker volumes persist cargo/go caches between builds:
+  #   ebpf-cargo-target  — Rust incremental build cache (avoids full recompile)
+  #   ebpf-go-mod        — Go module download cache
+  #   ebpf-go-build      — Go build cache
+  #
+  # Compiled binaries land in ./out/:
+  #   out/detrix                — detrix daemon (Linux ELF)
+  #   out/ebpf_e2e_test         — test binary (Linux ELF)
+  #   out/detrix_example_app    — Go fixture (Linux ELF, with DWARF)
+  #
+  # Typical workflow:
+  #   task build-ebpf-playground   ← once: runtime image
+  #   task build-ebpf-builder      ← once: compiler image
+  #   task build-ebpf-bins         ← per edit: compile source → ./out/
+  #   task test-ebpf-inject        ← per run:  mount ./out/ into playground + run
+
+  build-ebpf-playground:
+    desc: "Build the eBPF playground base image (once; contains clang/llvm/libbpf)"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      DOCKERFILE: fixtures/docker/Dockerfile.ebpf-playground
+    cmds:
+      - docker build -f {{.DOCKERFILE}} -t {{.PLAYGROUND}} .
+
+  build-ebpf-builder:
+    desc: "Build the eBPF builder image (once; rust:bookworm + protobuf-compiler + pre-fetched crates)"
+    vars:
+      BUILDER: detrix-ebpf-builder
+      DOCKERFILE: fixtures/docker/Dockerfile.ebpf-test
+    cmds:
+      # Extract the rust-deps stage — it has protobuf-compiler installed and
+      # all Cargo dependencies pre-fetched via `cargo fetch --locked`.
+      # This image is stable: only rebuild when Cargo.lock or package versions change.
+      - docker build --target rust-deps -f {{.DOCKERFILE}} -t {{.BUILDER}} .
+
+  build-ebpf-bins:
+    desc: "Compile daemon + test binary + Go fixture for eBPF testing (output: ./out/)"
+    vars:
+      BUILDER: detrix-ebpf-builder
+      GO_IMAGE: golang:1.24.13-bookworm
+      OUT: "{{.ROOT_DIR}}/out"
+    cmds:
+      - mkdir -p {{.OUT}}
+      # ── Rust: daemon + test binary ──────────────────────────────────────────
+      # Source is mounted read-write (output written to ./out/).
+      # Named volume ebpf-cargo-target persists the incremental build cache across
+      # runs — first compile is slow, subsequent compiles only rebuild changed crates.
+      - |
+        docker run --rm \
+          -v "{{.ROOT_DIR}}:/src" \
+          -v "ebpf-cargo-target:/build/target" \
+          -w /src \
+          {{.BUILDER}} \
+          sh -c "
+            CARGO_TARGET_DIR=/build/target cargo build --release --locked --bin detrix &&
+            CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
+              --package detrix-testing --test ebpf_e2e &&
+            cp /build/target/release/detrix /src/out/detrix &&
+            find /build/target/debug/deps -maxdepth 1 -name 'ebpf_e2e-*' ! -name '*.d' \
+              | head -1 | xargs -I{} cp {} /src/out/ebpf_e2e_test
+          "
+      # ── Go: fixture binary with DWARF (no cgo → cross-compiles cleanly) ────
+      # Named volumes keep downloaded modules and build cache between runs.
+      # -compressdwarf=false: our gimli EndianSlice parser needs uncompressed DWARF.
+      - |
+        docker run --rm \
+          -v "{{.ROOT_DIR}}/fixtures/go:/src/fixtures/go:ro" \
+          -v "{{.ROOT_DIR}}/clients/go:/src/clients/go:ro" \
+          -v "{{.ROOT_DIR}}/out:/out" \
+          -v "ebpf-go-mod:/go/pkg/mod" \
+          -v "ebpf-go-build:/root/.cache/go-build" \
+          -w /src/fixtures/go \
+          {{.GO_IMAGE}} \
+          go build \
+            -gcflags="all=-N -l" \
+            -ldflags="-compressdwarf=false" \
+            -o /out/detrix_example_app .
+
+  test-ebpf-inject:
+    desc: "Run eBPF tests: compile binaries then mount into playground (fastest iteration)"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.ROOT_DIR}}/out"
+    deps: [build-ebpf-bins]
+    cmds:
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/detrix_example_app:/usr/local/bin/detrix_example_app:ro" \
+          -v "{{.OUT}}/ebpf_e2e_test:/usr/local/bin/ebpf_e2e_test:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e GO_FIXTURE_BINARY=/usr/local/bin/detrix_example_app \
+          -e GO_FIXTURE_SOURCE=/src/fixtures/go/detrix_example_app.go \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/ebpf_e2e_test --ignored --nocapture
+
+  # ── eBPF E2E Test (docker-build variant) ─────────────────────────────────────
+  # Requires detrix-ebpf-playground to be present locally (run build-ebpf-playground first).
+  # Compiles Go fixture + Rust binaries in Docker (cached), then runs in the playground.
+  test-ebpf:
+    desc: "Compile and run eBPF uprobe E2E test (fast after first run; requires --privileged)"
+    vars:
+      IMAGE: detrix-ebpf-test
+      DOCKERFILE: fixtures/docker/Dockerfile.ebpf-test
+    cmds:
+      - docker build -f {{.DOCKERFILE}} -t {{.IMAGE}} .
+      - docker run --privileged --rm {{.IMAGE}}
+
+  test-ebpf-pull:
+    desc: Pull latest base images then build playground + test image (use when upgrading images)
+    vars:
+      IMAGE: detrix-ebpf-test
+      DOCKERFILE: fixtures/docker/Dockerfile.ebpf-test
+      PLAYGROUND: detrix-ebpf-playground
+      PG_DOCKERFILE: fixtures/docker/Dockerfile.ebpf-playground
+    cmds:
+      - docker pull golang:1.24.13-bookworm
+      - docker pull rust:1.94.1-bookworm
+      - docker pull debian:bookworm-20260316-slim
+      - docker build -f {{.PG_DOCKERFILE}} -t {{.PLAYGROUND}} .
+      - docker build -f {{.DOCKERFILE}} -t {{.IMAGE}} .
+      - docker run --privileged --rm {{.IMAGE}}
+
+  test-ebpf-clean:
+    desc: Force-rebuild playground + test image (bypasses all caches) then run
+    vars:
+      IMAGE: detrix-ebpf-test
+      DOCKERFILE: fixtures/docker/Dockerfile.ebpf-test
+      PLAYGROUND: detrix-ebpf-playground
+      PG_DOCKERFILE: fixtures/docker/Dockerfile.ebpf-playground
+    cmds:
+      - docker build --no-cache -f {{.PG_DOCKERFILE}} -t {{.PLAYGROUND}} .
+      - docker build --no-cache -f {{.DOCKERFILE}} -t {{.IMAGE}} .
+      - docker run --privileged --rm {{.IMAGE}}
+
   # Docker Cloud E2E Tests
   test-cloud:
     desc: Run Docker cloud E2E tests (resource-intensive, requires Docker)

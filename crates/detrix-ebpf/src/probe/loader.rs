@@ -26,6 +26,15 @@ use crate::probe::program::BpfProgram;
 
 use std::path::PathBuf;
 
+// `-target bpf` strips __aarch64__ / __x86_64__ from the preprocessor, so
+// bpf_tracing.h cannot auto-detect the arch. We pass the flag explicitly.
+#[cfg(target_arch = "aarch64")]
+const BPF_ARCH_FLAG: &str = "-D__TARGET_ARCH_arm64";
+#[cfg(target_arch = "x86_64")]
+const BPF_ARCH_FLAG: &str = "-D__TARGET_ARCH_x86";
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+const BPF_ARCH_FLAG: &str = "-D__TARGET_ARCH_x86";
+
 /// A compiled BPF object ready for loading with aya.
 pub struct CompiledBpf {
     /// Raw ELF bytes of the compiled BPF object.
@@ -43,8 +52,8 @@ pub struct CompiledBpf {
 /// - `clang` with BPF target support on PATH
 /// - Linux kernel headers (usually via `linux-headers-$(uname -r)`)
 pub fn compile_bpf(program: &BpfProgram) -> Result<CompiledBpf> {
-    let temp_dir = tempfile::tempdir()
-        .map_err(|e| Error::Ebpf(format!("Failed to create tempdir: {e}")))?;
+    let temp_dir =
+        tempfile::tempdir().map_err(|e| Error::Ebpf(format!("Failed to create tempdir: {e}")))?;
 
     let src_path = temp_dir.path().join("probe.c");
     let obj_path = temp_dir.path().join("probe.o");
@@ -55,16 +64,24 @@ pub fn compile_bpf(program: &BpfProgram) -> Result<CompiledBpf> {
     let status = std::process::Command::new("clang")
         .args([
             "-O2",
-            "-target", "bpf",
-            "-g",                    // Include BTF debug info
+            "-target",
+            "bpf",
+            "-g", // Include BTF debug info
+            // Tell bpf_tracing.h which arch we're targeting.
+            // -target bpf strips __aarch64__/__x86_64__ so we set it explicitly.
+            BPF_ARCH_FLAG,
             "-Wall",
             "-Wno-unused-value",
             "-Wno-pointer-sign",
             "-Wno-compare-distinct-pointer-types",
             "-c",
-            src_path.to_str().ok_or_else(|| Error::Ebpf("Non-UTF8 path".to_string()))?,
+            src_path
+                .to_str()
+                .ok_or_else(|| Error::Ebpf("Non-UTF8 path".to_string()))?,
             "-o",
-            obj_path.to_str().ok_or_else(|| Error::Ebpf("Non-UTF8 path".to_string()))?,
+            obj_path
+                .to_str()
+                .ok_or_else(|| Error::Ebpf("Non-UTF8 path".to_string()))?,
         ])
         .output()
         .map_err(|e| Error::Ebpf(format!("Failed to invoke clang: {e}. Is clang installed?")))?;
@@ -122,7 +139,13 @@ pub fn check_clang_available() -> Result<String> {
 pub fn sanitize_probe_name(metric_name: &str) -> String {
     metric_name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -143,7 +166,10 @@ mod tests {
 
     #[test]
     fn sanitize_probe_name_replaces_dots() {
-        assert_eq!(sanitize_probe_name("http.request.size"), "http_request_size");
+        assert_eq!(
+            sanitize_probe_name("http.request.size"),
+            "http_request_size"
+        );
     }
 
     #[test]
@@ -176,7 +202,8 @@ mod tests {
         // If clang isn't available, we expect an Ebpf error (not a panic).
         // On machines with clang+BPF support, this would actually compile.
         use crate::probe::program::generate_bpf_program;
-        let prog = generate_bpf_program(&[], false).unwrap();
+        use crate::probe::types::CaptureConfig;
+        let prog = generate_bpf_program(&[], false, &CaptureConfig::default()).unwrap();
 
         // We don't assert success/failure here — just that it doesn't panic.
         // The actual compilation result depends on the host environment.

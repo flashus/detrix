@@ -58,6 +58,7 @@ mod api;
 pub mod credentials;
 mod daemon;
 pub mod daemons;
+mod ebpf;
 mod output;
 mod safety;
 mod storage;

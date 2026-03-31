@@ -123,6 +123,17 @@ pub enum VariableLocation {
         len: Box<VariableLocation>,
         cap: Box<VariableLocation>,
     },
+
+    /// Variable is a fixed-size array or struct stored inline on the stack.
+    ///
+    /// Captured as raw bytes via `bpf_probe_read_user(buf, min(byte_size, limit), sp + offset)`.
+    /// Used for `[N]T` arrays and user-defined struct types.
+    StackBlob {
+        /// Offset from frame base (RSP).
+        offset: i64,
+        /// Total byte size from DWARF `DW_AT_byte_size`. Clamped at runtime by `max_blob_capture`.
+        byte_size: usize,
+    },
 }
 
 impl VariableLocation {
@@ -148,6 +159,7 @@ impl VariableLocation {
             Self::StackOffset { .. } => 1,
             Self::GoString { .. } => 2,
             Self::GoSlice { .. } => 3,
+            Self::StackBlob { .. } => 1,
         }
     }
 }
@@ -165,6 +177,13 @@ impl fmt::Display for VariableLocation {
             }
             Self::GoString { .. } => write!(f, "go.string{{ptr, len}}"),
             Self::GoSlice { .. } => write!(f, "go.slice{{ptr, len, cap}}"),
+            Self::StackBlob { offset, byte_size } => {
+                if *offset >= 0 {
+                    write!(f, "blob[{byte_size}b@sp+{offset:#x}]")
+                } else {
+                    write!(f, "blob[{byte_size}b@sp-{:#x}]", offset.unsigned_abs())
+                }
+            }
         }
     }
 }
@@ -172,10 +191,10 @@ impl fmt::Display for VariableLocation {
 /// Size of a variable in bytes, needed for `bpf_probe_read_user`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariableSize {
-    Byte,       // 1 byte (bool)
-    Word,       // 2 bytes
-    DWord,      // 4 bytes (int32, float32)
-    QWord,      // 8 bytes (int64, float64, pointer)
+    Byte,  // 1 byte (bool)
+    Word,  // 2 bytes
+    DWord, // 4 bytes (int32, float32)
+    QWord, // 8 bytes (int64, float64, pointer)
 }
 
 impl VariableSize {
