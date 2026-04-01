@@ -1,7 +1,7 @@
 // Complex Types Fixture for eBPF Integration Testing
 // Tests nested structs, slices, maps, pointers, interfaces with depth-limited capture
 //
-// Build: go build -gcflags="all=-N -l" -o detrix_complex_types detrix_complex_types.go
+// Build: go build -gcflags="all=-N -l" -o nested_types .
 //
 // Type hierarchy depth:
 //   Order (depth 0)
@@ -14,6 +14,14 @@
 //   │  └─ OrderItem (depth 2)
 //   │     └─ Product (depth 3) - circular reference
 //   └─ map[string]Tag (depth 1) - map
+//
+// Test capture points (use find_logpoint() in tests):
+//   - OFFSET_ORDER: Capture full Order struct
+//   - OFFSET_PRODUCT: Capture Product with nested Category
+//   - OFFSET_SLICE: Capture []OrderItem slice
+//   - OFFSET_ARRAY: Capture fixed-size array
+//   - OFFSET_POINTER: Capture pointer to struct
+//   - OFFSET_SCALARS: Capture scalar fields
 
 package main
 
@@ -89,6 +97,18 @@ type Order struct {
 	Status    OrderStatus
 }
 
+// PriceHistory - fixed-size array test
+type PriceHistory struct {
+	Prices [5]float64  // Fixed-size array
+	Avg    float64
+}
+
+// OrderPtr - pointer test wrapper
+type OrderPtr struct {
+	Order *Order
+	Count int
+}
+
 // OrderStatus - enum-like type
 type OrderStatus string
 
@@ -123,8 +143,26 @@ func main() {
 		// Test pointer capture
 		globalOrder = &order
 
+		// Create array test data
+		history := PriceHistory{
+			Prices: [5]float64{100.5, 101.2, 99.8, 102.1, 100.0},
+			Avg:    100.72,
+		}
+
+		// Create pointer wrapper test data
+		ptrWrapper := OrderPtr{
+			Order: &order,
+			Count: iteration,
+		}
+
 		// OFFSET_ORDER - main capture point (all fields in scope)
 		logOrder(order) // OFFSET_ORDER
+
+		// OFFSET_HISTORY - capture struct with fixed-size array
+		_ = history // OFFSET_HISTORY
+
+		// OFFSET_POINTER - capture pointer to struct
+		_ = ptrWrapper // OFFSET_POINTER
 
 		// OFFSET_ITEMS - capture slice items
 		for i, item := range order.Items {

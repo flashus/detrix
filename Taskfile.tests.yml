@@ -255,9 +255,13 @@ tasks:
             CARGO_TARGET_DIR=/build/target cargo build --release --locked --bin detrix &&
             CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
               --package detrix-testing --test ebpf_e2e &&
+            CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
+              --package detrix-testing --test ebpf_nested_types_e2e &&
             cp /build/target/release/detrix /src/out/detrix &&
             find /build/target/debug/deps -maxdepth 1 -name 'ebpf_e2e-*' ! -name '*.d' \
-              | head -1 | xargs -I{} cp {} /src/out/ebpf_e2e_test
+              | head -1 | xargs -I{} cp {} /src/out/ebpf_e2e_test &&
+            find /build/target/debug/deps -maxdepth 1 -name 'ebpf_nested_types_e2e-*' ! -name '*.d' \
+              | head -1 | xargs -I{} cp {} /src/out/ebpf_nested_types_e2e_test
           "
       # ── Go: fixture binary with DWARF (no cgo → cross-compiles cleanly) ────
       # Named volumes keep downloaded modules and build cache between runs.
@@ -276,6 +280,20 @@ tasks:
             -gcflags="all=-N -l" \
             -ldflags="-compressdwarf=false" \
             -o /out/detrix_example_app .
+      # Build nested_types fixture (nested struct capture tests)
+      - |
+        docker run --rm \
+          -v "{{.ROOT_DIR}}/fixtures/go/nested_types:/src/fixtures/go/nested_types:ro" \
+          -v "{{.ROOT_DIR}}/clients/go:/src/clients/go:ro" \
+          -v "{{.ROOT_DIR}}/out:/out" \
+          -v "ebpf-go-mod:/go/pkg/mod" \
+          -v "ebpf-go-build:/root/.cache/go-build" \
+          -w /src/fixtures/go/nested_types \
+          {{.GO_IMAGE}} \
+          go build \
+            -gcflags="all=-N -l" \
+            -ldflags="-compressdwarf=false" \
+            -o /out/nested_types .
 
   test-ebpf-inject:
     desc: "Run eBPF tests: compile binaries then mount into playground (fastest iteration)"
@@ -294,6 +312,26 @@ tasks:
           -e GO_FIXTURE_SOURCE=/src/fixtures/go/string_capture/main.go \
           {{.PLAYGROUND}} \
           /usr/local/bin/ebpf_e2e_test --ignored --nocapture
+
+  # ── eBPF Nested Types E2E Test (inject variant) ─────────────────────────────
+  # Fastest iteration: uses pre-built binaries from ./out/
+  test-ebpf-nested-inject:
+    desc: "Run eBPF nested types test: mount pre-built binaries into playground"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.ROOT_DIR}}/out"
+    deps: [build-ebpf-bins]
+    cmds:
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/nested_types:/usr/local/bin/nested_types:ro" \
+          -v "{{.OUT}}/ebpf_nested_types_e2e_test:/usr/local/bin/ebpf_nested_types_e2e_test:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e GO_FIXTURE_BINARY=/usr/local/bin/nested_types \
+          -e GO_FIXTURE_SOURCE=/src/fixtures/go/nested_types/main.go \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/ebpf_nested_types_e2e_test --ignored --nocapture
 
   # ── eBPF E2E Test (docker-build variant) ─────────────────────────────────────
   # Requires detrix-ebpf-playground to be present locally (run build-ebpf-playground first).

@@ -57,11 +57,26 @@
 //! ```
 
 use crate::dwarf::typeinfo::{resolve_type_info, TypeInfo};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use gimli::{AttributeValue, DebuggingInformationEntry, DwAt, Reader, Unit};
 
 /// Maximum depth to recurse (safety limit, matches Delve's default behavior).
 const MAX_DEPTH: usize = 10;
+
+/// Returns true for type tags that should be transparently followed (typedef chains).
+///
+/// Mirrors Delve's `SeekToType` which loops through typedefs/qualifiers:
+/// `pkg/dwarf/reader/reader.go:SeekToType`
+#[inline]
+fn is_transparent_type_tag(tag: gimli::DwTag) -> bool {
+    matches!(
+        tag,
+        gimli::DW_TAG_typedef
+            | gimli::DW_TAG_const_type
+            | gimli::DW_TAG_volatile_type
+            | gimli::DW_TAG_restrict_type
+    )
+}
 
 /// Resolved struct field with DWARF-derived offset information.
 #[derive(Debug, Clone, PartialEq)]
@@ -213,7 +228,13 @@ fn classify_type<R: Reader>(
     }
 
     if type_info.is_struct {
-        return resolve_struct_fields(entry, unit, dwarf, type_info, config, depth);
+        // Follow DW_AT_type typedef chain AND resolve fields in one step, keeping
+        // the correct unit in scope. Using get_struct_type_entry then resolve_struct_fields
+        // separately would drop the target unit before entries_tree can use it.
+        detrix_logging::debug!(
+            "[nested_types] classify_type: is_struct=true, resolving typedef chain + fields"
+        );
+        return resolve_struct_following_type_chain(entry, unit, dwarf, type_info, config, depth, 0);
     }
 
     if type_info.is_pointer {
@@ -231,7 +252,130 @@ fn classify_type<R: Reader>(
     Ok(NestedType::Scalar(type_info))
 }
 
+/// Follow DW_AT_type chain and resolve struct fields while the correct unit is in scope.
+///
+/// The critical property: `resolve_struct_fields` requires the unit that OWNS the struct
+/// entry (so that `entries_tree(struct_offset)` is valid). When following DebugInfoRef
+/// chains, the owning unit is `target_unit` — a local variable. We must call
+/// `resolve_struct_fields` BEFORE `target_unit` drops.
+///
+/// This function keeps `target_unit` alive by recursing within its scope.
+fn resolve_struct_following_type_chain<R: Reader>(
+    entry: &DebuggingInformationEntry<R>,
+    unit: &Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+    type_info: TypeInfo,
+    config: &NestedTypeConfig,
+    depth: usize,
+    chain_depth: usize,
+) -> Result<NestedType> {
+    if chain_depth >= 8 {
+        return Err(Error::DwarfParse(format!(
+            "type chain depth {chain_depth} exceeded (cycle?)"
+        )));
+    }
+
+    let type_attr = match entry.attr_value(DwAt(gimli::constants::DW_AT_type.0)) {
+        Some(v) => v,
+        None => {
+            return Err(Error::DwarfParse(
+                "Entry has no DW_AT_type attribute".to_string(),
+            ))
+        }
+    };
+
+    match type_attr {
+        AttributeValue::UnitRef(offset) => {
+            let mut cursor = unit.entries_at_offset(offset)?;
+            let Some(resolved) = cursor.next_dfs()? else {
+                return Err(Error::DwarfParse(
+                    "No entry at UnitRef offset".to_string(),
+                ));
+            };
+            let resolved = resolved.clone();
+            let tag = resolved.tag();
+            detrix_logging::debug!(
+                "[nested_types] type chain depth={} UnitRef({:?}) → tag={:?}",
+                chain_depth,
+                offset,
+                tag
+            );
+            if is_transparent_type_tag(tag) {
+                // Still same unit; follow further
+                resolve_struct_following_type_chain(
+                    &resolved, unit, dwarf, type_info, config, depth, chain_depth + 1,
+                )
+            } else {
+                // Found the struct type entry — unit is correct (UnitRef stays in same CU)
+                resolve_struct_fields(&resolved, unit, dwarf, type_info, config, depth)
+            }
+        }
+        AttributeValue::DebugInfoRef(debug_info_offset) => {
+            let target_offset = debug_info_offset.0;
+            let mut units = dwarf.units();
+            while let Some(header) = units.next()? {
+                let unit_start = header.offset().0;
+                let unit_end = unit_start + header.unit_length();
+                if target_offset >= unit_start && target_offset < unit_end {
+                    // target_unit lives in this scope — alive when resolve_struct_fields runs ✓
+                    let target_unit = dwarf.unit(header)?;
+                    let local_offset = gimli::UnitOffset(target_offset - unit_start);
+                    let mut cursor = target_unit.entries_at_offset(local_offset)?;
+                    let Some(resolved) = cursor.next_dfs()? else {
+                        return Err(Error::DwarfParse(
+                            "No entry in target unit".to_string(),
+                        ));
+                    };
+                    let resolved = resolved.clone();
+                    let tag = resolved.tag();
+                    detrix_logging::debug!(
+                        "[nested_types] type chain depth={} DebugInfoRef({:?}) → tag={:?}",
+                        chain_depth,
+                        target_offset,
+                        tag
+                    );
+                    if is_transparent_type_tag(tag) {
+                        // Follow further within target_unit (while it's alive in this scope)
+                        return resolve_struct_following_type_chain(
+                            &resolved,
+                            &target_unit,
+                            dwarf,
+                            type_info,
+                            config,
+                            depth,
+                            chain_depth + 1,
+                        );
+                    }
+                    // Found struct entry — pass target_unit (still alive here) to fields resolution
+                    return resolve_struct_fields(
+                        &resolved,
+                        &target_unit,
+                        dwarf,
+                        type_info,
+                        config,
+                        depth,
+                    );
+                }
+            }
+            Err(Error::DwarfParse(format!(
+                "DebugInfoRef {:?} not found in any unit",
+                debug_info_offset
+            )))
+        }
+        _ => Err(Error::DwarfParse(
+            "DW_AT_type is not a UnitRef or DebugInfoRef".to_string(),
+        )),
+    }
+}
+
 /// Resolve struct fields by traversing DW_TAG_member children.
+///
+/// Uses gimli's `entries_tree` API (analogous to Delve's `next()` helper in
+/// `pkg/dwarf/godwarf/type.go:600`) which correctly limits traversal to
+/// **direct children** of the struct entry only — no depth-tracking needed.
+///
+/// NOTE: `entry` MUST be the DW_TAG_structure_type entry, not a typedef.
+/// Call `get_struct_type_entry()` first to resolve typedef chains.
 fn resolve_struct_fields<R: Reader>(
     entry: &DebuggingInformationEntry<R>,
     unit: &Unit<R>,
@@ -240,69 +384,89 @@ fn resolve_struct_fields<R: Reader>(
     config: &NestedTypeConfig,
     depth: usize,
 ) -> Result<NestedType> {
+    detrix_logging::info!(
+        "[nested_types] Resolving struct '{}' fields at offset {:?} tag={:?} has_children={}",
+        type_info.name,
+        entry.offset(),
+        entry.tag(),
+        entry.has_children()
+    );
+
+    if !entry.has_children() {
+        // This means get_struct_type_entry returned a non-struct entry (e.g., still a typedef).
+        // Return empty fields rather than silently failing.
+        detrix_logging::warn!(
+            "[nested_types] struct entry at {:?} has tag={:?} with has_children=false — \
+             typedef chain may not have been fully resolved; returning 0 fields",
+            entry.offset(),
+            entry.tag()
+        );
+        return Ok(NestedType::Struct {
+            type_info,
+            fields: vec![],
+            depth,
+        });
+    }
+
+    // entries_tree(Some(offset)) starts a tree rooted at the entry at `offset`.
+    // root.children() returns ONLY direct children — correct by construction.
+    let mut tree = unit.entries_tree(Some(entry.offset()))?;
+    let root = tree.root()?;
+
+    detrix_logging::debug!(
+        "[nested_types] entries_tree root: tag={:?} offset={:?}",
+        root.entry().tag(),
+        root.entry().offset()
+    );
+
+    let mut children_iter = root.children();
     let mut fields = Vec::new();
+    let mut member_count = 0;
 
-    let type_offset = entry.attr_value(DwAt(gimli::constants::DW_AT_type.0));
-    let struct_offset = match type_offset {
-        Some(AttributeValue::UnitRef(offset)) => offset,
-        Some(AttributeValue::DebugInfoRef(offset)) => {
-            return Ok(NestedType::Unsupported {
-                type_info,
-                reason: format!("cross-unit type reference at offset {:?}", offset.0),
-            });
-        }
-        _ => {
-            return Ok(NestedType::Unsupported {
-                type_info,
-                reason: "no DW_AT_type attribute found".to_string(),
-            });
-        }
-    };
+    while let Some(child_node) = children_iter.next()? {
+        let child = child_node.entry();
 
-    // Iterate over children of the struct type to find DW_TAG_member entries
-    // We need to skip the first entry (the struct type itself) and only process its direct children
-    let mut cursor = unit.entries_at_offset(struct_offset)?;
-    
-    // Skip the struct type entry itself
-    cursor.next_dfs()?;
-    
-    // Now iterate over children
-    while let Some(child) = cursor.next_dfs()? {
+        detrix_logging::debug!(
+            "[nested_types] child tag={:?} name={:?}",
+            child.tag(),
+            read_die_name_string(child, dwarf)
+        );
+
         if child.tag() != gimli::DW_TAG_member {
             continue;
         }
 
+        member_count += 1;
         if config.max_struct_fields >= 0 && fields.len() >= config.max_struct_fields as usize {
             break;
         }
 
-        let field_name = read_die_name_string(child, dwarf).unwrap_or_else(|| format!("_field{}", fields.len()));
+        let field_name = read_die_name_string(child, dwarf)
+            .unwrap_or_else(|| format!("_field{}", fields.len()));
 
         let byte_offset = match child.attr_value(DwAt(gimli::constants::DW_AT_data_member_location.0)) {
-            Some(attr) => {
-                match attr {
-                    AttributeValue::Udata(n) => n,
-                    AttributeValue::Data1(n) => n as u64,
-                    AttributeValue::Data2(n) => n as u64,
-                    AttributeValue::Data4(n) => n as u64,
-                    AttributeValue::Data8(n) => n,
-                    _ => 0,
-                }
-            },
-            None => 0,
+            Some(AttributeValue::Udata(n)) => n,
+            Some(AttributeValue::Data1(n)) => n as u64,
+            Some(AttributeValue::Data2(n)) => n as u64,
+            Some(AttributeValue::Data4(n)) => n as u64,
+            Some(AttributeValue::Data8(n)) => n,
+            _ => 0,
         };
 
         let byte_size = match child.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0)) {
-            Some(attr) => {
-                match attr {
-                    AttributeValue::Udata(n) => n,
-                    _ => 8,
-                }
-            },
-            None => 8,
+            Some(AttributeValue::Udata(n)) => n,
+            _ => 8,
         };
 
         let field_type_info = resolve_type_info(child, unit, dwarf)?;
+
+        detrix_logging::debug!(
+            "[nested_types] field '{}' byte_offset={} byte_size={} type='{}'",
+            field_name,
+            byte_offset,
+            byte_size,
+            field_type_info.name
+        );
 
         fields.push(StructField {
             name: field_name,
@@ -311,6 +475,13 @@ fn resolve_struct_fields<R: Reader>(
             byte_size,
         });
     }
+
+    detrix_logging::info!(
+        "[nested_types] Resolved struct '{}' → {} fields (saw {} DW_TAG_member entries)",
+        type_info.name,
+        fields.len(),
+        member_count
+    );
 
     Ok(NestedType::Struct {
         type_info,

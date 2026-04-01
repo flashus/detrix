@@ -3,6 +3,13 @@
 //! Used to read Go string content from heap memory after eBPF captures {ptr, len}.
 //! eBPF's `bpf_probe_read_user` cannot access Go's heap, so we read from user-space
 //! after the event is received.
+//!
+//! # Struct Field Reading
+//!
+//! For structs, the pattern is:
+//! 1. BPF captures struct base address from stack
+//! 2. User-space reads DWARF field offsets
+//! 3. User-space reads each field via process_vm_readv(base_addr + field_offset)
 
 use crate::error::Result;
 
@@ -18,6 +25,27 @@ pub trait ProcessMemoryReader: Send + Sync {
     /// # Returns
     /// The string content as UTF-8 text, or an error if the read fails.
     fn read_string(&self, pid: u32, ptr: u64, len: usize) -> Result<String>;
+
+    /// Read raw bytes from the target process memory.
+    ///
+    /// # Arguments
+    /// * `pid` - Process ID of the target process  
+    /// * `ptr` - Memory address to read from
+    /// * `len` - Number of bytes to read
+    ///
+    /// # Returns
+    /// The raw bytes, or an error if the read fails.
+    fn read_bytes(&self, pid: u32, ptr: u64, len: usize) -> Result<Vec<u8>>;
+
+    /// Read a u64 value from the target process memory.
+    ///
+    /// # Arguments
+    /// * `pid` - Process ID of the target process
+    /// * `ptr` - Memory address to read from (must be 8-byte aligned)
+    ///
+    /// # Returns
+    /// The u64 value, or an error if the read fails.
+    fn read_u64(&self, pid: u32, ptr: u64) -> Result<u64>;
 }
 
 /// Linux implementation using process_vm_readv syscall.
@@ -143,6 +171,32 @@ impl ProcessMemoryReader for LinuxProcessMemoryReader {
             target_pid, ptr, len
         )))
     }
+
+    fn read_bytes(&self, _kernel_pid: u32, ptr: u64, len: usize) -> Result<Vec<u8>> {
+        use crate::error::Error;
+
+        let target_pid = self.find_target_pid().ok_or_else(|| {
+            Error::Ebpf(format!("Could not find target process: {}", self.target_exe))
+        })?;
+
+        // Try process_vm_readv first
+        if let Ok(buf) = process_vm_read(target_pid, ptr, len) {
+            return Ok(buf);
+        }
+
+        // Fallback to /proc/pid/mem
+        read_proc_mem(target_pid, ptr, len)
+    }
+
+    fn read_u64(&self, kernel_pid: u32, ptr: u64) -> Result<u64> {
+        let bytes = self.read_bytes(kernel_pid, ptr, 8)?;
+        if bytes.len() < 8 {
+            return Err(crate::error::Error::Ebpf(
+                format!("read_u64: only got {} bytes", bytes.len())
+            ));
+        }
+        Ok(u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]))
+    }
 }
 
 /// Read memory from another process using process_vm_readv syscall.
@@ -235,6 +289,14 @@ impl ProcessMemoryReader for StubProcessMemoryReader {
     fn read_string(&self, _pid: u32, _ptr: u64, len: usize) -> Result<String> {
         // Return a placeholder string for testing on non-Linux
         Ok(format!("<stub-string-len-{len}>"))
+    }
+
+    fn read_bytes(&self, _pid: u32, _ptr: u64, len: usize) -> Result<Vec<u8>> {
+        Ok(vec![0u8; len])
+    }
+
+    fn read_u64(&self, _pid: u32, _ptr: u64) -> Result<u64> {
+        Ok(0)
     }
 }
 

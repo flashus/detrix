@@ -97,6 +97,8 @@ impl From<&detrix_config::EbpfConfig> for CaptureConfig {
 pub enum CapturedValue {
     /// Scalar value (register or stack read), up to 8 bytes.
     Scalar(u64),
+    /// Float value (float32 or float64 field, decoded from IEEE 754 bits).
+    Float(f64),
     /// String value (pointer + length read, then data read).
     String { data: Vec<u8>, len: usize },
     /// Go slice header: len and cap (ptr is captured but not returned to callers).
@@ -136,6 +138,7 @@ impl CapturedValue {
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Self::Scalar(v) => Some(f64::from_bits(*v)),
+            Self::Float(f) => Some(*f),
             _ => None,
         }
     }
@@ -180,6 +183,7 @@ impl CapturedValue {
     /// For structs, recursively converts all fields to JSON object notation.
     pub fn to_json_value(&self, size: VariableSize) -> String {
         match self {
+            Self::Float(f) => format!("{f}"),
             Self::Scalar(v) => match size {
                 VariableSize::Byte => {
                     if *v <= 1 {

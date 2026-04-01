@@ -173,33 +173,44 @@ fn resolve_type_from_debug_info_ref<R: Reader>(
     Ok(TypeInfo::unknown())
 }
 
-/// Get the `DW_AT_type` unit offset from a DIE.
-///
-/// Go's DWARF uses `DW_FORM_ref_addr` (DebugInfoRef) for type references,
-/// which points to a global offset in the `.debug_info` section (cross-unit reference).
-/// Other compilers use `DW_FORM_ref1/2/4/8` (UnitRef) for unit-local references.
-/// We handle both cases.
-fn get_type_offset<R: Reader>(
-    entry: &DebuggingInformationEntry<R>,
-) -> Result<Option<gimli::UnitOffset<R::Offset>>> {
-    match entry.attr_value(DwAt(gimli::constants::DW_AT_type.0)) {
-        Some(AttributeValue::UnitRef(offset)) => Ok(Some(offset)),
-        Some(AttributeValue::DebugInfoRef(_debug_info_offset)) => {
-            // Cross-unit reference — Go uses this for type references.
-            // We can't resolve it here without the full DWARF context.
-            // Return None to signal that type resolution failed.
-            // The caller should handle this case separately.
-            detrix_logging::debug!(
-                "[DWARF typeinfo] DebugInfoRef (cross-unit) not yet supported"
-            );
-            Ok(None)
-        }
-        _ => Ok(None),
-    }
-}
-
 /// Maximum depth for following pointer/typedef chains (prevents cycles).
 const MAX_TYPE_DEPTH: u8 = 8;
+
+/// Resolve the target type of a typedef, handling both unit-local and cross-unit references.
+///
+/// Go's DWARF uses `DW_FORM_ref_addr` (DebugInfoRef) for type references,
+/// which can point to types in different compilation units.
+fn resolve_typedef_target<R: Reader>(
+    typedef_entry: &DebuggingInformationEntry<R>,
+    unit: &gimli::Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+    depth: u8,
+) -> Result<TypeInfo> {
+    let type_attr = typedef_entry.attr_value(DwAt(gimli::constants::DW_AT_type.0));
+    
+    match type_attr {
+        Some(AttributeValue::UnitRef(offset)) => {
+            // Unit-local reference
+            detrix_logging::debug!(
+                "[DWARF typeinfo] typedef target: UnitRef offset={:?}",
+                offset.0
+            );
+            resolve_type_at_offset(offset, unit, dwarf, depth + 1)
+        }
+        Some(AttributeValue::DebugInfoRef(debug_info_offset)) => {
+            // Cross-unit reference - search all units
+            detrix_logging::debug!(
+                "[DWARF typeinfo] typedef target: DebugInfoRef offset={:?}",
+                debug_info_offset.0
+            );
+            resolve_type_from_debug_info_ref(debug_info_offset, unit, dwarf, depth + 1)
+        }
+        _ => {
+            detrix_logging::debug!("[DWARF typeinfo] typedef has no type attribute");
+            Ok(TypeInfo::unknown())
+        }
+    }
+}
 
 /// Resolve a type at a given unit offset.
 fn resolve_type_at_offset<R: Reader>(
@@ -260,22 +271,21 @@ fn resolve_type_at_offset<R: Reader>(
                 "[DWARF typeinfo] typedef name={:?} following chain",
                 typedef_name
             );
-            let inner_offset = match get_type_offset(entry)? {
-                Some(off) => off,
-                None => return Ok(TypeInfo::unknown()),
-            };
-            let mut info = resolve_type_at_offset(inner_offset, unit, dwarf, depth + 1)?;
+            
+            // Get the inner type offset - may be unit-local or cross-unit
+            let mut inner_info = resolve_typedef_target(entry, unit, dwarf, depth)?;
+            
             // Override name with the typedef name if available
             if let Some(name) = read_attr_string(entry, dwarf, gimli::constants::DW_AT_name)? {
                 detrix_logging::debug!(
                     "[DWARF typeinfo] typedef '{}' overriding inner name='{}' is_string={}",
                     name,
-                    info.name,
-                    info.is_string
+                    inner_info.name,
+                    inner_info.is_string
                 );
-                info.name = name;
+                inner_info.name = name;
             }
-            Ok(info)
+            Ok(inner_info)
         }
 
         // Go string is a struct with two fields (ptr + len), total 16 bytes
@@ -288,13 +298,9 @@ fn resolve_type_at_offset<R: Reader>(
                 Some(AttributeValue::Udata(n)) => n,
                 _ => 0, // Unknown size — will be treated as zero-byte blob
             };
-            let name = match get_type_offset(entry)? {
-                Some(off) => {
-                    let elem = resolve_type_at_offset(off, unit, dwarf, depth + 1)?;
-                    format!("[N]{}", elem.name) // [N]T — N not yet decoded
-                }
-                None => "[N]unknown".to_string(),
-            };
+            // Use resolve_typedef_target to handle cross-unit element type references
+            let elem_info = resolve_typedef_target(entry, unit, dwarf, depth)?;
+            let name = format!("[N]{}", elem_info.name); // [N]T — N not yet decoded
             Ok(TypeInfo {
                 name,
                 size: VariableSize::QWord, // Header word for location; actual read uses byte_size
@@ -309,10 +315,7 @@ fn resolve_type_at_offset<R: Reader>(
 
         // Const qualifier — follow the inner type
         gimli::DW_TAG_const_type | gimli::DW_TAG_volatile_type | gimli::DW_TAG_restrict_type => {
-            match get_type_offset(entry)? {
-                Some(off) => resolve_type_at_offset(off, unit, dwarf, depth + 1),
-                None => Ok(TypeInfo::unknown()),
-            }
+            resolve_typedef_target(entry, unit, dwarf, depth + 1)
         }
 
         _ => Ok(TypeInfo::unknown()),
@@ -361,12 +364,10 @@ fn get_pointee_name<R: Reader>(
     dwarf: &gimli::Dwarf<R>,
     depth: u8,
 ) -> Result<String> {
-    match get_type_offset(ptr_entry)? {
-        Some(off) => {
-            let inner = resolve_type_at_offset(off, unit, dwarf, depth + 1)?;
-            Ok(inner.name)
-        }
-        None => Ok("void".to_string()),
+    // Use resolve_typedef_target to handle cross-unit references
+    match resolve_typedef_target(ptr_entry, unit, dwarf, depth) {
+        Ok(inner) => Ok(inner.name),
+        Err(_) => Ok("void".to_string()),
     }
 }
 

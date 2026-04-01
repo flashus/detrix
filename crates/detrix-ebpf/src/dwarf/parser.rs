@@ -454,15 +454,50 @@ fn resolve_variables_at_pc<R: Reader>(
                 );
 
                 // Resolve nested type structure for structs (depth-limited)
-                let nested_type = if type_info.is_struct {
+                // Try to resolve for any type that might be a struct (not just is_struct=true)
+                // Go DWARF sometimes emits structs as typedefs or with different type info
+                let should_resolve_nested = type_info.is_struct 
+                    || type_info.name.contains('.')  // Package-qualified names like main.Order
+                    || (!type_info.name.starts_with("[]") && !type_info.name.starts_with("map[") 
+                        && !type_info.name.starts_with('*') && !type_info.is_string && !type_info.is_slice);
+                
+                let nested_type = if should_resolve_nested {
                     use crate::dwarf::nested_types::{resolve_nested_type, NestedTypeConfig};
                     let config = NestedTypeConfig {
                         max_depth: 2,  // Default depth limit
                         max_struct_fields: -1,  // -1 = all fields
                         max_elements: 64,
                     };
-                    resolve_nested_type(entry, &unit, dwarf, &config).ok()
+                    detrix_logging::debug!(
+                        "[DWARF] Attempting nested type resolution for '{}' (type_name='{}', is_struct={})",
+                        name, type_info.name, type_info.is_struct
+                    );
+                    let result = resolve_nested_type(entry, &unit, dwarf, &config);
+                    match &result {
+                        Ok(nested) => {
+                            detrix_logging::debug!(
+                                "[DWARF] Resolved nested type for '{}': {:?}",
+                                name,
+                                match nested {
+                                    crate::dwarf::nested_types::NestedType::Struct { fields, .. } => 
+                                        format!("Struct with {} fields", fields.len()),
+                                    _ => "Other".to_string(),
+                                }
+                            );
+                        },
+                        Err(e) => {
+                            detrix_logging::debug!(
+                                "[DWARF] Failed to resolve nested type for '{}': {}",
+                                name, e
+                            );
+                        }
+                    }
+                    result.ok()
                 } else {
+                    detrix_logging::debug!(
+                        "[DWARF] Skipping nested type resolution for '{}' (type_name='{}')",
+                        name, type_info.name
+                    );
                     None
                 };
 

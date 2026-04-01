@@ -167,6 +167,39 @@ pub mod go_lines {
     }
 }
 
+// Nested types fixture line numbers — for ebpf_nested_types_e2e.rs tests
+// Update NESTED_MAIN_LINE if you add/remove lines before `func main()` in
+// fixtures/go/nested_types/main.go
+pub mod go_nested_lines {
+    use super::FixtureCodeMap;
+
+    /// Line of `func main()` in nested_types/main.go
+    pub const NESTED_MAIN_LINE: u32 = 126;
+
+    /// Symbol map for nested types fixture
+    const SYMBOL_MAP: &[(&str, u32, u32)] = &[
+        // (name,             decl, logpt)
+        ("order", 28, 30),        // order := createRandomOrder()
+        ("history", 35, 36),      // history := PriceHistory{...}
+        ("ptrWrapper", 39, 40),   // ptrWrapper := OrderPtr{...}
+        ("logOrder", 42, 42),     // logOrder(order) call
+        ("i", 46, 46),            // for i, item := range order.Items
+        ("item", 46, 46),
+        ("key", 52, 52),          // for key, tag := range order.Tags
+        ("tag", 52, 52),
+        ("status", 57, 57),       // status := order.Status
+        ("categoryName", 60, 60), // categoryName := order.Product.Category.Name
+        ("timestamp", 63, 63),    // timestamp := order.Timestamp
+    ];
+
+    /// Code map for the nested types fixture.
+    pub static CODEMAP: FixtureCodeMap = FixtureCodeMap::new(NESTED_MAIN_LINE, SYMBOL_MAP);
+
+    pub const fn line(offset: u32) -> u32 {
+        NESTED_MAIN_LINE + offset
+    }
+}
+
 /// Python fixture line numbers — single source of truth.
 /// Update MAIN_LINE if you add/remove lines before `def main()` in
 /// fixtures/python/trade_bot_forever.py

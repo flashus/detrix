@@ -135,6 +135,7 @@ impl EbpfAdapter {
                             .ok()
                             .map(|s| TypedValue::Text(s.to_string()))
                     }
+                    CapturedValue::Float(f) => Some(TypedValue::Numeric(*f)),
                     CapturedValue::Slice { len, .. } => Some(TypedValue::Numeric(*len as f64)),
                     CapturedValue::Bytes(_) => None, // raw bytes have no single typed representation
                     CapturedValue::Error(_) => None,
