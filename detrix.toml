@@ -833,6 +833,9 @@ source_host = "detrix-local"
 # Default: 60 (seconds)
 # hot_reload_ttl_seconds = 60
 
+[ebpf]
+  max_capture_depth = 3
+
 # ════════════════════════════════════════════════════════════════════════════
 # End of Configuration
 # ════════════════════════════════════════════════════════════════════════════

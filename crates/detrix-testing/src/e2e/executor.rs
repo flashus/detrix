@@ -2550,6 +2550,9 @@ port = {}
 
 [safety]
 enable_ast_analysis = false
+
+[ebpf]
+max_capture_depth = 10
 "#,
             workspace_path_str,
             db_path_str,

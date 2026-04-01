@@ -138,7 +138,7 @@ pub struct EbpfGoFactory {
 }
 
 impl EbpfGoFactory {
-    /// Create a composite factory.
+    /// Create a composite factory with default capture limits.
     ///
     /// * `inner`     — base DAP factory (used for non-Go adapters)
     /// * `base_path` — base directory for resolving relative binary paths
@@ -146,6 +146,18 @@ impl EbpfGoFactory {
         Self {
             inner,
             ebpf: EbpfAdapterFactory::new(base_path),
+        }
+    }
+
+    /// Create a composite factory with capture limits from config.
+    pub fn new_with_config(
+        inner: DapAdapterFactoryRef,
+        base_path: impl Into<PathBuf>,
+        capture_config: CaptureConfig,
+    ) -> Self {
+        Self {
+            inner,
+            ebpf: EbpfAdapterFactory::new_with_config(base_path, capture_config),
         }
     }
 }

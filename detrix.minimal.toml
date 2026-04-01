@@ -39,3 +39,6 @@ enable_ast_analysis = true
 # For advanced settings (safety rules, output streaming, performance tuning),
 # run: detrix init --full
 # ════════════════════════════════════════════════════════════════════════════
+
+[ebpf]
+  max_capture_depth = 3

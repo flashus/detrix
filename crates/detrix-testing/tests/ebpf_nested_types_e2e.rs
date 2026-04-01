@@ -57,7 +57,10 @@ async fn test_ebpf_captures_nested_types() {
         reporter.step_failed(step, &e.to_string());
         panic!("Failed to start daemon: {e}");
     }
-    reporter.step_success(step, Some(&format!("HTTP port: {}", executor.http_port)));
+    reporter.step_success(step, Some(&format!(
+        "HTTP port: {} | config: ebpf.max_capture_depth=10 (wired from [ebpf] section via EbpfGoFactory::new_with_config)",
+        executor.http_port
+    )));
 
     // ── PHASE 2: Start Go fixture ────────────────────────────────────────────
     reporter.section("PHASE 2: START GO FIXTURE");

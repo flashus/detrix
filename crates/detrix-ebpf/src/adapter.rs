@@ -230,6 +230,7 @@ impl DapAdapter for EbpfAdapter {
             &metric.location.file,
             metric.location.line,
             &metric.expressions,
+            self.capture_config.max_capture_depth,
         )?;
 
         self.uprobe_manager

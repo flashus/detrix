@@ -127,36 +127,8 @@ pub fn parse_ring_buffer_event(
                     ..
                 }) = &var.nested_type
                 {
-                    // Heap-escape detection: Go may allocate a struct on the heap when its
-                    // address is taken (e.g. `globalPtr = &localStruct`). The DWARF location
-                    // still points to the stack slot, but the stack slot now holds an 8-byte
-                    // pointer to the heap struct instead of the struct bytes. We detect this
-                    // heuristically when:
-                    //   1. The declared struct size exceeds our capture window (stack slot is
-                    //      too small to hold the full struct — pointer fits in 8 bytes though)
-                    //   2. The first 8 captured bytes decode to a plausible Go heap address
-                    // If both hold, we try to dereference via user-space memory reader.
-                    let heap_bytes = if *byte_size > config.max_blob_capture && bytes.len() >= 8 {
-                        let candidate = u64::from_le_bytes(bytes[..8].try_into().unwrap_or([0; 8]));
-                        if looks_like_go_heap_ptr(candidate) {
-                            detrix_logging::debug!(
-                                "[ringbuf] StackBlob heap-escape candidate for '{}': ptr={:#x}",
-                                var.name, candidate
-                            );
-                            let real_capture = (*byte_size).min(config.max_blob_capture);
-                            mem_reader.read_bytes(pid, candidate, real_capture)
-                                .or_else(|_| mem_reader.read_bytes(tid, candidate, real_capture))
-                                .ok()
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-
-                    let effective_bytes = heap_bytes.as_deref().unwrap_or(&bytes);
                     parse_struct_fields_from_blob(
-                        effective_bytes,
+                        &bytes,
                         &var.type_name,
                         dwarf_fields,
                         config,
@@ -578,19 +550,6 @@ mod tests {
 // ============================================================================
 // Nested struct support
 // ============================================================================
-
-/// Returns true if `addr` looks like a Go heap pointer on Linux/amd64.
-///
-/// Used for heap-escape detection: when a Go struct variable's address is taken,
-/// the compiler allocates it on the heap and the stack slot holds a pointer to it.
-/// A plausible Go heap pointer satisfies:
-/// - >= 0x1000 (avoids null-page and very small values)
-/// - < 0x0001_0000_0000_0000 (within the 48-bit userspace virtual address space)
-/// - 8-byte aligned (Go heap allocations are always word-aligned)
-#[inline]
-fn looks_like_go_heap_ptr(addr: u64) -> bool {
-    addr >= 0x1000 && addr < 0x0001_0000_0000_0000 && addr % 8 == 0
-}
 
 /// Walk through `NestedType::Pointer` wrappers to find the first `Struct` variant.
 ///

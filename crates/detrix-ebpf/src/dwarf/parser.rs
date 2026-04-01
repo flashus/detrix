@@ -67,11 +67,16 @@ impl DwarfInfo {
     ///
     /// This is the main entry point for the DWARF module. Given a file and line,
     /// it returns the PC to attach the uprobe and the variables available at that PC.
+    ///
+    /// `max_nested_depth` controls how many levels of nested struct fields are resolved.
+    /// Follows Delve's `MaxVariableRecurse` semantics: pointer chasing is free, each
+    /// struct field level consumes one depth unit. Default: 2.
     pub fn resolve_probe_point(
         &self,
         file: &str,
         line: u32,
         requested_vars: &[String],
+        max_nested_depth: usize,
     ) -> Result<ProbePoint> {
         let obj = object::File::parse(&*self._data)
             .map_err(|e| Error::DwarfParse(format!("Failed to parse ELF: {e}")))?;
@@ -100,7 +105,7 @@ impl DwarfInfo {
         );
 
         // Step 4: Resolve variable locations at this PC
-        let variables = resolve_variables_at_pc(&dwarf, pc, requested_vars, cfa_sp_delta)?;
+        let variables = resolve_variables_at_pc(&dwarf, pc, requested_vars, cfa_sp_delta, max_nested_depth)?;
 
         // aya uprobe attach(fn_name=None, offset, ...) expects a file offset,
         // not a virtual address. Convert: file_offset = text_file_offset + (pc - text_vma).
@@ -391,6 +396,7 @@ fn resolve_variables_at_pc<R: Reader>(
     pc: ProgramCounter,
     requested_vars: &[String],
     cfa_sp_delta: i64,
+    max_nested_depth: usize,
 ) -> Result<Vec<ResolvedVariable>> {
     let mut resolved = Vec::new();
     let mut units = dwarf.units();
@@ -464,8 +470,8 @@ fn resolve_variables_at_pc<R: Reader>(
                 let nested_type = if should_resolve_nested {
                     use crate::dwarf::nested_types::{resolve_nested_type, NestedTypeConfig};
                     let config = NestedTypeConfig {
-                        max_depth: 2,  // Default depth limit
-                        max_struct_fields: -1,  // -1 = all fields
+                        max_depth: max_nested_depth,
+                        max_struct_fields: -1,
                         max_elements: 64,
                     };
                     detrix_logging::debug!(

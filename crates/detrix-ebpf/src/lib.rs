@@ -44,3 +44,4 @@ pub mod probe;
 
 pub use adapter::EbpfAdapter;
 pub use factory::{EbpfAdapterFactory, EbpfGoFactory};
+pub use probe::types::CaptureConfig;

@@ -60,8 +60,9 @@ use crate::dwarf::typeinfo::{resolve_type_info, TypeInfo};
 use crate::error::{Error, Result};
 use gimli::{AttributeValue, DebuggingInformationEntry, DwAt, Reader, Unit};
 
-/// Maximum depth to recurse (safety limit, matches Delve's default behavior).
-const MAX_DEPTH: usize = 10;
+/// Hard safety cap on recursion depth (prevents cycles and stack overflow).
+/// Always >= any user-configured max_capture_depth.
+const MAX_DEPTH: usize = 32;
 
 /// Returns true for type tags that should be transparently followed (typedef chains).
 ///

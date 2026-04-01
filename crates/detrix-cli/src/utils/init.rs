@@ -386,10 +386,12 @@ fn init_adapter_factory(
     let dap_factory = Arc::new(DapAdapterFactoryImpl::new(base_path.to_path_buf()));
 
     // On Linux, wrap with EbpfGoFactory so Go connections use eBPF uprobes.
+    // Pass capture config from [ebpf] section so max_capture_depth etc. are respected.
     #[cfg(target_os = "linux")]
-    let dap_factory: DapAdapterFactoryRef = Arc::new(detrix_ebpf::EbpfGoFactory::new(
+    let dap_factory: DapAdapterFactoryRef = Arc::new(detrix_ebpf::EbpfGoFactory::new_with_config(
         dap_factory,
         base_path.to_path_buf(),
+        detrix_ebpf::CaptureConfig::from(&config.ebpf),
     ));
     #[cfg(not(target_os = "linux"))]
     let dap_factory: DapAdapterFactoryRef = dap_factory;
