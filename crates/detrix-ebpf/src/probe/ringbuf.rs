@@ -720,6 +720,40 @@ fn parse_struct_fields_from_blob(
             } else {
                 CapturedValue::String { data: vec![], len: 0 }
             }
+        } else if field.type_info.is_array && field.type_info.array_element_count > 0 {
+            // Fixed-size array: iterate elements and decode each
+            let elem_size = field.byte_size / field.type_info.array_element_count;
+            let mut elements = Vec::new();
+            
+            for elem_idx in 0..field.type_info.array_element_count {
+                let elem_start = start + (elem_idx * elem_size) as usize;
+                if elem_start + elem_size as usize > blob.len() {
+                    break;
+                }
+                
+                let elem_slice = &blob[elem_start..elem_start + elem_size as usize];
+                let val = match elem_size {
+                    8 => u64::from_le_bytes(elem_slice.try_into().unwrap_or([0; 8])),
+                    4 => u32::from_le_bytes(elem_slice.try_into().unwrap_or([0; 4])) as u64,
+                    2 => u16::from_le_bytes(elem_slice.try_into().unwrap_or([0; 2])) as u64,
+                    1 => elem_slice[0] as u64,
+                    _ => 0,
+                };
+                
+                // Decode IEEE 754 float for float arrays
+                let elem_value = match field.type_info.array_element_type.as_str() {
+                    "float64" => CapturedValue::Float(f64::from_bits(val)),
+                    "float32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
+                    _ => CapturedValue::Scalar(val),
+                };
+                
+                elements.push(elem_value);
+            }
+            
+            CapturedValue::Array {
+                element_type: field.type_info.array_element_type.clone(),
+                elements,
+            }
         } else {
             // Scalar / pointer / other: read LE integer of appropriate size
             let end = (start + size).min(blob.len());

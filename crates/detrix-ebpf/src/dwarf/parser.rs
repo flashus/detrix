@@ -828,6 +828,7 @@ mod tests {
             is_slice: false,
             is_array: false,
             is_struct: false,
+            ..TypeInfo::unknown()
         }
     }
 
@@ -841,6 +842,7 @@ mod tests {
             is_slice: true,
             is_array: false,
             is_struct: false,
+            ..TypeInfo::unknown()
         }
     }
 
@@ -854,6 +856,7 @@ mod tests {
             is_slice: false,
             is_array: true,
             is_struct: false,
+            ..TypeInfo::unknown()
         }
     }
 
@@ -867,6 +870,7 @@ mod tests {
             is_slice: false,
             is_array: false,
             is_struct: true,
+            ..TypeInfo::unknown()
         }
     }
 

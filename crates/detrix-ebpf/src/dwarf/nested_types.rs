@@ -453,12 +453,14 @@ fn resolve_struct_fields<R: Reader>(
             _ => 0,
         };
 
+        let field_type_info = resolve_type_info(child, unit, dwarf)?;
+
+        // Go DWARF does NOT emit DW_AT_byte_size on DW_TAG_member — size lives on the type.
+        // Fall back to the type's byte_size (e.g. 40 for [5]float64, 312 for main.Order).
         let byte_size = match child.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0)) {
             Some(AttributeValue::Udata(n)) => n,
-            _ => 8,
+            _ => field_type_info.byte_size,
         };
-
-        let field_type_info = resolve_type_info(child, unit, dwarf)?;
 
         detrix_logging::debug!(
             "[nested_types] field '{}' byte_offset={} byte_size={} type='{}'",

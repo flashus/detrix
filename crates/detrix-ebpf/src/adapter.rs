@@ -137,9 +137,14 @@ impl EbpfAdapter {
                     }
                     CapturedValue::Float(f) => Some(TypedValue::Numeric(*f)),
                     CapturedValue::Slice { len, .. } => Some(TypedValue::Numeric(*len as f64)),
+                    CapturedValue::Array { .. } => {
+                        // Arrays have no single typed value — use JSON representation
+                        None
+                    }
                     CapturedValue::Bytes(_) => None, // raw bytes have no single typed representation
                     CapturedValue::Error(_) => None,
                     CapturedValue::Struct { .. } => None, // structs have no single typed value (use value_json)
+                    CapturedValue::Map { .. } => None, // maps have no single typed value (use value_json)
                 };
                 ExpressionValue {
                     expression: var.name.clone(),

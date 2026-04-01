@@ -103,7 +103,17 @@ pub enum CapturedValue {
     String { data: Vec<u8>, len: usize },
     /// Go slice header: len and cap (ptr is captured but not returned to callers).
     Slice { len: u64, cap: u64 },
+    /// Fixed-size array with element values.
+    ///
+    /// Elements are captured inline from the array's memory.
+    /// Element type is preserved for JSON serialization.
+    Array {
+        element_type: String,
+        elements: Vec<CapturedValue>,
+    },
     /// Raw bytes from a fixed-size array or struct captured as a blob.
+    ///
+    /// Used when element type is unknown or array is too large to iterate.
     Bytes(Vec<u8>),
     /// Struct with named fields (depth-limited nested capture).
     ///
@@ -112,6 +122,16 @@ pub enum CapturedValue {
     Struct {
         type_name: String,
         fields: Vec<(String, Box<CapturedValue>)>,
+    },
+    /// Map (key-value pairs) — currently unsupported.
+    ///
+    /// Go maps are complex runtime structures (hmap) that require
+    /// special introspection. This variant is a placeholder for future support.
+    Map {
+        key_type: String,
+        value_type: String,
+        entries: Vec<(CapturedValue, CapturedValue)>,
+        reason: String,  // Explanation of why capture failed/partial
     },
     /// Read failed (invalid address, variable optimized out, etc.)
     Error(String),
@@ -207,6 +227,15 @@ impl CapturedValue {
                 }
             }
             Self::Slice { len, cap } => format!("{{\"len\":{len},\"cap\":{cap}}}"),
+            Self::Array { element_type, elements } => {
+                // Convert array elements to JSON array
+                let n = elements.len();
+                let elem_strs: Vec<String> = elements
+                    .iter()
+                    .map(|elem| elem.to_json_value(VariableSize::QWord))
+                    .collect();
+                format!("{{\"__type\":\"[{n}]{element_type}\",\"elements\":[{}]}}", elem_strs.join(","))
+            }
             Self::Bytes(b) => {
                 // Hex-encode raw bytes for JSON portability
                 let hex: String = b.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -222,6 +251,11 @@ impl CapturedValue {
                     })
                     .collect();
                 format!("{{\"__type\":\"{}\",{}}}", type_name, field_strs.join(","))
+            }
+            Self::Map { key_type, value_type, entries, reason } => {
+                // Maps are unsupported — return error with explanation
+                format!("{{\"__type\":\"map[{key_type}]{value_type}\",\"error\":\"{reason}\",\"partial_entries\":{}}}", 
+                    entries.len())
             }
             Self::Error(msg) => format!("\"<error: {msg}>\""),
         }

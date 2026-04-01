@@ -28,7 +28,7 @@
 use crate::dwarf::types::VariableSize;
 use crate::error::{Error, Result};
 
-use gimli::{AttributeValue, DebuggingInformationEntry, DwAt, Reader};
+use gimli::{AttributeValue, DebuggingInformationEntry, DwAt, Reader, Unit};
 
 /// Resolved type info for a variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +49,10 @@ pub struct TypeInfo {
     pub is_array: bool,
     /// Whether this is a struct type (non-string, non-slice aggregate).
     pub is_struct: bool,
+    /// Element count for arrays (0 for non-arrays).
+    pub array_element_count: u64,
+    /// Element type name for arrays (empty for non-arrays).
+    pub array_element_type: String,
 }
 
 impl TypeInfo {
@@ -63,6 +67,8 @@ impl TypeInfo {
             is_slice: false,
             is_array: false,
             is_struct: false,
+            array_element_count: 0,
+            array_element_type: String::new(),
         }
     }
 }
@@ -261,6 +267,8 @@ fn resolve_type_at_offset<R: Reader>(
                 is_slice: false,
                 is_array: false,
                 is_struct: false,
+                array_element_count: 0,
+                array_element_type: String::new(),
             })
         }
 
@@ -293,6 +301,7 @@ fn resolve_type_at_offset<R: Reader>(
 
         // Fixed-size array type `[N]T` — stores N elements inline on stack.
         // Go DWARF includes DW_AT_byte_size on the array type itself.
+        // Element count is in DW_TAG_subrange_type child with DW_AT_count.
         gimli::DW_TAG_array_type => {
             let byte_size = match entry.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0)) {
                 Some(AttributeValue::Udata(n)) => n,
@@ -300,7 +309,11 @@ fn resolve_type_at_offset<R: Reader>(
             };
             // Use resolve_typedef_target to handle cross-unit element type references
             let elem_info = resolve_typedef_target(entry, unit, dwarf, depth)?;
-            let name = format!("[N]{}", elem_info.name); // [N]T — N not yet decoded
+            
+            // Get element count from DW_TAG_subrange_type child
+            let element_count = get_array_element_count(entry, unit, dwarf)?;
+            let name = format!("[{}]{}", element_count, elem_info.name);
+            
             Ok(TypeInfo {
                 name,
                 size: VariableSize::QWord, // Header word for location; actual read uses byte_size
@@ -310,6 +323,8 @@ fn resolve_type_at_offset<R: Reader>(
                 is_slice: false,
                 is_array: true,
                 is_struct: false,
+                array_element_count: element_count,
+                array_element_type: elem_info.name.clone(),
             })
         }
 
@@ -354,6 +369,8 @@ fn resolve_base_type<R: Reader>(
         is_slice: false,
         is_array: false,
         is_struct: false,
+        array_element_count: 0,
+        array_element_type: String::new(),
     })
 }
 
@@ -369,6 +386,68 @@ fn get_pointee_name<R: Reader>(
         Ok(inner) => Ok(inner.name),
         Err(_) => Ok("void".to_string()),
     }
+}
+
+/// Get the element count for an array type from DW_TAG_subrange_type child.
+fn get_array_element_count<R: Reader>(
+    array_entry: &DebuggingInformationEntry<R>,
+    unit: &Unit<R>,
+    _dwarf: &gimli::Dwarf<R>,
+) -> Result<u64> {
+    // Array types have DW_TAG_subrange_type child with DW_AT_count or DW_AT_upper_bound
+    let mut cursor = unit.entries_at_offset(array_entry.offset())?;
+    
+    // Skip the array entry itself
+    let Some(_) = cursor.next_dfs()? else {
+        return Ok(0);
+    };
+    
+    // Look for DW_TAG_subrange_type child
+    while let Some(child) = cursor.next_dfs()? {
+        detrix_logging::debug!(
+            "[DWARF typeinfo] array child tag={:?} at offset {:?}",
+            child.tag(), child.offset()
+        );
+        
+        if child.tag() != gimli::DW_TAG_subrange_type {
+            continue;
+        }
+        
+        // Try DW_AT_count first
+        if let Some(count) = child.attr_value(DwAt(gimli::constants::DW_AT_count.0)) {
+            detrix_logging::debug!(
+                "[DWARF typeinfo] array DW_AT_count={:?}",
+                count
+            );
+            match count {
+                AttributeValue::Udata(n) => return Ok(n),
+                AttributeValue::Data1(n) => return Ok(n as u64),
+                AttributeValue::Data2(n) => return Ok(n as u64),
+                AttributeValue::Data4(n) => return Ok(n as u64),
+                AttributeValue::Data8(n) => return Ok(n),
+                _ => {}
+            }
+        }
+        
+        // Fallback to DW_AT_upper_bound + 1
+        if let Some(upper) = child.attr_value(DwAt(gimli::constants::DW_AT_upper_bound.0)) {
+            detrix_logging::debug!(
+                "[DWARF typeinfo] array DW_AT_upper_bound={:?} (count will be upper+1)",
+                upper
+            );
+            match upper {
+                AttributeValue::Udata(n) => return Ok(n + 1),
+                AttributeValue::Data1(n) => return Ok(n as u64 + 1),
+                AttributeValue::Data2(n) => return Ok(n as u64 + 1),
+                AttributeValue::Data4(n) => return Ok(n as u64 + 1),
+                AttributeValue::Data8(n) => return Ok(n + 1),
+                _ => {}
+            }
+        }
+    }
+    
+    detrix_logging::debug!("[DWARF typeinfo] array element count not found, returning 0");
+    Ok(0)  // Unknown count
 }
 
 /// Resolve a DW_TAG_structure_type DIE.
@@ -463,6 +542,8 @@ fn resolve_struct_type<R: Reader>(
         is_slice,
         is_array: false,
         is_struct,
+        array_element_count: 0,
+        array_element_type: String::new(),
     })
 }
 
@@ -700,6 +781,7 @@ mod tests {
             is_slice: false,
             is_array: false,
             is_struct: false,
+            ..TypeInfo::unknown()
         };
         assert!(info.is_pointer);
         assert_eq!(info.size.bytes(), 8);
@@ -716,6 +798,7 @@ mod tests {
             is_slice: false,
             is_array: false,
             is_struct: false,
+            ..TypeInfo::unknown()
         };
         assert!(info.is_string);
         assert!(!info.is_slice);
@@ -732,6 +815,7 @@ mod tests {
             is_slice: true,
             is_array: false,
             is_struct: false,
+            ..TypeInfo::unknown()
         };
         assert!(info.is_slice);
         assert!(!info.is_string);
@@ -740,17 +824,21 @@ mod tests {
     #[test]
     fn type_info_array() {
         let info = TypeInfo {
-            name: "[N]int64".to_string(),
+            name: "[5]int64".to_string(),
             size: VariableSize::QWord,
-            byte_size: 32,
+            byte_size: 40,
             is_pointer: false,
             is_string: false,
             is_slice: false,
             is_array: true,
             is_struct: false,
+            array_element_count: 5,
+            array_element_type: "int64".to_string(),
+            ..TypeInfo::unknown()
         };
         assert!(info.is_array);
-        assert_eq!(info.byte_size, 32);
+        assert_eq!(info.byte_size, 40);
+        assert_eq!(info.array_element_count, 5);
     }
 
     #[test]
@@ -764,6 +852,7 @@ mod tests {
             is_slice: false,
             is_array: false,
             is_struct: true,
+            ..TypeInfo::unknown()
         };
         assert!(info.is_struct);
         assert_eq!(info.byte_size, 48);
