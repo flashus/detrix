@@ -814,4 +814,4 @@ pub const DEFAULT_EBPF_STRING_CAPTURE_BYTES: usize = 64;
 ///
 /// Arrays and structs are read as raw byte blobs via `bpf_probe_read_user`. Clamped
 /// to at most this value to limit ring buffer usage. Must be a multiple of 8.
-pub const DEFAULT_EBPF_BLOB_CAPTURE_BYTES: usize = 64;
+pub const DEFAULT_EBPF_BLOB_CAPTURE_BYTES: usize = 256;

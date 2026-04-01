@@ -276,20 +276,24 @@ fn resolve_type_at_offset<R: Reader>(
         gimli::DW_TAG_typedef => {
             let typedef_name = read_attr_string(entry, dwarf, gimli::constants::DW_AT_name)?;
             detrix_logging::debug!(
-                "[DWARF typeinfo] typedef name={:?} following chain",
-                typedef_name
+                "[DWARF typeinfo] TYPEDEF: name={:?} at offset {:?}",
+                typedef_name, entry.offset()
             );
-            
+
             // Get the inner type offset - may be unit-local or cross-unit
             let mut inner_info = resolve_typedef_target(entry, unit, dwarf, depth)?;
             
+            detrix_logging::debug!(
+                "[DWARF typeinfo] TYPEDEF '{}' → inner: name='{}' is_string={} is_struct={} byte_size={}",
+                typedef_name.as_ref().map(|s| s.as_str()).unwrap_or("???"),
+                inner_info.name, inner_info.is_string, inner_info.is_struct, inner_info.byte_size
+            );
+
             // Override name with the typedef name if available
             if let Some(name) = read_attr_string(entry, dwarf, gimli::constants::DW_AT_name)? {
                 detrix_logging::debug!(
-                    "[DWARF typeinfo] typedef '{}' overriding inner name='{}' is_string={}",
-                    name,
-                    inner_info.name,
-                    inner_info.is_string
+                    "[DWARF typeinfo] TYPEDEF '{}' final: name='{}' is_string={} (preserved from inner)",
+                    name, inner_info.name, inner_info.is_string
                 );
                 inner_info.name = name;
             }
@@ -360,12 +364,21 @@ fn resolve_base_type<R: Reader>(
         byte_size
     );
 
+    // Go's DWARF emits 'string' as a base_type with byte_size=16
+    // Check for string type alias (type MyString string)
+    let is_string = name == "string" || name == "basic/string";
+    
+    detrix_logging::info!(
+        "[DWARF typeinfo] BASE_TYPE: name='{}' byte_size={} is_string={}",
+        name, byte_size, is_string
+    );
+
     Ok(TypeInfo {
         name,
         size,
         byte_size,
         is_pointer: false,
-        is_string: false,
+        is_string,
         is_slice: false,
         is_array: false,
         is_struct: false,
@@ -526,10 +539,13 @@ fn resolve_struct_type<R: Reader>(
 
     // Go string = struct with "str" field (ptr) + "len" field = 16 bytes on amd64
     let is_string = is_go_string_type_by_name_and_size(&name, &linkage_name, byte_size);
-    // Go slice = struct with array ptr + len + cap = 24 bytes
-    let is_slice = byte_size == 24 && !is_string;
+    // time.Time is a 24-byte struct (wall uint64 + ext int64 + loc *Location)
+    // Don't confuse it with slices
+    let is_time = name == "time.Time" || name.ends_with(".Time");
+    // Go slice = struct with array ptr + len + cap = 24 bytes (but not time.Time)
+    let is_slice = byte_size == 24 && !is_string && !is_time;
     // Everything else is a user-defined struct (captured as blob)
-    let is_struct = !is_string && !is_slice;
+    let is_struct = !is_string && !is_slice && !is_time;
 
     let size = VariableSize::from_byte_size(byte_size).unwrap_or(VariableSize::QWord);
 
@@ -594,8 +610,9 @@ fn is_go_string_type_by_name_and_size(name: &str, linkage_name: &str, byte_size:
         {
             return true;
         }
-        // Named type aliases: if it's 16 bytes and has "string" anywhere in the name
-        // This catches `type MyString string` declarations
+        // Named type aliases: if it's 16 bytes AND has "string" in the name
+        // This catches `type MyString string` and `type OrderStatus string` declarations
+        // We require BOTH size match AND name containing "string" to avoid false positives
         if name.to_lowercase().contains("string") {
             return true;
         }

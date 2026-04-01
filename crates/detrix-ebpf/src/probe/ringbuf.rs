@@ -705,15 +705,37 @@ fn parse_struct_fields_from_addr(
                     .unwrap_or(0);
                 let slice_cap = mem_reader.read_u64(pid, field_addr + 16)
                     .unwrap_or(0);
-                
+
                 // Return slice header (elements would require reading array from slice_ptr)
                 CapturedValue::Slice { len: slice_len, cap: slice_cap }
+            } else if field.type_info.name == "time.Time" || field.type_info.name.ends_with(".Time") {
+                // time.Time struct: wall uint64 (8 bytes) + ext int64 (8 bytes) + loc *Location (8 bytes) = 24 bytes
+                // For now, capture as struct with wall and ext fields
+                let wall = mem_reader.read_u64(pid, field_addr).unwrap_or(0);
+                let ext = mem_reader.read_u64(pid, field_addr + 8).unwrap_or(0);
+                // Convert to timestamp (ext is Unix time in seconds or nanoseconds)
+                // For display, show as struct with wall/ext
+                CapturedValue::Struct {
+                    type_name: "time.Time".to_string(),
+                    fields: vec![
+                        ("wall".to_string(), Box::new(CapturedValue::Scalar(wall))),
+                        ("ext".to_string(), Box::new(CapturedValue::Scalar(ext))),
+                    ],
+                }
             } else if field.type_info.is_array {
                 // Fixed-size array: read as blob (elements stored inline)
                 let blob_size = field.byte_size.min(config.max_blob_capture as u64) as usize;
                 match mem_reader.read_bytes(pid, field_addr, blob_size) {
                     Ok(bytes) => CapturedValue::Bytes(bytes),
                     Err(_) => CapturedValue::Bytes(vec![0u8; blob_size]),
+                }
+            } else if field.type_info.name.starts_with("map[") {
+                // Map types are complex runtime structures - mark as unsupported
+                CapturedValue::Map {
+                    key_type: "unknown".to_string(),
+                    value_type: "unknown".to_string(),
+                    entries: vec![],
+                    reason: "map capture requires runtime introspection".to_string(),
                 }
             } else if field.type_info.is_struct {
                 // Embedded struct field: read bytes and recursively parse if we have type info.
@@ -792,10 +814,14 @@ fn parse_struct_fields_from_addr(
                 }
             } else {
                 // Scalar field (int, float, bool, etc.): read from user-space
-                match mem_reader.read_u64(pid, field_addr) {
-                    Ok(scalar_val) => CapturedValue::Scalar(scalar_val),
-                    Err(_) => CapturedValue::Scalar(0),
-                }
+                let scalar_val = mem_reader.read_u64(pid, field_addr).unwrap_or(0);
+                // Decode IEEE 754 float for float types
+                let field_value = match field.type_info.name.as_str() {
+                    "float64" => CapturedValue::Float(f64::from_bits(scalar_val)),
+                    "float32" => CapturedValue::Float(f32::from_bits(scalar_val as u32) as f64),
+                    _ => CapturedValue::Scalar(scalar_val),
+                };
+                field_value
             };
 
             fields.push((field_name, Box::new(field_value)));
@@ -987,6 +1013,22 @@ fn parse_struct_fields_from_blob(
             } else {
                 // Nil pointer
                 CapturedValue::Scalar(0)
+            }
+        } else if field.type_info.is_slice {
+            // Slice field in blob: read {ptr, len, cap} header (24 bytes)
+            // Go slice header: ptr (8 bytes) + len (8 bytes) + cap (8 bytes)
+            if start + 24 <= blob.len() {
+                let slice_ptr = u64::from_le_bytes(blob[start..start+8].try_into().unwrap_or([0; 8]));
+                let slice_len = u64::from_le_bytes(blob[start+8..start+16].try_into().unwrap_or([0; 8]));
+                let slice_cap = u64::from_le_bytes(blob[start+16..start+24].try_into().unwrap_or([0; 8]));
+                detrix_logging::debug!(
+                    "[ringbuf] slice field '{}' ptr={:#x} len={} cap={}",
+                    field.name, slice_ptr, slice_len, slice_cap
+                );
+                CapturedValue::Slice { len: slice_len, cap: slice_cap }
+            } else {
+                // Not enough bytes for slice header
+                CapturedValue::Slice { len: 0, cap: 0 }
             }
         } else {
             // Scalar / other: read LE integer of appropriate size
