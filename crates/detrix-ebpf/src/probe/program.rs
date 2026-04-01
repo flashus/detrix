@@ -300,7 +300,7 @@ fn build_struct_field_definitions(
 ) -> String {
     // Structs are captured as a single u64 (base address)
     // The var{idx} field already exists from the main variable capture
-    format!("    // struct captured as base address (user-space expands fields)\n")
+    "    // struct captured as base address (user-space expands fields)\n".to_string()
 }
 
 fn simple_read_expr(loc: &VariableLocation, field: &str) -> String {

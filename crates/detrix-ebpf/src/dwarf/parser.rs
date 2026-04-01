@@ -420,9 +420,19 @@ fn resolve_variables_at_pc<R: Reader>(
                 continue;
             }
 
-            let name = match read_die_name(entry, dwarf)? {
+            let raw_name = match read_die_name(entry, dwarf)? {
                 Some(n) => n,
                 None => continue,
+            };
+
+            // Go compiler emits heap-escaped local variables with a "&" prefix in DW_AT_name
+            // (e.g. `order` that escapes becomes `&order` in DWARF).
+            // Match both "order" (the canonical name) and "&order" (the heap-escaped form)
+            // when the user requests "order" — this mirrors Delve's behaviour in eval.go.
+            let (name, is_heap_escaped) = if let Some(stripped) = raw_name.strip_prefix('&') {
+                (stripped.to_string(), true)
+            } else {
+                (raw_name.clone(), false)
             };
 
             if !requested_vars.is_empty() && !requested_vars.contains(&name) {
@@ -434,9 +444,8 @@ fn resolve_variables_at_pc<R: Reader>(
                 // Falls back to QWord / "unknown" on resolution failure.
                 let type_offset_debug = entry.attr_value(DwAt(gimli::constants::DW_AT_type.0));
                 detrix_logging::debug!(
-                    "[DWARF resolve] variable '{}' type_attr={:?}",
-                    name,
-                    type_offset_debug
+                    "[DWARF resolve] variable '{}' (raw='{}' heap_escaped={}) type_attr={:?}",
+                    name, raw_name, is_heap_escaped, type_offset_debug
                 );
                 let type_info = resolve_type_info(entry, &unit, dwarf)?;
                 let size = if type_info.size == VariableSize::QWord {
@@ -448,7 +457,30 @@ fn resolve_variables_at_pc<R: Reader>(
 
                 // Upgrade scalar/piece locations to compound types (GoString, GoSlice).
                 // Multi-piece = Go register ABI; single-piece = stack-allocated.
-                let location = upgrade_location_for_type(locations, &type_info);
+                let location = {
+                    let upgraded = upgrade_location_for_type(locations, &type_info);
+                    // For heap-escaped variables (& prefix in DWARF name): the location
+                    // expression gives the stack slot of a pointer to the heap value.
+                    // upgrade_location_for_type sees a struct type + StackOffset and returns
+                    // StackBlob — but the stack slot holds only the pointer, not the struct
+                    // bytes. Convert to StackIndirect so BPF reads 8 bytes (the pointer),
+                    // and user-space dereferences it to get the actual struct from the heap.
+                    if is_heap_escaped {
+                        match upgraded {
+                            VariableLocation::StackBlob { offset, byte_size } => {
+                                detrix_logging::info!(
+                                    "[DWARF] '{}' heap-escaped (& prefix): \
+                                     StackBlob→StackIndirect offset={} byte_size={}",
+                                    name, offset, byte_size
+                                );
+                                VariableLocation::StackIndirect { offset, byte_size }
+                            }
+                            other => other,
+                        }
+                    } else {
+                        upgraded
+                    }
+                };
 
                 detrix_logging::debug!(
                     "DWARF resolved '{}': type={} is_string={} is_slice={} location={}",

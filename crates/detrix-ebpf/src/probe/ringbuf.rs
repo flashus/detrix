@@ -545,6 +545,7 @@ mod tests {
         let val = CapturedValue::Bytes(vec![0xAB, 0xCD]);
         assert_eq!(val.as_bytes(), Some([0xABu8, 0xCD].as_ref()));
     }
+
 }
 
 // ============================================================================
@@ -636,6 +637,21 @@ fn parse_struct_fields_from_addr(
         });
     }
 
+    // Heap-escaped Go variables have DWARF type `*T` (pointer to T).
+    // The BPF ring buffer captures the pointer value (which IS the struct address on the heap).
+    // Transparently unwrap one pointer level so we parse the pointee struct directly.
+    if let Some(crate::dwarf::nested_types::NestedType::Pointer { pointee, .. }) = nested_type {
+        let pointee_name = pointee.type_info().name.clone();
+        return parse_struct_fields_from_addr(
+            struct_base_addr,
+            &pointee_name,
+            config,
+            Some(pointee.as_ref()),
+            mem_reader,
+            pid,
+        );
+    }
+
     let mut fields = Vec::new();
 
     // Use DWARF type info if available
@@ -651,8 +667,8 @@ fn parse_struct_fields_from_addr(
             let field_addr = struct_base_addr + field.byte_offset;
             
             detrix_logging::debug!(
-                "[ringbuf] Reading field '{}' at {:#x} (type: {}, is_slice={}, is_array={})",
-                field_name, field_addr, field.type_info.name, field.type_info.is_slice, field.type_info.is_array
+                "[ringbuf] Reading field '{}' at {:#x} (type: {}, is_string={}, is_slice={}, is_array={})",
+                field_name, field_addr, field.type_info.name, field.type_info.is_string, field.type_info.is_slice, field.type_info.is_array
             );
             
             // Parse field based on its type
