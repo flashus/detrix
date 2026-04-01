@@ -471,9 +471,11 @@ fn resolve_struct_fields<R: Reader>(
             _ => field_type_info.byte_size,
         };
 
-        // For pointer fields within depth limits, resolve the pointee type so that the
-        // ring buffer parser can dereference the pointer and capture the struct fields.
-        let field_nested = if field_type_info.is_pointer && depth < config.max_depth {
+        // For pointer and struct fields within depth limits, resolve nested type info so
+        // the ring buffer parser can dereference pointers and recursively parse embedded structs.
+        let field_nested = if (field_type_info.is_pointer || field_type_info.is_struct)
+            && depth < config.max_depth
+        {
             resolve_nested_type_impl(child, unit, dwarf, config, depth + 1).ok()
         } else {
             None
@@ -564,7 +566,9 @@ fn resolve_pointer_type<R: Reader>(
         Some(AttributeValue::UnitRef(offset)) => {
             let mut cursor = unit.entries_at_offset(offset)?;
             if let Some(pointee_entry) = cursor.next_dfs()? {
-                let pointee = resolve_nested_type_impl(pointee_entry, unit, dwarf, config, depth + 1)?;
+                // Following a pointer does NOT consume depth budget — only entering
+                // struct fields does (matching Delve's MaxVariableRecurse semantics).
+                let pointee = resolve_nested_type_impl(pointee_entry, unit, dwarf, config, depth)?;
                 return Ok(NestedType::Pointer {
                     type_info,
                     pointee: Box::new(pointee),
@@ -588,12 +592,13 @@ fn resolve_pointer_type<R: Reader>(
                             "[nested_types] resolve_pointer_type DebugInfoRef → tag={:?}",
                             pointee_entry.tag()
                         );
+                        // Following a pointer does NOT consume depth budget.
                         let pointee = resolve_nested_type_impl(
                             pointee_entry,
                             &target_unit,
                             dwarf,
                             config,
-                            depth + 1,
+                            depth,  // not depth+1
                         )?;
                         return Ok(NestedType::Pointer {
                             type_info,

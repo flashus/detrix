@@ -127,6 +127,70 @@ pub fn parse_ring_buffer_event(
                     ..
                 }) = &var.nested_type
                 {
+                    // Heap-escape detection: Go may allocate a struct on the heap when its
+                    // address is taken (e.g. `globalPtr = &localStruct`). The DWARF location
+                    // still points to the stack slot, but the stack slot now holds an 8-byte
+                    // pointer to the heap struct instead of the struct bytes. We detect this
+                    // heuristically when:
+                    //   1. The declared struct size exceeds our capture window (stack slot is
+                    //      too small to hold the full struct — pointer fits in 8 bytes though)
+                    //   2. The first 8 captured bytes decode to a plausible Go heap address
+                    // If both hold, we try to dereference via user-space memory reader.
+                    let heap_bytes = if *byte_size > config.max_blob_capture && bytes.len() >= 8 {
+                        let candidate = u64::from_le_bytes(bytes[..8].try_into().unwrap_or([0; 8]));
+                        if looks_like_go_heap_ptr(candidate) {
+                            detrix_logging::debug!(
+                                "[ringbuf] StackBlob heap-escape candidate for '{}': ptr={:#x}",
+                                var.name, candidate
+                            );
+                            let real_capture = (*byte_size).min(config.max_blob_capture);
+                            mem_reader.read_bytes(pid, candidate, real_capture)
+                                .or_else(|_| mem_reader.read_bytes(tid, candidate, real_capture))
+                                .ok()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    let effective_bytes = heap_bytes.as_deref().unwrap_or(&bytes);
+                    parse_struct_fields_from_blob(
+                        effective_bytes,
+                        &var.type_name,
+                        dwarf_fields,
+                        config,
+                        mem_reader,
+                        pid,
+                    )
+                } else {
+                    CapturedValue::Bytes(bytes)
+                }
+            }
+            crate::dwarf::types::VariableLocation::StackIndirect { byte_size, .. } => {
+                // `val` holds the pointer read from the stack slot by BPF.
+                // Heap-escaped Go struct: dereference the pointer in user-space to read
+                // the actual struct bytes, then parse fields using DWARF type info.
+                detrix_logging::debug!(
+                    "[ringbuf] StackIndirect '{}': ptr={:#x} byte_size={}",
+                    var.name, val, byte_size
+                );
+                let capture = (*byte_size).min(config.max_blob_capture);
+                let bytes = if val != 0 {
+                    let mut result = mem_reader.read_bytes(pid, val, capture);
+                    if result.is_err() {
+                        result = mem_reader.read_bytes(tid, val, capture);
+                    }
+                    result.unwrap_or_else(|_| vec![0u8; capture])
+                } else {
+                    vec![0u8; capture]
+                };
+
+                if let Some(crate::dwarf::nested_types::NestedType::Struct {
+                    fields: dwarf_fields,
+                    ..
+                }) = &var.nested_type
+                {
                     parse_struct_fields_from_blob(
                         &bytes,
                         &var.type_name,
@@ -515,6 +579,19 @@ mod tests {
 // Nested struct support
 // ============================================================================
 
+/// Returns true if `addr` looks like a Go heap pointer on Linux/amd64.
+///
+/// Used for heap-escape detection: when a Go struct variable's address is taken,
+/// the compiler allocates it on the heap and the stack slot holds a pointer to it.
+/// A plausible Go heap pointer satisfies:
+/// - >= 0x1000 (avoids null-page and very small values)
+/// - < 0x0001_0000_0000_0000 (within the 48-bit userspace virtual address space)
+/// - 8-byte aligned (Go heap allocations are always word-aligned)
+#[inline]
+fn looks_like_go_heap_ptr(addr: u64) -> bool {
+    addr >= 0x1000 && addr < 0x0001_0000_0000_0000 && addr % 8 == 0
+}
+
 /// Walk through `NestedType::Pointer` wrappers to find the first `Struct` variant.
 ///
 /// Go's cross-CU pointer types can produce double-wrapped Pointer nodes
@@ -664,11 +741,30 @@ fn parse_struct_fields_from_addr(
                     Err(_) => CapturedValue::Bytes(vec![0u8; blob_size]),
                 }
             } else if field.type_info.is_struct {
-                // Nested struct: read as blob
+                // Embedded struct field: read bytes and recursively parse if we have type info.
                 let blob_size = field.byte_size.min(config.max_blob_capture as u64) as usize;
-                match mem_reader.read_bytes(pid, field_addr, blob_size) {
-                    Ok(bytes) => CapturedValue::Bytes(bytes),
-                    Err(_) => CapturedValue::Bytes(vec![0u8; blob_size]),
+                if let Some(crate::dwarf::nested_types::NestedType::Struct {
+                    type_info: sub_type_info,
+                    fields: sub_fields,
+                    ..
+                }) = &field.nested_type
+                {
+                    match mem_reader.read_bytes(pid, field_addr, blob_size) {
+                        Ok(bytes) => parse_struct_fields_from_blob(
+                            &bytes,
+                            &sub_type_info.name,
+                            sub_fields,
+                            config,
+                            mem_reader,
+                            pid,
+                        ),
+                        Err(_) => CapturedValue::Bytes(vec![0u8; blob_size]),
+                    }
+                } else {
+                    match mem_reader.read_bytes(pid, field_addr, blob_size) {
+                        Ok(bytes) => CapturedValue::Bytes(bytes),
+                        Err(_) => CapturedValue::Bytes(vec![0u8; blob_size]),
+                    }
                 }
             } else if field.type_info.is_pointer {
                 // Pointer field: read the address, then dereference if we have type info.
@@ -834,6 +930,32 @@ fn parse_struct_fields_from_blob(
             CapturedValue::Array {
                 element_type: field.type_info.array_element_type.clone(),
                 elements,
+            }
+        } else if field.type_info.is_struct {
+            // Embedded struct field (not a pointer): recursively parse the sub-blob.
+            let end = (start + field.byte_size as usize).min(blob.len());
+            if start >= end {
+                break;
+            }
+            let sub_blob = &blob[start..end];
+
+            if let Some(crate::dwarf::nested_types::NestedType::Struct {
+                type_info: sub_type_info,
+                fields: sub_fields,
+                ..
+            }) = &field.nested_type
+            {
+                parse_struct_fields_from_blob(
+                    sub_blob,
+                    &sub_type_info.name,
+                    sub_fields,
+                    config,
+                    mem_reader,
+                    pid,
+                )
+            } else {
+                // No type info — return raw bytes
+                CapturedValue::Bytes(sub_blob.to_vec())
             }
         } else if field.type_info.is_pointer {
             // Pointer field: read 8-byte address from blob, then dereference if we have type info.

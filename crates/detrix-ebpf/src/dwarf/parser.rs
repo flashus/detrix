@@ -688,6 +688,19 @@ fn evaluate_location_expr<R: Reader>(
                     pieces.push(loc);
                 }
             }
+            Some(gimli::Operation::Deref { .. }) => {
+                // DW_OP_deref: treat the pending address as a pointer and dereference.
+                // Go heap-escaped variables: the stack slot holds a pointer to the heap struct.
+                // We convert StackOffset → StackIndirect so the ring buffer parser knows to
+                // read 8 bytes (the pointer) from BPF and dereference them in user-space.
+                detrix_logging::debug!("[DWARF eval] Deref: converting pending to StackIndirect");
+                if let Some(VariableLocation::StackOffset { offset }) = pending.take() {
+                    pending = Some(VariableLocation::StackIndirect { offset, byte_size: 0 });
+                } else {
+                    detrix_logging::debug!("[DWARF eval] Deref on non-StackOffset — discarding");
+                    pending = None;
+                }
+            }
             other => {
                 // Unrecognised operation — discard pending; we can't interpret it.
                 detrix_logging::debug!("[DWARF eval] Unhandled operation: {:?}", other);
@@ -788,13 +801,23 @@ fn upgrade_location_for_type(
             };
         }
     } else if (type_info.is_array || type_info.is_struct) && type_info.byte_size > 0 {
-        if let VariableLocation::StackOffset { offset } = location {
-            return VariableLocation::StackBlob {
-                offset,
-                byte_size: type_info.byte_size as usize,
-            };
+        match location {
+            VariableLocation::StackOffset { offset } => {
+                return VariableLocation::StackBlob {
+                    offset,
+                    byte_size: type_info.byte_size as usize,
+                };
+            }
+            VariableLocation::StackIndirect { offset, .. } => {
+                // Heap-escaped struct: BPF reads 8-byte pointer from stack,
+                // user-space dereferences the pointer to get actual struct bytes.
+                return VariableLocation::StackIndirect {
+                    offset,
+                    byte_size: type_info.byte_size as usize,
+                };
+            }
+            _ => {} // Register-based arrays/structs are unusual; fall through as scalar.
         }
-        // Register-based arrays/structs are unusual; fall through as scalar.
     }
     location
 }

@@ -250,6 +250,20 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                 )
             }
         }
+        VariableLocation::StackIndirect { offset, .. } => {
+            // Heap-escaped struct: read the 8-byte pointer from the stack slot.
+            // User-space dereferences the pointer to read the actual struct bytes.
+            // This produces the same BPF code as a plain StackOffset scalar read.
+            let size = 8usize;
+            if *offset >= 0 {
+                format!("    bpf_probe_read_user(&event->var{idx}, {size}, (void *)(ctx->sp + {offset}));")
+            } else {
+                format!(
+                    "    bpf_probe_read_user(&event->var{idx}, {size}, (void *)(ctx->sp - {}));",
+                    offset.unsigned_abs()
+                )
+            }
+        }
     }
 }
 

@@ -134,6 +134,18 @@ pub enum VariableLocation {
         /// Total byte size from DWARF `DW_AT_byte_size`. Clamped at runtime by `max_blob_capture`.
         byte_size: usize,
     },
+
+    /// Variable's stack slot holds a POINTER to the actual struct on the heap.
+    ///
+    /// Produced when DWARF location contains `DW_OP_deref` (heap-escaped Go variables).
+    /// BPF reads the 8-byte pointer from the stack slot, then user-space dereferences
+    /// the pointer to read `byte_size` bytes of the actual struct from process memory.
+    StackIndirect {
+        /// Offset from frame base (RSP) where the pointer lives.
+        offset: i64,
+        /// Byte size of the pointed-to struct (from DWARF `DW_AT_byte_size`).
+        byte_size: usize,
+    },
 }
 
 impl VariableLocation {
@@ -160,6 +172,7 @@ impl VariableLocation {
             Self::GoString { .. } => 2,
             Self::GoSlice { .. } => 3,
             Self::StackBlob { .. } => 1,
+            Self::StackIndirect { .. } => 1,
         }
     }
 }
@@ -182,6 +195,13 @@ impl fmt::Display for VariableLocation {
                     write!(f, "blob[{byte_size}b@sp+{offset:#x}]")
                 } else {
                     write!(f, "blob[{byte_size}b@sp-{:#x}]", offset.unsigned_abs())
+                }
+            }
+            Self::StackIndirect { offset, byte_size } => {
+                if *offset >= 0 {
+                    write!(f, "indirect[{byte_size}b@*sp+{offset:#x}]")
+                } else {
+                    write!(f, "indirect[{byte_size}b@*sp-{:#x}]", offset.unsigned_abs())
                 }
             }
         }
