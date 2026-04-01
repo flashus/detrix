@@ -246,8 +246,7 @@ impl CapturedValue {
                 let field_strs: Vec<String> = fields
                     .iter()
                     .map(|(name, value)| {
-                        // For nested values, use default size (QWord) since we don't track it per field
-                        format!("\"{}\": {}", name, value.to_json_value(VariableSize::QWord))
+                        format!("\"{}\":{}", name, value.to_json_value(VariableSize::QWord))
                     })
                     .collect();
                 format!("{{\"__type\":\"{}\",{}}}", type_name, field_strs.join(","))

@@ -321,6 +321,7 @@ mod tests {
                 location: VariableLocation::Register(Register::Rax),
                 size: VariableSize::QWord,
                 type_name: "int64".to_string(),
+                nested_type: None,
             }],
         }
     }

@@ -332,6 +332,7 @@ mod tests {
             location: loc,
             size,
             type_name: "int64".to_string(),
+            nested_type: None,
         }
     }
 
@@ -427,6 +428,7 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "string".to_string(),
+            nested_type: None,
         }];
         let prog = generate_bpf_program(&vars, false, &CaptureConfig::default()).unwrap();
         assert!(prog.source.contains("var0"));     // ptr field
@@ -445,6 +447,7 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "string".to_string(),
+            nested_type: None,
         }];
         let prog = generate_bpf_program(&vars, false, &CaptureConfig::default()).unwrap();
         // Struct must have the fixed-size string buffer
@@ -469,6 +472,7 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "string".to_string(),
+            nested_type: None,
         }];
         let prog = generate_bpf_program(&vars, false, &CaptureConfig::default()).unwrap();
         // The probe function must dereference the ptr to fill the str buffer
@@ -529,6 +533,7 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "TradeRequest".to_string(),
+            nested_type: None,
         }];
         let prog = generate_bpf_program(&vars, false, &CaptureConfig::default()).unwrap();
         // Struct must have the fixed-size blob buffer
@@ -553,11 +558,13 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "[32]int64".to_string(),
+            nested_type: None,
         }];
         let config = CaptureConfig {
             max_capture_vars: 8,
             max_string_capture: 64,
             max_blob_capture: 64,
+            ..CaptureConfig::default()
         };
         let prog = generate_bpf_program(&vars, false, &config).unwrap();
         // Clamped: min(256, 64) = 64
@@ -574,6 +581,7 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "TradeRequest".to_string(),
+            nested_type: None,
         };
         let expr = generate_read_expr(&var, 0, &CaptureConfig::default());
         assert!(
@@ -595,6 +603,7 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "[]int64".to_string(),
+            nested_type: None,
         }];
         let prog = generate_bpf_program(&vars, false, &CaptureConfig::default()).unwrap();
         assert!(prog.source.contains("var0_len"));

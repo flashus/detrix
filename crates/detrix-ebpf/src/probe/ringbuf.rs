@@ -230,6 +230,14 @@ mod tests {
                 _ => Ok(std::iter::repeat('x').take(len).collect()),
             }
         }
+
+        fn read_bytes(&self, _pid: u32, _ptr: u64, len: usize) -> Result<Vec<u8>> {
+            Ok(vec![0u8; len])
+        }
+
+        fn read_u64(&self, _pid: u32, _ptr: u64) -> Result<u64> {
+            Ok(0)
+        }
     }
 
     fn build_event_bytes(pid: u32, tid: u32, timestamp: u64, var_values: &[u64]) -> Vec<u8> {
@@ -267,6 +275,7 @@ mod tests {
             location: VariableLocation::Register(Register::Rax),
             size: VariableSize::QWord,
             type_name: "int64".to_string(),
+            nested_type: None,
         }
     }
 
@@ -349,6 +358,7 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "string".to_string(),
+            nested_type: None,
         }];
 
         let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
@@ -379,6 +389,7 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "string".to_string(),
+            nested_type: None,
         }];
 
         let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
@@ -407,6 +418,7 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "[]int64".to_string(),
+            nested_type: None,
         }];
 
         let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
@@ -434,12 +446,14 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "TradeRequest".to_string(),
+            nested_type: None,
         }];
 
         let config = CaptureConfig {
             max_capture_vars: 8,
             max_string_capture: 64,
             max_blob_capture: 64,
+            ..CaptureConfig::default()
         };
         let event = parse_ring_buffer_event(&data, &vars, false, &config, &StubMemReader).unwrap();
         match &event.values[0] {
@@ -465,12 +479,14 @@ mod tests {
             },
             size: VariableSize::QWord,
             type_name: "[4]int64".to_string(),
+            nested_type: None,
         }];
 
         let config = CaptureConfig {
             max_capture_vars: 8,
             max_string_capture: 64,
             max_blob_capture: 4,
+            ..CaptureConfig::default()
         };
         let event = parse_ring_buffer_event(&data, &vars, false, &config, &StubMemReader).unwrap();
         match &event.values[0] {
@@ -498,6 +514,28 @@ mod tests {
 // ============================================================================
 // Nested struct support
 // ============================================================================
+
+/// Walk through `NestedType::Pointer` wrappers to find the first `Struct` variant.
+///
+/// Go's cross-CU pointer types can produce double-wrapped Pointer nodes
+/// (the outer one from the member's DW_AT_type, the inner from the pointer type entry).
+/// This unwraps all pointer layers to get to the actual struct fields and type name.
+fn find_struct_pointee(
+    nested: &crate::dwarf::nested_types::NestedType,
+) -> Option<(&str, &[crate::dwarf::nested_types::StructField])> {
+    let mut current = nested;
+    loop {
+        match current {
+            crate::dwarf::nested_types::NestedType::Pointer { pointee, .. } => {
+                current = pointee.as_ref();
+            }
+            crate::dwarf::nested_types::NestedType::Struct { type_info, fields, .. } => {
+                return Some((type_info.name.as_str(), fields.as_slice()));
+            }
+            _ => return None,
+        }
+    }
+}
 
 /// Check if a type name indicates a struct type.
 ///
@@ -633,10 +671,53 @@ fn parse_struct_fields_from_addr(
                     Err(_) => CapturedValue::Bytes(vec![0u8; blob_size]),
                 }
             } else if field.type_info.is_pointer {
-                // Pointer: read address from user-space
-                match mem_reader.read_u64(pid, field_addr) {
-                    Ok(ptr_val) => CapturedValue::Scalar(ptr_val),
-                    Err(_) => CapturedValue::Scalar(0),
+                // Pointer field: read the address, then dereference if we have type info.
+                let ptr_val = mem_reader.read_u64(pid, field_addr).unwrap_or(0);
+
+                detrix_logging::debug!(
+                    "[ringbuf] pointer field '{}' at {:#x} ptr={:#x} has_nested={}",
+                    field_name, field_addr, ptr_val, field.nested_type.is_some()
+                );
+
+                if ptr_val != 0 {
+                    if let Some(nested) = &field.nested_type {
+                        if let Some((struct_name, struct_fields)) = find_struct_pointee(nested) {
+                            let read_size = (struct_fields
+                                .iter()
+                                .map(|f| f.byte_offset + f.byte_size)
+                                .max()
+                                .unwrap_or(0) as usize)
+                                .min(config.max_blob_capture);
+                            if read_size > 0 {
+                                match mem_reader.read_bytes(pid, ptr_val, read_size) {
+                                    Ok(deref_bytes) => parse_struct_fields_from_blob(
+                                        &deref_bytes,
+                                        struct_name,
+                                        struct_fields,
+                                        config,
+                                        mem_reader,
+                                        pid,
+                                    ),
+                                    Err(e) => {
+                                        detrix_logging::debug!(
+                                            "[ringbuf] pointer deref failed '{}' ptr={:#x}: {}",
+                                            field_name, ptr_val, e
+                                        );
+                                        CapturedValue::Scalar(ptr_val)
+                                    }
+                                }
+                            } else {
+                                CapturedValue::Scalar(ptr_val)
+                            }
+                        } else {
+                            CapturedValue::Scalar(ptr_val)
+                        }
+                    } else {
+                        CapturedValue::Scalar(ptr_val)
+                    }
+                } else {
+                    // Nil pointer
+                    CapturedValue::Scalar(0)
                 }
             } else {
                 // Scalar field (int, float, bool, etc.): read from user-space
@@ -754,8 +835,64 @@ fn parse_struct_fields_from_blob(
                 element_type: field.type_info.array_element_type.clone(),
                 elements,
             }
+        } else if field.type_info.is_pointer {
+            // Pointer field: read 8-byte address from blob, then dereference if we have type info.
+            let end = (start + 8).min(blob.len());
+            let ptr_val = if end - start == 8 {
+                u64::from_le_bytes(blob[start..end].try_into().unwrap_or([0; 8]))
+            } else {
+                0
+            };
+
+            detrix_logging::debug!(
+                "[ringbuf] pointer field '{}' ptr={:#x} has_nested={}",
+                field.name, ptr_val, field.nested_type.is_some()
+            );
+
+            if ptr_val != 0 {
+                if let Some(nested) = &field.nested_type {
+                    if let Some((struct_name, struct_fields)) = find_struct_pointee(nested) {
+                        let read_size = (struct_fields
+                            .iter()
+                            .map(|f| f.byte_offset + f.byte_size)
+                            .max()
+                            .unwrap_or(0) as usize)
+                            .min(config.max_blob_capture);
+                        if read_size > 0 {
+                            match mem_reader.read_bytes(pid, ptr_val, read_size) {
+                                Ok(deref_bytes) => {
+                                    parse_struct_fields_from_blob(
+                                        &deref_bytes,
+                                        struct_name,
+                                        struct_fields,
+                                        config,
+                                        mem_reader,
+                                        pid,
+                                    )
+                                }
+                                Err(e) => {
+                                    detrix_logging::debug!(
+                                        "[ringbuf] pointer deref failed for '{}' ptr={:#x}: {}",
+                                        field.name, ptr_val, e
+                                    );
+                                    CapturedValue::Scalar(ptr_val)
+                                }
+                            }
+                        } else {
+                            CapturedValue::Scalar(ptr_val)
+                        }
+                    } else {
+                        CapturedValue::Scalar(ptr_val)
+                    }
+                } else {
+                    CapturedValue::Scalar(ptr_val)
+                }
+            } else {
+                // Nil pointer
+                CapturedValue::Scalar(0)
+            }
         } else {
-            // Scalar / pointer / other: read LE integer of appropriate size
+            // Scalar / other: read LE integer of appropriate size
             let end = (start + size).min(blob.len());
             let slice = &blob[start..end];
             let val = match slice.len() {

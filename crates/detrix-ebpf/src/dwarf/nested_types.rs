@@ -89,6 +89,15 @@ pub struct StructField {
     pub byte_offset: u64,
     /// Field byte size (DW_AT_byte_size).
     pub byte_size: u64,
+    /// Resolved nested type for pointer fields.
+    ///
+    /// Populated when `type_info.is_pointer = true` and depth < max_depth.
+    /// Contains the pointer's nested type chain ending in `NestedType::Struct`
+    /// (after following typedef chains through the pointee).
+    ///
+    /// Used by the ring buffer parser to dereference pointers and capture
+    /// the pointed-to struct's fields instead of the raw pointer value.
+    pub nested_type: Option<NestedType>,
 }
 
 /// Resolved nested type structure with depth-limited recursion.
@@ -462,12 +471,21 @@ fn resolve_struct_fields<R: Reader>(
             _ => field_type_info.byte_size,
         };
 
+        // For pointer fields within depth limits, resolve the pointee type so that the
+        // ring buffer parser can dereference the pointer and capture the struct fields.
+        let field_nested = if field_type_info.is_pointer && depth < config.max_depth {
+            resolve_nested_type_impl(child, unit, dwarf, config, depth + 1).ok()
+        } else {
+            None
+        };
+
         detrix_logging::debug!(
-            "[nested_types] field '{}' byte_offset={} byte_size={} type='{}'",
+            "[nested_types] field '{}' byte_offset={} byte_size={} type='{}' has_nested={}",
             field_name,
             byte_offset,
             byte_size,
-            field_type_info.name
+            field_type_info.name,
+            field_nested.is_some()
         );
 
         fields.push(StructField {
@@ -475,6 +493,7 @@ fn resolve_struct_fields<R: Reader>(
             type_info: field_type_info,
             byte_offset,
             byte_size,
+            nested_type: field_nested,
         });
     }
 
@@ -540,16 +559,52 @@ fn resolve_pointer_type<R: Reader>(
     config: &NestedTypeConfig,
     depth: usize,
 ) -> Result<NestedType> {
-    let type_offset = entry.attr_value(DwAt(gimli::constants::DW_AT_type.0));
-    if let Some(AttributeValue::UnitRef(offset)) = type_offset {
-        let mut cursor = unit.entries_at_offset(offset)?;
-        if let Some(pointee_entry) = cursor.next_dfs()? {
-            let pointee = resolve_nested_type_impl(pointee_entry, unit, dwarf, config, depth + 1)?;
-            return Ok(NestedType::Pointer {
-                type_info,
-                pointee: Box::new(pointee),
-            });
+    let type_attr = entry.attr_value(DwAt(gimli::constants::DW_AT_type.0));
+    match type_attr {
+        Some(AttributeValue::UnitRef(offset)) => {
+            let mut cursor = unit.entries_at_offset(offset)?;
+            if let Some(pointee_entry) = cursor.next_dfs()? {
+                let pointee = resolve_nested_type_impl(pointee_entry, unit, dwarf, config, depth + 1)?;
+                return Ok(NestedType::Pointer {
+                    type_info,
+                    pointee: Box::new(pointee),
+                });
+            }
         }
+        Some(AttributeValue::DebugInfoRef(debug_info_offset)) => {
+            // Go emits cross-CU type references as DebugInfoRef (absolute DWARF offset).
+            // Find the compilation unit that owns this offset, load it, then recurse.
+            let target_offset = debug_info_offset.0;
+            let mut units = dwarf.units();
+            while let Some(header) = units.next()? {
+                let unit_start = header.offset().0;
+                let unit_end = unit_start + header.unit_length();
+                if target_offset >= unit_start && target_offset < unit_end {
+                    let target_unit = dwarf.unit(header)?;
+                    let local_offset = gimli::UnitOffset(target_offset - unit_start);
+                    let mut cursor = target_unit.entries_at_offset(local_offset)?;
+                    if let Some(pointee_entry) = cursor.next_dfs()? {
+                        detrix_logging::debug!(
+                            "[nested_types] resolve_pointer_type DebugInfoRef → tag={:?}",
+                            pointee_entry.tag()
+                        );
+                        let pointee = resolve_nested_type_impl(
+                            pointee_entry,
+                            &target_unit,
+                            dwarf,
+                            config,
+                            depth + 1,
+                        )?;
+                        return Ok(NestedType::Pointer {
+                            type_info,
+                            pointee: Box::new(pointee),
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+        _ => {}
     }
 
     Ok(NestedType::Pointer {
