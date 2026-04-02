@@ -478,11 +478,16 @@ fn resolve_struct_fields<R: Reader>(
             _ => field_type_info.byte_size,
         };
 
-        // For pointer and struct fields within depth limits, resolve nested type info so
-        // the ring buffer parser can dereference pointers and recursively parse embedded structs.
-        let field_nested = if (field_type_info.is_pointer || field_type_info.is_struct)
+        // For pointer, struct, slice, and array fields within depth limits, resolve nested type info so
+        // the ring buffer parser can dereference pointers, recursively parse embedded structs,
+        // read slice elements, and iterate array elements.
+        let field_nested = if (field_type_info.is_pointer || field_type_info.is_struct || field_type_info.is_slice || field_type_info.is_array)
             && depth < config.max_depth
         {
+            detrix_logging::debug!(
+                "[nested_types] Resolving nested type for field '{}' (type={}, is_array={}, depth={}/{})",
+                field_name, field_type_info.name, field_type_info.is_array, depth, config.max_depth
+            );
             resolve_nested_type_impl(child, unit, dwarf, config, depth + 1).ok()
         } else {
             None
@@ -521,29 +526,221 @@ fn resolve_struct_fields<R: Reader>(
 }
 
 fn resolve_slice_type<R: Reader>(
-    _entry: &DebuggingInformationEntry<R>,
-    _unit: &Unit<R>,
-    _dwarf: &gimli::Dwarf<R>,
+    entry: &DebuggingInformationEntry<R>,
+    unit: &Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
     type_info: TypeInfo,
-    _config: &NestedTypeConfig,
+    config: &NestedTypeConfig,
     depth: usize,
 ) -> Result<NestedType> {
-    Ok(NestedType::Struct {
+    // For slices, we need to resolve the element type
+    // Following Delve's loadSliceInfo which gets ElemType from the array field
+    // 
+    // The 'entry' here is the DW_TAG_member field entry, not the slice struct type.
+    // We need to follow the DW_AT_type attribute to get to the slice struct type entry.
+    let slice_struct_entry = match entry.attr_value(DwAt(gimli::constants::DW_AT_type.0)) {
+        Some(type_attr) => {
+            // Follow the type reference to get the slice struct type
+            match type_attr {
+                AttributeValue::UnitRef(offset) => {
+                    let mut cursor = unit.entries_at_offset(offset)?;
+                    cursor.next_dfs()?.cloned()
+                }
+                AttributeValue::DebugInfoRef(debug_info_offset) => {
+                    // Cross-unit reference - find the unit and get the entry
+                    let target_offset = debug_info_offset.0;
+                    let mut units = dwarf.units();
+                    let mut result = None;
+                    while let Some(header) = units.next()? {
+                        let unit_start = header.offset().0;
+                        let unit_end = unit_start + header.unit_length();
+                        if target_offset >= unit_start && target_offset < unit_end {
+                            let target_unit = dwarf.unit(header)?;
+                            let local_offset = gimli::UnitOffset(target_offset - unit_start);
+                            let mut cursor = target_unit.entries_at_offset(local_offset)?;
+                            result = cursor.next_dfs()?.cloned();
+                            break;
+                        }
+                    }
+                    result
+                }
+                _ => None,
+            }
+        }
+        None => None,
+    };
+    
+    let element_nested_type = if let Some(slice_entry) = slice_struct_entry {
+        resolve_slice_element_type(&slice_entry, unit, dwarf, config, depth + 1)?
+    } else {
+        // Fallback: return unknown type
+        NestedType::Scalar(TypeInfo::unknown())
+    };
+    
+    Ok(NestedType::Array {
         type_info,
-        fields: vec![],
-        depth,
+        element_type: Box::new(element_nested_type),
+        count: None, // Slices have dynamic length
     })
 }
 
-fn resolve_array_type<R: Reader>(
-    _entry: &DebuggingInformationEntry<R>,
-    _unit: &Unit<R>,
-    _dwarf: &gimli::Dwarf<R>,
-    type_info: TypeInfo,
-    _config: &NestedTypeConfig,
-    _depth: usize,
+/// Resolve the element type of a slice by following the 'array' field pointer.
+fn resolve_slice_element_type<R: Reader>(
+    entry: &DebuggingInformationEntry<R>,
+    unit: &Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+    config: &NestedTypeConfig,
+    depth: usize,
 ) -> Result<NestedType> {
-    Ok(NestedType::Scalar(type_info))
+    detrix_logging::debug!(
+        "[nested_types] Resolving slice element type for '{}' at offset {:?}",
+        read_die_name_string(entry, dwarf).unwrap_or_else(|| "unknown".to_string()),
+        entry.offset()
+    );
+    
+    // Iterate over children to find the 'array' field (pointer to element type)
+    let mut cursor = unit.entries_at_offset(entry.offset())?;
+    let _ = cursor.next_dfs()?; // Skip the struct entry itself
+    
+    while let Ok(Some(child)) = cursor.next_dfs() {
+        if child.tag() != gimli::DW_TAG_member {
+            continue;
+        }
+        
+        let field_name = read_die_name_string(child, dwarf);
+        if field_name.as_deref() != Some("array") {
+            continue;
+        }
+        
+        detrix_logging::debug!(
+            "[nested_types] Found slice 'array' field, resolving element type"
+        );
+        
+        // Get the type of the array field (should be a pointer to element type)
+        let type_attr = child.attr_value(DwAt(gimli::constants::DW_AT_type.0));
+        if let Some(type_attr) = type_attr {
+            // Follow the pointer to get the element type
+            let element_type = resolve_pointer_target_type(&type_attr, unit, dwarf, config, depth)?;
+            detrix_logging::debug!(
+                "[nested_types] Slice element type resolved: {:?}",
+                match &element_type {
+                    NestedType::Struct { type_info, .. } => format!("Struct({})", type_info.name),
+                    NestedType::Scalar(type_info) => format!("Scalar({})", type_info.name),
+                    NestedType::Array { type_info, .. } => format!("Array({})", type_info.name),
+                    _ => "Other".to_string(),
+                }
+            );
+            return Ok(element_type);
+        }
+    }
+
+    // Fallback: return unknown scalar type
+    detrix_logging::warn!("[nested_types] Slice 'array' field not found, returning unknown type");
+    Ok(NestedType::Scalar(TypeInfo::unknown()))
+}
+
+/// Resolve the target type of a pointer type attribute.
+fn resolve_pointer_target_type<R: Reader>(
+    type_attr: &gimli::AttributeValue<R>,
+    unit: &Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+    config: &NestedTypeConfig,
+    depth: usize,
+) -> Result<NestedType> {
+    match type_attr {
+        AttributeValue::UnitRef(offset) => {
+            let mut cursor = unit.entries_at_offset(*offset)?;
+            if let Ok(Some(ptr_entry)) = cursor.next_dfs() {
+                if ptr_entry.tag() == gimli::DW_TAG_pointer_type {
+                    // Follow the pointer's DW_AT_type
+                    if let Some(elem_attr) = ptr_entry.attr_value(DwAt(gimli::constants::DW_AT_type.0)) {
+                        return resolve_pointer_target_type(&elem_attr, unit, dwarf, config, depth);
+                    }
+                } else {
+                    // The offset points directly to the element type
+                    // First resolve type info, then classify
+                    let type_info = crate::dwarf::typeinfo::resolve_type_info(ptr_entry, unit, dwarf)?;
+                    return classify_type(ptr_entry, unit, dwarf, type_info, config, depth);
+                }
+            }
+        }
+        AttributeValue::DebugInfoRef(debug_info_offset) => {
+            // Cross-unit reference - find the unit and resolve
+            return resolve_cross_unit_type(*debug_info_offset, unit, dwarf, config, depth);
+        }
+        _ => {}
+    }
+    
+    Ok(NestedType::Scalar(TypeInfo::unknown()))
+}
+
+/// Resolve a type from a cross-unit DebugInfoRef.
+fn resolve_cross_unit_type<R: Reader>(
+    debug_info_offset: gimli::DebugInfoOffset<R::Offset>,
+    _current_unit: &Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+    config: &NestedTypeConfig,
+    depth: usize,
+) -> Result<NestedType> {
+    let target_offset = debug_info_offset.0;
+    let mut units = dwarf.units();
+    
+    while let Ok(Some(unit_header)) = units.next() {
+        let unit_start = unit_header.offset().0;
+        let unit_end = unit_start + unit_header.unit_length();
+        
+        if target_offset >= unit_start && target_offset < unit_end {
+            let target_unit = dwarf.unit(unit_header)?;
+            let local_offset = gimli::UnitOffset(target_offset - unit_start);
+            let mut cursor = target_unit.entries_at_offset(local_offset)?;
+            
+            if let Ok(Some(entry)) = cursor.next_dfs() {
+                // First resolve the type info, then classify
+                let type_info = crate::dwarf::typeinfo::resolve_type_info(entry, &target_unit, dwarf)?;
+                return classify_type(entry, &target_unit, dwarf, type_info, config, depth);
+            }
+        }
+    }
+    
+    Ok(NestedType::Scalar(TypeInfo::unknown()))
+}
+
+fn resolve_array_type<R: Reader>(
+    entry: &DebuggingInformationEntry<R>,
+    unit: &Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+    type_info: TypeInfo,
+    config: &NestedTypeConfig,
+    depth: usize,
+) -> Result<NestedType> {
+    // For fixed-size arrays, resolve the element type
+    // Following Delve's approach for array element resolution
+    let element_nested_type = resolve_array_element_type(entry, unit, dwarf, config, depth + 1)?;
+    
+    Ok(NestedType::Array {
+        type_info: type_info.clone(),
+        element_type: Box::new(element_nested_type),
+        count: Some(type_info.array_element_count),
+    })
+}
+
+/// Resolve the element type of a fixed-size array from DW_TAG_subrange_type.
+fn resolve_array_element_type<R: Reader>(
+    entry: &DebuggingInformationEntry<R>,
+    unit: &Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+    config: &NestedTypeConfig,
+    depth: usize,
+) -> Result<NestedType> {
+    // Arrays have DW_TAG_subrange_type child that describes the index type
+    // The element type comes from DW_AT_type of the array itself
+    let type_attr = entry.attr_value(DwAt(gimli::constants::DW_AT_type.0));
+    if let Some(type_attr) = type_attr {
+        return resolve_pointer_target_type(&type_attr, unit, dwarf, config, depth);
+    }
+    
+    // Fallback
+    Ok(NestedType::Scalar(TypeInfo::unknown()))
 }
 
 fn resolve_map_type<R: Reader>(

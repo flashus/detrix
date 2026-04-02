@@ -19,6 +19,7 @@
 //! 2. Parsing each field value recursively
 //! 3. Building nested `CapturedValue::Struct` hierarchy
 
+use crate::dwarf::nested_types::NestedType;
 use crate::dwarf::types::ResolvedVariable;
 use crate::error::{Error, Result};
 use crate::mem_reader::ProcessMemoryReader;
@@ -697,6 +698,100 @@ fn is_struct_type(type_name: &str) -> bool {
 /// 1. BPF captures base address from stack (as u64 in ring buffer)
 /// 2. User-space reads DWARF field offsets
 /// 3. User-space reads each field via process_vm_readv(base_addr + field_offset)
+
+/// Parse a single slice/array element based on its NestedType.
+/// Following Delve's loadArrayValues which creates a new variable for each element
+/// and recursively loads its value with incremented recursion level.
+fn parse_slice_element(
+    elem_addr: u64,
+    element_nested_type: &NestedType,
+    element_size: u64,
+    config: &CaptureConfig,
+    mem_reader: &dyn crate::mem_reader::ProcessMemoryReader,
+    pid: u32,
+) -> Result<CapturedValue> {
+    detrix_logging::debug!(
+        "[ringbuf] parse_slice_element: addr={:#x}, type={:?}, size={}",
+        elem_addr,
+        match element_nested_type {
+            NestedType::Struct { type_info, .. } => format!("Struct({})", type_info.name),
+            NestedType::Scalar(t) => format!("Scalar({})", t.name),
+            NestedType::Array { type_info, .. } => format!("Array({})", type_info.name),
+            NestedType::Pointer { type_info, .. } => format!("Pointer({})", type_info.name),
+            _ => "Other".to_string(),
+        },
+        element_size
+    );
+    
+    match element_nested_type {
+        NestedType::Struct { type_info, .. } => {
+            // Element is a struct - recursively parse its fields
+            // Following Delve: fieldvar.loadValueInternal(recurseLevel+1, cfg)
+            parse_struct_fields_from_addr(
+                elem_addr,
+                &type_info.name,
+                config,
+                Some(element_nested_type),
+                mem_reader,
+                pid,
+            )
+        }
+        NestedType::Scalar(type_info) => {
+            // Element is a scalar - read based on type
+            if type_info.is_string {
+                // String element - read ptr+len and then content
+                let str_ptr = mem_reader.read_u64(pid, elem_addr).unwrap_or(0);
+                let str_len = mem_reader.read_u64(pid, elem_addr + 8).unwrap_or(0) as usize;
+                if str_ptr != 0 && str_len > 0 {
+                    match mem_reader.read_string(pid, str_ptr, str_len.min(config.max_string_capture)) {
+                        Ok(s) => Ok(CapturedValue::String {
+                            len: s.len(),
+                            data: s.into_bytes(),
+                        }),
+                        Err(_) => Ok(CapturedValue::String {
+                            data: b"<read-failed>".to_vec(),
+                            len: str_len,
+                        }),
+                    }
+                } else {
+                    Ok(CapturedValue::String { data: vec![], len: 0 })
+                }
+            } else if type_info.name == "float64" {
+                // Float64 element
+                let val = mem_reader.read_u64(pid, elem_addr).unwrap_or(0);
+                Ok(CapturedValue::Float(f64::from_bits(val)))
+            } else if type_info.name == "float32" {
+                // Float32 element - read as u64 and take lower 32 bits
+                let val = mem_reader.read_u64(pid, elem_addr).unwrap_or(0);
+                Ok(CapturedValue::Float(f32::from_bits(val as u32) as f64))
+            } else {
+                // Other scalar - read as integer
+                let val = mem_reader.read_u64(pid, elem_addr).unwrap_or(0);
+                Ok(CapturedValue::Scalar(val))
+            }
+        }
+        NestedType::Pointer { pointee: _, .. } => {
+            // Element is a pointer - read the address
+            let ptr_val = mem_reader.read_u64(pid, elem_addr).unwrap_or(0);
+            if ptr_val != 0 {
+                // Could recursively follow the pointer if needed
+                // For now, just return the pointer value
+                Ok(CapturedValue::Scalar(ptr_val))
+            } else {
+                Ok(CapturedValue::Scalar(0))
+            }
+        }
+        _ => {
+            // Unknown element type - read as bytes
+            match mem_reader.read_bytes(pid, elem_addr, element_size as usize) {
+                Ok(bytes) => Ok(CapturedValue::Bytes(bytes)),
+                Err(_) => Ok(CapturedValue::Error("read failed".to_string())),
+            }
+        }
+    }
+}
+
+/// Parse struct fields from ring buffer data using user-space memory reading.
 fn parse_struct_fields_from_addr(
     struct_base_addr: u64, // Base address captured by BPF
     type_name: &str,
@@ -795,33 +890,61 @@ fn parse_struct_fields_from_addr(
                 let slice_len = mem_reader.read_u64(pid, field_addr + 8).unwrap_or(0);
                 let slice_cap = mem_reader.read_u64(pid, field_addr + 16).unwrap_or(0);
 
+                detrix_logging::debug!(
+                    "[ringbuf] Slice field '{}' ptr={:#x} len={} cap={}, has_nested={}",
+                    field_name, slice_ptr, slice_len, slice_cap, field.nested_type.is_some()
+                );
+
                 // Read slice elements if we have a valid pointer and length
                 if slice_ptr != 0 && slice_len > 0 && slice_len <= 10 {
                     // Limit to 10 elements to avoid excessive memory reads
-                    // Get element size from TypeInfo (populated by DWARF resolution)
-                    let element_size = if field.type_info.element_byte_size > 0 {
+                    // Get element size from the element type's TypeInfo
+                    let element_size = if let Some(NestedType::Array { element_type, .. }) = &field.nested_type {
+                        // Use the element type's byte_size
+                        element_type.type_info().byte_size.max(1)
+                    } else if field.type_info.element_byte_size > 0 {
                         field.type_info.element_byte_size
                     } else if field.type_info.name.contains("OrderItem") {
                         // Fallback for known types
-                        64 // OrderItem is a large struct
+                        328 // OrderItem: Product(312) + Quantity(8) + Total(8)
                     } else {
                         8 // Default fallback
                     };
 
+                    detrix_logging::debug!(
+                        "[ringbuf] Reading {} slice elements, size={}, nested_type={:?}",
+                        slice_len, element_size,
+                        field.nested_type.as_ref().map(|n| match n {
+                            NestedType::Array { .. } => "Array",
+                            NestedType::Struct { .. } => "Struct",
+                            NestedType::Scalar(_) => "Scalar",
+                            _ => "Other",
+                        })
+                    );
+
                     let mut elements = Vec::new();
                     for i in 0..slice_len {
                         let elem_addr = slice_ptr + (i * element_size);
-                        // Read element as bytes
-                        match mem_reader.read_bytes(pid, elem_addr, element_size as usize) {
-                            Ok(bytes) => {
-                                // For struct elements, capture as Bytes for now
-                                // (could be enhanced to parse nested structs recursively)
-                                elements.push(CapturedValue::Bytes(bytes));
+
+                        // Read element based on its nested type
+                        // Following Delve's loadArrayValues: fieldvar.loadValueInternal(recurseLevel+1, cfg)
+                        let elem_value = if let Some(NestedType::Array { element_type, .. }) = &field.nested_type {
+                            // We have element type info - recursively parse it
+                            detrix_logging::debug!(
+                                "[ringbuf] Parsing slice element {} with nested type", i
+                            );
+                            parse_slice_element(elem_addr, element_type.as_ref(), element_size, config, mem_reader, pid)?
+                        } else {
+                            // Fallback: read as bytes
+                            detrix_logging::debug!(
+                                "[ringbuf] Slice element {} has no nested type, reading as bytes", i
+                            );
+                            match mem_reader.read_bytes(pid, elem_addr, element_size as usize) {
+                                Ok(bytes) => CapturedValue::Bytes(bytes),
+                                Err(_) => CapturedValue::Error("read failed".to_string()),
                             }
-                            Err(_) => {
-                                elements.push(CapturedValue::Error("read failed".to_string()));
-                            }
-                        }
+                        };
+                        elements.push(elem_value);
                     }
 
                     CapturedValue::Struct {
