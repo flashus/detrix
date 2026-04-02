@@ -32,6 +32,55 @@ const FIXTURE_START_WAIT: Duration = Duration::from_secs(2);
 const ADAPTER_START_WAIT: Duration = Duration::from_secs(3);
 const EVENT_COLLECTION_WAIT: Duration = Duration::from_secs(20);
 
+// ── Helper Functions ─────────────────────────────────────────────────────────
+
+/// Pretty-print a captured event with formatted JSON values
+/// Removes escape noise and shows type information clearly
+fn pretty_print_event(event: &serde_json::Value) -> String {
+    let mut output = String::new();
+
+    // Print event metadata
+    if let Some(metric_name) = event["metricName"].as_str() {
+        output.push_str(&format!("  Metric: {}\n", metric_name));
+    }
+    if let Some(thread_id) = event["threadId"].as_i64() {
+        output.push_str(&format!("  Thread: {}\n", thread_id));
+    }
+
+    // Print captured values
+    if let Some(values) = event["values"].as_array() {
+        for val in values {
+            if let Some(expr) = val["expression"].as_str() {
+                output.push_str(&format!("\n  [{}]\n", expr));
+
+                // Pretty-print valueJson
+                if let Some(value_json_str) = val["valueJson"].as_str() {
+                    // Parse the nested JSON
+                    if let Ok(value_json) =
+                        serde_json::from_str::<serde_json::Value>(value_json_str)
+                    {
+                        let pretty = serde_json::to_string_pretty(&value_json)
+                            .unwrap_or_else(|_| value_json_str.to_string());
+                        // Indent the pretty-printed JSON
+                        for line in pretty.lines() {
+                            output.push_str(&format!("    {}\n", line));
+                        }
+                    } else {
+                        output.push_str(&format!("    {}\n", value_json_str));
+                    }
+                }
+
+                // Print typed value if available
+                if !val["typedValue"].is_null() {
+                    output.push_str(&format!("  Typed: {}\n", val["typedValue"]));
+                }
+            }
+        }
+    }
+
+    output
+}
+
 // ── Main test ─────────────────────────────────────────────────────────────────
 
 /// End-to-end test: nested struct capture via eBPF uprobe
@@ -264,12 +313,10 @@ async fn test_ebpf_captures_nested_types() {
     );
     reporter.info(&format!("Received {} Order events", order_events.len()));
 
-    // Debug: Print first Order event structure
+    // Debug: Print first Order event with pretty-printed values
     if let Some(first_order) = order_events.first() {
-        reporter.info(&format!(
-            "Sample Order event: {}",
-            serde_json::to_string_pretty(first_order).unwrap_or_else(|_| "N/A".to_string())
-        ));
+        reporter.info("Sample Order event:");
+        reporter.info(&pretty_print_event(first_order));
     }
 
     // Verify PriceHistory (array) captured
@@ -294,12 +341,10 @@ async fn test_ebpf_captures_nested_types() {
         history_events.len()
     ));
 
-    // Debug: Print first PriceHistory event structure
+    // Debug: Print first PriceHistory event with pretty-printed values
     if let Some(first_history) = history_events.first() {
-        reporter.info(&format!(
-            "Sample PriceHistory event (array capture): {}",
-            serde_json::to_string_pretty(first_history).unwrap_or_else(|_| "N/A".to_string())
-        ));
+        reporter.info("Sample PriceHistory event (array capture):");
+        reporter.info(&pretty_print_event(first_history));
     }
 
     // Verify pointer captured
@@ -321,12 +366,10 @@ async fn test_ebpf_captures_nested_types() {
     );
     reporter.info(&format!("Received {} OrderPtr events", ptr_events.len()));
 
-    // Debug: Print first OrderPtr event structure
+    // Debug: Print first OrderPtr event with pretty-printed values
     if let Some(first_ptr) = ptr_events.first() {
-        reporter.info(&format!(
-            "Sample OrderPtr event (pointer capture): {}",
-            serde_json::to_string_pretty(first_ptr).unwrap_or_else(|_| "N/A".to_string())
-        ));
+        reporter.info("Sample OrderPtr event (pointer capture):");
+        reporter.info(&pretty_print_event(first_ptr));
     }
 
     // ── PHASE 7: Comprehensive Field Validation ──────────────────────────────
@@ -355,14 +398,31 @@ async fn test_ebpf_captures_nested_types() {
 
             // Check Product.SKU - deterministic format SKU-XXXX
             if !value_json.contains("\"SKU\":\"SKU-") {
-                mismatches.push(format!("Order[{}] Product.SKU should be SKU-XXXX format", idx));
+                mismatches.push(format!(
+                    "Order[{}] Product.SKU should be SKU-XXXX format",
+                    idx
+                ));
             }
 
             // Check Product.Name - should be one of the deterministic names
-            let valid_product_names = ["Laptop", "Phone", "Tablet", "Monitor", "Keyboard", "Mouse", "Headphones", "Camera"];
-            let has_valid_name = valid_product_names.iter().any(|name| value_json.contains(&format!("\"Name\":\"{}\"", name)));
+            let valid_product_names = [
+                "Laptop",
+                "Phone",
+                "Tablet",
+                "Monitor",
+                "Keyboard",
+                "Mouse",
+                "Headphones",
+                "Camera",
+            ];
+            let has_valid_name = valid_product_names
+                .iter()
+                .any(|name| value_json.contains(&format!("\"Name\":\"{}\"", name)));
             if !has_valid_name {
-                mismatches.push(format!("Order[{}] Product.Name should be one of {:?}", idx, valid_product_names));
+                mismatches.push(format!(
+                    "Order[{}] Product.Name should be one of {:?}",
+                    idx, valid_product_names
+                ));
             }
 
             // Check Product.Price (float) - should be a numeric value, not a struct
@@ -378,17 +438,35 @@ async fn test_ebpf_captures_nested_types() {
             }
 
             // Check Product.Category.Name - should be one of the deterministic names
-            let valid_category_names = ["Electronics", "Accessories", "Computing", "Audio", "Photography"];
-            let has_valid_category = valid_category_names.iter().any(|name| value_json.contains(&format!("\"Name\":\"{}\"", name)));
+            let valid_category_names = [
+                "Electronics",
+                "Accessories",
+                "Computing",
+                "Audio",
+                "Photography",
+            ];
+            let has_valid_category = valid_category_names
+                .iter()
+                .any(|name| value_json.contains(&format!("\"Name\":\"{}\"", name)));
             if !has_valid_category {
-                mismatches.push(format!("Order[{}] Category.Name should be one of {:?}", idx, valid_category_names));
+                mismatches.push(format!(
+                    "Order[{}] Category.Name should be one of {:?}",
+                    idx, valid_category_names
+                ));
             }
 
             // Check Trader.Name - should be one of the deterministic names
-            let valid_trader_names = ["Alice", "Bob", "Charlie", "Diana", "Eve", "Frank", "Grace", "Henry"];
-            let has_valid_trader = valid_trader_names.iter().any(|name| value_json.contains(&format!("\"Name\":\"{}\"", name)));
+            let valid_trader_names = [
+                "Alice", "Bob", "Charlie", "Diana", "Eve", "Frank", "Grace", "Henry",
+            ];
+            let has_valid_trader = valid_trader_names
+                .iter()
+                .any(|name| value_json.contains(&format!("\"Name\":\"{}\"", name)));
             if !has_valid_trader {
-                mismatches.push(format!("Order[{}] Trader.Name should be one of {:?}", idx, valid_trader_names));
+                mismatches.push(format!(
+                    "Order[{}] Trader.Name should be one of {:?}",
+                    idx, valid_trader_names
+                ));
             }
 
             // Check Address fields
@@ -436,7 +514,10 @@ async fn test_ebpf_captures_nested_types() {
             }
             // Timestamp should be a struct with wall/ext, not a slice
             if value_json.contains("\"Timestamp\":{\"len\":") {
-                mismatches.push(format!("Order[{}] Timestamp should be time.Time struct, not slice", idx));
+                mismatches.push(format!(
+                    "Order[{}] Timestamp should be time.Time struct, not slice",
+                    idx
+                ));
             }
 
             // Check Status (OrderStatus string alias - should be a string value, not a struct)
@@ -445,9 +526,14 @@ async fn test_ebpf_captures_nested_types() {
             }
             // Status should be a string value like "PENDING", "DELIVERED", etc.
             let valid_statuses = ["PENDING", "CONFIRMED", "SHIPPED", "DELIVERED"];
-            let has_valid_status = valid_statuses.iter().any(|status| value_json.contains(&format!("\"Status\":\"{}\"", status)));
+            let has_valid_status = valid_statuses
+                .iter()
+                .any(|status| value_json.contains(&format!("\"Status\":\"{}\"", status)));
             if !has_valid_status {
-                mismatches.push(format!("Order[{}] Status should be one of {:?}, got: {}", idx, valid_statuses, value_json));
+                mismatches.push(format!(
+                    "Order[{}] Status should be one of {:?}, got: {}",
+                    idx, valid_statuses, value_json
+                ));
             }
             // Status should NOT be a struct with str/len fields
             if value_json.contains("\"Status\":{\"__type\":\"main.OrderStatus\",\"str\":") {
@@ -553,7 +639,7 @@ async fn test_ebpf_captures_nested_types() {
                     idx
                 ));
             }
-            
+
             // Validate OrderPtr is a proper struct, not raw pointer bytes
             if !value_json.contains("\"__type\":\"main.OrderPtr\"") {
                 mismatches.push(format!(
