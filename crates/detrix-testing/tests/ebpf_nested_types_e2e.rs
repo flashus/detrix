@@ -59,8 +59,7 @@ fn pretty_print_event(event: &serde_json::Value) -> String {
                     if let Ok(value_json) =
                         serde_json::from_str::<serde_json::Value>(value_json_str)
                     {
-                        let pretty = serde_json::to_string_pretty(&value_json)
-                            .unwrap_or_else(|_| value_json_str.to_string());
+                        let pretty = pretty_print_value(&value_json, 1);
                         // Indent the pretty-printed JSON
                         for line in pretty.lines() {
                             output.push_str(&format!("    {}\n", line));
@@ -79,6 +78,188 @@ fn pretty_print_event(event: &serde_json::Value) -> String {
     }
 
     output
+}
+
+/// Recursively pretty-print a JSON value with smart formatting
+/// - Simple arrays (scalars only) are printed inline
+/// - Complex types (structs, nested arrays) are pretty-printed
+/// - time.Time is converted to human-readable format
+/// - Go map internals are annotated
+fn pretty_print_value(value: &serde_json::Value, indent_level: usize) -> String {
+    let indent = "  ".repeat(indent_level);
+    let next_indent = "  ".repeat(indent_level + 1);
+
+    match value {
+        serde_json::Value::Object(obj) => {
+            // Check for special types
+            if let Some(type_name) = obj.get("__type").and_then(|v| v.as_str()) {
+                // Handle time.Time specially
+                if type_name == "time.Time" {
+                    let wall_opt = obj.get("wall");
+                    let ext_opt = obj.get("ext").and_then(|v| v.as_i64());
+
+                    if let Some(ext) = ext_opt {
+                        // Convert Unix timestamp to human-readable format
+                        let secs = ext;
+                        let nanos = wall_opt.and_then(|v| v.as_i64()).unwrap_or(0);
+
+                        // Format as RFC3339-like string
+                        let datetime = format_timestamp(secs, nanos);
+                        let wall_str = wall_opt
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "0".to_string());
+                        return format!(
+                            "{{\n{}  \"__type\": \"{}\",\n{}  \"wall\": {},\n{}  \"ext\": {},\n{}  \"str_value\": \"{}\"\n{}}}",
+                            indent, type_name,
+                            indent, wall_str,
+                            indent, ext,
+                            indent, datetime,
+                            indent
+                        );
+                    }
+                }
+
+                // Annotate Go map internals (runtime.hmap bucket directory)
+                if type_name.contains("table<") || type_name.contains("hmap") {
+                    // This is Go's internal map runtime structure - will be annotated below
+                }
+            }
+
+            // Check if this is a simple object (few fields, no nested objects)
+            let is_simple = obj.len() <= 3
+                && obj
+                    .values()
+                    .all(|v| v.is_number() || v.is_string() || v.is_boolean());
+
+            if is_simple {
+                // Print simple objects inline
+                let pairs: Vec<String> = obj
+                    .iter()
+                    .map(|(k, v)| format!("\"{}\": {}", k, format_simple_value(v)))
+                    .collect();
+                return format!("{{ {} }}", pairs.join(", "));
+            }
+
+            // Pretty-print complex objects
+            let fields: Vec<String> = obj
+                .iter()
+                .map(|(k, v)| {
+                    // Special handling for Go map internals (runtime.hmap bucket directory)
+                    if k == "dirPtr" || k == "buckets" {
+                        format!(
+                            "{}\"{}\": {} // Go map internal: runtime.hmap bucket directory pointer",
+                            next_indent, k, pretty_print_value(v, indent_level + 1)
+                        )
+                    } else {
+                        format!(
+                            "{}\"{}\": {}",
+                            next_indent, k, pretty_print_value(v, indent_level + 1)
+                        )
+                    }
+                })
+                .collect();
+            format!("{{\n{}\n{}}}", fields.join(",\n"), indent)
+        }
+
+        serde_json::Value::Array(arr) => {
+            // Check if array contains only simple scalars
+            let is_simple = arr
+                .iter()
+                .all(|v| v.is_number() || v.is_string() || v.is_boolean());
+
+            if is_simple && arr.len() <= 10 {
+                // Print simple arrays inline
+                let items: Vec<String> = arr.iter().map(|v| format_simple_value(v)).collect();
+                return format!("[{}]", items.join(", "));
+            }
+
+            // Pretty-print complex arrays
+            let items: Vec<String> = arr
+                .iter()
+                .map(|v| format!("{}{}", next_indent, pretty_print_value(v, indent_level + 1)))
+                .collect();
+            format!("[\n{}\n{}]", items.join(",\n"), indent)
+        }
+
+        _ => format_simple_value(value),
+    }
+}
+
+/// Format a simple JSON value (number, string, boolean, null)
+fn format_simple_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => format!("\"{}\"", s),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => "null".to_string(),
+        _ => value.to_string(),
+    }
+}
+
+/// Convert Unix timestamp to human-readable datetime string
+fn format_timestamp(secs: i64, _nanos: i64) -> String {
+    // Handle zero/invalid timestamps
+    if secs == 0 {
+        return "1970-01-01 00:00:00".to_string();
+    }
+
+    // Go's time.Time stores ext as seconds since year 1 for some representations
+    // Unix epoch (1970-01-01) is approximately 62135596800 seconds after year 1
+    // If ext is very large (> 1 billion), it's likely seconds since year 1
+    let unix_secs = if secs > 1_000_000_000 {
+        // Convert from seconds since year 1 to Unix timestamp
+        // Year 1 to 1970 is approximately 62135596800 seconds
+        secs - 62_135_596_800
+    } else {
+        // Already a Unix timestamp
+        secs
+    };
+
+    // Handle negative or very old timestamps
+    if unix_secs < 0 {
+        return format!("{} (year < 1970)", secs);
+    }
+
+    // Simple conversion without external dependencies
+    let days_since_epoch = unix_secs / 86400;
+    let remaining_secs = unix_secs % 86400;
+    let hours = remaining_secs / 3600;
+    let minutes = (remaining_secs % 3600) / 60;
+    let seconds = remaining_secs % 60;
+
+    // Approximate date calculation (ignoring leap years for simplicity)
+    let mut year = 1970;
+    let mut days = days_since_epoch;
+    while days >= 365 {
+        let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let days_in_year = if is_leap { 366 } else { 365 };
+        if days >= days_in_year {
+            days -= days_in_year;
+            year += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Month calculation
+    let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let mut month = 1;
+    let mut day = days + 1;
+    for (i, &days_in_month) in month_days.iter().enumerate() {
+        let actual_days = if i == 1 && is_leap { 29 } else { days_in_month };
+        if day > actual_days {
+            day -= actual_days;
+            month += 1;
+        } else {
+            break;
+        }
+    }
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        year, month, day, hours, minutes, seconds
+    )
 }
 
 // ── Main test ─────────────────────────────────────────────────────────────────
@@ -517,6 +698,21 @@ async fn test_ebpf_captures_nested_types() {
                 mismatches.push(format!(
                     "Order[{}] Timestamp should be time.Time struct, not slice",
                     idx
+                ));
+            }
+            // Timestamp should have str_value with human-readable date (1970s for our fixture)
+            if !value_json.contains("\"str_value\":") {
+                mismatches.push(format!(
+                    "Order[{}] Timestamp should have str_value field with human-readable date",
+                    idx
+                ));
+            }
+            // Check that str_value contains a reasonable date (2026 for our fixture)
+            // Fixture uses: time.Unix(1775102400+iteration*1000, 0) = 2026-04-02 19:20:00 + offset
+            if !value_json.contains("\"str_value\":\"2026-") {
+                mismatches.push(format!(
+                    "Order[{}] Timestamp str_value should be 2026 date, got: {}",
+                    idx, value_json
                 ));
             }
 

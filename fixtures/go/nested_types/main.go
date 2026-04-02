@@ -209,8 +209,10 @@ func createOrder(iteration int) Order {
 	statuses := []OrderStatus{StatusPending, StatusConfirmed, StatusShipped, StatusDelivered}
 	statusIndex := (iteration - 1) % len(statuses)
 
-	// Fixed timestamp for deterministic testing (Unix epoch + iteration seconds)
-	timestamp := time.Unix(int64(iteration*1000), 0)
+	// Fixed timestamp for deterministic testing
+	// Using a verifiable date: 2026-04-02 19:20:00 UTC + iteration offset
+	// Unix timestamp: 1775102400 (2026-04-02 19:20:00 UTC)
+	timestamp := time.Unix(1775102400+int64(iteration*1000), 0)
 
 	return Order{
 		ID:        iteration,

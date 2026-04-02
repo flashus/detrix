@@ -802,16 +802,42 @@ fn parse_struct_fields_from_addr(
             } else if field.type_info.name == "time.Time" || field.type_info.name.ends_with(".Time")
             {
                 // time.Time struct: wall uint64 (8 bytes) + ext int64 (8 bytes) + loc *Location (8 bytes) = 24 bytes
-                // For now, capture as struct with wall and ext fields
+                // See $GOROOT/src/time/time.go and Delve's pkg/proc/variables.go:formatTime()
                 let wall = mem_reader.read_u64(pid, field_addr).unwrap_or(0);
                 let ext = mem_reader.read_u64(pid, field_addr + 8).unwrap_or(0);
-                // Convert to timestamp (ext is Unix time in seconds or nanoseconds)
-                // For display, show as struct with wall/ext
+
+                // Check if wall has monotonic bit set (bit 63)
+                // Following Delve's formatTime() implementation
+                let has_monotonic = (wall & (1u64 << 63)) != 0;
+
+                // Format as human-readable datetime string
+                let datetime_str = if has_monotonic {
+                    // With monotonic clock: wall has 33-bit seconds since Jan 1, 1885
+                    // ext has monotonic clock reading (nanoseconds since process start)
+                    let sec = ((wall << 1) >> 31) as i64; // Extract 33-bit field
+                    let unix_timestamp_of_wall_epoch: i64 = -2_682_288_000; // Seconds from year 1 to Jan 1, 1885
+                    let unix_secs = sec + unix_timestamp_of_wall_epoch;
+                    format_unix_timestamp(unix_secs)
+                } else {
+                    // Without monotonic clock: ext has full signed 64-bit seconds since Jan 1, year 1
+                    let unix_timestamp_of_wall_epoch: i64 = -62_135_596_800; // Seconds from year 1 to 1970
+                    let unix_secs = (ext as i64) + unix_timestamp_of_wall_epoch;
+                    format_unix_timestamp(unix_secs)
+                };
+
+                // Capture as struct with wall, ext, and human-readable str_value
                 CapturedValue::Struct {
                     type_name: "time.Time".to_string(),
                     fields: vec![
                         ("wall".to_string(), Box::new(CapturedValue::Scalar(wall))),
                         ("ext".to_string(), Box::new(CapturedValue::Scalar(ext))),
+                        (
+                            "str_value".to_string(),
+                            Box::new(CapturedValue::String {
+                                data: datetime_str.clone().into_bytes(),
+                                len: datetime_str.len(),
+                            }),
+                        ),
                     ],
                 }
             } else if field.type_info.is_array {
@@ -1207,5 +1233,51 @@ fn parse_struct_fields(
         nested_type,
         mem_reader,
         pid,
+    )
+}
+
+/// Format a Unix timestamp as a human-readable datetime string (RFC3339-like)
+fn format_unix_timestamp(unix_secs: i64) -> String {
+    if unix_secs < 0 {
+        return format!("{} (year < 1970)", unix_secs);
+    }
+
+    let days = unix_secs / 86400;
+    let remaining = unix_secs % 86400;
+    let hours = remaining / 3600;
+    let mins = (remaining % 3600) / 60;
+    let secs = remaining % 60;
+
+    // Simple date calculation from days since epoch
+    let mut year = 1970;
+    let mut d = days;
+    while d >= 365 {
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let days_in_year = if leap { 366 } else { 365 };
+        if d >= days_in_year {
+            d -= days_in_year;
+            year += 1;
+        } else {
+            break;
+        }
+    }
+
+    let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let mut month = 1;
+    let mut day = d + 1;
+    for (i, &days_in_month) in month_days.iter().enumerate() {
+        let actual = if i == 1 && leap { 29 } else { days_in_month };
+        if day > actual {
+            day -= actual;
+            month += 1;
+        } else {
+            break;
+        }
+    }
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        year, month, day, hours, mins, secs
     )
 }
