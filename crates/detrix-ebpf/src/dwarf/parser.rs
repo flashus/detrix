@@ -101,11 +101,14 @@ impl DwarfInfo {
         let cfa_sp_delta = get_cfa_sp_delta(&obj, endian, pc);
         detrix_logging::debug!(
             "[DWARF CFI] PC={:#x} cfa_sp_delta={} (CFA = SP + {})",
-            pc, cfa_sp_delta, cfa_sp_delta
+            pc,
+            cfa_sp_delta,
+            cfa_sp_delta
         );
 
         // Step 4: Resolve variable locations at this PC
-        let variables = resolve_variables_at_pc(&dwarf, pc, requested_vars, cfa_sp_delta, max_nested_depth)?;
+        let variables =
+            resolve_variables_at_pc(&dwarf, pc, requested_vars, cfa_sp_delta, max_nested_depth)?;
 
         // aya uprobe attach(fn_name=None, offset, ...) expects a file offset,
         // not a virtual address. Convert: file_offset = text_file_offset + (pc - text_vma).
@@ -163,11 +166,7 @@ fn load_dwarf<'a>(
 ///
 /// Returns `0` when the section is absent or the PC is not covered, which leaves
 /// `DW_OP_fbreg` offsets treated as SP-relative (the old behaviour).
-fn get_cfa_sp_delta(
-    obj: &object::File<'_>,
-    endian: gimli::RunTimeEndian,
-    pc: u64,
-) -> i64 {
+fn get_cfa_sp_delta(obj: &object::File<'_>, endian: gimli::RunTimeEndian, pc: u64) -> i64 {
     use gimli::{BaseAddresses, CfaRule, DebugFrame, EndianSlice, UnwindSection};
 
     let data = match obj
@@ -187,23 +186,14 @@ fn get_cfa_sp_delta(
     // UnwindContext<R::Offset=usize, S=StoreOnHeap> — let the compiler infer the defaults.
     let mut ctx = gimli::UnwindContext::new();
 
-    match debug_frame.unwind_info_for_address(
-        &bases,
-        &mut ctx,
-        pc,
-        DebugFrame::cie_from_offset,
-    ) {
+    match debug_frame.unwind_info_for_address(&bases, &mut ctx, pc, DebugFrame::cie_from_offset) {
         Ok(row) => match row.cfa() {
             CfaRule::RegisterAndOffset { offset, .. } => {
                 detrix_logging::info!("[DWARF CFI] PC={:#x} CFA = SP + {}", pc, offset);
                 *offset
             }
             other => {
-                detrix_logging::warn!(
-                    "[DWARF CFI] PC={:#x} unsupported CFA rule: {:?}",
-                    pc,
-                    other
-                );
+                detrix_logging::warn!("[DWARF CFI] PC={:#x} unsupported CFA rule: {:?}", pc, other);
                 0
             }
         },
@@ -259,9 +249,10 @@ fn resolve_line_to_pc<R: Reader>(
 
         // DW_AT_comp_dir: needed for DWARF v4 files where dir_index=0 means comp_dir.
         // Gimli returns None for v4 dir index 0, so we read it explicitly from the unit.
-        let comp_dir: Option<String> = unit.comp_dir.clone().and_then(|cd| {
-            cd.to_string_lossy().ok().map(|s| s.into_owned())
-        });
+        let comp_dir: Option<String> = unit
+            .comp_dir
+            .clone()
+            .and_then(|cd| cd.to_string_lossy().ok().map(|s| s.into_owned()));
 
         if let Some(program) = unit.line_program.clone() {
             let mut rows = program.rows();
@@ -445,7 +436,10 @@ fn resolve_variables_at_pc<R: Reader>(
                 let type_offset_debug = entry.attr_value(DwAt(gimli::constants::DW_AT_type.0));
                 detrix_logging::debug!(
                     "[DWARF resolve] variable '{}' (raw='{}' heap_escaped={}) type_attr={:?}",
-                    name, raw_name, is_heap_escaped, type_offset_debug
+                    name,
+                    raw_name,
+                    is_heap_escaped,
+                    type_offset_debug
                 );
                 let type_info = resolve_type_info(entry, &unit, dwarf)?;
                 let size = if type_info.size == VariableSize::QWord {
@@ -471,7 +465,9 @@ fn resolve_variables_at_pc<R: Reader>(
                                 detrix_logging::info!(
                                     "[DWARF] '{}' heap-escaped (& prefix): \
                                      StackBlob→StackIndirect offset={} byte_size={}",
-                                    name, offset, byte_size
+                                    name,
+                                    offset,
+                                    byte_size
                                 );
                                 VariableLocation::StackIndirect { offset, byte_size }
                             }
@@ -494,11 +490,14 @@ fn resolve_variables_at_pc<R: Reader>(
                 // Resolve nested type structure for structs (depth-limited)
                 // Try to resolve for any type that might be a struct (not just is_struct=true)
                 // Go DWARF sometimes emits structs as typedefs or with different type info
-                let should_resolve_nested = type_info.is_struct 
-                    || type_info.name.contains('.')  // Package-qualified names like main.Order
-                    || (!type_info.name.starts_with("[]") && !type_info.name.starts_with("map[") 
-                        && !type_info.name.starts_with('*') && !type_info.is_string && !type_info.is_slice);
-                
+                let should_resolve_nested = type_info.is_struct
+                    || type_info.name.contains('.') // Package-qualified names like main.Order
+                    || (!type_info.name.starts_with("[]")
+                        && !type_info.name.starts_with("map[")
+                        && !type_info.name.starts_with('*')
+                        && !type_info.is_string
+                        && !type_info.is_slice);
+
                 let nested_type = if should_resolve_nested {
                     use crate::dwarf::nested_types::{resolve_nested_type, NestedTypeConfig};
                     let config = NestedTypeConfig {
@@ -517,16 +516,19 @@ fn resolve_variables_at_pc<R: Reader>(
                                 "[DWARF] Resolved nested type for '{}': {:?}",
                                 name,
                                 match nested {
-                                    crate::dwarf::nested_types::NestedType::Struct { fields, .. } => 
-                                        format!("Struct with {} fields", fields.len()),
+                                    crate::dwarf::nested_types::NestedType::Struct {
+                                        fields,
+                                        ..
+                                    } => format!("Struct with {} fields", fields.len()),
                                     _ => "Other".to_string(),
                                 }
                             );
-                        },
+                        }
                         Err(e) => {
                             detrix_logging::debug!(
                                 "[DWARF] Failed to resolve nested type for '{}': {}",
-                                name, e
+                                name,
+                                e
                             );
                         }
                     }
@@ -534,7 +536,8 @@ fn resolve_variables_at_pc<R: Reader>(
                 } else {
                     detrix_logging::debug!(
                         "[DWARF] Skipping nested type resolution for '{}' (type_name='{}')",
-                        name, type_info.name
+                        name,
+                        type_info.name
                     );
                     None
                 };
@@ -560,10 +563,7 @@ fn resolve_variables_at_pc<R: Reader>(
     for (i, var) in resolved.iter().enumerate() {
         seen.entry(var.name.clone()).or_insert(i);
     }
-    let mut deduped: Vec<ResolvedVariable> = seen
-        .values()
-        .map(|&i| resolved[i].clone())
-        .collect();
+    let mut deduped: Vec<ResolvedVariable> = seen.values().map(|&i| resolved[i].clone()).collect();
     // Preserve the original relative order so BPF slot indices are stable.
     deduped.sort_by_key(|v| resolved.iter().position(|r| r.name == v.name).unwrap_or(0));
 
@@ -631,7 +631,9 @@ fn resolve_location_attr<R: Reader>(
     };
 
     match loc_attr {
-        AttributeValue::Exprloc(expr) => evaluate_location_expr(expr, unit.encoding(), cfa_sp_delta),
+        AttributeValue::Exprloc(expr) => {
+            evaluate_location_expr(expr, unit.encoding(), cfa_sp_delta)
+        }
         AttributeValue::LocationListsRef(offset) => {
             let mut loclists = dwarf
                 .locations(unit, offset)
@@ -697,7 +699,9 @@ fn evaluate_location_expr<R: Reader>(
                 let sp_offset = cfa_sp_delta + offset;
                 detrix_logging::info!(
                     "[DWARF eval] FrameOffset fbreg={} + cfa_sp_delta={} = sp_offset={}",
-                    offset, cfa_sp_delta, sp_offset
+                    offset,
+                    cfa_sp_delta,
+                    sp_offset
                 );
                 if let Some(prev) = pending.take() {
                     pieces.push(prev);
@@ -733,7 +737,10 @@ fn evaluate_location_expr<R: Reader>(
                 // read 8 bytes (the pointer) from BPF and dereference them in user-space.
                 detrix_logging::debug!("[DWARF eval] Deref: converting pending to StackIndirect");
                 if let Some(VariableLocation::StackOffset { offset }) = pending.take() {
-                    pending = Some(VariableLocation::StackIndirect { offset, byte_size: 0 });
+                    pending = Some(VariableLocation::StackIndirect {
+                        offset,
+                        byte_size: 0,
+                    });
                 } else {
                     detrix_logging::debug!("[DWARF eval] Deref on non-StackOffset — discarding");
                     pending = None;
@@ -811,9 +818,10 @@ fn upgrade_location_for_type(
     // ── Single-piece: stack-based or register scalar ──────────────────────────
     // Safe: callers only reach this when locations is non-empty (resolve_location_attr
     // returns None for empty, which is filtered before calling upgrade_location_for_type).
-    let location = locations.into_iter().next().unwrap_or(VariableLocation::Register(
-        super::types::Register::Rax,
-    ));
+    let location = locations
+        .into_iter()
+        .next()
+        .unwrap_or(VariableLocation::Register(super::types::Register::Rax));
 
     detrix_logging::debug!(
         "[DWARF upgrade] single-piece location={:?} is_string={}",
@@ -835,7 +843,9 @@ fn upgrade_location_for_type(
             return VariableLocation::GoSlice {
                 ptr: Box::new(VariableLocation::StackOffset { offset }),
                 len: Box::new(VariableLocation::StackOffset { offset: offset + 8 }),
-                cap: Box::new(VariableLocation::StackOffset { offset: offset + 16 }),
+                cap: Box::new(VariableLocation::StackOffset {
+                    offset: offset + 16,
+                }),
             };
         }
     } else if (type_info.is_array || type_info.is_struct) && type_info.byte_size > 0 {
@@ -864,8 +874,8 @@ fn upgrade_location_for_type(
 fn resolve_type_size<R: Reader>(
     entry: &DebuggingInformationEntry<R>,
 ) -> Result<Option<VariableSize>> {
-    if let Some(AttributeValue::Udata(size)) = entry
-        .attr_value(DwAt(gimli::constants::DW_AT_byte_size.0))
+    if let Some(AttributeValue::Udata(size)) =
+        entry.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0))
     {
         return Ok(VariableSize::from_byte_size(size));
     }
@@ -993,7 +1003,10 @@ mod tests {
         // Single-register string (1 piece) — can't reconstruct GoString without len.
         let loc = VariableLocation::Register(Register::Rax);
         let result = upgrade_location_for_type(vec![loc.clone()], &string_type());
-        assert_eq!(result, loc, "single-register strings should pass through unchanged");
+        assert_eq!(
+            result, loc,
+            "single-register strings should pass through unchanged"
+        );
     }
 
     /// Go 1.17+ register ABI: string passed as two register pieces

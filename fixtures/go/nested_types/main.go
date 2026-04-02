@@ -17,17 +17,25 @@
 //
 // Test capture points (use find_logpoint() in tests):
 //   - OFFSET_ORDER: Capture full Order struct
-//   - OFFSET_PRODUCT: Capture Product with nested Category
-//   - OFFSET_SLICE: Capture []OrderItem slice
-//   - OFFSET_ARRAY: Capture fixed-size array
+//   - OFFSET_HISTORY: Capture struct with fixed-size array
 //   - OFFSET_POINTER: Capture pointer to struct
-//   - OFFSET_SCALARS: Capture scalar fields
+//   - OFFSET_ITEMS: Capture slice items
+//   - OFFSET_MAP: Capture map values
+//   - OFFSET_STATUS: Capture enum-like type
+//   - OFFSET_DEEP: Capture deeply nested field
+//   - OFFSET_TIME: Capture time.Time struct
+//
+// DETERMINISTIC VALUES (for testing):
+//   - Iteration 1: ID=1, Product.Name="Laptop", Trader.Name="Alice", Status="PENDING"
+//   - Iteration 2: ID=2, Product.Name="Phone", Trader.Name="Bob", Status="CONFIRMED"
+//   - Iteration 3: ID=3, Product.Name="Tablet", Trader.Name="Charlie", Status="SHIPPED"
+//   - Fixed array: Prices=[100.5, 101.2, 99.8, 102.1, 100.0], Avg=100.72
 
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"math/rand"
 	"os"
 	"os/signal"
 	"syscall"
@@ -126,8 +134,6 @@ func main() {
 	// Ignore SIGPIPE
 	signal.Ignore(syscall.SIGPIPE)
 
-	rand.Seed(time.Now().UnixNano())
-
 	log("Complex types fixture started")
 	log("Testing: nested structs, slices, maps, pointers, interfaces")
 	log("")
@@ -137,13 +143,13 @@ func main() {
 	for running {
 		iteration++
 
-		// Create nested order structure
-		order := createRandomOrder(iteration)
+		// Create deterministic nested order structure
+		order := createOrder(iteration)
 
 		// Test pointer capture
 		globalOrder = &order
 
-		// Create array test data
+		// Create array test data (always the same values)
 		history := PriceHistory{
 			Prices: [5]float64{100.5, 101.2, 99.8, 102.1, 100.0},
 			Avg:    100.72,
@@ -197,31 +203,47 @@ func main() {
 
 var running = true
 
-func createRandomOrder(iteration int) Order {
+// createOrder creates a deterministic Order based on iteration number
+func createOrder(iteration int) Order {
+	// Deterministic status selection based on iteration
 	statuses := []OrderStatus{StatusPending, StatusConfirmed, StatusShipped, StatusDelivered}
+	statusIndex := (iteration - 1) % len(statuses)
+
+	// Fixed timestamp for deterministic testing (Unix epoch + iteration seconds)
+	timestamp := time.Unix(int64(iteration*1000), 0)
 
 	return Order{
 		ID:        iteration,
-		Product:   createRandomProduct(),
-		Trader:    createRandomTrader(),
-		Items:     createRandomItems(rand.Intn(5) + 1),
-		Tags:      createRandomTags(rand.Intn(3) + 1),
-		Total:     rand.Float64()*1000 + 100,
-		Timestamp: time.Now(),
-		Status:    statuses[rand.Intn(len(statuses))],
+		Product:   createProduct(iteration),
+		Trader:    createTrader(iteration),
+		Items:     createItems(iteration),
+		Tags:      createTags(iteration),
+		Total:     float64(iteration) * 100.5,
+		Timestamp: timestamp,
+		Status:    statuses[statusIndex],
 	}
 }
 
-func createRandomProduct() Product {
+// createProduct creates a deterministic Product
+func createProduct(iteration int) Product {
+	productNames := []string{"Laptop", "Phone", "Tablet", "Monitor", "Keyboard", "Mouse", "Headphones", "Camera"}
+	productIndex := (iteration - 1) % len(productNames)
+
+	categoryNames := []string{"Electronics", "Accessories", "Computing", "Audio", "Photography"}
+	categoryIndex := (iteration - 1) % len(categoryNames)
+
+	// Fixed CreatedAt timestamp for deterministic testing
+	createdAt := time.Unix(int64(iteration*1000000), 0)
+
 	return Product{
-		SKU:   fmt.Sprintf("SKU-%d", rand.Intn(10000)),
-		Name:  randomProductName(),
-		Price: rand.Float64()*500 + 50,
+		SKU:   fmt.Sprintf("SKU-%04d", iteration*1111%10000),
+		Name:  productNames[productIndex],
+		Price: float64(iteration) * 50.25,
 		Category: Category{
-			ID:   rand.Intn(100),
-			Name: randomCategoryName(),
+			ID:   iteration * 10 % 100,
+			Name: categoryNames[categoryIndex],
 			Metadata: Metadata{
-				CreatedAt: time.Now().AddDate(0, -rand.Intn(12), 0),
+				CreatedAt: createdAt,
 				Tags:      []string{"tag1", "tag2", "tag3"},
 				Extra:     map[string]string{"source": "api", "version": "1.0"},
 			},
@@ -229,34 +251,50 @@ func createRandomProduct() Product {
 	}
 }
 
-func createRandomTrader() Trader {
+// createTrader creates a deterministic Trader
+func createTrader(iteration int) Trader {
+	traderNames := []string{"Alice", "Bob", "Charlie", "Diana", "Eve", "Frank", "Grace", "Henry"}
+	traderIndex := (iteration - 1) % len(traderNames)
+
+	streetNames := []string{"Main", "Oak", "Maple", "Cedar", "Pine", "Elm", "Washington", "Lake"}
+	streetIndex := (iteration - 1) % len(streetNames)
+
+	cityNames := []string{"New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "Philadelphia", "San Antonio", "San Diego"}
+	cityIndex := (iteration - 1) % len(cityNames)
+
 	return Trader{
-		ID:   rand.Intn(10000),
-		Name: randomTraderName(),
+		ID:   iteration * 100 % 10000,
+		Name: traderNames[traderIndex],
 		Address: Address{
-			Street:  fmt.Sprintf("%d %s St", rand.Intn(999), randomStreetName()),
-			City:    randomCityName(),
+			Street:  fmt.Sprintf("%d %s St", (iteration*111)%999, streetNames[streetIndex]),
+			City:    cityNames[cityIndex],
 			Country: "USA",
-			Zip:     fmt.Sprintf("%05d", rand.Intn(99999)),
+			Zip:     fmt.Sprintf("%05d", (iteration*1234)%99999),
 		},
-		Email: fmt.Sprintf("trader%d@example.com", rand.Intn(10000)),
+		Email: fmt.Sprintf("trader%d@example.com", iteration),
 	}
 }
 
-func createRandomItems(count int) []OrderItem {
+// createItems creates deterministic OrderItems
+func createItems(iteration int) []OrderItem {
+	// Always create 2 items for deterministic testing
+	count := 2
 	items := make([]OrderItem, count)
-	for i := range items {
-		product := createRandomProduct()
+	for i := 0; i < count; i++ {
+		product := createProduct(iteration*10 + i + 1)
 		items[i] = OrderItem{
 			Product:  product,
-			Quantity: rand.Intn(10) + 1,
-			Total:    product.Price * float64(rand.Intn(10)+1),
+			Quantity: (i + 1) * 2,
+			Total:    product.Price * float64((i+1)*2),
 		}
 	}
 	return items
 }
 
-func createRandomTags(count int) map[string]Tag {
+// createTags creates deterministic Tags map
+func createTags(iteration int) map[string]Tag {
+	// Always create 2 tags for deterministic testing
+	count := 2
 	tags := make(map[string]Tag, count)
 	for i := 0; i < count; i++ {
 		key := fmt.Sprintf("tag%d", i)
@@ -268,38 +306,20 @@ func createRandomTags(count int) map[string]Tag {
 	return tags
 }
 
+// logOrder prints order as pretty-printed JSON for debugging
 func logOrder(order Order) {
+	// Print human-readable summary
 	fmt.Fprintf(os.Stderr, "Order #%d: %s x $%.2f [%s] items=%d\n",
 		order.ID,
 		order.Product.Name,
 		order.Total,
 		order.Status,
 		len(order.Items))
-}
 
-func randomProductName() string {
-	products := []string{"Laptop", "Phone", "Tablet", "Monitor", "Keyboard", "Mouse", "Headphones", "Camera"}
-	return products[rand.Intn(len(products))]
-}
-
-func randomCategoryName() string {
-	categories := []string{"Electronics", "Accessories", "Computing", "Audio", "Photography"}
-	return categories[rand.Intn(len(categories))]
-}
-
-func randomTraderName() string {
-	names := []string{"Alice", "Bob", "Charlie", "Diana", "Eve", "Frank", "Grace", "Henry"}
-	return names[rand.Intn(len(names))]
-}
-
-func randomStreetName() string {
-	streets := []string{"Main", "Oak", "Maple", "Cedar", "Pine", "Elm", "Washington", "Lake"}
-	return streets[rand.Intn(len(streets))]
-}
-
-func randomCityName() string {
-	cities := []string{"New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "Philadelphia", "San Antonio", "San Diego"}
-	return cities[rand.Intn(len(cities))]
+	// Print pretty-printed JSON for detailed debugging
+	if jsonData, err := json.MarshalIndent(order, "  ", "  "); err == nil {
+		fmt.Fprintf(os.Stderr, "  JSON: %s\n", string(jsonData))
+	}
 }
 
 func log(args ...interface{}) {

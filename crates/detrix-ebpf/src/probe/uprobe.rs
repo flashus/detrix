@@ -199,11 +199,8 @@ impl UprobeManager {
         use aya::programs::UProbe;
 
         // Step 1: Generate BPF C source from variable locations
-        let bpf_program = generate_bpf_program(
-            &probe_point.variables,
-            false,
-            &self.capture_config,
-        )?;
+        let bpf_program =
+            generate_bpf_program(&probe_point.variables, false, &self.capture_config)?;
 
         // Debug: log generated BPF source
         detrix_logging::debug!(

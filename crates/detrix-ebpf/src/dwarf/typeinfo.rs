@@ -30,6 +30,13 @@ use crate::error::{Error, Result};
 
 use gimli::{AttributeValue, DebuggingInformationEntry, DwAt, Reader, Unit};
 
+// Go-specific DWARF attributes (not in standard DWARF spec)
+// Defined by Delve: pkg/dwarf/godwarf/type.go
+const DW_AT_GO_KIND: u16 = 0x2900;
+
+// Go reflect.Kind values
+const GO_KIND_STRING: i64 = 24;
+
 /// Resolved type info for a variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeInfo {
@@ -89,7 +96,7 @@ pub fn resolve_type_info<R: Reader>(
 ) -> Result<TypeInfo> {
     // Check for type attribute
     let type_attr = var_entry.attr_value(DwAt(gimli::constants::DW_AT_type.0));
-    
+
     match type_attr {
         Some(AttributeValue::UnitRef(offset)) => {
             detrix_logging::debug!(
@@ -130,23 +137,23 @@ fn resolve_type_from_debug_info_ref<R: Reader>(
         "[DWARF typeinfo] Resolving DebugInfoRef {:?} across units",
         target_offset
     );
-    
+
     // Collect all units first to find the one containing our offset
     let mut units = dwarf.units();
     let mut unit_headers = Vec::new();
     while let Ok(Some(unit_header)) = units.next() {
         unit_headers.push(unit_header);
     }
-    
+
     // Sort by offset to find the containing unit
     unit_headers.sort_by_key(|h| h.offset().0);
-    
+
     // Find the unit that contains our target offset
     // The target should be >= unit_start and < next_unit_start (or end of section)
     for (i, unit_header) in unit_headers.iter().enumerate() {
         let unit_start = unit_header.offset().0;
         let next_start = unit_headers.get(i + 1).map(|h| h.offset().0);
-        
+
         // Check if target is within this unit's range
         let is_in_range = if let Some(next) = next_start {
             target_offset >= unit_start && target_offset < next
@@ -154,12 +161,12 @@ fn resolve_type_from_debug_info_ref<R: Reader>(
             // Last unit - just check it's after the start
             target_offset >= unit_start
         };
-        
+
         if is_in_range {
             let unit = dwarf
                 .unit(unit_header.clone())
                 .map_err(|e| Error::DwarfParse(format!("Unit load: {e}")))?;
-            
+
             let unit_local_offset_val = target_offset - unit_start;
             let unit_local_offset = gimli::UnitOffset(unit_local_offset_val);
             detrix_logging::debug!(
@@ -167,11 +174,11 @@ fn resolve_type_from_debug_info_ref<R: Reader>(
                 unit_start,
                 unit_local_offset.0
             );
-            
+
             return resolve_type_at_offset(unit_local_offset, &unit, dwarf, depth);
         }
     }
-    
+
     detrix_logging::debug!(
         "[DWARF typeinfo] DebugInfoRef {:?} not found in any unit range",
         target_offset
@@ -193,7 +200,7 @@ fn resolve_typedef_target<R: Reader>(
     depth: u8,
 ) -> Result<TypeInfo> {
     let type_attr = typedef_entry.attr_value(DwAt(gimli::constants::DW_AT_type.0));
-    
+
     match type_attr {
         Some(AttributeValue::UnitRef(offset)) => {
             // Unit-local reference
@@ -277,12 +284,13 @@ fn resolve_type_at_offset<R: Reader>(
             let typedef_name = read_attr_string(entry, dwarf, gimli::constants::DW_AT_name)?;
             detrix_logging::debug!(
                 "[DWARF typeinfo] TYPEDEF: name={:?} at offset {:?}",
-                typedef_name, entry.offset()
+                typedef_name,
+                entry.offset()
             );
 
             // Get the inner type offset - may be unit-local or cross-unit
             let mut inner_info = resolve_typedef_target(entry, unit, dwarf, depth)?;
-            
+
             detrix_logging::debug!(
                 "[DWARF typeinfo] TYPEDEF '{}' → inner: name='{}' is_string={} is_struct={} byte_size={}",
                 typedef_name.as_ref().map(|s| s.as_str()).unwrap_or("???"),
@@ -313,11 +321,11 @@ fn resolve_type_at_offset<R: Reader>(
             };
             // Use resolve_typedef_target to handle cross-unit element type references
             let elem_info = resolve_typedef_target(entry, unit, dwarf, depth)?;
-            
+
             // Get element count from DW_TAG_subrange_type child
             let element_count = get_array_element_count(entry, unit, dwarf)?;
             let name = format!("[{}]{}", element_count, elem_info.name);
-            
+
             Ok(TypeInfo {
                 name,
                 size: VariableSize::QWord, // Header word for location; actual read uses byte_size
@@ -367,10 +375,12 @@ fn resolve_base_type<R: Reader>(
     // Go's DWARF emits 'string' as a base_type with byte_size=16
     // Check for string type alias (type MyString string)
     let is_string = name == "string" || name == "basic/string";
-    
+
     detrix_logging::info!(
         "[DWARF typeinfo] BASE_TYPE: name='{}' byte_size={} is_string={}",
-        name, byte_size, is_string
+        name,
+        byte_size,
+        is_string
     );
 
     Ok(TypeInfo {
@@ -409,29 +419,27 @@ fn get_array_element_count<R: Reader>(
 ) -> Result<u64> {
     // Array types have DW_TAG_subrange_type child with DW_AT_count or DW_AT_upper_bound
     let mut cursor = unit.entries_at_offset(array_entry.offset())?;
-    
+
     // Skip the array entry itself
     let Some(_) = cursor.next_dfs()? else {
         return Ok(0);
     };
-    
+
     // Look for DW_TAG_subrange_type child
     while let Some(child) = cursor.next_dfs()? {
         detrix_logging::debug!(
             "[DWARF typeinfo] array child tag={:?} at offset {:?}",
-            child.tag(), child.offset()
+            child.tag(),
+            child.offset()
         );
-        
+
         if child.tag() != gimli::DW_TAG_subrange_type {
             continue;
         }
-        
+
         // Try DW_AT_count first
         if let Some(count) = child.attr_value(DwAt(gimli::constants::DW_AT_count.0)) {
-            detrix_logging::debug!(
-                "[DWARF typeinfo] array DW_AT_count={:?}",
-                count
-            );
+            detrix_logging::debug!("[DWARF typeinfo] array DW_AT_count={:?}", count);
             match count {
                 AttributeValue::Udata(n) => return Ok(n),
                 AttributeValue::Data1(n) => return Ok(n as u64),
@@ -441,7 +449,7 @@ fn get_array_element_count<R: Reader>(
                 _ => {}
             }
         }
-        
+
         // Fallback to DW_AT_upper_bound + 1
         if let Some(upper) = child.attr_value(DwAt(gimli::constants::DW_AT_upper_bound.0)) {
             detrix_logging::debug!(
@@ -458,9 +466,9 @@ fn get_array_element_count<R: Reader>(
             }
         }
     }
-    
+
     detrix_logging::debug!("[DWARF typeinfo] array element count not found, returning 0");
-    Ok(0)  // Unknown count
+    Ok(0) // Unknown count
 }
 
 /// Resolve a DW_TAG_structure_type DIE.
@@ -510,7 +518,7 @@ fn get_array_element_count<R: Reader>(
 /// Name matching is secondary and used for additional validation.
 fn resolve_struct_type<R: Reader>(
     entry: &DebuggingInformationEntry<R>,
-    _unit: &gimli::Unit<R>,
+    unit: &gimli::Unit<R>,
     dwarf: &gimli::Dwarf<R>,
 ) -> Result<TypeInfo> {
     let name = read_attr_string(entry, dwarf, gimli::constants::DW_AT_name)?
@@ -537,8 +545,30 @@ fn resolve_struct_type<R: Reader>(
         byte_size == 24
     );
 
-    // Go string = struct with "str" field (ptr) + "len" field = 16 bytes on amd64
-    let is_string = is_go_string_type_by_name_and_size(&name, &linkage_name, byte_size);
+    // Check Go's DWARF kind attribute first (most reliable)
+    // Go emits DW_AT_go_kind (0x2900) with reflect.Kind value (24 = string)
+    let mut is_string = is_go_string_by_kind_attr(entry);
+
+    // Fallback to name/size-based detection if kind attr not present
+    if !is_string {
+        is_string = is_go_string_type_by_name_and_size(&name, &linkage_name, byte_size);
+    }
+
+    // Final fallback: 16-byte structs with str+len fields are string aliases
+    // Go represents string type aliases as 16-byte structs with str (ptr) + len fields
+    // We must check for str+len fields to avoid misidentifying other 16-byte structs
+    // like OrderPtr (Order *Order + Count int) or complex numbers
+    if !is_string && byte_size == 16 && !name.contains("Complex") {
+        // Check if struct has str and len fields (string-like structure)
+        if has_string_fields(entry, unit, dwarf) {
+            detrix_logging::debug!(
+                "[DWARF typeinfo] Treating 16-byte struct '{}' as string alias (has str+len fields)",
+                name
+            );
+            is_string = true;
+        }
+    }
+
     // time.Time is a 24-byte struct (wall uint64 + ext int64 + loc *Location)
     // Don't confuse it with slices
     let is_time = name == "time.Time" || name.ends_with(".Time");
@@ -606,7 +636,8 @@ fn is_go_string_type_by_name_and_size(name: &str, linkage_name: &str, byte_size:
         if name == "string"
             || name == "basic/string"
             || name.contains("/string")  // Package-qualified names
-            || linkage_name.contains("runtime.string")  // Internal runtime type
+            || linkage_name.contains("runtime.string")
+        // Internal runtime type
         {
             return true;
         }
@@ -618,6 +649,91 @@ fn is_go_string_type_by_name_and_size(name: &str, linkage_name: &str, byte_size:
         }
     }
     false
+}
+
+/// Check if a struct has Go string fields (str + len).
+///
+/// Go's DWARF represents string type aliases (e.g., `type OrderStatus string`)
+/// as structs with two fields: `str` (pointer) and `len` (length).
+/// This function detects such string-like structs to distinguish them from
+/// other 16-byte structs like OrderPtr (pointer + int).
+///
+/// Follows typedef chains to find the actual struct type.
+fn has_string_fields<R: Reader>(
+    entry: &DebuggingInformationEntry<R>,
+    unit: &gimli::Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+) -> bool {
+    // If this is a typedef, follow it to find the actual struct
+    if entry.tag() == gimli::DW_TAG_typedef {
+        if let Ok(inner_info) = resolve_typedef_target(entry, unit, dwarf, 0) {
+            // Check if the inner type name suggests it's a string
+            // Go's base string type is named "string" or "basic/string"
+            return inner_info.name == "string"
+                || inner_info.name == "basic/string"
+                || inner_info.name.ends_with(".string");
+        }
+        return false;
+    }
+
+    // For struct entries, check for str and len fields
+    let mut cursor = match unit.entries_at_offset(entry.offset()) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    // Skip the struct entry itself
+    if cursor.next_dfs().is_err() || cursor.next_dfs().ok().is_none() {
+        return false;
+    }
+
+    let mut has_str = false;
+    let mut has_len = false;
+    let mut field_count = 0;
+
+    // Iterate over children looking for str and len fields
+    while let Ok(Some(child)) = cursor.next_dfs() {
+        if child.tag() != gimli::DW_TAG_member {
+            continue;
+        }
+        field_count += 1;
+
+        if let Some(field_name) = read_attr_string(child, dwarf, gimli::constants::DW_AT_name)
+            .ok()
+            .flatten()
+        {
+            if field_name == "str" {
+                has_str = true;
+            } else if field_name == "len" {
+                has_len = true;
+            }
+        }
+
+        // Stop if we've seen more than 2 fields
+        if field_count > 2 {
+            break;
+        }
+    }
+
+    // String-like struct has exactly 2 fields: str and len
+    field_count == 2 && has_str && has_len
+}
+
+/// Check if a type has Go's DWARF string kind attribute.
+///
+/// Go's DWARF emission includes a custom `DW_AT_go_kind` attribute (0x2900)
+/// that directly encodes the reflect.Kind value. For strings, this is 24.
+///
+/// Reference: Delve pkg/dwarf/godwarf/type.go
+fn is_go_string_by_kind_attr<R: Reader>(entry: &DebuggingInformationEntry<R>) -> bool {
+    // Go's DW_AT_go_kind can be encoded as different attribute value types
+    // depending on the value size. Check for common encodings.
+    match entry.attr_value(DwAt(DW_AT_GO_KIND)) {
+        Some(AttributeValue::Sdata(kind)) => kind == GO_KIND_STRING,
+        Some(AttributeValue::Data1(kind)) => kind as i64 == GO_KIND_STRING,
+        Some(AttributeValue::Udata(kind)) => kind as i64 == GO_KIND_STRING,
+        _ => false,
+    }
 }
 
 /// Read a string attribute from a DIE.

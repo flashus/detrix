@@ -34,10 +34,7 @@ impl EbpfAdapterFactory {
     }
 
     /// Create a factory with custom capture limits derived from config.
-    pub fn new_with_config(
-        base_path: impl Into<PathBuf>,
-        capture_config: CaptureConfig,
-    ) -> Self {
+    pub fn new_with_config(base_path: impl Into<PathBuf>, capture_config: CaptureConfig) -> Self {
         Self {
             base_path: base_path.into(),
             capture_config,

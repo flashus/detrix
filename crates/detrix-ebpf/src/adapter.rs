@@ -25,7 +25,7 @@
 //! ```
 
 use crate::dwarf::{DwarfInfo, ProbePoint, ResolvedVariable, VariableSize};
-use crate::probe::types::{CapturedValue, CaptureConfig};
+use crate::probe::types::{CaptureConfig, CapturedValue};
 use crate::probe::UprobeManager;
 
 use async_trait::async_trait;
@@ -107,7 +107,7 @@ impl EbpfAdapter {
             capture_config,
             #[cfg(target_os = "linux")]
             mem_reader: Arc::new(crate::mem_reader::LinuxProcessMemoryReader::new(
-                path.to_str().unwrap_or("/unknown")
+                path.to_str().unwrap_or("/unknown"),
             )),
         }
     }
@@ -425,10 +425,7 @@ mod tests {
 
         assert_eq!(event.values[0].expression, "items");
         assert_eq!(event.values[0].value_json, r#"{"len":5,"cap":10}"#);
-        assert_eq!(
-            event.values[0].typed_value,
-            Some(TypedValue::Numeric(5.0))
-        );
+        assert_eq!(event.values[0].typed_value, Some(TypedValue::Numeric(5.0)));
     }
 
     #[test]

@@ -142,17 +142,17 @@ pub mod go_lines {
         ("quantity", 27, 28),       // quantity := ...; safe from +28 (price)
         ("price", 28, 30),          // price := ...; safe from +30 (direction line)
         ("direction", 29, 30),      // direction := ...; safe from +30 (labelConcat line)
-        ("labelConcat", 31, 33),    // labelConcat := ... (concatenation); safe from +33 (labelSprintf)
-        ("labelSprintf", 32, 33),   // labelSprintf := ... (fmt.Sprintf); safe from +33 (orderID)
-        ("label", 30, 33),          // [DEPRECATED] kept for backward compat; use labelConcat
-        ("orderID", 33, 36),        // orderID := placeOrder(); safe from +36 (entryPrice)
-        ("entryPrice", 36, 37),     // entryPrice := price; safe from +37 (currentPrice)
-        ("currentPrice", 37, 38),   // currentPrice := ...; safe from +38 (pnl)
-        ("pnl", 38, 41),            // pnl := calculatePnl(); safe from +41 (totalPnl)
-        ("totalPnl", 41, 42),       // totalPnl = ...; safe from +42 (lastOrderID)
-        ("lastOrderID", 42, 44),    // lastOrderID := orderID; safe from +44 (log)
-        ("log", 44, 44),            // log(...) call — all vars in scope
-        ("sleep", 46, 46),          // time.Sleep — all vars in scope
+        ("labelConcat", 31, 33), // labelConcat := ... (concatenation); safe from +33 (labelSprintf)
+        ("labelSprintf", 32, 33), // labelSprintf := ... (fmt.Sprintf); safe from +33 (orderID)
+        ("label", 30, 33),       // [DEPRECATED] kept for backward compat; use labelConcat
+        ("orderID", 33, 36),     // orderID := placeOrder(); safe from +36 (entryPrice)
+        ("entryPrice", 36, 37),  // entryPrice := price; safe from +37 (currentPrice)
+        ("currentPrice", 37, 38), // currentPrice := ...; safe from +38 (pnl)
+        ("pnl", 38, 41),         // pnl := calculatePnl(); safe from +41 (totalPnl)
+        ("totalPnl", 41, 42),    // totalPnl = ...; safe from +42 (lastOrderID)
+        ("lastOrderID", 42, 44), // lastOrderID := orderID; safe from +44 (log)
+        ("log", 44, 44),         // log(...) call — all vars in scope
+        ("sleep", 46, 46),       // time.Sleep — all vars in scope
     ];
 
     /// Code map for the Go fixture.
@@ -179,13 +179,13 @@ pub mod go_nested_lines {
     /// Symbol map for nested types fixture
     const SYMBOL_MAP: &[(&str, u32, u32)] = &[
         // (name,             decl, logpt)
-        ("order", 28, 30),        // order := createRandomOrder()
-        ("history", 35, 36),      // history := PriceHistory{...}
-        ("ptrWrapper", 39, 40),   // ptrWrapper := OrderPtr{...}
-        ("logOrder", 42, 42),     // logOrder(order) call
-        ("i", 46, 46),            // for i, item := range order.Items
+        ("order", 28, 30),      // order := createRandomOrder()
+        ("history", 35, 36),    // history := PriceHistory{...}
+        ("ptrWrapper", 39, 40), // ptrWrapper := OrderPtr{...}
+        ("logOrder", 42, 42),   // logOrder(order) call
+        ("i", 46, 46),          // for i, item := range order.Items
         ("item", 46, 46),
-        ("key", 52, 52),          // for key, tag := range order.Tags
+        ("key", 52, 52), // for key, tag := range order.Tags
         ("tag", 52, 52),
         ("status", 57, 57),       // status := order.Status
         ("categoryName", 60, 60), // categoryName := order.Product.Category.Name

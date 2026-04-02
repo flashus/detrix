@@ -67,7 +67,7 @@ impl LinuxProcessMemoryReader {
             target_exe: target_exe.into(),
         }
     }
-    
+
     /// Find the target process PID by searching /proc for matching executable
     fn find_target_pid(&self) -> Option<u32> {
         // Check cache first
@@ -80,7 +80,7 @@ impl LinuxProcessMemoryReader {
                 }
             }
         }
-        
+
         // Search /proc for matching executable
         if let Ok(entries) = std::fs::read_dir("/proc") {
             for entry in entries.flatten() {
@@ -97,7 +97,8 @@ impl LinuxProcessMemoryReader {
                             *cache = Some(pid);
                             detrix_logging::debug!(
                                 "[mem_reader] Found target PID {} for {}",
-                                pid, self.target_exe
+                                pid,
+                                self.target_exe
                             );
                             return Some(pid);
                         }
@@ -105,7 +106,7 @@ impl LinuxProcessMemoryReader {
                 }
             }
         }
-        
+
         detrix_logging::warn!(
             "[mem_reader] Could not find target process: {}",
             self.target_exe
@@ -118,20 +119,26 @@ impl LinuxProcessMemoryReader {
 impl ProcessMemoryReader for LinuxProcessMemoryReader {
     fn read_string(&self, _kernel_pid: u32, ptr: u64, len: usize) -> Result<String> {
         use crate::error::Error;
-        
+
         // Find the target process PID in our namespace by searching /proc
         let target_pid = self.find_target_pid().ok_or_else(|| {
-            Error::Ebpf(format!("Could not find target process: {}", self.target_exe))
+            Error::Ebpf(format!(
+                "Could not find target process: {}",
+                self.target_exe
+            ))
         })?;
-        
+
         detrix_logging::debug!(
             "[mem_reader] Reading string from target PID {} (kernel reported {}): ptr={:#x} len={}",
-            target_pid, _kernel_pid, ptr, len
+            target_pid,
+            _kernel_pid,
+            ptr,
+            len
         );
-        
+
         // Limit read size to prevent excessive memory access
         let read_len = len.min(1024);
-        
+
         // Try process_vm_readv first
         match process_vm_read(target_pid, ptr, read_len) {
             Ok(buf) => {
@@ -159,13 +166,10 @@ impl ProcessMemoryReader for LinuxProcessMemoryReader {
                 }
             }
             Err(e) => {
-                detrix_logging::debug!(
-                    "[mem_reader] /proc/{}/mem failed: {}",
-                    target_pid, e
-                );
+                detrix_logging::debug!("[mem_reader] /proc/{}/mem failed: {}", target_pid, e);
             }
         }
-        
+
         Err(Error::Ebpf(format!(
             "Failed to read string from target_pid={} ptr={:#x} len={}",
             target_pid, ptr, len
@@ -176,7 +180,10 @@ impl ProcessMemoryReader for LinuxProcessMemoryReader {
         use crate::error::Error;
 
         let target_pid = self.find_target_pid().ok_or_else(|| {
-            Error::Ebpf(format!("Could not find target process: {}", self.target_exe))
+            Error::Ebpf(format!(
+                "Could not find target process: {}",
+                self.target_exe
+            ))
         })?;
 
         // Try process_vm_readv first
@@ -191,11 +198,14 @@ impl ProcessMemoryReader for LinuxProcessMemoryReader {
     fn read_u64(&self, kernel_pid: u32, ptr: u64) -> Result<u64> {
         let bytes = self.read_bytes(kernel_pid, ptr, 8)?;
         if bytes.len() < 8 {
-            return Err(crate::error::Error::Ebpf(
-                format!("read_u64: only got {} bytes", bytes.len())
-            ));
+            return Err(crate::error::Error::Ebpf(format!(
+                "read_u64: only got {} bytes",
+                bytes.len()
+            )));
         }
-        Ok(u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]))
+        Ok(u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
     }
 }
 
@@ -242,7 +252,7 @@ fn process_vm_read(pid: u32, addr: u64, len: usize) -> Result<Vec<u8>> {
             )))
         } else if result == 0 {
             Err(Error::Ebpf(
-                "process_vm_readv returned 0 (address may be invalid)".to_string()
+                "process_vm_readv returned 0 (address may be invalid)".to_string(),
             ))
         } else {
             // Truncate buffer to actual bytes read

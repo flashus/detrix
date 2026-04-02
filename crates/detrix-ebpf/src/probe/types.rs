@@ -131,7 +131,7 @@ pub enum CapturedValue {
         key_type: String,
         value_type: String,
         entries: Vec<(CapturedValue, CapturedValue)>,
-        reason: String,  // Explanation of why capture failed/partial
+        reason: String, // Explanation of why capture failed/partial
     },
     /// Read failed (invalid address, variable optimized out, etc.)
     Error(String),
@@ -227,14 +227,20 @@ impl CapturedValue {
                 }
             }
             Self::Slice { len, cap } => format!("{{\"len\":{len},\"cap\":{cap}}}"),
-            Self::Array { element_type, elements } => {
+            Self::Array {
+                element_type,
+                elements,
+            } => {
                 // Convert array elements to JSON array
                 let n = elements.len();
                 let elem_strs: Vec<String> = elements
                     .iter()
                     .map(|elem| elem.to_json_value(VariableSize::QWord))
                     .collect();
-                format!("{{\"__type\":\"[{n}]{element_type}\",\"elements\":[{}]}}", elem_strs.join(","))
+                format!(
+                    "{{\"__type\":\"[{n}]{element_type}\",\"elements\":[{}]}}",
+                    elem_strs.join(",")
+                )
             }
             Self::Bytes(b) => {
                 // Hex-encode raw bytes for JSON portability
@@ -251,7 +257,12 @@ impl CapturedValue {
                     .collect();
                 format!("{{\"__type\":\"{}\",{}}}", type_name, field_strs.join(","))
             }
-            Self::Map { key_type, value_type, entries, reason } => {
+            Self::Map {
+                key_type,
+                value_type,
+                entries,
+                reason,
+            } => {
                 // Maps are unsupported — return error with explanation
                 format!("{{\"__type\":\"map[{key_type}]{value_type}\",\"error\":\"{reason}\",\"partial_entries\":{}}}", 
                     entries.len())
@@ -377,20 +388,26 @@ mod tests {
         let struct_val = CapturedValue::Struct {
             type_name: "main.Order".to_string(),
             fields: vec![
-                ("Product".to_string(), Box::new(CapturedValue::Struct {
-                    type_name: "main.Product".to_string(),
-                    fields: vec![
-                        ("Name".to_string(), Box::new(CapturedValue::String {
-                            data: b"Laptop".to_vec(),
-                            len: 6,
-                        })),
-                        ("Price".to_string(), Box::new(CapturedValue::Scalar(999))),
-                    ],
-                })),
+                (
+                    "Product".to_string(),
+                    Box::new(CapturedValue::Struct {
+                        type_name: "main.Product".to_string(),
+                        fields: vec![
+                            (
+                                "Name".to_string(),
+                                Box::new(CapturedValue::String {
+                                    data: b"Laptop".to_vec(),
+                                    len: 6,
+                                }),
+                            ),
+                            ("Price".to_string(), Box::new(CapturedValue::Scalar(999))),
+                        ],
+                    }),
+                ),
                 ("Total".to_string(), Box::new(CapturedValue::Scalar(1500))),
             ],
         };
-        
+
         let json = struct_val.to_json_value(VariableSize::QWord);
         assert!(json.contains("\"__type\":\"main.Order\""));
         assert!(json.contains("\"Product\":"));

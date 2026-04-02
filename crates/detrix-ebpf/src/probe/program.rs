@@ -203,7 +203,10 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                     format!("    bpf_probe_read_user(&event->var{idx}_len, 8, (void *)(ctx->sp + ({offset})));")
                 }
                 VariableLocation::Register(reg) => {
-                    format!("    event->var{idx}_len = (u64)ctx->{};", reg.pt_regs_field())
+                    format!(
+                        "    event->var{idx}_len = (u64)ctx->{};",
+                        reg.pt_regs_field()
+                    )
                 }
                 _ => format!("    event->var{idx}_len = 0;"),
             };
@@ -445,7 +448,7 @@ mod tests {
             nested_type: None,
         }];
         let prog = generate_bpf_program(&vars, false, &CaptureConfig::default()).unwrap();
-        assert!(prog.source.contains("var0"));     // ptr field
+        assert!(prog.source.contains("var0")); // ptr field
         assert!(prog.source.contains("var0_len")); // len field
         assert!(prog.source.contains("var0_str")); // content buffer field
         assert!(prog.source.contains("bpf_probe_read_user")); // content read
@@ -471,7 +474,8 @@ mod tests {
         );
         // Size must match MAX_STRING_CAPTURE
         assert!(
-            prog.source.contains(&format!("var0_str[{}]", MAX_STRING_CAPTURE)),
+            prog.source
+                .contains(&format!("var0_str[{}]", MAX_STRING_CAPTURE)),
             "str buffer size does not match MAX_STRING_CAPTURE"
         );
     }

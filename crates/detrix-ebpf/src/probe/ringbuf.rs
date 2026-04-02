@@ -22,7 +22,7 @@
 use crate::dwarf::types::ResolvedVariable;
 use crate::error::{Error, Result};
 use crate::mem_reader::ProcessMemoryReader;
-use crate::probe::types::{CapturedValue, CaptureConfig, ProbeEvent};
+use crate::probe::types::{CaptureConfig, CapturedValue, ProbeEvent};
 
 /// Minimum event size: pid(4) + tid(4) + timestamp(8) = 16 bytes.
 const MIN_EVENT_SIZE: usize = 16;
@@ -83,7 +83,9 @@ pub fn parse_ring_buffer_event(
                 // BPF cannot access Go heap memory reliably
                 detrix_logging::debug!(
                     "[ringbuf] Reading Go string via user-space: pid={} ptr={:#x} len={}",
-                    pid, val, len
+                    pid,
+                    val,
+                    len
                 );
 
                 // Try with pid first, then tid
@@ -118,8 +120,8 @@ pub fn parse_ring_buffer_event(
                 // var{idx} (u64) was already read above as `val` — it is 0 (unused).
                 // The BPF program filled var{idx}_blob[N] with the actual bytes inline.
                 let capture = (*byte_size).min(config.max_blob_capture);
-                let bytes = read_bytes(data, &mut offset, capture)
-                    .unwrap_or_else(|_| vec![0u8; capture]);
+                let bytes =
+                    read_bytes(data, &mut offset, capture).unwrap_or_else(|_| vec![0u8; capture]);
 
                 // If we have DWARF field info, parse the blob into named fields
                 if let Some(crate::dwarf::nested_types::NestedType::Struct {
@@ -145,7 +147,9 @@ pub fn parse_ring_buffer_event(
                 // the actual struct bytes, then parse fields using DWARF type info.
                 detrix_logging::debug!(
                     "[ringbuf] StackIndirect '{}': ptr={:#x} byte_size={}",
-                    var.name, val, byte_size
+                    var.name,
+                    val,
+                    byte_size
                 );
                 let capture = (*byte_size).min(config.max_blob_capture);
                 let bytes = if val != 0 {
@@ -180,16 +184,21 @@ pub fn parse_ring_buffer_event(
                 // DWARF resolution populates nested_type for struct types
                 detrix_logging::debug!(
                     "[ringbuf] Variable '{}' type='{}' nested_type={:?}",
-                    var.name, var.type_name, var.nested_type.as_ref().map(|_| "Some")
+                    var.name,
+                    var.type_name,
+                    var.nested_type.as_ref().map(|_| "Some")
                 );
                 if var.nested_type.is_some() {
                     // For structs, BPF captured the base address as `val` (the u64 we already read)
                     // We need to use that address to read fields from user-space
                     // Don't read more from ring buffer - use `val` as the struct base address
                     parse_struct_fields_from_addr(
-                        val,  // Use the value BPF already captured as struct base address
-                        &var.type_name, config,
-                        var.nested_type.as_ref(), mem_reader, pid
+                        val, // Use the value BPF already captured as struct base address
+                        &var.type_name,
+                        config,
+                        var.nested_type.as_ref(),
+                        mem_reader,
+                        pid,
                     )?
                 } else {
                     CapturedValue::Scalar(val)
@@ -318,7 +327,9 @@ mod tests {
     #[test]
     fn parse_empty_event_no_vars() {
         let data = build_event_bytes(1000, 2000, 5_000_000_000, &[]);
-        let event = parse_ring_buffer_event(&data, &[], false, &CaptureConfig::default(), &StubMemReader).unwrap();
+        let event =
+            parse_ring_buffer_event(&data, &[], false, &CaptureConfig::default(), &StubMemReader)
+                .unwrap();
 
         assert_eq!(event.pid, 1000);
         assert_eq!(event.tid, 2000);
@@ -331,7 +342,14 @@ mod tests {
     fn parse_single_scalar_var() {
         let data = build_event_bytes(1, 2, 100, &[42]);
         let vars = vec![scalar_var("amount")];
-        let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
 
         assert_eq!(event.values.len(), 1);
         assert_eq!(event.values[0].as_u64(), Some(42));
@@ -341,7 +359,14 @@ mod tests {
     fn parse_multiple_vars() {
         let data = build_event_bytes(1, 2, 100, &[10, 20, 30]);
         let vars = vec![scalar_var("a"), scalar_var("b"), scalar_var("c")];
-        let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
 
         assert_eq!(event.values.len(), 3);
         assert_eq!(event.values[0].as_u64(), Some(10));
@@ -353,7 +378,14 @@ mod tests {
     fn parse_with_goid() {
         let data = build_event_bytes_with_goid(1, 2, 999, 100, &[42]);
         let vars = vec![scalar_var("x")];
-        let event = parse_ring_buffer_event(&data, &vars, true, &CaptureConfig::default(), &StubMemReader).unwrap();
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            true,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
 
         assert_eq!(event.goid, Some(999));
         assert_eq!(event.values[0].as_u64(), Some(42));
@@ -362,7 +394,8 @@ mod tests {
     #[test]
     fn parse_too_small_fails() {
         let data = vec![0u8; 10]; // Less than MIN_EVENT_SIZE
-        let result = parse_ring_buffer_event(&data, &[], false, &CaptureConfig::default(), &StubMemReader);
+        let result =
+            parse_ring_buffer_event(&data, &[], false, &CaptureConfig::default(), &StubMemReader);
         assert!(result.is_err());
     }
 
@@ -371,7 +404,14 @@ mod tests {
         // Event with header but missing variable data
         let data = build_event_bytes(1, 2, 100, &[]);
         let vars = vec![scalar_var("x")]; // Expects 8 more bytes
-        let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
         // Should handle gracefully with default value
         assert_eq!(event.values[0].as_u64(), Some(0));
     }
@@ -397,7 +437,14 @@ mod tests {
             nested_type: None,
         }];
 
-        let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
         assert_eq!(event.values.len(), 1);
         match &event.values[0] {
             CapturedValue::String { len, data } => {
@@ -414,7 +461,7 @@ mod tests {
         let mut data = build_event_bytes(1, 2, 100, &[]);
         data.extend_from_slice(&0xCAFEBABE_u64.to_le_bytes()); // ptr - stub returns "BTCUSD"
         data.extend_from_slice(&(symbol.len() as u64).to_le_bytes()); // len
-        // Skip buffer - memory reader provides content now
+                                                                      // Skip buffer - memory reader provides content now
         data.extend_from_slice(&vec![0u8; MAX_STRING_CAPTURE]);
 
         let vars = vec![ResolvedVariable {
@@ -428,7 +475,14 @@ mod tests {
             nested_type: None,
         }];
 
-        let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
         match &event.values[0] {
             CapturedValue::String { len, data } => {
                 assert_eq!(*len, 6);
@@ -457,7 +511,14 @@ mod tests {
             nested_type: None,
         }];
 
-        let event = parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &StubMemReader).unwrap();
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
         match &event.values[0] {
             CapturedValue::Slice { len, cap } => {
                 assert_eq!(*len, 7);
@@ -545,7 +606,6 @@ mod tests {
         let val = CapturedValue::Bytes(vec![0xAB, 0xCD]);
         assert_eq!(val.as_bytes(), Some([0xABu8, 0xCD].as_ref()));
     }
-
 }
 
 // ============================================================================
@@ -566,7 +626,9 @@ fn find_struct_pointee(
             crate::dwarf::nested_types::NestedType::Pointer { pointee, .. } => {
                 current = pointee.as_ref();
             }
-            crate::dwarf::nested_types::NestedType::Struct { type_info, fields, .. } => {
+            crate::dwarf::nested_types::NestedType::Struct {
+                type_info, fields, ..
+            } => {
                 return Some((type_info.name.as_str(), fields.as_slice()));
             }
             _ => return None,
@@ -592,19 +654,38 @@ fn is_struct_type(type_name: &str) -> bool {
     if type_name.starts_with("[]") || type_name.starts_with("map[") || type_name.starts_with('*') {
         return false;
     }
-    
+
     // Skip basic types
-    let basic_types = ["int", "int8", "int16", "int32", "int64",
-                       "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
-                       "float32", "float64",
-                       "complex64", "complex128",
-                       "bool", "string", "byte", "rune", "error"];
+    let basic_types = [
+        "int",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "uintptr",
+        "float32",
+        "float64",
+        "complex64",
+        "complex128",
+        "bool",
+        "string",
+        "byte",
+        "rune",
+        "error",
+    ];
     if basic_types.contains(&type_name) {
         return false;
     }
-    
+
     // Struct types have package prefix (main.Order), simple name (Order), or are anonymous structs
-    type_name.contains('.') || type_name.starts_with("struct") || (!type_name.is_empty() && !type_name.starts_with('[') && !type_name.starts_with("map"))
+    type_name.contains('.')
+        || type_name.starts_with("struct")
+        || (!type_name.is_empty() && !type_name.starts_with('[') && !type_name.starts_with("map"))
 }
 
 /// Parse struct fields using a known base address (captured by BPF).
@@ -617,7 +698,7 @@ fn is_struct_type(type_name: &str) -> bool {
 /// 2. User-space reads DWARF field offsets
 /// 3. User-space reads each field via process_vm_readv(base_addr + field_offset)
 fn parse_struct_fields_from_addr(
-    struct_base_addr: u64,  // Base address captured by BPF
+    struct_base_addr: u64, // Base address captured by BPF
     type_name: &str,
     config: &CaptureConfig,
     nested_type: Option<&crate::dwarf::nested_types::NestedType>,
@@ -626,7 +707,8 @@ fn parse_struct_fields_from_addr(
 ) -> Result<CapturedValue> {
     detrix_logging::debug!(
         "[ringbuf] Parsing struct fields for type '{}' at base addr {:#x} via user-space",
-        type_name, struct_base_addr
+        type_name,
+        struct_base_addr
     );
 
     // If struct address is 0 (nil pointer), return empty struct
@@ -655,7 +737,11 @@ fn parse_struct_fields_from_addr(
     let mut fields = Vec::new();
 
     // Use DWARF type info if available
-    if let Some(crate::dwarf::nested_types::NestedType::Struct { fields: dwarf_fields, .. }) = nested_type {
+    if let Some(crate::dwarf::nested_types::NestedType::Struct {
+        fields: dwarf_fields,
+        ..
+    }) = nested_type
+    {
         // Read each field from user-space memory
         for (field_idx, field) in dwarf_fields.iter().enumerate() {
             // Apply max_struct_fields limit
@@ -665,20 +751,18 @@ fn parse_struct_fields_from_addr(
 
             let field_name = field.name.clone();
             let field_addr = struct_base_addr + field.byte_offset;
-            
+
             detrix_logging::debug!(
                 "[ringbuf] Reading field '{}' at {:#x} (type: {}, is_string={}, is_slice={}, is_array={})",
                 field_name, field_addr, field.type_info.name, field.type_info.is_string, field.type_info.is_slice, field.type_info.is_array
             );
-            
+
             // Parse field based on its type
             let field_value = if field.type_info.is_string {
                 // String field: read ptr and len from user-space, then read content
-                let str_ptr = mem_reader.read_u64(pid, field_addr)
-                    .unwrap_or(0);
-                let str_len = mem_reader.read_u64(pid, field_addr + 8)
-                    .unwrap_or(0) as usize;
-                
+                let str_ptr = mem_reader.read_u64(pid, field_addr).unwrap_or(0);
+                let str_len = mem_reader.read_u64(pid, field_addr + 8).unwrap_or(0) as usize;
+
                 if str_ptr != 0 && str_len > 0 {
                     match mem_reader.read_string(pid, str_ptr, str_len) {
                         Ok(s) => CapturedValue::String {
@@ -686,7 +770,11 @@ fn parse_struct_fields_from_addr(
                             len: str_len,
                         },
                         Err(e) => {
-                            detrix_logging::debug!("[ringbuf] Failed to read struct string field '{}': {}", field_name, e);
+                            detrix_logging::debug!(
+                                "[ringbuf] Failed to read struct string field '{}': {}",
+                                field_name,
+                                e
+                            );
                             CapturedValue::String {
                                 data: b"<read-failed>".to_vec(),
                                 len: str_len,
@@ -694,21 +782,25 @@ fn parse_struct_fields_from_addr(
                         }
                     }
                 } else {
-                    CapturedValue::String { data: vec![], len: 0 }
+                    CapturedValue::String {
+                        data: vec![],
+                        len: 0,
+                    }
                 }
             } else if field.type_info.is_slice {
                 // Slice field: read {ptr, len, cap} header
                 // Go slice header: ptr (8 bytes) + len (8 bytes) + cap (8 bytes) = 24 bytes
-                let _slice_ptr = mem_reader.read_u64(pid, field_addr)
-                    .unwrap_or(0);
-                let slice_len = mem_reader.read_u64(pid, field_addr + 8)
-                    .unwrap_or(0);
-                let slice_cap = mem_reader.read_u64(pid, field_addr + 16)
-                    .unwrap_or(0);
+                let _slice_ptr = mem_reader.read_u64(pid, field_addr).unwrap_or(0);
+                let slice_len = mem_reader.read_u64(pid, field_addr + 8).unwrap_or(0);
+                let slice_cap = mem_reader.read_u64(pid, field_addr + 16).unwrap_or(0);
 
                 // Return slice header (elements would require reading array from slice_ptr)
-                CapturedValue::Slice { len: slice_len, cap: slice_cap }
-            } else if field.type_info.name == "time.Time" || field.type_info.name.ends_with(".Time") {
+                CapturedValue::Slice {
+                    len: slice_len,
+                    cap: slice_cap,
+                }
+            } else if field.type_info.name == "time.Time" || field.type_info.name.ends_with(".Time")
+            {
                 // time.Time struct: wall uint64 (8 bytes) + ext int64 (8 bytes) + loc *Location (8 bytes) = 24 bytes
                 // For now, capture as struct with wall and ext fields
                 let wall = mem_reader.read_u64(pid, field_addr).unwrap_or(0);
@@ -769,7 +861,10 @@ fn parse_struct_fields_from_addr(
 
                 detrix_logging::debug!(
                     "[ringbuf] pointer field '{}' at {:#x} ptr={:#x} has_nested={}",
-                    field_name, field_addr, ptr_val, field.nested_type.is_some()
+                    field_name,
+                    field_addr,
+                    ptr_val,
+                    field.nested_type.is_some()
                 );
 
                 if ptr_val != 0 {
@@ -779,7 +874,8 @@ fn parse_struct_fields_from_addr(
                                 .iter()
                                 .map(|f| f.byte_offset + f.byte_size)
                                 .max()
-                                .unwrap_or(0) as usize)
+                                .unwrap_or(0)
+                                as usize)
                                 .min(config.max_blob_capture);
                             if read_size > 0 {
                                 match mem_reader.read_bytes(pid, ptr_val, read_size) {
@@ -794,7 +890,9 @@ fn parse_struct_fields_from_addr(
                                     Err(e) => {
                                         detrix_logging::debug!(
                                             "[ringbuf] pointer deref failed '{}' ptr={:#x}: {}",
-                                            field_name, ptr_val, e
+                                            field_name,
+                                            ptr_val,
+                                            e
                                         );
                                         CapturedValue::Scalar(ptr_val)
                                     }
@@ -828,12 +926,17 @@ fn parse_struct_fields_from_addr(
         }
     } else {
         // Fallback: no DWARF struct info, just return the base address
-        fields.push(("__base_addr".to_string(), Box::new(CapturedValue::Scalar(struct_base_addr))));
+        fields.push((
+            "__base_addr".to_string(),
+            Box::new(CapturedValue::Scalar(struct_base_addr)),
+        ));
     }
 
     detrix_logging::debug!(
         "[ringbuf] Parsed {} struct fields for '{}' at {:#x}",
-        fields.len(), type_name, struct_base_addr
+        fields.len(),
+        type_name,
+        struct_base_addr
     );
 
     Ok(CapturedValue::Struct {
@@ -872,7 +975,9 @@ fn parse_struct_fields_from_blob(
             // Field is beyond the captured blob window
             detrix_logging::debug!(
                 "[ringbuf] field '{}' at offset {} beyond blob len {}",
-                field.name, start, blob.len()
+                field.name,
+                start,
+                blob.len()
             );
             break;
         }
@@ -896,19 +1001,22 @@ fn parse_struct_fields_from_blob(
                     },
                 }
             } else {
-                CapturedValue::String { data: vec![], len: 0 }
+                CapturedValue::String {
+                    data: vec![],
+                    len: 0,
+                }
             }
         } else if field.type_info.is_array && field.type_info.array_element_count > 0 {
             // Fixed-size array: iterate elements and decode each
             let elem_size = field.byte_size / field.type_info.array_element_count;
             let mut elements = Vec::new();
-            
+
             for elem_idx in 0..field.type_info.array_element_count {
                 let elem_start = start + (elem_idx * elem_size) as usize;
                 if elem_start + elem_size as usize > blob.len() {
                     break;
                 }
-                
+
                 let elem_slice = &blob[elem_start..elem_start + elem_size as usize];
                 let val = match elem_size {
                     8 => u64::from_le_bytes(elem_slice.try_into().unwrap_or([0; 8])),
@@ -917,17 +1025,17 @@ fn parse_struct_fields_from_blob(
                     1 => elem_slice[0] as u64,
                     _ => 0,
                 };
-                
+
                 // Decode IEEE 754 float for float arrays
                 let elem_value = match field.type_info.array_element_type.as_str() {
                     "float64" => CapturedValue::Float(f64::from_bits(val)),
                     "float32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
                     _ => CapturedValue::Scalar(val),
                 };
-                
+
                 elements.push(elem_value);
             }
-            
+
             CapturedValue::Array {
                 element_type: field.type_info.array_element_type.clone(),
                 elements,
@@ -969,7 +1077,9 @@ fn parse_struct_fields_from_blob(
 
             detrix_logging::debug!(
                 "[ringbuf] pointer field '{}' ptr={:#x} has_nested={}",
-                field.name, ptr_val, field.nested_type.is_some()
+                field.name,
+                ptr_val,
+                field.nested_type.is_some()
             );
 
             if ptr_val != 0 {
@@ -983,20 +1093,20 @@ fn parse_struct_fields_from_blob(
                             .min(config.max_blob_capture);
                         if read_size > 0 {
                             match mem_reader.read_bytes(pid, ptr_val, read_size) {
-                                Ok(deref_bytes) => {
-                                    parse_struct_fields_from_blob(
-                                        &deref_bytes,
-                                        struct_name,
-                                        struct_fields,
-                                        config,
-                                        mem_reader,
-                                        pid,
-                                    )
-                                }
+                                Ok(deref_bytes) => parse_struct_fields_from_blob(
+                                    &deref_bytes,
+                                    struct_name,
+                                    struct_fields,
+                                    config,
+                                    mem_reader,
+                                    pid,
+                                ),
                                 Err(e) => {
                                     detrix_logging::debug!(
                                         "[ringbuf] pointer deref failed for '{}' ptr={:#x}: {}",
-                                        field.name, ptr_val, e
+                                        field.name,
+                                        ptr_val,
+                                        e
                                     );
                                     CapturedValue::Scalar(ptr_val)
                                 }
@@ -1018,14 +1128,23 @@ fn parse_struct_fields_from_blob(
             // Slice field in blob: read {ptr, len, cap} header (24 bytes)
             // Go slice header: ptr (8 bytes) + len (8 bytes) + cap (8 bytes)
             if start + 24 <= blob.len() {
-                let slice_ptr = u64::from_le_bytes(blob[start..start+8].try_into().unwrap_or([0; 8]));
-                let slice_len = u64::from_le_bytes(blob[start+8..start+16].try_into().unwrap_or([0; 8]));
-                let slice_cap = u64::from_le_bytes(blob[start+16..start+24].try_into().unwrap_or([0; 8]));
+                let slice_ptr =
+                    u64::from_le_bytes(blob[start..start + 8].try_into().unwrap_or([0; 8]));
+                let slice_len =
+                    u64::from_le_bytes(blob[start + 8..start + 16].try_into().unwrap_or([0; 8]));
+                let slice_cap =
+                    u64::from_le_bytes(blob[start + 16..start + 24].try_into().unwrap_or([0; 8]));
                 detrix_logging::debug!(
                     "[ringbuf] slice field '{}' ptr={:#x} len={} cap={}",
-                    field.name, slice_ptr, slice_len, slice_cap
+                    field.name,
+                    slice_ptr,
+                    slice_len,
+                    slice_cap
                 );
-                CapturedValue::Slice { len: slice_len, cap: slice_cap }
+                CapturedValue::Slice {
+                    len: slice_len,
+                    cap: slice_cap,
+                }
             } else {
                 // Not enough bytes for slice header
                 CapturedValue::Slice { len: 0, cap: 0 }
@@ -1074,10 +1193,19 @@ fn parse_struct_fields(
 ) -> Result<CapturedValue> {
     // Read the struct base address from ring buffer first
     if *offset + 8 > data.len() {
-        return Err(Error::RingBuffer("Not enough data for struct base address".to_string()));
+        return Err(Error::RingBuffer(
+            "Not enough data for struct base address".to_string(),
+        ));
     }
     let struct_base_addr = read_u64(data, offset)?;
-    
+
     // Delegate to the main implementation
-    parse_struct_fields_from_addr(struct_base_addr, type_name, config, nested_type, mem_reader, pid)
+    parse_struct_fields_from_addr(
+        struct_base_addr,
+        type_name,
+        config,
+        nested_type,
+        mem_reader,
+        pid,
+    )
 }

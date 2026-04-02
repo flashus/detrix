@@ -135,18 +135,19 @@ pub enum NestedType {
         concrete_type: Option<String>,
     },
     /// Unsupported or too-deep.
-    Unsupported {
-        type_info: TypeInfo,
-        reason: String,
-    },
+    Unsupported { type_info: TypeInfo, reason: String },
 }
 
 impl NestedType {
     pub fn type_info(&self) -> &TypeInfo {
         match self {
-            Self::Scalar(t) | Self::Struct { type_info: t, .. } | Self::Array { type_info: t, .. }
-            | Self::Map { type_info: t, .. } | Self::Pointer { type_info: t, .. }
-            | Self::Interface { type_info: t, .. } | Self::Unsupported { type_info: t, .. } => t,
+            Self::Scalar(t)
+            | Self::Struct { type_info: t, .. }
+            | Self::Array { type_info: t, .. }
+            | Self::Map { type_info: t, .. }
+            | Self::Pointer { type_info: t, .. }
+            | Self::Interface { type_info: t, .. }
+            | Self::Unsupported { type_info: t, .. } => t,
         }
     }
 
@@ -244,7 +245,9 @@ fn classify_type<R: Reader>(
         detrix_logging::debug!(
             "[nested_types] classify_type: is_struct=true, resolving typedef chain + fields"
         );
-        return resolve_struct_following_type_chain(entry, unit, dwarf, type_info, config, depth, 0);
+        return resolve_struct_following_type_chain(
+            entry, unit, dwarf, type_info, config, depth, 0,
+        );
     }
 
     if type_info.is_pointer {
@@ -298,9 +301,7 @@ fn resolve_struct_following_type_chain<R: Reader>(
         AttributeValue::UnitRef(offset) => {
             let mut cursor = unit.entries_at_offset(offset)?;
             let Some(resolved) = cursor.next_dfs()? else {
-                return Err(Error::DwarfParse(
-                    "No entry at UnitRef offset".to_string(),
-                ));
+                return Err(Error::DwarfParse("No entry at UnitRef offset".to_string()));
             };
             let resolved = resolved.clone();
             let tag = resolved.tag();
@@ -313,7 +314,13 @@ fn resolve_struct_following_type_chain<R: Reader>(
             if is_transparent_type_tag(tag) {
                 // Still same unit; follow further
                 resolve_struct_following_type_chain(
-                    &resolved, unit, dwarf, type_info, config, depth, chain_depth + 1,
+                    &resolved,
+                    unit,
+                    dwarf,
+                    type_info,
+                    config,
+                    depth,
+                    chain_depth + 1,
                 )
             } else {
                 // Found the struct type entry — unit is correct (UnitRef stays in same CU)
@@ -332,9 +339,7 @@ fn resolve_struct_following_type_chain<R: Reader>(
                     let local_offset = gimli::UnitOffset(target_offset - unit_start);
                     let mut cursor = target_unit.entries_at_offset(local_offset)?;
                     let Some(resolved) = cursor.next_dfs()? else {
-                        return Err(Error::DwarfParse(
-                            "No entry in target unit".to_string(),
-                        ));
+                        return Err(Error::DwarfParse("No entry in target unit".to_string()));
                     };
                     let resolved = resolved.clone();
                     let tag = resolved.tag();
@@ -451,17 +456,18 @@ fn resolve_struct_fields<R: Reader>(
             break;
         }
 
-        let field_name = read_die_name_string(child, dwarf)
-            .unwrap_or_else(|| format!("_field{}", fields.len()));
+        let field_name =
+            read_die_name_string(child, dwarf).unwrap_or_else(|| format!("_field{}", fields.len()));
 
-        let byte_offset = match child.attr_value(DwAt(gimli::constants::DW_AT_data_member_location.0)) {
-            Some(AttributeValue::Udata(n)) => n,
-            Some(AttributeValue::Data1(n)) => n as u64,
-            Some(AttributeValue::Data2(n)) => n as u64,
-            Some(AttributeValue::Data4(n)) => n as u64,
-            Some(AttributeValue::Data8(n)) => n,
-            _ => 0,
-        };
+        let byte_offset =
+            match child.attr_value(DwAt(gimli::constants::DW_AT_data_member_location.0)) {
+                Some(AttributeValue::Udata(n)) => n,
+                Some(AttributeValue::Data1(n)) => n as u64,
+                Some(AttributeValue::Data2(n)) => n as u64,
+                Some(AttributeValue::Data4(n)) => n as u64,
+                Some(AttributeValue::Data8(n)) => n,
+                _ => 0,
+            };
 
         let field_type_info = resolve_type_info(child, unit, dwarf)?;
 
@@ -599,7 +605,7 @@ fn resolve_pointer_type<R: Reader>(
                             &target_unit,
                             dwarf,
                             config,
-                            depth,  // not depth+1
+                            depth, // not depth+1
                         )?;
                         return Ok(NestedType::Pointer {
                             type_info,
@@ -675,7 +681,7 @@ fn read_die_name_string<R: Reader>(
     dwarf: &gimli::Dwarf<R>,
 ) -> Option<String> {
     let attr = entry.attr_value(DwAt(gimli::constants::DW_AT_name.0))?;
-    
+
     match attr {
         AttributeValue::DebugStrRef(offset) => {
             let s = dwarf.string(offset).ok()?;
@@ -684,12 +690,10 @@ fn read_die_name_string<R: Reader>(
                 Err(_) => Some("<invalid-utf8>".to_string()),
             }
         }
-        AttributeValue::String(ref s) => {
-            match s.to_string_lossy() {
-                Ok(cow) => Some(cow.into_owned()),
-                Err(_) => Some("<invalid-utf8>".to_string()),
-            }
-        }
+        AttributeValue::String(ref s) => match s.to_string_lossy() {
+            Ok(cow) => Some(cow.into_owned()),
+            Err(_) => Some("<invalid-utf8>".to_string()),
+        },
         _ => None,
     }
 }

@@ -405,7 +405,10 @@ async fn test_ebpf_go_uprobe_captures_variables() {
         "No eBPF events received for labelConcat metric {label_concat_metric_id}. \
          The dynamic string (heap-allocated via + concatenation) was not captured.",
     );
-    reporter.info(&format!("Received {} labelConcat events", label_concat_events.len()));
+    reporter.info(&format!(
+        "Received {} labelConcat events",
+        label_concat_events.len()
+    ));
 
     let label_concat_values = label_concat_events[0]["values"]
         .as_array()
@@ -444,7 +447,10 @@ async fn test_ebpf_go_uprobe_captures_variables() {
         concat_parts[2]
     );
 
-    let step = reporter.step_start("Verify labelConcat", "dynamic heap string via + concatenation");
+    let step = reporter.step_start(
+        "Verify labelConcat",
+        "dynamic heap string via + concatenation",
+    );
     reporter.step_success(step, Some(&format!("labelConcat={label_concat_val:?}")));
 
     // ── labelSprintf metric (string formatting with fmt.Sprintf) ─────────────
@@ -453,7 +459,10 @@ async fn test_ebpf_go_uprobe_captures_variables() {
         "No eBPF events received for labelSprintf metric {label_sprintf_metric_id}. \
          The dynamic string (heap-allocated via fmt.Sprintf) was not captured.",
     );
-    reporter.info(&format!("Received {} labelSprintf events", label_sprintf_events.len()));
+    reporter.info(&format!(
+        "Received {} labelSprintf events",
+        label_sprintf_events.len()
+    ));
 
     let label_sprintf_values = label_sprintf_events[0]["values"]
         .as_array()
