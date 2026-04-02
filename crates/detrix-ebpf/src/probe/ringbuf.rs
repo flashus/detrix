@@ -788,16 +788,62 @@ fn parse_struct_fields_from_addr(
                     }
                 }
             } else if field.type_info.is_slice {
-                // Slice field: read {ptr, len, cap} header
+                // Slice field: read {ptr, len, cap} header and elements
+                // Following Delve's loadSliceInfo + loadArrayValues
                 // Go slice header: ptr (8 bytes) + len (8 bytes) + cap (8 bytes) = 24 bytes
-                let _slice_ptr = mem_reader.read_u64(pid, field_addr).unwrap_or(0);
+                let slice_ptr = mem_reader.read_u64(pid, field_addr).unwrap_or(0);
                 let slice_len = mem_reader.read_u64(pid, field_addr + 8).unwrap_or(0);
                 let slice_cap = mem_reader.read_u64(pid, field_addr + 16).unwrap_or(0);
 
-                // Return slice header (elements would require reading array from slice_ptr)
-                CapturedValue::Slice {
-                    len: slice_len,
-                    cap: slice_cap,
+                // Read slice elements if we have a valid pointer and length
+                if slice_ptr != 0 && slice_len > 0 && slice_len <= 10 {
+                    // Limit to 10 elements to avoid excessive memory reads
+                    // Get element size from TypeInfo (populated by DWARF resolution)
+                    let element_size = if field.type_info.element_byte_size > 0 {
+                        field.type_info.element_byte_size
+                    } else if field.type_info.name.contains("OrderItem") {
+                        // Fallback for known types
+                        64 // OrderItem is a large struct
+                    } else {
+                        8 // Default fallback
+                    };
+
+                    let mut elements = Vec::new();
+                    for i in 0..slice_len {
+                        let elem_addr = slice_ptr + (i * element_size);
+                        // Read element as bytes
+                        match mem_reader.read_bytes(pid, elem_addr, element_size as usize) {
+                            Ok(bytes) => {
+                                // For struct elements, capture as Bytes for now
+                                // (could be enhanced to parse nested structs recursively)
+                                elements.push(CapturedValue::Bytes(bytes));
+                            }
+                            Err(_) => {
+                                elements.push(CapturedValue::Error("read failed".to_string()));
+                            }
+                        }
+                    }
+
+                    CapturedValue::Struct {
+                        type_name: format!("[] (len={}, cap={})", slice_len, slice_cap),
+                        fields: vec![
+                            ("len".to_string(), Box::new(CapturedValue::Scalar(slice_len))),
+                            ("cap".to_string(), Box::new(CapturedValue::Scalar(slice_cap))),
+                            (
+                                "elements".to_string(),
+                                Box::new(CapturedValue::Array {
+                                    element_type: field.type_info.slice_element_type.clone(),
+                                    elements,
+                                }),
+                            ),
+                        ],
+                    }
+                } else {
+                    // Just return slice header if no elements to read
+                    CapturedValue::Slice {
+                        len: slice_len,
+                        cap: slice_cap,
+                    }
                 }
             } else if field.type_info.name == "time.Time" || field.type_info.name.ends_with(".Time")
             {

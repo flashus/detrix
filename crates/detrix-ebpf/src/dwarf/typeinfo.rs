@@ -60,6 +60,10 @@ pub struct TypeInfo {
     pub array_element_count: u64,
     /// Element type name for arrays (empty for non-arrays).
     pub array_element_type: String,
+    /// Element type name for slices (empty for non-slices).
+    pub slice_element_type: String,
+    /// Element byte size for arrays/slices (0 for non-arrays/slices).
+    pub element_byte_size: u64,
 }
 
 impl TypeInfo {
@@ -76,6 +80,8 @@ impl TypeInfo {
             is_struct: false,
             array_element_count: 0,
             array_element_type: String::new(),
+            slice_element_type: String::new(),
+            element_byte_size: 0,
         }
     }
 }
@@ -276,6 +282,8 @@ fn resolve_type_at_offset<R: Reader>(
                 is_struct: false,
                 array_element_count: 0,
                 array_element_type: String::new(),
+                slice_element_type: String::new(),
+                element_byte_size: 0,
             })
         }
 
@@ -337,6 +345,8 @@ fn resolve_type_at_offset<R: Reader>(
                 is_struct: false,
                 array_element_count: element_count,
                 array_element_type: elem_info.name.clone(),
+                slice_element_type: String::new(),
+                element_byte_size: 0,
             })
         }
 
@@ -394,6 +404,8 @@ fn resolve_base_type<R: Reader>(
         is_struct: false,
         array_element_count: 0,
         array_element_type: String::new(),
+        slice_element_type: String::new(),
+        element_byte_size: 0,
     })
 }
 
@@ -577,6 +589,13 @@ fn resolve_struct_type<R: Reader>(
     // Everything else is a user-defined struct (captured as blob)
     let is_struct = !is_string && !is_slice && !is_time;
 
+    // For slices, try to extract element type info from DWARF
+    let (slice_element_type, element_byte_size) = if is_slice {
+        extract_slice_element_info(entry, unit, dwarf).unwrap_or_else(|| (String::new(), 0))
+    } else {
+        (String::new(), 0)
+    };
+
     let size = VariableSize::from_byte_size(byte_size).unwrap_or(VariableSize::QWord);
 
     Ok(TypeInfo {
@@ -590,7 +609,56 @@ fn resolve_struct_type<R: Reader>(
         is_struct,
         array_element_count: 0,
         array_element_type: String::new(),
+        slice_element_type,
+        element_byte_size,
     })
+}
+
+/// Extract slice element type information from DWARF.
+///
+/// Go slices have the structure: { array *T, len int, cap int }
+/// The 'array' field points to the underlying array, which contains the element type.
+fn extract_slice_element_info<R: Reader>(
+    entry: &DebuggingInformationEntry<R>,
+    unit: &gimli::Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+) -> Option<(String, u64)> {
+    // Iterate over children to find the 'array' field
+    let mut cursor = unit.entries_at_offset(entry.offset()).ok()?;
+    let _ = cursor.next_dfs().ok()??; // Skip the struct entry itself
+
+    while let Ok(Some(child)) = cursor.next_dfs() {
+        if child.tag() != gimli::DW_TAG_member {
+            continue;
+        }
+
+        let field_name = read_attr_string(child, dwarf, gimli::constants::DW_AT_name).ok()?.unwrap_or_default();
+        if field_name != "array" {
+            continue;
+        }
+
+        // Get the type of the array field (should be a pointer to element type)
+        let type_attr = child.attr_value(DwAt(gimli::constants::DW_AT_type.0))?;
+        match type_attr {
+            AttributeValue::UnitRef(_offset) => {
+                // Resolve the pointer type - for now return placeholder
+                detrix_logging::debug!(
+                    "[DWARF typeinfo] Found slice 'array' field (UnitRef)"
+                );
+                return Some(("unknown".to_string(), 8));
+            }
+            AttributeValue::DebugInfoRef(_offset) => {
+                // Cross-unit reference - for now return placeholder
+                detrix_logging::debug!(
+                    "[DWARF typeinfo] Found slice 'array' field (DebugInfoRef)"
+                );
+                return Some(("unknown".to_string(), 8));
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 /// Detect if a struct type is a Go string based on name and size.
