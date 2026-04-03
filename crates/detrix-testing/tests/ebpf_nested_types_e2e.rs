@@ -677,7 +677,10 @@ async fn test_ebpf_captures_nested_types() {
             // Tags must NOT show raw runtime internals (dirPtr/seed/used) — that indicates
             // the map iterator was not applied and the map was parsed as a plain struct.
             if value_json.contains("\"dirPtr\"") {
-                mismatches.push(format!("Order[{}] Tags shows raw runtime struct (map iterator not applied)", idx));
+                mismatches.push(format!(
+                    "Order[{}] Tags shows raw runtime struct (map iterator not applied)",
+                    idx
+                ));
             }
 
             // Check Total (float) - should be a numeric value
@@ -825,7 +828,10 @@ async fn test_ebpf_captures_nested_types() {
                 mismatches.push(format!("OrderPtr[{}] missing Order.Items", idx));
             }
             if !value_json.contains("\"elements\":") {
-                mismatches.push(format!("OrderPtr[{}] Order.Items missing elements (only has header)", idx));
+                mismatches.push(format!(
+                    "OrderPtr[{}] Order.Items missing elements (only has header)",
+                    idx
+                ));
             }
 
             // Check Count field - should be numeric (iteration number)

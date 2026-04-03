@@ -65,7 +65,10 @@ fn read_swiss_map_inner(
 
     detrix_logging::debug!(
         "[map_iter] map={:#x} used={} dirPtr={:#x} dirLen={}",
-        map_ptr, used, dir_ptr, dir_len
+        map_ptr,
+        used,
+        dir_ptr,
+        dir_len
     );
 
     if used == 0 || dir_ptr == 0 {
@@ -88,12 +91,25 @@ fn read_swiss_map_inner(
         let (val_offset, slot_size) = compute_slot_layout(key_size, val_size);
         detrix_logging::debug!(
             "[map_iter] small-map dirPtr={:#x} key_size={} val_size={} slot_size={}",
-            dir_ptr, key_size, val_size, slot_size
+            dir_ptr,
+            key_size,
+            val_size,
+            slot_size
         );
         read_groups(
-            dir_ptr, 1, key_nested, val_nested,
-            key_size, val_size, val_offset, slot_size,
-            max_entries, config, mem_reader, pid, &mut entries,
+            dir_ptr,
+            1,
+            key_nested,
+            val_nested,
+            key_size,
+            val_size,
+            val_offset,
+            slot_size,
+            max_entries,
+            config,
+            mem_reader,
+            pid,
+            &mut entries,
         );
     } else {
         // Directory mode (dirLen > 0): dirPtr → [dirLen]*table.
@@ -112,8 +128,14 @@ fn read_swiss_map_inner(
             }
             seen_tables.push(table_ptr);
             let _ = read_table(
-                table_ptr, key_nested, val_nested,
-                max_entries - entries.len(), config, mem_reader, pid, &mut entries,
+                table_ptr,
+                key_nested,
+                val_nested,
+                max_entries - entries.len(),
+                config,
+                mem_reader,
+                pid,
+                &mut entries,
             );
         }
     }
@@ -152,7 +174,9 @@ fn read_table(
 
     // Sanity check: more than 1024 groups is unreasonable
     if num_groups > 1024 {
-        return Err(format!("table@{table_ptr:#x} num_groups={num_groups} exceeds sanity limit"));
+        return Err(format!(
+            "table@{table_ptr:#x} num_groups={num_groups} exceeds sanity limit"
+        ));
     }
 
     let key_size = slot_type_size(key_nested);
@@ -161,13 +185,28 @@ fn read_table(
 
     detrix_logging::debug!(
         "[map_iter] table={:#x} groups={:#x} num_groups={} key_size={} val_size={} slot_size={}",
-        table_ptr, groups_data, num_groups, key_size, val_size, slot_size
+        table_ptr,
+        groups_data,
+        num_groups,
+        key_size,
+        val_size,
+        slot_size
     );
 
     read_groups(
-        groups_data, num_groups, key_nested, val_nested,
-        key_size, val_size, val_offset, slot_size,
-        max_entries, config, mem_reader, pid, entries,
+        groups_data,
+        num_groups,
+        key_nested,
+        val_nested,
+        key_size,
+        val_size,
+        val_offset,
+        slot_size,
+        max_entries,
+        config,
+        mem_reader,
+        pid,
+        entries,
     );
     Ok(())
 }
@@ -215,7 +254,14 @@ fn read_groups(
             }
             let slot_base = group_ptr + SLOTS_PER_GROUP + s as u64 * slot_size;
             let key_val = read_slot_value(slot_base, key_nested, key_size, config, mem_reader, pid);
-            let val_val = read_slot_value(slot_base + val_offset, val_nested, val_size, config, mem_reader, pid);
+            let val_val = read_slot_value(
+                slot_base + val_offset,
+                val_nested,
+                val_size,
+                config,
+                mem_reader,
+                pid,
+            );
             entries.push((key_val, val_val));
         }
     }
@@ -260,7 +306,11 @@ fn slot_type_size(nested: Option<&NestedType>) -> u64 {
     match nested {
         Some(n) => {
             let s = n.type_info().byte_size;
-            if s > 0 { s } else { 8 }
+            if s > 0 {
+                s
+            } else {
+                8
+            }
         }
         None => 8,
     }
@@ -283,7 +333,9 @@ fn read_slot_value(
         Some(NestedType::Scalar(ti)) if ti.is_string => {
             read_string_slot(addr, mem_reader, pid, config)
         }
-        Some(NestedType::Struct { type_info, fields, .. }) => {
+        Some(NestedType::Struct {
+            type_info, fields, ..
+        }) => {
             // Recursively parse struct fields using the address-based parser.
             // We re-use parse_struct_fields_from_addr from ringbuf to avoid duplication.
             use crate::dwarf::nested_types::NestedType as NT;
@@ -357,7 +409,12 @@ fn read_string_slot(
     }
 }
 
-fn read_raw_bytes(addr: u64, size: u64, mem_reader: &dyn ProcessMemoryReader, pid: u32) -> CapturedValue {
+fn read_raw_bytes(
+    addr: u64,
+    size: u64,
+    mem_reader: &dyn ProcessMemoryReader,
+    pid: u32,
+) -> CapturedValue {
     match mem_reader.read_bytes(pid, addr, size as usize) {
         Ok(b) => CapturedValue::Bytes(b),
         Err(_) => CapturedValue::Error("read failed".to_string()),

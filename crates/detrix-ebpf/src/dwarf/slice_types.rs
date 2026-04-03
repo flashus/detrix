@@ -22,24 +22,25 @@ pub fn extract_slice_element_info<R: Reader>(
         }
         _ => return None,
     };
-    
+
     // Extract element type from slice name (e.g., "[]OrderItem" -> "OrderItem")
-    let element_type = if slice_type_name.starts_with("[]") || slice_type_name.starts_with("<str@") {
+    let element_type = if slice_type_name.starts_with("[]") || slice_type_name.starts_with("<str@")
+    {
         // For now, use a placeholder element type
         "unknown".to_string()
     } else {
         slice_type_name
     };
-    
+
     // Estimate element size based on type name
     let element_size = estimate_element_size(&element_type);
-    
+
     detrix_logging::debug!(
         "[DWARF typeinfo] Slice element type: '{}', estimated byte_size: {}",
         element_type,
         element_size
     );
-    
+
     Some((element_type, element_size))
 }
 

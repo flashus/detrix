@@ -271,13 +271,17 @@ impl CapturedValue {
                     let entry_strs: Vec<String> = entries
                         .iter()
                         .map(|(k, v)| {
-                            format!("{{\"key\":{},\"value\":{}}}",
+                            format!(
+                                "{{\"key\":{},\"value\":{}}}",
                                 k.to_json_value(VariableSize::QWord),
-                                v.to_json_value(VariableSize::QWord))
+                                v.to_json_value(VariableSize::QWord)
+                            )
                         })
                         .collect();
-                    format!("{{\"__type\":\"map[{key_type}]{value_type}\",\"entries\":[{}]}}",
-                        entry_strs.join(","))
+                    format!(
+                        "{{\"__type\":\"map[{key_type}]{value_type}\",\"entries\":[{}]}}",
+                        entry_strs.join(",")
+                    )
                 }
             }
             Self::Error(msg) => format!("\"<error: {msg}>\""),

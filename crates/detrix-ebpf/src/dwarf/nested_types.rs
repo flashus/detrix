@@ -481,7 +481,10 @@ fn resolve_struct_fields<R: Reader>(
         // For pointer, struct, slice, and array fields within depth limits, resolve nested type info so
         // the ring buffer parser can dereference pointers, recursively parse embedded structs,
         // read slice elements, and iterate array elements.
-        let field_nested = if (field_type_info.is_pointer || field_type_info.is_struct || field_type_info.is_slice || field_type_info.is_array)
+        let field_nested = if (field_type_info.is_pointer
+            || field_type_info.is_struct
+            || field_type_info.is_slice
+            || field_type_info.is_array)
             && depth < config.max_depth
         {
             detrix_logging::debug!(
@@ -493,7 +496,8 @@ fn resolve_struct_fields<R: Reader>(
                 "[nested_types] Resolved nested type for field '{}': {:?}",
                 field_name,
                 result.as_ref().map(|n| match n {
-                    NestedType::Array { element_type, .. } => format!("Array(element={})", element_type.type_info().name),
+                    NestedType::Array { element_type, .. } =>
+                        format!("Array(element={})", element_type.type_info().name),
                     NestedType::Struct { type_info, .. } => format!("Struct({})", type_info.name),
                     NestedType::Scalar(t) => format!("Scalar({})", t.name),
                     NestedType::Pointer { .. } => "Pointer".to_string(),
@@ -553,7 +557,7 @@ fn resolve_slice_type<R: Reader>(
 ) -> Result<NestedType> {
     // For slices, we need to resolve the element type
     // Following Delve's loadSliceInfo which gets ElemType from the array field
-    // 
+    //
     // The 'entry' here is the DW_TAG_member field entry, not the slice struct type.
     // We need to follow the DW_AT_type attribute to get to the slice struct type entry.
     let slice_struct_entry = match entry.attr_value(DwAt(gimli::constants::DW_AT_type.0)) {
@@ -587,14 +591,14 @@ fn resolve_slice_type<R: Reader>(
         }
         None => None,
     };
-    
+
     let element_nested_type = if let Some(slice_entry) = slice_struct_entry {
         resolve_slice_element_type(&slice_entry, unit, dwarf, config, depth + 1)?
     } else {
         // Fallback: return unknown type
         NestedType::Scalar(TypeInfo::unknown())
     };
-    
+
     Ok(NestedType::Array {
         type_info,
         element_type: Box::new(element_nested_type),
@@ -615,25 +619,23 @@ fn resolve_slice_element_type<R: Reader>(
         read_die_name_string(entry, dwarf).unwrap_or_else(|| "unknown".to_string()),
         entry.offset()
     );
-    
+
     // Iterate over children to find the 'array' field (pointer to element type)
     let mut cursor = unit.entries_at_offset(entry.offset())?;
     let _ = cursor.next_dfs()?; // Skip the struct entry itself
-    
+
     while let Ok(Some(child)) = cursor.next_dfs() {
         if child.tag() != gimli::DW_TAG_member {
             continue;
         }
-        
+
         let field_name = read_die_name_string(child, dwarf);
         if field_name.as_deref() != Some("array") {
             continue;
         }
-        
-        detrix_logging::debug!(
-            "[nested_types] Found slice 'array' field, resolving element type"
-        );
-        
+
+        detrix_logging::debug!("[nested_types] Found slice 'array' field, resolving element type");
+
         // Get the type of the array field (should be a pointer to element type)
         let type_attr = child.attr_value(DwAt(gimli::constants::DW_AT_type.0));
         if let Some(type_attr) = type_attr {
@@ -671,13 +673,16 @@ fn resolve_pointer_target_type<R: Reader>(
             if let Ok(Some(ptr_entry)) = cursor.next_dfs() {
                 if ptr_entry.tag() == gimli::DW_TAG_pointer_type {
                     // Follow the pointer's DW_AT_type
-                    if let Some(elem_attr) = ptr_entry.attr_value(DwAt(gimli::constants::DW_AT_type.0)) {
+                    if let Some(elem_attr) =
+                        ptr_entry.attr_value(DwAt(gimli::constants::DW_AT_type.0))
+                    {
                         return resolve_pointer_target_type(&elem_attr, unit, dwarf, config, depth);
                     }
                 } else {
                     // The offset points directly to the element type
                     // First resolve type info, then classify
-                    let type_info = crate::dwarf::typeinfo::resolve_type_info(ptr_entry, unit, dwarf)?;
+                    let type_info =
+                        crate::dwarf::typeinfo::resolve_type_info(ptr_entry, unit, dwarf)?;
                     return classify_type(ptr_entry, unit, dwarf, type_info, config, depth);
                 }
             }
@@ -688,7 +693,7 @@ fn resolve_pointer_target_type<R: Reader>(
         }
         _ => {}
     }
-    
+
     Ok(NestedType::Scalar(TypeInfo::unknown()))
 }
 
@@ -702,24 +707,25 @@ fn resolve_cross_unit_type<R: Reader>(
 ) -> Result<NestedType> {
     let target_offset = debug_info_offset.0;
     let mut units = dwarf.units();
-    
+
     while let Ok(Some(unit_header)) = units.next() {
         let unit_start = unit_header.offset().0;
         let unit_end = unit_start + unit_header.unit_length();
-        
+
         if target_offset >= unit_start && target_offset < unit_end {
             let target_unit = dwarf.unit(unit_header)?;
             let local_offset = gimli::UnitOffset(target_offset - unit_start);
             let mut cursor = target_unit.entries_at_offset(local_offset)?;
-            
+
             if let Ok(Some(entry)) = cursor.next_dfs() {
                 // First resolve the type info, then classify
-                let type_info = crate::dwarf::typeinfo::resolve_type_info(entry, &target_unit, dwarf)?;
+                let type_info =
+                    crate::dwarf::typeinfo::resolve_type_info(entry, &target_unit, dwarf)?;
                 return classify_type(entry, &target_unit, dwarf, type_info, config, depth);
             }
         }
     }
-    
+
     Ok(NestedType::Scalar(TypeInfo::unknown()))
 }
 
@@ -734,7 +740,7 @@ fn resolve_array_type<R: Reader>(
     // For fixed-size arrays, resolve the element type
     // Following Delve's approach for array element resolution
     let element_nested_type = resolve_array_element_type(entry, unit, dwarf, config, depth + 1)?;
-    
+
     Ok(NestedType::Array {
         type_info: type_info.clone(),
         element_type: Box::new(element_nested_type),
@@ -756,7 +762,7 @@ fn resolve_array_element_type<R: Reader>(
     if let Some(type_attr) = type_attr {
         return resolve_pointer_target_type(&type_attr, unit, dwarf, config, depth);
     }
-    
+
     // Fallback
     Ok(NestedType::Scalar(TypeInfo::unknown()))
 }
@@ -774,15 +780,13 @@ fn resolve_map_type<R: Reader>(
     const DW_AT_GO_KEY: u16 = 0x2901;
     const DW_AT_GO_ELEM: u16 = 0x2902;
 
-    let key_nested = try_resolve_go_map_component(
-        entry, unit, dwarf, config, depth, DwAt(DW_AT_GO_KEY),
-    )
-    .unwrap_or_else(|| infer_nested_from_map_name(&type_info.name, 0));
+    let key_nested =
+        try_resolve_go_map_component(entry, unit, dwarf, config, depth, DwAt(DW_AT_GO_KEY))
+            .unwrap_or_else(|| infer_nested_from_map_name(&type_info.name, 0));
 
-    let val_nested = try_resolve_go_map_component(
-        entry, unit, dwarf, config, depth, DwAt(DW_AT_GO_ELEM),
-    )
-    .unwrap_or_else(|| infer_nested_from_map_name(&type_info.name, 1));
+    let val_nested =
+        try_resolve_go_map_component(entry, unit, dwarf, config, depth, DwAt(DW_AT_GO_ELEM))
+            .unwrap_or_else(|| infer_nested_from_map_name(&type_info.name, 1));
 
     Ok(NestedType::Map {
         type_info,
@@ -827,12 +831,15 @@ fn try_resolve_go_map_component<R: Reader>(
                 }
             }
             // Try one more hop (typedef → pointer → struct)
-            if let Some(inner_attr) = typedef_entry.attr_value(DwAt(gimli::constants::DW_AT_type.0)) {
+            if let Some(inner_attr) = typedef_entry.attr_value(DwAt(gimli::constants::DW_AT_type.0))
+            {
                 if let AttributeValue::UnitRef(inner_offset) = inner_attr {
                     let mut inner_cursor = unit.entries_at_offset(inner_offset).ok()?;
                     let inner_entry = inner_cursor.next_dfs().ok()??;
                     if let Some(val) = inner_entry.attr_value(attr) {
-                        if let Ok(nt) = resolve_nested_from_attr_value(val, unit, dwarf, config, depth) {
+                        if let Ok(nt) =
+                            resolve_nested_from_attr_value(val, unit, dwarf, config, depth)
+                        {
                             if nt.type_info().name != "unknown" {
                                 return Some(nt);
                             }
@@ -855,7 +862,11 @@ fn try_resolve_go_map_component<R: Reader>(
                             if let Ok(Some(target_entry)) = cursor.next_dfs() {
                                 if let Some(val) = target_entry.attr_value(attr) {
                                     if let Ok(nt) = resolve_nested_from_attr_value(
-                                        val, &target_unit, dwarf, config, depth,
+                                        val,
+                                        &target_unit,
+                                        dwarf,
+                                        config,
+                                        depth,
                                     ) {
                                         if nt.type_info().name != "unknown" {
                                             return Some(nt);
@@ -968,12 +979,11 @@ fn known_go_type_byte_size(name: &str) -> u64 {
         "bool" | "int8" | "uint8" | "byte" => 1,
         "int16" | "uint16" => 2,
         "int32" | "uint32" | "float32" | "rune" => 4,
-        "int" | "int64" | "uint" | "uint64" | "uintptr"
-        | "float64" | "complex64" | "error" => 8,
+        "int" | "int64" | "uint" | "uint64" | "uintptr" | "float64" | "complex64" | "error" => 8,
         "complex128" => 16,
-        _ if name.starts_with('*') => 8, // pointer
+        _ if name.starts_with('*') => 8,   // pointer
         _ if name.starts_with("[]") => 24, // slice header
-        _ => 8, // struct or unknown — conservative
+        _ => 8,                            // struct or unknown — conservative
     }
 }
 

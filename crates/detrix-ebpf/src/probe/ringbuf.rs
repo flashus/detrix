@@ -743,7 +743,7 @@ fn parse_slice_element(
         },
         element_size
     );
-    
+
     match element_nested_type {
         NestedType::Struct { type_info, .. } => {
             // Element is a struct - recursively parse its fields
@@ -764,7 +764,11 @@ fn parse_slice_element(
                 let str_ptr = mem_reader.read_u64(pid, elem_addr).unwrap_or(0);
                 let str_len = mem_reader.read_u64(pid, elem_addr + 8).unwrap_or(0) as usize;
                 if str_ptr != 0 && str_len > 0 {
-                    match mem_reader.read_string(pid, str_ptr, str_len.min(config.max_string_capture)) {
+                    match mem_reader.read_string(
+                        pid,
+                        str_ptr,
+                        str_len.min(config.max_string_capture),
+                    ) {
                         Ok(s) => Ok(CapturedValue::String {
                             len: s.len(),
                             data: s.into_bytes(),
@@ -775,7 +779,10 @@ fn parse_slice_element(
                         }),
                     }
                 } else {
-                    Ok(CapturedValue::String { data: vec![], len: 0 })
+                    Ok(CapturedValue::String {
+                        data: vec![],
+                        len: 0,
+                    })
                 }
             } else if type_info.name == "float64" {
                 // Float64 element
@@ -842,7 +849,10 @@ pub fn parse_struct_fields_from_addr(
         let pointee_name = pointee.type_info().name.clone();
         match pointee.as_ref() {
             crate::dwarf::nested_types::NestedType::Struct { fields, .. } => {
-                let items_nested = fields.iter().find(|f| f.name == "Items").map(|f| f.nested_type.is_some());
+                let items_nested = fields
+                    .iter()
+                    .find(|f| f.name == "Items")
+                    .map(|f| f.nested_type.is_some());
                 detrix_logging::debug!(
                     "[ringbuf] Unwrapping pointer for '{}', pointee type={}, pointee has {} fields, Items.has_nested={:?}",
                     type_name, pointee_name, fields.len(), items_nested
@@ -940,21 +950,23 @@ pub fn parse_struct_fields_from_addr(
                 if slice_ptr != 0 && slice_len > 0 && slice_len <= 10 {
                     // Limit to 10 elements to avoid excessive memory reads
                     // Get element size from the element type's TypeInfo
-                    let element_size = if let Some(NestedType::Array { element_type, .. }) = &field.nested_type {
-                        // Use the element type's byte_size
-                        element_type.type_info().byte_size.max(1)
-                    } else if field.type_info.element_byte_size > 0 {
-                        field.type_info.element_byte_size
-                    } else if field.type_info.name.contains("OrderItem") {
-                        // Fallback for known types
-                        328 // OrderItem: Product(312) + Quantity(8) + Total(8)
-                    } else {
-                        8 // Default fallback
-                    };
+                    let element_size =
+                        if let Some(NestedType::Array { element_type, .. }) = &field.nested_type {
+                            // Use the element type's byte_size
+                            element_type.type_info().byte_size.max(1)
+                        } else if field.type_info.element_byte_size > 0 {
+                            field.type_info.element_byte_size
+                        } else if field.type_info.name.contains("OrderItem") {
+                            // Fallback for known types
+                            328 // OrderItem: Product(312) + Quantity(8) + Total(8)
+                        } else {
+                            8 // Default fallback
+                        };
 
                     detrix_logging::debug!(
                         "[ringbuf] Reading {} slice elements, size={}, nested_type={:?}",
-                        slice_len, element_size,
+                        slice_len,
+                        element_size,
                         field.nested_type.as_ref().map(|n| match n {
                             NestedType::Array { .. } => "Array",
                             NestedType::Struct { .. } => "Struct",
@@ -969,16 +981,27 @@ pub fn parse_struct_fields_from_addr(
 
                         // Read element based on its nested type
                         // Following Delve's loadArrayValues: fieldvar.loadValueInternal(recurseLevel+1, cfg)
-                        let elem_value = if let Some(NestedType::Array { element_type, .. }) = &field.nested_type {
+                        let elem_value = if let Some(NestedType::Array { element_type, .. }) =
+                            &field.nested_type
+                        {
                             // We have element type info - recursively parse it
                             detrix_logging::debug!(
-                                "[ringbuf] Parsing slice element {} with nested type", i
+                                "[ringbuf] Parsing slice element {} with nested type",
+                                i
                             );
-                            parse_slice_element(elem_addr, element_type.as_ref(), element_size, config, mem_reader, pid)?
+                            parse_slice_element(
+                                elem_addr,
+                                element_type.as_ref(),
+                                element_size,
+                                config,
+                                mem_reader,
+                                pid,
+                            )?
                         } else {
                             // Fallback: read as bytes
                             detrix_logging::debug!(
-                                "[ringbuf] Slice element {} has no nested type, reading as bytes", i
+                                "[ringbuf] Slice element {} has no nested type, reading as bytes",
+                                i
                             );
                             match mem_reader.read_bytes(pid, elem_addr, element_size as usize) {
                                 Ok(bytes) => CapturedValue::Bytes(bytes),
@@ -996,8 +1019,14 @@ pub fn parse_struct_fields_from_addr(
                     CapturedValue::Struct {
                         type_name: format!("[] (len={}, cap={})", slice_len, slice_cap),
                         fields: vec![
-                            ("len".to_string(), Box::new(CapturedValue::Scalar(slice_len))),
-                            ("cap".to_string(), Box::new(CapturedValue::Scalar(slice_cap))),
+                            (
+                                "len".to_string(),
+                                Box::new(CapturedValue::Scalar(slice_len)),
+                            ),
+                            (
+                                "cap".to_string(),
+                                Box::new(CapturedValue::Scalar(slice_cap)),
+                            ),
                             (
                                 "elements".to_string(),
                                 Box::new(CapturedValue::Array {
@@ -1062,7 +1091,9 @@ pub fn parse_struct_fields_from_addr(
                     Ok(bytes) => CapturedValue::Bytes(bytes),
                     Err(_) => CapturedValue::Bytes(vec![0u8; blob_size]),
                 }
-            } else if field.type_info.name.starts_with("map[") || field.type_info.name.starts_with("map<") {
+            } else if field.type_info.name.starts_with("map[")
+                || field.type_info.name.starts_with("map<")
+            {
                 // Map field: read the map pointer then iterate the Swiss Table.
                 let map_ptr = mem_reader.read_u64(pid, field_addr).unwrap_or(0);
                 if map_ptr == 0 {
@@ -1074,9 +1105,11 @@ pub fn parse_struct_fields_from_addr(
                     }
                 } else {
                     let (key_nested, val_nested) = match &field.nested_type {
-                        Some(NestedType::Map { key_type, value_type, .. }) => {
-                            (Some(key_type.as_ref()), Some(value_type.as_ref()))
-                        }
+                        Some(NestedType::Map {
+                            key_type,
+                            value_type,
+                            ..
+                        }) => (Some(key_type.as_ref()), Some(value_type.as_ref())),
                         _ => (None, None),
                     };
                     super::map_iter::read_go_swiss_map(
@@ -1128,10 +1161,15 @@ pub fn parse_struct_fields_from_addr(
                         let mut current = nested;
                         loop {
                             match current {
-                                crate::dwarf::nested_types::NestedType::Pointer { pointee, .. } => {
+                                crate::dwarf::nested_types::NestedType::Pointer {
+                                    pointee, ..
+                                } => {
                                     current = pointee.as_ref();
                                 }
-                                crate::dwarf::nested_types::NestedType::Struct { type_info, .. } => {
+                                crate::dwarf::nested_types::NestedType::Struct {
+                                    type_info,
+                                    ..
+                                } => {
                                     // Found the struct type - parse it with full nested type info
                                     detrix_logging::debug!(
                                         "[ringbuf] Dereferencing pointer to '{}'",
@@ -1141,14 +1179,16 @@ pub fn parse_struct_fields_from_addr(
                                         ptr_val,
                                         &type_info.name,
                                         config,
-                                        Some(nested),  // Pass the full nested type
+                                        Some(nested), // Pass the full nested type
                                         mem_reader,
                                         pid,
                                     );
                                     break result.unwrap_or_else(|e| {
                                         detrix_logging::debug!(
                                             "[ringbuf] pointer deref failed '{}' ptr={:#x}: {}",
-                                            field_name, ptr_val, e
+                                            field_name,
+                                            ptr_val,
+                                            e
                                         );
                                         CapturedValue::Scalar(ptr_val)
                                     });
@@ -1322,7 +1362,9 @@ fn parse_struct_fields_from_blob(
                 // No type info — return raw bytes
                 CapturedValue::Bytes(sub_blob.to_vec())
             }
-        } else if field.type_info.name.starts_with("map[") || field.type_info.name.starts_with("map<") {
+        } else if field.type_info.name.starts_with("map[")
+            || field.type_info.name.starts_with("map<")
+        {
             // Map field in blob: read the map pointer then iterate the Swiss Table.
             // Must come BEFORE is_pointer check since Go maps are pointers.
             let end = (start + 8).min(blob.len());
@@ -1335,13 +1377,18 @@ fn parse_struct_fields_from_blob(
             if map_ptr == 0 {
                 let (key_type, val_type) = parse_map_type_names(&field.type_info.name);
                 CapturedValue::Map {
-                    key_type, value_type: val_type, entries: vec![], reason: "nil map".to_string(),
+                    key_type,
+                    value_type: val_type,
+                    entries: vec![],
+                    reason: "nil map".to_string(),
                 }
             } else {
                 let (key_nested, val_nested) = match &field.nested_type {
-                    Some(NestedType::Map { key_type, value_type, .. }) => {
-                        (Some(key_type.as_ref()), Some(value_type.as_ref()))
-                    }
+                    Some(NestedType::Map {
+                        key_type,
+                        value_type,
+                        ..
+                    }) => (Some(key_type.as_ref()), Some(value_type.as_ref())),
                     _ => (None, None),
                 };
                 super::map_iter::read_go_swiss_map(
@@ -1426,27 +1473,50 @@ fn parse_struct_fields_from_blob(
                         for i in 0..slice_len {
                             let elem_addr = slice_ptr + (i * element_size);
                             let elem_value = parse_slice_element(
-                                elem_addr, element_type.as_ref(), element_size, config, mem_reader, pid,
-                            ).unwrap_or_else(|_| CapturedValue::Error("slice element read failed".to_string()));
+                                elem_addr,
+                                element_type.as_ref(),
+                                element_size,
+                                config,
+                                mem_reader,
+                                pid,
+                            )
+                            .unwrap_or_else(|_| {
+                                CapturedValue::Error("slice element read failed".to_string())
+                            });
                             elements.push(elem_value);
                         }
                         CapturedValue::Struct {
                             type_name: format!("[] (len={}, cap={})", slice_len, slice_cap),
                             fields: vec![
-                                ("len".to_string(), Box::new(CapturedValue::Scalar(slice_len))),
-                                ("cap".to_string(), Box::new(CapturedValue::Scalar(slice_cap))),
-                                ("elements".to_string(), Box::new(CapturedValue::Array {
-                                    element_type: field.type_info.slice_element_type.clone(),
-                                    elements,
-                                })),
+                                (
+                                    "len".to_string(),
+                                    Box::new(CapturedValue::Scalar(slice_len)),
+                                ),
+                                (
+                                    "cap".to_string(),
+                                    Box::new(CapturedValue::Scalar(slice_cap)),
+                                ),
+                                (
+                                    "elements".to_string(),
+                                    Box::new(CapturedValue::Array {
+                                        element_type: field.type_info.slice_element_type.clone(),
+                                        elements,
+                                    }),
+                                ),
                             ],
                         }
                     } else {
                         // No nested type info - just return header
-                        CapturedValue::Slice { len: slice_len, cap: slice_cap }
+                        CapturedValue::Slice {
+                            len: slice_len,
+                            cap: slice_cap,
+                        }
                     }
                 } else {
-                    CapturedValue::Slice { len: slice_len, cap: slice_cap }
+                    CapturedValue::Slice {
+                        len: slice_len,
+                        cap: slice_cap,
+                    }
                 }
             } else {
                 // Not enough bytes for slice header
