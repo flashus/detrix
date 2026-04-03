@@ -637,6 +637,27 @@ fn find_struct_pointee(
     }
 }
 
+/// Parse `map[K]V` or `map<K,V>` into (key_str, val_str).
+fn parse_map_type_names(type_name: &str) -> (String, String) {
+    if let Some(inner) = type_name.strip_prefix("map[") {
+        if let Some(bracket_end) = inner.find(']') {
+            let key = &inner[..bracket_end];
+            let val = &inner[bracket_end + 1..];
+            return (key.to_string(), val.to_string());
+        }
+    }
+    if let Some(inner) = type_name.strip_prefix("map<") {
+        if let Some(comma) = inner.find(',') {
+            if let Some(gt) = inner.find('>') {
+                let key = inner[..comma].trim();
+                let val = inner[comma + 1..gt].trim();
+                return (key.to_string(), val.to_string());
+            }
+        }
+    }
+    ("unknown".to_string(), "unknown".to_string())
+}
+
 /// Check if a type name indicates a struct type.
 ///
 /// Go struct types from DWARF have names like:
@@ -1301,6 +1322,32 @@ fn parse_struct_fields_from_blob(
                 // No type info — return raw bytes
                 CapturedValue::Bytes(sub_blob.to_vec())
             }
+        } else if field.type_info.name.starts_with("map[") || field.type_info.name.starts_with("map<") {
+            // Map field in blob: read the map pointer then iterate the Swiss Table.
+            // Must come BEFORE is_pointer check since Go maps are pointers.
+            let end = (start + 8).min(blob.len());
+            let map_ptr = if end - start == 8 {
+                u64::from_le_bytes(blob[start..end].try_into().unwrap_or([0; 8]))
+            } else {
+                0
+            };
+
+            if map_ptr == 0 {
+                let (key_type, val_type) = parse_map_type_names(&field.type_info.name);
+                CapturedValue::Map {
+                    key_type, value_type: val_type, entries: vec![], reason: "nil map".to_string(),
+                }
+            } else {
+                let (key_nested, val_nested) = match &field.nested_type {
+                    Some(NestedType::Map { key_type, value_type, .. }) => {
+                        (Some(key_type.as_ref()), Some(value_type.as_ref()))
+                    }
+                    _ => (None, None),
+                };
+                super::map_iter::read_go_swiss_map(
+                    map_ptr, key_nested, val_nested, config, mem_reader, pid,
+                )
+            }
         } else if field.type_info.is_pointer {
             // Pointer field: read 8-byte address from blob, then dereference if we have type info.
             let end = (start + 8).min(blob.len());
@@ -1362,15 +1409,44 @@ fn parse_struct_fields_from_blob(
                 let slice_cap =
                     u64::from_le_bytes(blob[start + 16..start + 24].try_into().unwrap_or([0; 8]));
                 detrix_logging::debug!(
-                    "[ringbuf] slice field '{}' ptr={:#x} len={} cap={}",
+                    "[ringbuf] slice field '{}' ptr={:#x} len={} cap={}, has_nested={}",
                     field.name,
                     slice_ptr,
                     slice_len,
-                    slice_cap
+                    slice_cap,
+                    field.nested_type.is_some()
                 );
-                CapturedValue::Slice {
-                    len: slice_len,
-                    cap: slice_cap,
+
+                // If we have nested type info and a valid pointer, read elements
+                // Following Delve's loadArrayValues pattern
+                if slice_ptr != 0 && slice_len > 0 && slice_len <= 10 {
+                    if let Some(NestedType::Array { element_type, .. }) = &field.nested_type {
+                        let element_size = element_type.type_info().byte_size.max(1);
+                        let mut elements = Vec::new();
+                        for i in 0..slice_len {
+                            let elem_addr = slice_ptr + (i * element_size);
+                            let elem_value = parse_slice_element(
+                                elem_addr, element_type.as_ref(), element_size, config, mem_reader, pid,
+                            ).unwrap_or_else(|_| CapturedValue::Error("slice element read failed".to_string()));
+                            elements.push(elem_value);
+                        }
+                        CapturedValue::Struct {
+                            type_name: format!("[] (len={}, cap={})", slice_len, slice_cap),
+                            fields: vec![
+                                ("len".to_string(), Box::new(CapturedValue::Scalar(slice_len))),
+                                ("cap".to_string(), Box::new(CapturedValue::Scalar(slice_cap))),
+                                ("elements".to_string(), Box::new(CapturedValue::Array {
+                                    element_type: field.type_info.slice_element_type.clone(),
+                                    elements,
+                                })),
+                            ],
+                        }
+                    } else {
+                        // No nested type info - just return header
+                        CapturedValue::Slice { len: slice_len, cap: slice_cap }
+                    }
+                } else {
+                    CapturedValue::Slice { len: slice_len, cap: slice_cap }
                 }
             } else {
                 // Not enough bytes for slice header

@@ -263,9 +263,22 @@ impl CapturedValue {
                 entries,
                 reason,
             } => {
-                // Maps are unsupported — return error with explanation
-                format!("{{\"__type\":\"map[{key_type}]{value_type}\",\"error\":\"{reason}\",\"partial_entries\":{}}}", 
-                    entries.len())
+                if entries.is_empty() && !reason.is_empty() {
+                    // Map capture failed — return error with explanation
+                    format!("{{\"__type\":\"map[{key_type}]{value_type}\",\"error\":\"{reason}\",\"partial_entries\":0}}")
+                } else {
+                    // Map entries captured — output as array of {key, value} objects
+                    let entry_strs: Vec<String> = entries
+                        .iter()
+                        .map(|(k, v)| {
+                            format!("{{\"key\":{},\"value\":{}}}",
+                                k.to_json_value(VariableSize::QWord),
+                                v.to_json_value(VariableSize::QWord))
+                        })
+                        .collect();
+                    format!("{{\"__type\":\"map[{key_type}]{value_type}\",\"entries\":[{}]}}",
+                        entry_strs.join(","))
+                }
             }
             Self::Error(msg) => format!("\"<error: {msg}>\""),
         }
