@@ -485,11 +485,29 @@ fn resolve_struct_fields<R: Reader>(
             && depth < config.max_depth
         {
             detrix_logging::debug!(
-                "[nested_types] Resolving nested type for field '{}' (type={}, is_array={}, depth={}/{})",
-                field_name, field_type_info.name, field_type_info.is_array, depth, config.max_depth
+                "[nested_types] Resolving nested type for field '{}' (type={}, is_slice={}, is_array={}, depth={}/{})",
+                field_name, field_type_info.name, field_type_info.is_slice, field_type_info.is_array, depth, config.max_depth
             );
-            resolve_nested_type_impl(child, unit, dwarf, config, depth + 1).ok()
+            let result = resolve_nested_type_impl(child, unit, dwarf, config, depth + 1);
+            detrix_logging::debug!(
+                "[nested_types] Resolved nested type for field '{}': {:?}",
+                field_name,
+                result.as_ref().map(|n| match n {
+                    NestedType::Array { element_type, .. } => format!("Array(element={})", element_type.type_info().name),
+                    NestedType::Struct { type_info, .. } => format!("Struct({})", type_info.name),
+                    NestedType::Scalar(t) => format!("Scalar({})", t.name),
+                    NestedType::Pointer { .. } => "Pointer".to_string(),
+                    NestedType::Map { .. } => "Map".to_string(),
+                    NestedType::Unsupported { reason, .. } => format!("Unsupported({})", reason),
+                    _ => "Other".to_string(),
+                })
+            );
+            result.ok()
         } else {
+            detrix_logging::debug!(
+                "[nested_types] NOT resolving nested type for field '{}' (type={}, is_slice={}, depth={}/{})",
+                field_name, field_type_info.name, field_type_info.is_slice, depth, config.max_depth
+            );
             None
         };
 

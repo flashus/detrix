@@ -819,6 +819,16 @@ fn parse_struct_fields_from_addr(
     // Transparently unwrap one pointer level so we parse the pointee struct directly.
     if let Some(crate::dwarf::nested_types::NestedType::Pointer { pointee, .. }) = nested_type {
         let pointee_name = pointee.type_info().name.clone();
+        match pointee.as_ref() {
+            crate::dwarf::nested_types::NestedType::Struct { fields, .. } => {
+                let items_nested = fields.iter().find(|f| f.name == "Items").map(|f| f.nested_type.is_some());
+                detrix_logging::debug!(
+                    "[ringbuf] Unwrapping pointer for '{}', pointee type={}, pointee has {} fields, Items.has_nested={:?}",
+                    type_name, pointee_name, fields.len(), items_nested
+                );
+            }
+            _ => {}
+        }
         return parse_struct_fields_from_addr(
             struct_base_addr,
             &pointee_name,
@@ -891,8 +901,18 @@ fn parse_struct_fields_from_addr(
                 let slice_cap = mem_reader.read_u64(pid, field_addr + 16).unwrap_or(0);
 
                 detrix_logging::debug!(
-                    "[ringbuf] Slice field '{}' ptr={:#x} len={} cap={}, has_nested={}",
-                    field_name, slice_ptr, slice_len, slice_cap, field.nested_type.is_some()
+                    "[ringbuf] Slice field '{}' ptr={:#x} len={} cap={}, has_nested={}, nested_type_variant={:?}, field_nested_type={:?}",
+                    field_name, slice_ptr, slice_len, slice_cap, field.nested_type.is_some(),
+                    field.nested_type.as_ref().map(|n| match n {
+                        NestedType::Array { element_type, .. } => format!("Array(element={})", element_type.type_info().name),
+                        NestedType::Struct { type_info, .. } => format!("Struct({})", type_info.name),
+                        NestedType::Scalar(t) => format!("Scalar({})", t.name),
+                        NestedType::Pointer { .. } => "Pointer".to_string(),
+                        NestedType::Map { .. } => "Map".to_string(),
+                        NestedType::Interface { .. } => "Interface".to_string(),
+                        NestedType::Unsupported { reason, .. } => format!("Unsupported({})", reason),
+                    }),
+                    field.nested_type.as_ref().map(|n| std::mem::discriminant(n))
                 );
 
                 // Read slice elements if we have a valid pointer and length
@@ -946,6 +966,11 @@ fn parse_struct_fields_from_addr(
                         };
                         elements.push(elem_value);
                     }
+
+                    detrix_logging::debug!(
+                        "[ringbuf] Parsed {} slice elements, creating Struct with fields",
+                        elements.len()
+                    );
 
                     CapturedValue::Struct {
                         type_name: format!("[] (len={}, cap={})", slice_len, slice_cap),
@@ -1052,6 +1077,7 @@ fn parse_struct_fields_from_addr(
                 }
             } else if field.type_info.is_pointer {
                 // Pointer field: read the address, then dereference if we have type info.
+                // Following Delve's pointer dereferencing pattern.
                 let ptr_val = mem_reader.read_u64(pid, field_addr).unwrap_or(0);
 
                 detrix_logging::debug!(
@@ -1064,39 +1090,40 @@ fn parse_struct_fields_from_addr(
 
                 if ptr_val != 0 {
                     if let Some(nested) = &field.nested_type {
-                        if let Some((struct_name, struct_fields)) = find_struct_pointee(nested) {
-                            let read_size = (struct_fields
-                                .iter()
-                                .map(|f| f.byte_offset + f.byte_size)
-                                .max()
-                                .unwrap_or(0)
-                                as usize)
-                                .min(config.max_blob_capture);
-                            if read_size > 0 {
-                                match mem_reader.read_bytes(pid, ptr_val, read_size) {
-                                    Ok(deref_bytes) => parse_struct_fields_from_blob(
-                                        &deref_bytes,
-                                        struct_name,
-                                        struct_fields,
+                        // Unwrap pointer layers to find the actual struct type
+                        let mut current = nested;
+                        loop {
+                            match current {
+                                crate::dwarf::nested_types::NestedType::Pointer { pointee, .. } => {
+                                    current = pointee.as_ref();
+                                }
+                                crate::dwarf::nested_types::NestedType::Struct { type_info, .. } => {
+                                    // Found the struct type - parse it with full nested type info
+                                    detrix_logging::debug!(
+                                        "[ringbuf] Dereferencing pointer to '{}'",
+                                        type_info.name
+                                    );
+                                    let result = parse_struct_fields_from_addr(
+                                        ptr_val,
+                                        &type_info.name,
                                         config,
+                                        Some(nested),  // Pass the full nested type
                                         mem_reader,
                                         pid,
-                                    ),
-                                    Err(e) => {
+                                    );
+                                    break result.unwrap_or_else(|e| {
                                         detrix_logging::debug!(
                                             "[ringbuf] pointer deref failed '{}' ptr={:#x}: {}",
-                                            field_name,
-                                            ptr_val,
-                                            e
+                                            field_name, ptr_val, e
                                         );
                                         CapturedValue::Scalar(ptr_val)
-                                    }
+                                    });
                                 }
-                            } else {
-                                CapturedValue::Scalar(ptr_val)
+                                _ => {
+                                    // Not a struct - just return the pointer value
+                                    break CapturedValue::Scalar(ptr_val);
+                                }
                             }
-                        } else {
-                            CapturedValue::Scalar(ptr_val)
                         }
                     } else {
                         CapturedValue::Scalar(ptr_val)
@@ -1279,36 +1306,28 @@ fn parse_struct_fields_from_blob(
 
             if ptr_val != 0 {
                 if let Some(nested) = &field.nested_type {
-                    if let Some((struct_name, struct_fields)) = find_struct_pointee(nested) {
-                        let read_size = (struct_fields
-                            .iter()
-                            .map(|f| f.byte_offset + f.byte_size)
-                            .max()
-                            .unwrap_or(0) as usize)
-                            .min(config.max_blob_capture);
-                        if read_size > 0 {
-                            match mem_reader.read_bytes(pid, ptr_val, read_size) {
-                                Ok(deref_bytes) => parse_struct_fields_from_blob(
-                                    &deref_bytes,
-                                    struct_name,
-                                    struct_fields,
-                                    config,
-                                    mem_reader,
-                                    pid,
-                                ),
-                                Err(e) => {
-                                    detrix_logging::debug!(
-                                        "[ringbuf] pointer deref failed for '{}' ptr={:#x}: {}",
-                                        field.name,
-                                        ptr_val,
-                                        e
-                                    );
-                                    CapturedValue::Scalar(ptr_val)
-                                }
-                            }
-                        } else {
+                    if find_struct_pointee(nested).is_some() {
+                        // Use the address-based parser so that slice element reading,
+                        // string heap reads, and nested pointer derefs all work correctly.
+                        // parse_struct_fields_from_blob cannot follow slice data pointers
+                        // and would return only Slice{len,cap} without elements.
+                        parse_struct_fields_from_addr(
+                            ptr_val,
+                            &field.type_info.name,
+                            config,
+                            Some(nested),
+                            mem_reader,
+                            pid,
+                        )
+                        .unwrap_or_else(|e| {
+                            detrix_logging::debug!(
+                                "[ringbuf] pointer deref failed for '{}' ptr={:#x}: {}",
+                                field.name,
+                                ptr_val,
+                                e
+                            );
                             CapturedValue::Scalar(ptr_val)
-                        }
+                        })
                     } else {
                         CapturedValue::Scalar(ptr_val)
                     }
