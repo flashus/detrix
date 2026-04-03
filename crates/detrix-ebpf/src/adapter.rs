@@ -29,7 +29,7 @@ use crate::probe::types::{CaptureConfig, CapturedValue};
 use crate::probe::UprobeManager;
 
 use async_trait::async_trait;
-use detrix_application::{DapAdapter, RemoveMetricResult, SetMetricResult};
+use detrix_ports::{DapAdapter, RemoveMetricResult, SetMetricResult};
 use detrix_core::{ExpressionValue, Metric, MetricEvent, MetricId, TypedValue};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

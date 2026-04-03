@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::probe::types::CaptureConfig;
 
 use async_trait::async_trait;
-use detrix_application::{DapAdapterFactory, DapAdapterFactoryRef, DapAdapterRef};
+use detrix_ports::{DapAdapterFactory, DapAdapterFactoryRef, DapAdapterRef};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -201,7 +201,7 @@ impl DapAdapterFactory for EbpfGoFactory {
 #[cfg(test)]
 mod ebpf_go_factory_tests {
     use super::*;
-    use detrix_application::DapAdapterRef;
+    use detrix_ports::DapAdapterRef;
     use detrix_core::Result;
 
     /// Minimal stub factory that records calls.
