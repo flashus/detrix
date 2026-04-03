@@ -670,12 +670,14 @@ async fn test_ebpf_captures_nested_types() {
                 mismatches.push(format!("Order[{}] missing Items slice", idx));
             }
 
-            // Check Tags map (should be marked as unsupported)
+            // Check Tags map (should be captured with Swiss Table iterator)
             if !value_json.contains("\"Tags\":") {
                 mismatches.push(format!("Order[{}] missing Tags", idx));
             }
-            if !value_json.contains("\"error\":\"map capture requires runtime introspection\"") {
-                mismatches.push(format!("Order[{}] Tags should have map error message", idx));
+            // Tags must NOT show raw runtime internals (dirPtr/seed/used) — that indicates
+            // the map iterator was not applied and the map was parsed as a plain struct.
+            if value_json.contains("\"dirPtr\"") {
+                mismatches.push(format!("Order[{}] Tags shows raw runtime struct (map iterator not applied)", idx));
             }
 
             // Check Total (float) - should be a numeric value

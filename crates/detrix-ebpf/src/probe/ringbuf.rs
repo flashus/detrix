@@ -792,7 +792,7 @@ fn parse_slice_element(
 }
 
 /// Parse struct fields from ring buffer data using user-space memory reading.
-fn parse_struct_fields_from_addr(
+pub fn parse_struct_fields_from_addr(
     struct_base_addr: u64, // Base address captured by BPF
     type_name: &str,
     config: &CaptureConfig,
@@ -1041,13 +1041,26 @@ fn parse_struct_fields_from_addr(
                     Ok(bytes) => CapturedValue::Bytes(bytes),
                     Err(_) => CapturedValue::Bytes(vec![0u8; blob_size]),
                 }
-            } else if field.type_info.name.starts_with("map[") {
-                // Map types are complex runtime structures - mark as unsupported
-                CapturedValue::Map {
-                    key_type: "unknown".to_string(),
-                    value_type: "unknown".to_string(),
-                    entries: vec![],
-                    reason: "map capture requires runtime introspection".to_string(),
+            } else if field.type_info.name.starts_with("map[") || field.type_info.name.starts_with("map<") {
+                // Map field: read the map pointer then iterate the Swiss Table.
+                let map_ptr = mem_reader.read_u64(pid, field_addr).unwrap_or(0);
+                if map_ptr == 0 {
+                    CapturedValue::Map {
+                        key_type: "?".to_string(),
+                        value_type: "?".to_string(),
+                        entries: vec![],
+                        reason: "nil map".to_string(),
+                    }
+                } else {
+                    let (key_nested, val_nested) = match &field.nested_type {
+                        Some(NestedType::Map { key_type, value_type, .. }) => {
+                            (Some(key_type.as_ref()), Some(value_type.as_ref()))
+                        }
+                        _ => (None, None),
+                    };
+                    super::map_iter::read_go_swiss_map(
+                        map_ptr, key_nested, val_nested, config, mem_reader, pid,
+                    )
                 }
             } else if field.type_info.is_struct {
                 // Embedded struct field: read bytes and recursively parse if we have type info.

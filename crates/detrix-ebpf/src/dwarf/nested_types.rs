@@ -250,12 +250,12 @@ fn classify_type<R: Reader>(
         );
     }
 
-    if type_info.is_pointer {
-        return resolve_pointer_type(entry, unit, dwarf, type_info, config, depth);
+    if type_info.name.starts_with("map[") || type_info.name.starts_with("map<") {
+        return resolve_map_type(entry, unit, dwarf, type_info, config, depth);
     }
 
-    if type_info.name.starts_with("map[") {
-        return resolve_map_type(entry, unit, dwarf, type_info, config, depth);
+    if type_info.is_pointer {
+        return resolve_pointer_type(entry, unit, dwarf, type_info, config, depth);
     }
 
     if type_info.name == "interface{}" || type_info.name.contains(".interface") {
@@ -762,17 +762,219 @@ fn resolve_array_element_type<R: Reader>(
 }
 
 fn resolve_map_type<R: Reader>(
-    _entry: &DebuggingInformationEntry<R>,
-    _unit: &Unit<R>,
-    _dwarf: &gimli::Dwarf<R>,
+    entry: &DebuggingInformationEntry<R>,
+    unit: &Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
     type_info: TypeInfo,
-    _config: &NestedTypeConfig,
-    _depth: usize,
+    config: &NestedTypeConfig,
+    depth: usize,
 ) -> Result<NestedType> {
-    Ok(NestedType::Unsupported {
+    // Go custom DWARF attributes for map key and element types.
+    // Emitted by the Go compiler on the map typedef DIE.
+    const DW_AT_GO_KEY: u16 = 0x2901;
+    const DW_AT_GO_ELEM: u16 = 0x2902;
+
+    let key_nested = try_resolve_go_map_component(
+        entry, unit, dwarf, config, depth, DwAt(DW_AT_GO_KEY),
+    )
+    .unwrap_or_else(|| infer_nested_from_map_name(&type_info.name, 0));
+
+    let val_nested = try_resolve_go_map_component(
+        entry, unit, dwarf, config, depth, DwAt(DW_AT_GO_ELEM),
+    )
+    .unwrap_or_else(|| infer_nested_from_map_name(&type_info.name, 1));
+
+    Ok(NestedType::Map {
         type_info,
-        reason: "map capture requires runtime introspection".to_string(),
+        key_type: Box::new(key_nested),
+        value_type: Box::new(val_nested),
     })
+}
+
+/// Try to resolve a map key or value type using a Go-specific DWARF attribute
+/// (`DW_AT_go_key` = 0x2901, `DW_AT_go_elem` = 0x2902).
+///
+/// Searches the member entry itself, then follows one level of `DW_AT_type`
+/// (the typedef or pointer) to locate the attribute.
+fn try_resolve_go_map_component<R: Reader>(
+    entry: &DebuggingInformationEntry<R>,
+    unit: &Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+    config: &NestedTypeConfig,
+    depth: usize,
+    attr: DwAt,
+) -> Option<NestedType> {
+    // Check the entry itself first
+    if let Some(val) = entry.attr_value(attr) {
+        if let Ok(nt) = resolve_nested_from_attr_value(val, unit, dwarf, config, depth) {
+            if nt.type_info().name != "unknown" {
+                return Some(nt);
+            }
+        }
+    }
+
+    // Follow DW_AT_type one level (member → typedef or pointer_type)
+    let type_attr = entry.attr_value(DwAt(gimli::constants::DW_AT_type.0))?;
+    match type_attr {
+        AttributeValue::UnitRef(offset) => {
+            let mut cursor = unit.entries_at_offset(offset).ok()?;
+            let typedef_entry = cursor.next_dfs().ok()??;
+            if let Some(val) = typedef_entry.attr_value(attr) {
+                if let Ok(nt) = resolve_nested_from_attr_value(val, unit, dwarf, config, depth) {
+                    if nt.type_info().name != "unknown" {
+                        return Some(nt);
+                    }
+                }
+            }
+            // Try one more hop (typedef → pointer → struct)
+            if let Some(inner_attr) = typedef_entry.attr_value(DwAt(gimli::constants::DW_AT_type.0)) {
+                if let AttributeValue::UnitRef(inner_offset) = inner_attr {
+                    let mut inner_cursor = unit.entries_at_offset(inner_offset).ok()?;
+                    let inner_entry = inner_cursor.next_dfs().ok()??;
+                    if let Some(val) = inner_entry.attr_value(attr) {
+                        if let Ok(nt) = resolve_nested_from_attr_value(val, unit, dwarf, config, depth) {
+                            if nt.type_info().name != "unknown" {
+                                return Some(nt);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        AttributeValue::DebugInfoRef(di_off) => {
+            // Inline cross-unit resolution (can't return entry+unit together due to lifetimes)
+            let target = di_off.0;
+            let mut units = dwarf.units();
+            while let Ok(Some(header)) = units.next() {
+                let start = header.offset().0;
+                let end = start + header.unit_length();
+                if target >= start && target < end {
+                    if let Ok(target_unit) = dwarf.unit(header) {
+                        let local = gimli::UnitOffset(target - start);
+                        if let Ok(mut cursor) = target_unit.entries_at_offset(local) {
+                            if let Ok(Some(target_entry)) = cursor.next_dfs() {
+                                if let Some(val) = target_entry.attr_value(attr) {
+                                    if let Ok(nt) = resolve_nested_from_attr_value(
+                                        val, &target_unit, dwarf, config, depth,
+                                    ) {
+                                        if nt.type_info().name != "unknown" {
+                                            return Some(nt);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+/// Resolve a `NestedType` from a gimli `AttributeValue` that is a type reference.
+fn resolve_nested_from_attr_value<R: Reader>(
+    val: AttributeValue<R>,
+    unit: &Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+    config: &NestedTypeConfig,
+    depth: usize,
+) -> Result<NestedType> {
+    match val {
+        AttributeValue::UnitRef(offset) => {
+            let mut cursor = unit.entries_at_offset(offset)?;
+            if let Some(e) = cursor.next_dfs()? {
+                let ti = resolve_type_info(e, unit, dwarf)?;
+                return classify_type(e, unit, dwarf, ti, config, depth);
+            }
+        }
+        AttributeValue::DebugInfoRef(di_off) => {
+            return resolve_cross_unit_type(di_off, unit, dwarf, config, depth);
+        }
+        _ => {}
+    }
+    Ok(NestedType::Scalar(TypeInfo::unknown()))
+}
+
+/// Infer a `NestedType::Scalar` for a map key (component=0) or value (component=1)
+/// by parsing the map type name string.
+///
+/// Handles both `map[K]V` and `map<K,V>` formats.
+/// Returns `NestedType::Scalar(TypeInfo::unknown())` when the size cannot be determined.
+fn infer_nested_from_map_name(type_name: &str, component: usize) -> NestedType {
+    let (key_name, val_name) = match split_map_type_name(type_name) {
+        Some(pair) => pair,
+        None => return NestedType::Scalar(TypeInfo::unknown()),
+    };
+    let name = if component == 0 { key_name } else { val_name };
+    let size = known_go_type_byte_size(name);
+    NestedType::Scalar(TypeInfo {
+        name: name.to_string(),
+        size: crate::dwarf::types::VariableSize::from_byte_size(size)
+            .unwrap_or(crate::dwarf::types::VariableSize::QWord),
+        byte_size: size,
+        is_pointer: name.starts_with('*'),
+        is_string: name == "string",
+        is_slice: name.starts_with("[]"),
+        is_array: false,
+        is_struct: name.contains('.') && !name.starts_with('*') && !name.starts_with("[]"),
+        array_element_count: 0,
+        array_element_type: String::new(),
+        slice_element_type: String::new(),
+        element_byte_size: 0,
+    })
+}
+
+/// Parse `map[K]V` or `map<K,V>` into (key_str, val_str).
+fn split_map_type_name(s: &str) -> Option<(&str, &str)> {
+    if let Some(inner) = s.strip_prefix("map[") {
+        let mut depth = 1usize;
+        for (i, c) in inner.char_indices() {
+            match c {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((&inner[..i], &inner[i + 1..]));
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else if let Some(inner) = s.strip_prefix("map<") {
+        let inner = inner.trim_end_matches('>');
+        let mut depth = 0usize;
+        for (i, c) in inner.char_indices() {
+            match c {
+                '<' | '[' => depth += 1,
+                '>' | ']' => depth -= 1,
+                ',' if depth == 0 => {
+                    return Some((&inner[..i], inner[i + 1..].trim_start()));
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Return the known in-memory byte size for common Go types.
+/// Returns 8 as a conservative default for unknown/struct types.
+fn known_go_type_byte_size(name: &str) -> u64 {
+    match name {
+        "string" => 16,
+        "bool" | "int8" | "uint8" | "byte" => 1,
+        "int16" | "uint16" => 2,
+        "int32" | "uint32" | "float32" | "rune" => 4,
+        "int" | "int64" | "uint" | "uint64" | "uintptr"
+        | "float64" | "complex64" | "error" => 8,
+        "complex128" => 16,
+        _ if name.starts_with('*') => 8, // pointer
+        _ if name.starts_with("[]") => 24, // slice header
+        _ => 8, // struct or unknown — conservative
+    }
 }
 
 fn resolve_pointer_type<R: Reader>(

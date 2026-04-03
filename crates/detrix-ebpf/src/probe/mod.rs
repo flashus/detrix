@@ -23,6 +23,7 @@
 //! ```
 
 pub mod loader;
+pub mod map_iter;
 pub mod program;
 pub mod ringbuf;
 pub mod types;
