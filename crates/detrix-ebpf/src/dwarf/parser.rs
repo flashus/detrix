@@ -11,8 +11,7 @@ use super::types::{ProbePoint, ProgramCounter, ResolvedVariable, VariableLocatio
 use crate::error::{Error, Result};
 
 use gimli::{AttributeValue, DebuggingInformationEntry, DwAt, EndianSlice, Reader};
-use object::{Object, ObjectSection};
-use std::borrow::Cow;
+use object::{CompressionFormat, Object, ObjectSection};
 use std::path::{Path, PathBuf};
 
 /// Parsed Go binary with DWARF debug info ready for probe point resolution.
@@ -136,23 +135,34 @@ fn load_dwarf<'a>(
     obj: &'a object::File<'a>,
     endian: gimli::RunTimeEndian,
 ) -> Result<gimli::Dwarf<EndianSlice<'a, gimli::RunTimeEndian>>> {
+    // Check for compressed DWARF sections before attempting to load.
+    // `EndianSlice` borrows directly from the ELF bytes and cannot hold
+    // decompressed (Cow::Owned) data.
+    for section in obj.sections() {
+        let name = section.name().unwrap_or("");
+        if name.starts_with(".debug_") || name.starts_with(".zdebug_") {
+            if let Ok(compressed) = section.compressed_data() {
+                if compressed.format != CompressionFormat::None {
+                    return Err(Error::DwarfParse(
+                        "Compressed DWARF is not supported. \
+                         Build with -ldflags=\"-compressdwarf=false\" -gcflags=\"all=-N -l\" \
+                         to produce uncompressed DWARF with stable variable locations."
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     let load_section = |id: gimli::SectionId| -> std::result::Result<
         EndianSlice<'a, gimli::RunTimeEndian>,
         gimli::Error,
     > {
         let data = obj
             .section_by_name(id.name())
-            .and_then(|s| s.uncompressed_data().ok())
-            .unwrap_or(Cow::Borrowed(&[]));
-        Ok(EndianSlice::new(
-            match data {
-                Cow::Borrowed(b) => b,
-                // Compressed DWARF: silently empty. Build with -compressdwarf=false
-                // to avoid this. A TODO: handle via DwarfInfo-owned storage.
-                Cow::Owned(_) => &[],
-            },
-            endian,
-        ))
+            .and_then(|s| s.data().ok())
+            .unwrap_or(&[]);
+        Ok(EndianSlice::new(data, endian))
     };
 
     gimli::Dwarf::load(load_section).map_err(|e| Error::DwarfParse(format!("Load DWARF: {e}")))

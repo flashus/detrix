@@ -100,11 +100,9 @@ fn build_event_fields(
             VariableLocation::GoString { .. } => {
                 out.push_str(&format!("    u64 var{i}_len;\n"));
                 // Fixed-size buffer for string content — filled by bpf_probe_read_user.
-                // Ring buffer parser reads exactly max_string_capture bytes after len.
-                out.push_str(&format!(
-                    "    u8  var{i}_str[{}];\n",
-                    config.max_string_capture
-                ));
+                // Capped at 255 to match the verifier hint (_len &= 0xFF) in build_var_reads.
+                let buf_size = config.max_string_capture.min(255);
+                out.push_str(&format!("    u8  var{i}_str[{}];\n", buf_size));
             }
             VariableLocation::GoSlice { .. } => {
                 out.push_str(&format!("    u64 var{i}_len;\n"));
@@ -217,9 +215,11 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
             // provably bounded.  The `var &= const` pattern is the canonical way:
             //   1. mask _len with a power-of-two - 1 to give the verifier an upper bound,
             //   2. then guard with > 0 so we don't call with size 0.
-            // We use mask = MAX_STRING_CAPTURE (which must be a power of two) so that
-            // masking is both the truncation AND the verifier hint in one step.
-            let max = config.max_string_capture;
+            //
+            // The mask is capped at 255 (0xFF) because BPF has limited stack space.
+            // The ring buffer parser also enforces this limit, so strings longer than
+            // 255 bytes are safely truncated at parse time.
+            let max = config.max_string_capture.min(255);
             let content_read = format!(
                 "    __builtin_memset(event->var{idx}_str, 0, {max});\
 \n    {{\

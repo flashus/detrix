@@ -16,7 +16,7 @@ pub type ProgramCounter = u64;
 /// Maps to `struct pt_regs` fields in the eBPF program.
 /// See: DWARF register number assignments for x86-64 (AMD64 ABI).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u16)]
+#[repr(u8)]
 pub enum Register {
     Rax = 0,
     Rdx = 1,

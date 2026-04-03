@@ -41,6 +41,8 @@ pub struct CompiledBpf {
     pub elf_bytes: Vec<u8>,
     /// Path to the source file (retained for debugging).
     pub source_path: PathBuf,
+    /// The temp dir is kept alive to prevent cleanup of source_path.
+    _temp_dir: tempfile::TempDir,
 }
 
 /// Compile a generated BPF C program to ELF bytes using clang.
@@ -94,14 +96,10 @@ pub fn compile_bpf(program: &BpfProgram) -> Result<CompiledBpf> {
     let elf_bytes = std::fs::read(&obj_path)
         .map_err(|e| Error::Ebpf(format!("Failed to read compiled BPF object: {e}")))?;
 
-    // temp_dir and its contents are cleaned up here
-    // But src_path is inside temp_dir, return a copy of it before drop
-    let src_path_copy = src_path.clone();
-    drop(temp_dir);
-
     Ok(CompiledBpf {
         elf_bytes,
-        source_path: src_path_copy,
+        source_path: src_path,
+        _temp_dir: temp_dir,
     })
 }
 
@@ -137,7 +135,7 @@ pub fn check_clang_available() -> Result<String> {
 ///
 /// BPF program names in aya must be valid C identifiers.
 pub fn sanitize_probe_name(metric_name: &str) -> String {
-    metric_name
+    let sanitized: String = metric_name
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' {
@@ -146,7 +144,14 @@ pub fn sanitize_probe_name(metric_name: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+
+    // C identifiers cannot start with a digit; prepend underscore if needed
+    if sanitized.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        format!("_{}", sanitized)
+    } else {
+        sanitized
+    }
 }
 
 #[cfg(test)]
@@ -180,6 +185,13 @@ mod tests {
     #[test]
     fn sanitize_probe_name_preserves_numbers() {
         assert_eq!(sanitize_probe_name("metric_v2"), "metric_v2");
+    }
+
+    #[test]
+    fn sanitize_probe_name_prepends_underscore_for_leading_digit() {
+        assert_eq!(sanitize_probe_name("123metric"), "_123metric");
+        assert_eq!(sanitize_probe_name("9test"), "_9test");
+        assert_eq!(sanitize_probe_name("1"), "_1");
     }
 
     #[test]

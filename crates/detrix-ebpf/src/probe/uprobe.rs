@@ -273,12 +273,19 @@ impl UprobeManager {
             let name = metric_name.to_string();
 
             tokio::task::spawn_blocking(move || loop {
+                let mut got_event = false;
                 while let Some(item) = ring_buf.next() {
+                    got_event = true;
                     if tx.send((name.clone(), item.to_vec())).is_err() {
                         return; // Receiver dropped — stop polling
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                // Use park_timeout for efficient sleeping that can be woken early.
+                // This is more efficient than sleep() because it doesn't hold a CPU
+                // timeslice and can be woken via thread.unpark() if needed.
+                if !got_event {
+                    std::thread::park_timeout(std::time::Duration::from_millis(10));
+                }
             })
         } else {
             // No event channel configured — idle task so _poller is always valid.

@@ -301,7 +301,7 @@ fn resolve_type_at_offset<R: Reader>(
 
             detrix_logging::debug!(
                 "[DWARF typeinfo] TYPEDEF '{}' → inner: name='{}' is_string={} is_struct={} byte_size={}",
-                typedef_name.as_ref().map(|s| s.as_str()).unwrap_or("???"),
+                typedef_name.as_deref().unwrap_or("???"),
                 inner_info.name, inner_info.is_string, inner_info.is_struct, inner_info.byte_size
             );
 
@@ -362,7 +362,7 @@ fn resolve_type_at_offset<R: Reader>(
 /// Resolve a DW_TAG_base_type DIE (int, float, bool, etc.).
 fn resolve_base_type<R: Reader>(
     entry: &DebuggingInformationEntry<R>,
-    unit: &gimli::Unit<R>,
+    _unit: &gimli::Unit<R>,
     dwarf: &gimli::Dwarf<R>,
 ) -> Result<TypeInfo> {
     let name = read_attr_string(entry, dwarf, gimli::constants::DW_AT_name)?
@@ -370,11 +370,20 @@ fn resolve_base_type<R: Reader>(
 
     let byte_size = match entry.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0)) {
         Some(AttributeValue::Udata(n)) => n,
-        _ => 8, // Default to 8 bytes
+        _ => {
+            // Infer byte size from base type name when DW_AT_byte_size is missing
+            match name.as_str() {
+                "bool" | "int8" | "uint8" | "byte" => 1,
+                "int16" | "uint16" => 2,
+                "int32" | "uint32" | "rune" | "float32" => 4,
+                "int64" | "uint64" | "int" | "uint" | "uintptr" | "float64" | "complex64" => 8,
+                "complex128" => 16,
+                _ => 8, // Conservative default
+            }
+        }
     };
 
     let size = VariableSize::from_byte_size(byte_size).unwrap_or(VariableSize::QWord);
-    let _ = unit; // used for completeness
 
     detrix_logging::debug!(
         "[DWARF typeinfo] base_type name='{}' byte_size={}",
@@ -666,11 +675,22 @@ fn is_go_string_type_by_name_and_size(name: &str, linkage_name: &str, byte_size:
         // Named type aliases: if it's 16 bytes AND has "string" in the name
         // This catches `type MyString string` and `type OrderStatus string` declarations
         // We require BOTH size match AND name containing "string" to avoid false positives
-        if name.to_lowercase().contains("string") {
+        // Only match when "string" appears as a complete word (not as substring of StringBuffer, StringCache, etc.)
+        if is_go_string_name(name) {
             return true;
         }
     }
     false
+}
+
+/// Check if a type name refers to a Go string type (not just containing "string" as substring).
+fn is_go_string_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    // Exact match or ends with "string" (type aliases like MyString, OrderStatus)
+    lower == "string"
+        || lower.ends_with("string")
+        || lower.contains("/string")
+        || lower.contains(".string")
 }
 
 /// Check if a struct has Go string fields (str + len).

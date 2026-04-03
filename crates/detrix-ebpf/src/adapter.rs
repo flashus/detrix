@@ -35,6 +35,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
+#[cfg(target_os = "linux")]
+use tokio::task::JoinHandle;
 
 /// eBPF-based adapter for Go logpoints on Linux.
 ///
@@ -50,19 +52,21 @@ pub struct EbpfAdapter {
     /// Active metrics keyed by name. Shared with the correlator task via Arc.
     active_metrics: Arc<RwLock<HashMap<String, ActiveMetric>>>,
     /// Capture limits — kept here for the event correlator's ring buffer parsing (Linux only).
-    #[allow(dead_code)]
     capture_config: CaptureConfig,
     /// Event sender — probe events are converted to MetricEvents and sent here.
-    /// Cloned for the Linux correlator task in start(); field retained for future re-use.
-    #[allow(dead_code)]
+    /// Cloned for the Linux correlator task in start().
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     event_tx: mpsc::Sender<MetricEvent>,
     /// Event receiver — handed out exactly once via subscribe_events().
     event_rx: RwLock<Option<mpsc::Receiver<MetricEvent>>>,
     /// Raw ring buffer events from UprobeManager polling tasks (Linux only).
-    #[allow(dead_code, clippy::type_complexity)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     raw_event_rx: RwLock<Option<mpsc::UnboundedReceiver<(String, Vec<u8>)>>>,
-    /// Whether the adapter is started.
+    /// Whether the adapter is Started.
     started: RwLock<bool>,
+    /// Handle to the event correlator task (Linux only). Stored for graceful shutdown.
+    #[cfg(target_os = "linux")]
+    correlator_handle: RwLock<Option<JoinHandle<()>>>,
     /// Process memory reader for dereferencing Go string pointers (Linux only).
     #[cfg(target_os = "linux")]
     mem_reader: Arc<dyn crate::mem_reader::ProcessMemoryReader>,
@@ -71,13 +75,11 @@ pub struct EbpfAdapter {
 /// A metric with its resolved probe point, ready for event correlation.
 ///
 /// Fields are read by `run_event_correlator` (Linux-only).
+#[allow(dead_code)]
 struct ActiveMetric {
-    #[allow(dead_code)]
     metric: Metric,
-    #[allow(dead_code)]
     probe_point: ProbePoint,
     /// Whether the BPF program captures the goroutine ID (from runtime.g via R14).
-    #[allow(dead_code)]
     capture_goid: bool,
 }
 
@@ -109,6 +111,8 @@ impl EbpfAdapter {
             mem_reader: Arc::new(crate::mem_reader::LinuxProcessMemoryReader::new(
                 path.to_str().unwrap_or("/unknown"),
             )),
+            #[cfg(target_os = "linux")]
+            correlator_handle: RwLock::new(None),
         }
     }
 
@@ -188,13 +192,14 @@ impl DapAdapter for EbpfAdapter {
             let event_tx = self.event_tx.clone();
             let capture_config = self.capture_config.clone();
             let mem_reader = Arc::clone(&self.mem_reader);
-            tokio::spawn(run_event_correlator(
+            let handle = tokio::spawn(run_event_correlator(
                 raw_rx,
                 active_metrics,
                 event_tx,
                 capture_config,
                 mem_reader,
             ));
+            *self.correlator_handle.write().await = Some(handle);
         }
 
         *self.started.write().await = true;
@@ -204,6 +209,18 @@ impl DapAdapter for EbpfAdapter {
     async fn stop(&self) -> detrix_core::Result<()> {
         self.uprobe_manager.write().await.detach_all();
         self.active_metrics.write().await.clear();
+
+        // Gracefully shut down the correlator task by dropping raw_event_rx
+        // (which closes the channel) and awaiting the handle.
+        #[cfg(target_os = "linux")]
+        if let Some(handle) = self.correlator_handle.write().await.take() {
+            // The correlator will exit when raw_rx is exhausted (already taken in start()).
+            // We don't need to send a cancellation signal — the channel is already closed.
+            if let Err(e) = handle.await {
+                detrix_logging::warn!("[EbpfAdapter] Correlator task panicked: {e}");
+            }
+        }
+
         *self.started.write().await = false;
         Ok(())
     }

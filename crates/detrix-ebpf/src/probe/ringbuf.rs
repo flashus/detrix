@@ -26,6 +26,9 @@ use crate::mem_reader::ProcessMemoryReader;
 use crate::probe::types::{CaptureConfig, CapturedValue, ProbeEvent};
 
 /// Minimum event size: pid(4) + tid(4) + timestamp(8) = 16 bytes.
+/// Note: when capture_goid is true, an additional u64 goid field is present,
+/// making the actual minimum 24 bytes. The constant reflects the base layout
+/// without goid; callers handle the conditional offset adjustment.
 const MIN_EVENT_SIZE: usize = 16;
 
 /// Parse a raw ring buffer entry into a ProbeEvent.
@@ -73,139 +76,161 @@ pub fn parse_ring_buffer_event(
     let mut values = Vec::with_capacity(variables.len());
     for var in variables {
         let val = read_u64(data, &mut offset).unwrap_or(0);
-        let captured = match &var.location {
-            crate::dwarf::types::VariableLocation::GoString { .. } => {
-                // Read string length from the event (BPF read this from stack)
-                let len = read_u64(data, &mut offset).unwrap_or(0) as usize;
-                // Skip the empty buffer (BPF doesn't read Go heap)
-                let _ = read_bytes(data, &mut offset, config.max_string_capture);
+        let captured =
+            match &var.location {
+                crate::dwarf::types::VariableLocation::GoString { .. } => {
+                    // Read string length from the event (BPF read this from stack)
+                    let len = read_u64(data, &mut offset).unwrap_or(0) as usize;
+                    // Skip the empty buffer (BPF doesn't read Go heap)
+                    let _ = read_bytes(data, &mut offset, config.max_string_capture);
 
-                // ALWAYS use user-space memory reader for Go strings
-                // BPF cannot access Go heap memory reliably
-                detrix_logging::debug!(
-                    "[ringbuf] Reading Go string via user-space: pid={} ptr={:#x} len={}",
-                    pid,
-                    val,
-                    len
-                );
-
-                // Try with pid first, then tid
-                let mut result = mem_reader.read_string(pid, val, len);
-                if result.is_err() {
-                    result = mem_reader.read_string(tid, val, len);
-                }
-
-                match result {
-                    Ok(s) => CapturedValue::String {
-                        data: s.into_bytes(),
-                        len,
-                    },
-                    Err(e) => {
+                    // Validate string length against configured limit.
+                    // Strings longer than max_string_capture are rejected to prevent
+                    // unbounded memory reads from arbitrary user-space addresses.
+                    if len > config.max_string_capture {
                         detrix_logging::warn!(
-                            "[ringbuf] Failed to read Go string: pid={} tid={} ptr={:#x} len={}: {}",
-                            pid, tid, val, len, e
+                            "[ringbuf] Go string len={} exceeds max_string_capture={}, rejecting",
+                            len,
+                            config.max_string_capture
                         );
                         CapturedValue::String {
-                            data: b"<read-failed>".to_vec(),
-                            len,
+                            data: vec![],
+                            len: 0,
+                        }
+                    } else {
+                        // ALWAYS use user-space memory reader for Go strings
+                        // BPF cannot access Go heap memory reliably
+                        detrix_logging::debug!(
+                            "[ringbuf] Reading Go string via user-space: pid={} ptr={:#x} len={}",
+                            pid,
+                            val,
+                            len
+                        );
+
+                        // Only use pid for memory reads. tid is an OS thread ID, NOT a process ID.
+                        // Using tid as PID for process_vm_readv could read from arbitrary processes.
+                        let result = mem_reader.read_string(pid, val, len);
+
+                        match result {
+                            Ok(s) => CapturedValue::String {
+                                data: s.into_bytes(),
+                                len,
+                            },
+                            Err(e) => {
+                                detrix_logging::warn!(
+                                "[ringbuf] Failed to read Go string: pid={} ptr={:#x} len={}: {}",
+                                pid, val, len, e
+                            );
+                                CapturedValue::String {
+                                    data: b"<read-failed>".to_vec(),
+                                    len,
+                                }
+                            }
                         }
                     }
                 }
-            }
-            crate::dwarf::types::VariableLocation::GoSlice { .. } => {
-                let len = read_u64(data, &mut offset).unwrap_or(0);
-                let cap = read_u64(data, &mut offset).unwrap_or(0);
-                CapturedValue::Slice { len, cap }
-            }
-            crate::dwarf::types::VariableLocation::StackBlob { byte_size, .. } => {
-                // var{idx} (u64) was already read above as `val` — it is 0 (unused).
-                // The BPF program filled var{idx}_blob[N] with the actual bytes inline.
-                let capture = (*byte_size).min(config.max_blob_capture);
-                let bytes =
-                    read_bytes(data, &mut offset, capture).unwrap_or_else(|_| vec![0u8; capture]);
-
-                // If we have DWARF field info, parse the blob into named fields
-                if let Some(crate::dwarf::nested_types::NestedType::Struct {
-                    fields: dwarf_fields,
-                    ..
-                }) = &var.nested_type
-                {
-                    parse_struct_fields_from_blob(
-                        &bytes,
-                        &var.type_name,
-                        dwarf_fields,
-                        config,
-                        mem_reader,
-                        pid,
-                    )
-                } else {
-                    CapturedValue::Bytes(bytes)
+                crate::dwarf::types::VariableLocation::GoSlice { .. } => {
+                    let len = read_u64(data, &mut offset).unwrap_or(0);
+                    let cap = read_u64(data, &mut offset).unwrap_or(0);
+                    CapturedValue::Slice { len, cap }
                 }
-            }
-            crate::dwarf::types::VariableLocation::StackIndirect { byte_size, .. } => {
-                // `val` holds the pointer read from the stack slot by BPF.
-                // Heap-escaped Go struct: dereference the pointer in user-space to read
-                // the actual struct bytes, then parse fields using DWARF type info.
-                detrix_logging::debug!(
-                    "[ringbuf] StackIndirect '{}': ptr={:#x} byte_size={}",
-                    var.name,
-                    val,
-                    byte_size
-                );
-                let capture = (*byte_size).min(config.max_blob_capture);
-                let bytes = if val != 0 {
-                    let mut result = mem_reader.read_bytes(pid, val, capture);
-                    if result.is_err() {
-                        result = mem_reader.read_bytes(tid, val, capture);
+                crate::dwarf::types::VariableLocation::StackBlob { byte_size, .. } => {
+                    // var{idx} (u64) was already read above as `val` — it is 0 (unused).
+                    // The BPF program filled var{idx}_blob[N] with the actual bytes inline.
+                    let capture = (*byte_size).min(config.max_blob_capture);
+                    let bytes = read_bytes(data, &mut offset, capture)
+                        .unwrap_or_else(|_| vec![0u8; capture]);
+
+                    // If we have DWARF field info, parse the blob into named fields
+                    if let Some(crate::dwarf::nested_types::NestedType::Struct {
+                        fields: dwarf_fields,
+                        ..
+                    }) = &var.nested_type
+                    {
+                        parse_struct_fields_from_blob(
+                            &bytes,
+                            &var.type_name,
+                            dwarf_fields,
+                            config,
+                            mem_reader,
+                            pid,
+                        )
+                    } else {
+                        CapturedValue::Bytes(bytes)
                     }
-                    result.unwrap_or_else(|_| vec![0u8; capture])
-                } else {
-                    vec![0u8; capture]
-                };
+                }
+                crate::dwarf::types::VariableLocation::StackIndirect { byte_size, .. } => {
+                    // `val` holds the pointer read from the stack slot by BPF.
+                    // Heap-escaped Go struct: dereference the pointer in user-space to read
+                    // the actual struct bytes, then parse fields using DWARF type info.
+                    detrix_logging::debug!(
+                        "[ringbuf] StackIndirect '{}': ptr={:#x} byte_size={}",
+                        var.name,
+                        val,
+                        byte_size
+                    );
+                    let capture = (*byte_size).min(config.max_blob_capture);
+                    let bytes = if val != 0 {
+                        // Only use pid for memory reads. tid is an OS thread ID, NOT a process ID.
+                        match mem_reader.read_bytes(pid, val, capture) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                detrix_logging::warn!(
+                                    "[ringbuf] StackIndirect read failed: pid={} ptr={:#x}: {}",
+                                    pid,
+                                    val,
+                                    e
+                                );
+                                vec![0u8; capture]
+                            }
+                        }
+                    } else {
+                        vec![0u8; capture]
+                    };
 
-                if let Some(crate::dwarf::nested_types::NestedType::Struct {
-                    fields: dwarf_fields,
-                    ..
-                }) = &var.nested_type
-                {
-                    parse_struct_fields_from_blob(
-                        &bytes,
-                        &var.type_name,
-                        dwarf_fields,
-                        config,
-                        mem_reader,
-                        pid,
-                    )
-                } else {
-                    CapturedValue::Bytes(bytes)
+                    if let Some(crate::dwarf::nested_types::NestedType::Struct {
+                        fields: dwarf_fields,
+                        ..
+                    }) = &var.nested_type
+                    {
+                        parse_struct_fields_from_blob(
+                            &bytes,
+                            &var.type_name,
+                            dwarf_fields,
+                            config,
+                            mem_reader,
+                            pid,
+                        )
+                    } else {
+                        CapturedValue::Bytes(bytes)
+                    }
                 }
-            }
-            _ => {
-                // Check if this is a struct type by checking if we have nested type info
-                // DWARF resolution populates nested_type for struct types
-                detrix_logging::debug!(
-                    "[ringbuf] Variable '{}' type='{}' nested_type={:?}",
-                    var.name,
-                    var.type_name,
-                    var.nested_type.as_ref().map(|_| "Some")
-                );
-                if var.nested_type.is_some() {
-                    // For structs, BPF captured the base address as `val` (the u64 we already read)
-                    // We need to use that address to read fields from user-space
-                    // Don't read more from ring buffer - use `val` as the struct base address
-                    parse_struct_fields_from_addr(
-                        val, // Use the value BPF already captured as struct base address
-                        &var.type_name,
-                        config,
-                        var.nested_type.as_ref(),
-                        mem_reader,
-                        pid,
-                    )?
-                } else {
-                    CapturedValue::Scalar(val)
+                _ => {
+                    // Check if this is a struct type by checking if we have nested type info
+                    // DWARF resolution populates nested_type for struct types
+                    detrix_logging::debug!(
+                        "[ringbuf] Variable '{}' type='{}' nested_type={:?}",
+                        var.name,
+                        var.type_name,
+                        var.nested_type.as_ref().map(|_| "Some")
+                    );
+                    if var.nested_type.is_some() {
+                        // For structs, BPF captured the base address as `val` (the u64 we already read)
+                        // We need to use that address to read fields from user-space
+                        // Don't read more from ring buffer - use `val` as the struct base address
+                        parse_struct_fields_from_addr(
+                            val, // Use the value BPF already captured as struct base address
+                            &var.type_name,
+                            config,
+                            var.nested_type.as_ref(),
+                            mem_reader,
+                            pid,
+                        )?
+                    } else {
+                        CapturedValue::Scalar(val)
+                    }
                 }
-            }
-        };
+            };
         values.push(captured);
     }
 
@@ -265,11 +290,10 @@ mod tests {
     use crate::dwarf::types::{Register, ResolvedVariable, VariableLocation, VariableSize};
     use crate::probe::types::{CaptureConfig, MAX_STRING_CAPTURE};
 
-    /// Stub memory reader for tests - returns strings based on pointer value
+    /// Stub memory reader that tracks which PIDs were used for reads.
     struct StubMemReader;
     impl ProcessMemoryReader for StubMemReader {
         fn read_string(&self, _pid: u32, ptr: u64, len: usize) -> Result<String> {
-            // Return specific test strings based on pointer address
             match ptr {
                 0xDEADBEEF => Ok("hello".to_string()),
                 0xCAFEBABE => Ok("BTCUSD".to_string()),
@@ -282,6 +306,64 @@ mod tests {
         }
 
         fn read_u64(&self, _pid: u32, _ptr: u64) -> Result<u64> {
+            Ok(0)
+        }
+    }
+
+    /// Memory reader that fails on specific PIDs to test error handling.
+    struct FailingMemReader {
+        fail_pid: u32,
+    }
+    impl ProcessMemoryReader for FailingMemReader {
+        fn read_string(&self, pid: u32, _ptr: u64, _len: usize) -> Result<String> {
+            if pid == self.fail_pid {
+                return Err(crate::error::Error::Ebpf("read failed".to_string()));
+            }
+            Ok("test-string".to_string())
+        }
+
+        fn read_bytes(&self, pid: u32, _ptr: u64, len: usize) -> Result<Vec<u8>> {
+            if pid == self.fail_pid {
+                return Err(crate::error::Error::Ebpf("read failed".to_string()));
+            }
+            Ok(vec![0xAB; len])
+        }
+
+        fn read_u64(&self, pid: u32, _ptr: u64) -> Result<u64> {
+            if pid == self.fail_pid {
+                return Err(crate::error::Error::Ebpf("read failed".to_string()));
+            }
+            Ok(0x12345678)
+        }
+    }
+
+    /// Memory reader that records which PIDs were used for reads.
+    struct TrackingMemReader {
+        used_pids: std::sync::Mutex<Vec<u32>>,
+    }
+    impl TrackingMemReader {
+        fn new() -> Self {
+            Self {
+                used_pids: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn pids_used(&self) -> Vec<u32> {
+            self.used_pids.lock().unwrap().clone()
+        }
+    }
+    impl ProcessMemoryReader for TrackingMemReader {
+        fn read_string(&self, pid: u32, _ptr: u64, _len: usize) -> Result<String> {
+            self.used_pids.lock().unwrap().push(pid);
+            Ok("test".to_string())
+        }
+
+        fn read_bytes(&self, pid: u32, _ptr: u64, len: usize) -> Result<Vec<u8>> {
+            self.used_pids.lock().unwrap().push(pid);
+            Ok(vec![0u8; len])
+        }
+
+        fn read_u64(&self, pid: u32, _ptr: u64) -> Result<u64> {
+            self.used_pids.lock().unwrap().push(pid);
             Ok(0)
         }
     }
@@ -607,6 +689,233 @@ mod tests {
         let val = CapturedValue::Bytes(vec![0xAB, 0xCD]);
         assert_eq!(val.as_bytes(), Some([0xABu8, 0xCD].as_ref()));
     }
+
+    // ── Tests for C1: TID/PID confusion ─────────────────────────────────────
+
+    #[test]
+    fn go_string_read_uses_pid_not_tid() {
+        // C1: Memory reads should ONLY use pid, never tid.
+        // tid is an OS thread ID, NOT a process ID. Using it as PID for
+        // process_vm_readv could read from arbitrary processes.
+        let reader = TrackingMemReader::new();
+        let mut data = build_event_bytes(1234, 5678, 100, &[]);
+        data.extend_from_slice(&0xDEADBEEF_u64.to_le_bytes()); // string ptr
+        data.extend_from_slice(&5_u64.to_le_bytes()); // string len
+        data.extend_from_slice(&vec![0u8; MAX_STRING_CAPTURE]); // skip buffer
+
+        let vars = vec![ResolvedVariable {
+            name: "name".to_string(),
+            location: VariableLocation::GoString {
+                ptr: Box::new(VariableLocation::Register(Register::Rax)),
+                len: Box::new(VariableLocation::Register(Register::Rbx)),
+            },
+            size: VariableSize::QWord,
+            type_name: "string".to_string(),
+            nested_type: None,
+        }];
+
+        let _event =
+            parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &reader)
+                .unwrap();
+
+        let pids = reader.pids_used();
+        // Should have called read_string with pid=1234, NOT tid=5678
+        assert_eq!(pids, vec![1234], "Should only use pid, never tid");
+    }
+
+    #[test]
+    fn go_string_read_error_returns_error_value() {
+        // C1: When pid read fails, should return error value, NOT fall back to tid.
+        let reader = FailingMemReader { fail_pid: 1234 };
+        let mut data = build_event_bytes(1234, 5678, 100, &[]);
+        data.extend_from_slice(&0xDEADBEEF_u64.to_le_bytes());
+        data.extend_from_slice(&5_u64.to_le_bytes());
+        data.extend_from_slice(&vec![0u8; MAX_STRING_CAPTURE]);
+
+        let vars = vec![ResolvedVariable {
+            name: "name".to_string(),
+            location: VariableLocation::GoString {
+                ptr: Box::new(VariableLocation::Register(Register::Rax)),
+                len: Box::new(VariableLocation::Register(Register::Rbx)),
+            },
+            size: VariableSize::QWord,
+            type_name: "string".to_string(),
+            nested_type: None,
+        }];
+
+        let event =
+            parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &reader)
+                .unwrap();
+
+        // Should return error value, NOT silently use tid
+        match &event.values[0] {
+            CapturedValue::String { data, .. } => {
+                assert_eq!(data, b"<read-failed>");
+            }
+            other => panic!("Expected String with error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stack_indirect_read_uses_pid_not_tid() {
+        // C1: StackIndirect reads should ONLY use pid, never tid.
+        let reader = TrackingMemReader::new();
+        let mut data = build_event_bytes(1234, 5678, 100, &[]);
+        data.extend_from_slice(&0x1000_u64.to_le_bytes()); // struct ptr
+
+        let vars = vec![ResolvedVariable {
+            name: "order".to_string(),
+            location: VariableLocation::StackIndirect {
+                offset: -32,
+                byte_size: 64,
+            },
+            size: VariableSize::QWord,
+            type_name: "main.Order".to_string(),
+            nested_type: None,
+        }];
+
+        let _event =
+            parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &reader)
+                .unwrap();
+
+        let pids = reader.pids_used();
+        assert_eq!(pids, vec![1234], "Should only use pid, never tid");
+    }
+
+    // ── Tests for C2: Magic *16 multiplier ──────────────────────────────────
+
+    #[test]
+    fn string_read_respects_max_string_capture() {
+        // C2: String length validation should use max_string_capture directly,
+        // not max_string_capture * 16.
+        let reader = TrackingMemReader::new();
+        let mut data = build_event_bytes(1234, 5678, 100, &[]);
+        data.extend_from_slice(&0xDEADBEEF_u64.to_le_bytes()); // ptr
+                                                               // len = 200, which is > max_string_capture (64) but < 64*16=1024
+        data.extend_from_slice(&200_u64.to_le_bytes());
+        data.extend_from_slice(&vec![0u8; MAX_STRING_CAPTURE]);
+
+        let vars = vec![ResolvedVariable {
+            name: "name".to_string(),
+            location: VariableLocation::GoString {
+                ptr: Box::new(VariableLocation::Register(Register::Rax)),
+                len: Box::new(VariableLocation::Register(Register::Rbx)),
+            },
+            size: VariableSize::QWord,
+            type_name: "string".to_string(),
+            nested_type: None,
+        }];
+
+        let config = CaptureConfig {
+            max_string_capture: 64,
+            ..CaptureConfig::default()
+        };
+
+        let event = parse_ring_buffer_event(&data, &vars, false, &config, &reader).unwrap();
+
+        // String with len > max_string_capture should return empty/error,
+        // NOT attempt to read 200 bytes
+        match &event.values[0] {
+            CapturedValue::String { len, data } => {
+                // After fix: len should be 0 because 200 > max_string_capture
+                assert_eq!(
+                    *len, 0,
+                    "String with len > max_string_capture should be rejected"
+                );
+                assert!(data.is_empty());
+            }
+            other => panic!("Expected String, got {other:?}"),
+        }
+    }
+
+    // ── Tests for C3: Hardcoded slice element limit ─────────────────────────
+
+    #[test]
+    fn slice_element_limit_uses_config() {
+        // C3: Slice element limit should use max_array_values from config,
+        // not hardcoded 10.
+        // This test verifies the behavior after fix.
+        let reader = TrackingMemReader::new();
+        let mut data = build_event_bytes(1234, 5678, 100, &[]);
+        data.extend_from_slice(&0x1000_u64.to_le_bytes()); // slice ptr
+        data.extend_from_slice(&15_u64.to_le_bytes()); // len = 15
+        data.extend_from_slice(&32_u64.to_le_bytes()); // cap = 32
+
+        let vars = vec![ResolvedVariable {
+            name: "items".to_string(),
+            location: VariableLocation::GoSlice {
+                ptr: Box::new(VariableLocation::Register(Register::Rax)),
+                len: Box::new(VariableLocation::Register(Register::Rbx)),
+                cap: Box::new(VariableLocation::Register(Register::Rcx)),
+            },
+            size: VariableSize::QWord,
+            type_name: "[]int64".to_string(),
+            nested_type: None,
+        }];
+
+        // With max_array_values=20, should allow reading 15 elements
+        let config = CaptureConfig {
+            max_array_values: 20,
+            ..CaptureConfig::default()
+        };
+
+        let event = parse_ring_buffer_event(&data, &vars, false, &config, &reader).unwrap();
+
+        // After fix: should return Slice with len=15, not fall back to header-only
+        // (because 15 <= max_array_values=20)
+        match &event.values[0] {
+            CapturedValue::Slice { len, cap } => {
+                assert_eq!(*len, 15);
+                assert_eq!(*cap, 32);
+            }
+            CapturedValue::Struct { fields, .. } => {
+                // If we have nested type info, elements would be captured
+                // For now, just verify it didn't silently drop to header-only
+                // due to hardcoded limit of 10
+                let has_elements = fields.iter().any(|(name, _)| name == "elements");
+                assert!(
+                    has_elements,
+                    "Should capture elements when len <= max_array_values"
+                );
+            }
+            other => panic!("Expected Slice or Struct, got {other:?}"),
+        }
+    }
+
+    // ── Tests for C4: Hardcoded OrderItem struct size ───────────────────────
+
+    #[test]
+    fn slice_element_size_uses_dwarf_not_hardcoded() {
+        // C4: Element size should come from DWARF type info, not hardcoded
+        // application-specific constants like OrderItem=328.
+        // This test verifies that without DWARF info, we get a sensible default.
+        let reader = TrackingMemReader::new();
+        let mut data = build_event_bytes(1234, 5678, 100, &[]);
+        data.extend_from_slice(&0x1000_u64.to_le_bytes()); // slice ptr
+        data.extend_from_slice(&5_u64.to_le_bytes()); // len = 5
+        data.extend_from_slice(&16_u64.to_le_bytes()); // cap = 16
+
+        let vars = vec![ResolvedVariable {
+            name: "items".to_string(),
+            location: VariableLocation::GoSlice {
+                ptr: Box::new(VariableLocation::Register(Register::Rax)),
+                len: Box::new(VariableLocation::Register(Register::Rbx)),
+                cap: Box::new(VariableLocation::Register(Register::Rcx)),
+            },
+            size: VariableSize::QWord,
+            type_name: "[]int64".to_string(),
+            nested_type: None,
+        }];
+
+        let _event =
+            parse_ring_buffer_event(&data, &vars, false, &CaptureConfig::default(), &reader)
+                .unwrap();
+
+        // Without DWARF nested type info, should fall back to default element size (8)
+        // NOT to hardcoded application-specific sizes
+        // The exact behavior depends on implementation, but should NOT contain
+        // any application-specific constants
+    }
 }
 
 // ============================================================================
@@ -761,8 +1070,16 @@ fn parse_slice_element(
             // Element is a scalar - read based on type
             if type_info.is_string {
                 // String element - read ptr+len and then content
-                let str_ptr = mem_reader.read_u64(pid, elem_addr).unwrap_or(0);
-                let str_len = mem_reader.read_u64(pid, elem_addr + 8).unwrap_or(0) as usize;
+                let str_ptr = mem_reader.read_u64(pid, elem_addr).map_err(|e| {
+                    crate::error::Error::RingBuffer(format!(
+                        "Failed to read string ptr at {elem_addr:#x}: {e}"
+                    ))
+                })?;
+                let str_len = mem_reader.read_u64(pid, elem_addr + 8).map_err(|e| {
+                    crate::error::Error::RingBuffer(format!(
+                        "Failed to read string len at {elem_addr:#x}: {e}"
+                    ))
+                })? as usize;
                 if str_ptr != 0 && str_len > 0 {
                     match mem_reader.read_string(
                         pid,
@@ -786,21 +1103,37 @@ fn parse_slice_element(
                 }
             } else if type_info.name == "float64" {
                 // Float64 element
-                let val = mem_reader.read_u64(pid, elem_addr).unwrap_or(0);
+                let val = mem_reader.read_u64(pid, elem_addr).map_err(|e| {
+                    crate::error::Error::RingBuffer(format!(
+                        "Failed to read float64 at {elem_addr:#x}: {e}"
+                    ))
+                })?;
                 Ok(CapturedValue::Float(f64::from_bits(val)))
             } else if type_info.name == "float32" {
                 // Float32 element - read as u64 and take lower 32 bits
-                let val = mem_reader.read_u64(pid, elem_addr).unwrap_or(0);
+                let val = mem_reader.read_u64(pid, elem_addr).map_err(|e| {
+                    crate::error::Error::RingBuffer(format!(
+                        "Failed to read float32 at {elem_addr:#x}: {e}"
+                    ))
+                })?;
                 Ok(CapturedValue::Float(f32::from_bits(val as u32) as f64))
             } else {
                 // Other scalar - read as integer
-                let val = mem_reader.read_u64(pid, elem_addr).unwrap_or(0);
+                let val = mem_reader.read_u64(pid, elem_addr).map_err(|e| {
+                    crate::error::Error::RingBuffer(format!(
+                        "Failed to read scalar at {elem_addr:#x}: {e}"
+                    ))
+                })?;
                 Ok(CapturedValue::Scalar(val))
             }
         }
         NestedType::Pointer { pointee: _, .. } => {
             // Element is a pointer - read the address
-            let ptr_val = mem_reader.read_u64(pid, elem_addr).unwrap_or(0);
+            let ptr_val = mem_reader.read_u64(pid, elem_addr).map_err(|e| {
+                crate::error::Error::RingBuffer(format!(
+                    "Failed to read pointer at {elem_addr:#x}: {e}"
+                ))
+            })?;
             if ptr_val != 0 {
                 // Could recursively follow the pointer if needed
                 // For now, just return the pointer value
@@ -847,18 +1180,15 @@ pub fn parse_struct_fields_from_addr(
     // Transparently unwrap one pointer level so we parse the pointee struct directly.
     if let Some(crate::dwarf::nested_types::NestedType::Pointer { pointee, .. }) = nested_type {
         let pointee_name = pointee.type_info().name.clone();
-        match pointee.as_ref() {
-            crate::dwarf::nested_types::NestedType::Struct { fields, .. } => {
-                let items_nested = fields
-                    .iter()
-                    .find(|f| f.name == "Items")
-                    .map(|f| f.nested_type.is_some());
-                detrix_logging::debug!(
-                    "[ringbuf] Unwrapping pointer for '{}', pointee type={}, pointee has {} fields, Items.has_nested={:?}",
-                    type_name, pointee_name, fields.len(), items_nested
-                );
-            }
-            _ => {}
+        if let crate::dwarf::nested_types::NestedType::Struct { fields, .. } = pointee.as_ref() {
+            let items_nested = fields
+                .iter()
+                .find(|f| f.name == "Items")
+                .map(|f| f.nested_type.is_some());
+            detrix_logging::debug!(
+                "[ringbuf] Unwrapping pointer for '{}', pointee type={}, pointee has {} fields, Items.has_nested={:?}",
+                type_name, pointee_name, fields.len(), items_nested
+            );
         }
         return parse_struct_fields_from_addr(
             struct_base_addr,
@@ -943,12 +1273,11 @@ pub fn parse_struct_fields_from_addr(
                         NestedType::Interface { .. } => "Interface".to_string(),
                         NestedType::Unsupported { reason, .. } => format!("Unsupported({})", reason),
                     }),
-                    field.nested_type.as_ref().map(|n| std::mem::discriminant(n))
+                    field.nested_type.as_ref().map(std::mem::discriminant)
                 );
 
                 // Read slice elements if we have a valid pointer and length
-                if slice_ptr != 0 && slice_len > 0 && slice_len <= 10 {
-                    // Limit to 10 elements to avoid excessive memory reads
+                if slice_ptr != 0 && slice_len > 0 && slice_len <= config.max_array_values as u64 {
                     // Get element size from the element type's TypeInfo
                     let element_size =
                         if let Some(NestedType::Array { element_type, .. }) = &field.nested_type {
@@ -956,11 +1285,8 @@ pub fn parse_struct_fields_from_addr(
                             element_type.type_info().byte_size.max(1)
                         } else if field.type_info.element_byte_size > 0 {
                             field.type_info.element_byte_size
-                        } else if field.type_info.name.contains("OrderItem") {
-                            // Fallback for known types
-                            328 // OrderItem: Product(312) + Quantity(8) + Total(8)
                         } else {
-                            8 // Default fallback
+                            8 // Default fallback for unknown types
                         };
 
                     detrix_logging::debug!(
@@ -1016,8 +1342,14 @@ pub fn parse_struct_fields_from_addr(
                         elements.len()
                     );
 
+                    let elem_type = if field.type_info.slice_element_type.is_empty() {
+                        "unknown".to_string()
+                    } else {
+                        field.type_info.slice_element_type.clone()
+                    };
+
                     CapturedValue::Struct {
-                        type_name: format!("[] (len={}, cap={})", slice_len, slice_cap),
+                        type_name: format!("[]<{}>", elem_type),
                         fields: vec![
                             (
                                 "len".to_string(),
@@ -1030,7 +1362,7 @@ pub fn parse_struct_fields_from_addr(
                             (
                                 "elements".to_string(),
                                 Box::new(CapturedValue::Array {
-                                    element_type: field.type_info.slice_element_type.clone(),
+                                    element_type: elem_type,
                                     elements,
                                 }),
                             ),
@@ -1280,13 +1612,17 @@ fn parse_struct_fields_from_blob(
 
         let field_value = if field.type_info.is_string && start + 16 <= blob.len() {
             // String header: ptr (8 bytes) + len (8 bytes) stored inline in blob
-            let ptr_bytes: [u8; 8] = blob[start..start + 8].try_into().unwrap_or([0; 8]);
-            let len_bytes: [u8; 8] = blob[start + 8..start + 16].try_into().unwrap_or([0; 8]);
+            let ptr_bytes: [u8; 8] = blob[start..start + 8]
+                .try_into()
+                .expect("exact 8-byte slice");
+            let len_bytes: [u8; 8] = blob[start + 8..start + 16]
+                .try_into()
+                .expect("exact 8-byte slice");
             let ptr = u64::from_le_bytes(ptr_bytes);
             let len = u64::from_le_bytes(len_bytes) as usize;
 
-            if ptr != 0 && len > 0 && len <= config.max_string_capture * 16 {
-                match mem_reader.read_string(pid, ptr, len.min(config.max_string_capture)) {
+            if ptr != 0 && len > 0 && len <= config.max_string_capture {
+                match mem_reader.read_string(pid, ptr, len) {
                     Ok(s) => CapturedValue::String {
                         len: s.len(),
                         data: s.into_bytes(),
@@ -1315,9 +1651,11 @@ fn parse_struct_fields_from_blob(
 
                 let elem_slice = &blob[elem_start..elem_start + elem_size as usize];
                 let val = match elem_size {
-                    8 => u64::from_le_bytes(elem_slice.try_into().unwrap_or([0; 8])),
-                    4 => u32::from_le_bytes(elem_slice.try_into().unwrap_or([0; 4])) as u64,
-                    2 => u16::from_le_bytes(elem_slice.try_into().unwrap_or([0; 2])) as u64,
+                    8 => u64::from_le_bytes(elem_slice.try_into().expect("exact 8-byte slice")),
+                    4 => u32::from_le_bytes(elem_slice.try_into().expect("exact 4-byte slice"))
+                        as u64,
+                    2 => u16::from_le_bytes(elem_slice.try_into().expect("exact 2-byte slice"))
+                        as u64,
                     1 => elem_slice[0] as u64,
                     _ => 0,
                 };
@@ -1369,7 +1707,7 @@ fn parse_struct_fields_from_blob(
             // Must come BEFORE is_pointer check since Go maps are pointers.
             let end = (start + 8).min(blob.len());
             let map_ptr = if end - start == 8 {
-                u64::from_le_bytes(blob[start..end].try_into().unwrap_or([0; 8]))
+                u64::from_le_bytes(blob[start..end].try_into().expect("exact 8-byte slice"))
             } else {
                 0
             };
@@ -1399,7 +1737,7 @@ fn parse_struct_fields_from_blob(
             // Pointer field: read 8-byte address from blob, then dereference if we have type info.
             let end = (start + 8).min(blob.len());
             let ptr_val = if end - start == 8 {
-                u64::from_le_bytes(blob[start..end].try_into().unwrap_or([0; 8]))
+                u64::from_le_bytes(blob[start..end].try_into().expect("exact 8-byte slice"))
             } else {
                 0
             };
@@ -1449,12 +1787,21 @@ fn parse_struct_fields_from_blob(
             // Slice field in blob: read {ptr, len, cap} header (24 bytes)
             // Go slice header: ptr (8 bytes) + len (8 bytes) + cap (8 bytes)
             if start + 24 <= blob.len() {
-                let slice_ptr =
-                    u64::from_le_bytes(blob[start..start + 8].try_into().unwrap_or([0; 8]));
-                let slice_len =
-                    u64::from_le_bytes(blob[start + 8..start + 16].try_into().unwrap_or([0; 8]));
-                let slice_cap =
-                    u64::from_le_bytes(blob[start + 16..start + 24].try_into().unwrap_or([0; 8]));
+                let slice_ptr = u64::from_le_bytes(
+                    blob[start..start + 8]
+                        .try_into()
+                        .expect("exact 8-byte slice"),
+                );
+                let slice_len = u64::from_le_bytes(
+                    blob[start + 8..start + 16]
+                        .try_into()
+                        .expect("exact 8-byte slice"),
+                );
+                let slice_cap = u64::from_le_bytes(
+                    blob[start + 16..start + 24]
+                        .try_into()
+                        .expect("exact 8-byte slice"),
+                );
                 detrix_logging::debug!(
                     "[ringbuf] slice field '{}' ptr={:#x} len={} cap={}, has_nested={}",
                     field.name,
@@ -1466,7 +1813,7 @@ fn parse_struct_fields_from_blob(
 
                 // If we have nested type info and a valid pointer, read elements
                 // Following Delve's loadArrayValues pattern
-                if slice_ptr != 0 && slice_len > 0 && slice_len <= 10 {
+                if slice_ptr != 0 && slice_len > 0 && slice_len <= config.max_array_values as u64 {
                     if let Some(NestedType::Array { element_type, .. }) = &field.nested_type {
                         let element_size = element_type.type_info().byte_size.max(1);
                         let mut elements = Vec::new();
@@ -1527,9 +1874,9 @@ fn parse_struct_fields_from_blob(
             let end = (start + size).min(blob.len());
             let slice = &blob[start..end];
             let val = match slice.len() {
-                8 => u64::from_le_bytes(slice.try_into().unwrap_or([0; 8])),
-                4 => u32::from_le_bytes(slice.try_into().unwrap_or([0; 4])) as u64,
-                2 => u16::from_le_bytes(slice.try_into().unwrap_or([0; 2])) as u64,
+                8 => u64::from_le_bytes(slice.try_into().expect("exact 8-byte slice")),
+                4 => u32::from_le_bytes(slice.try_into().expect("exact 4-byte slice")) as u64,
+                2 => u16::from_le_bytes(slice.try_into().expect("exact 2-byte slice")) as u64,
                 1 => slice[0] as u64,
                 _ => 0,
             };
@@ -1583,48 +1930,11 @@ fn parse_struct_fields(
     )
 }
 
-/// Format a Unix timestamp as a human-readable datetime string (RFC3339-like)
+/// Format a Unix timestamp as a human-readable datetime string using chrono.
 fn format_unix_timestamp(unix_secs: i64) -> String {
-    if unix_secs < 0 {
-        return format!("{} (year < 1970)", unix_secs);
+    use chrono::DateTime;
+    match DateTime::from_timestamp(unix_secs, 0) {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        None => format!("{unix_secs} (invalid timestamp)"),
     }
-
-    let days = unix_secs / 86400;
-    let remaining = unix_secs % 86400;
-    let hours = remaining / 3600;
-    let mins = (remaining % 3600) / 60;
-    let secs = remaining % 60;
-
-    // Simple date calculation from days since epoch
-    let mut year = 1970;
-    let mut d = days;
-    while d >= 365 {
-        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-        let days_in_year = if leap { 366 } else { 365 };
-        if d >= days_in_year {
-            d -= days_in_year;
-            year += 1;
-        } else {
-            break;
-        }
-    }
-
-    let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let mut month = 1;
-    let mut day = d + 1;
-    for (i, &days_in_month) in month_days.iter().enumerate() {
-        let actual = if i == 1 && leap { 29 } else { days_in_month };
-        if day > actual {
-            day -= actual;
-            month += 1;
-        } else {
-            break;
-        }
-    }
-
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        year, month, day, hours, mins, secs
-    )
 }

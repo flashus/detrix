@@ -5,6 +5,7 @@
 use crate::dwarf::nested_types::NestedType;
 use crate::mem_reader::ProcessMemoryReader;
 use crate::probe::types::{CaptureConfig, CapturedValue};
+use std::collections::HashSet;
 
 const SLOTS_PER_GROUP: u64 = 8;
 const CTRL_EMPTY: u8 = 0x80;
@@ -59,9 +60,13 @@ fn read_swiss_map_inner(
         .read_bytes(pid, map_ptr, 32)
         .map_err(|e| format!("map header: {e}"))?;
 
-    let used = u64::from_le_bytes(header[0..8].try_into().unwrap());
-    let dir_ptr = u64::from_le_bytes(header[16..24].try_into().unwrap());
-    let dir_len = i64::from_le_bytes(header[24..32].try_into().unwrap());
+    if header.len() < 32 {
+        return Err(format!("map header too short: {} bytes", header.len()));
+    }
+
+    let used = u64::from_le_bytes(header[0..8].try_into().expect("8 bytes"));
+    let dir_ptr = u64::from_le_bytes(header[16..24].try_into().expect("8 bytes"));
+    let dir_len = i64::from_le_bytes(header[24..32].try_into().expect("8 bytes"));
 
     detrix_logging::debug!(
         "[map_iter] map={:#x} used={} dirPtr={:#x} dirLen={}",
@@ -77,10 +82,15 @@ fn read_swiss_map_inner(
 
     let max_entries = config.max_array_values;
     let mut entries: Vec<(CapturedValue, CapturedValue)> = Vec::new();
-    let mut seen_tables: Vec<u64> = Vec::new();
+    let mut seen_tables: HashSet<u64> = HashSet::new();
 
     if dir_len < 0 {
-        // Negative dirLen indicates a nil or uninitialised map — skip.
+        // Negative dirLen indicates a nil or uninitialised map — return empty with reason.
+        detrix_logging::debug!(
+            "[map_iter] map={:#x} has negative dirLen={}, treating as nil map",
+            map_ptr,
+            dir_len
+        );
         return Ok(vec![]);
     } else if dir_len == 0 {
         // Small-map mode (Go 1.24 dirLen==0): dirPtr points directly to the
@@ -123,11 +133,10 @@ fn read_swiss_map_inner(
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            if table_ptr == 0 || seen_tables.contains(&table_ptr) {
+            if table_ptr == 0 || !seen_tables.insert(table_ptr) {
                 continue;
             }
-            seen_tables.push(table_ptr);
-            let _ = read_table(
+            if let Err(e) = read_table(
                 table_ptr,
                 key_nested,
                 val_nested,
@@ -136,7 +145,9 @@ fn read_swiss_map_inner(
                 mem_reader,
                 pid,
                 &mut entries,
-            );
+            ) {
+                detrix_logging::warn!("[map_iter] read_table failed: {e}");
+            }
         }
     }
 
@@ -164,8 +175,12 @@ fn read_table(
         .read_bytes(pid, table_ptr, 32)
         .map_err(|e| format!("table header: {e}"))?;
 
-    let groups_data = u64::from_le_bytes(hdr[16..24].try_into().unwrap());
-    let length_mask = u64::from_le_bytes(hdr[24..32].try_into().unwrap());
+    if hdr.len() < 32 {
+        return Err(format!("table header too short: {} bytes", hdr.len()));
+    }
+
+    let groups_data = u64::from_le_bytes(hdr[16..24].try_into().expect("8 bytes"));
+    let length_mask = u64::from_le_bytes(hdr[24..32].try_into().expect("8 bytes"));
     let num_groups = length_mask.wrapping_add(1);
 
     if groups_data == 0 {
@@ -241,7 +256,13 @@ fn read_groups(
 
         let ctrl = match mem_reader.read_bytes(pid, group_ptr, SLOTS_PER_GROUP as usize) {
             Ok(b) => b,
-            Err(_) => continue,
+            Err(e) => {
+                detrix_logging::warn!(
+                    "[map_iter] Failed to read group ctrl at {:#x}: {e}",
+                    group_ptr
+                );
+                continue;
+            }
         };
 
         for s in 0..(SLOTS_PER_GROUP as usize) {
@@ -298,7 +319,7 @@ fn align_up(n: u64, align: u64) -> u64 {
     if align == 0 {
         return n;
     }
-    (n + align - 1) / align * align
+    n.div_ceil(align) * align
 }
 
 /// Byte size to use when reading a slot field.
@@ -389,8 +410,11 @@ fn read_string_slot(
         Ok(b) => b,
         Err(_) => return CapturedValue::Error("string header read failed".to_string()),
     };
-    let ptr = u64::from_le_bytes(hdr[0..8].try_into().unwrap());
-    let len = u64::from_le_bytes(hdr[8..16].try_into().unwrap()) as usize;
+    if hdr.len() < 16 {
+        return CapturedValue::Error("string header too short".to_string());
+    }
+    let ptr = u64::from_le_bytes(hdr[0..8].try_into().expect("8 bytes"));
+    let len = u64::from_le_bytes(hdr[8..16].try_into().expect("8 bytes")) as usize;
 
     if ptr == 0 || len == 0 {
         return CapturedValue::String {
