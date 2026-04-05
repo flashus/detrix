@@ -108,6 +108,10 @@ fn build_event_fields(
                 out.push_str(&format!("    u64 var{i}_len;\n"));
                 out.push_str(&format!("    u64 var{i}_cap;\n"));
             }
+            VariableLocation::GoMap { .. } => {
+                // Map pointer is already captured in var{i}. No extra fields needed.
+                // User-space iterates the map structure via process_vm_readv.
+            }
             VariableLocation::StackBlob { byte_size, .. } => {
                 let capture = (*byte_size).min(config.max_blob_capture);
                 out.push_str(&format!("    u8  var{i}_blob[{capture}];\n"));
@@ -266,6 +270,14 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                     offset.unsigned_abs()
                 )
             }
+        }
+        VariableLocation::GoMap { ptr } => {
+            // Go map: capture the hmap pointer. User-space iterates the map.
+            simple_read_expr(ptr, &format!("var{idx}"))
+                .lines()
+                .map(|l| format!("    {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         }
     }
 }

@@ -216,6 +216,11 @@ impl UprobeManager {
         let mut ebpf = aya::Ebpf::load(&compiled.elf_bytes)
             .map_err(|e| Error::Ebpf(format!("aya load failed: {e}")))?;
 
+        // Step 3a: Populate DETRIX_NS_INFO with our PID namespace dev/ino so
+        // the BPF program can call bpf_get_ns_current_pid_tgid() and emit
+        // container-local PIDs instead of host PIDs for process_vm_readv.
+        populate_ns_info(&mut ebpf);
+
         let binary_path_str = probe_point
             .binary_path
             .to_str()
@@ -297,6 +302,59 @@ impl UprobeManager {
             _link: link,
             _poller: poller,
         })
+    }
+}
+
+/// Populate the DETRIX_NS_INFO BPF array map with the daemon's PID namespace
+/// device/inode numbers. This enables the BPF uprobe to call
+/// `bpf_get_ns_current_pid_tgid()` and emit the container-local PID rather
+/// than the host (root namespace) PID, allowing `process_vm_readv` to work
+/// correctly from inside Docker containers.
+///
+/// On bare Linux (no container), `/proc/self/ns/pid` describes the root
+/// namespace. The fixture processes are also in the same namespace, so
+/// `bpf_get_ns_current_pid_tgid()` returns a PID identical to the host PID
+/// and everything still works — there is no regression.
+///
+/// If the map lookup or stat call fails (shouldn't happen in practice),
+/// the map entries stay zero and the BPF program falls back to the host PID.
+#[cfg(target_os = "linux")]
+fn populate_ns_info(ebpf: &mut aya::Ebpf) {
+    use aya::maps::Array;
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = match std::fs::metadata("/proc/self/ns/pid") {
+        Ok(m) => m,
+        Err(e) => {
+            detrix_logging::warn!("[uprobe] Failed to stat /proc/self/ns/pid: {e}");
+            return;
+        }
+    };
+
+    let dev = meta.dev();
+    let ino = meta.ino();
+
+    let map = match ebpf.map_mut("DETRIX_NS_INFO") {
+        Some(m) => m,
+        None => {
+            detrix_logging::warn!("[uprobe] DETRIX_NS_INFO map not found in BPF object");
+            return;
+        }
+    };
+
+    let mut array: Array<_, [u64; 2]> = match Array::try_from(map) {
+        Ok(a) => a,
+        Err(e) => {
+            detrix_logging::warn!("[uprobe] DETRIX_NS_INFO is not an Array map: {e}");
+            return;
+        }
+    };
+
+    match array.set(0, [dev, ino], 0) {
+        Ok(()) => detrix_logging::debug!(
+            "[uprobe] PID namespace info set: dev={dev} ino={ino}"
+        ),
+        Err(e) => detrix_logging::warn!("[uprobe] Failed to set DETRIX_NS_INFO: {e}"),
     }
 }
 

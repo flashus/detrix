@@ -200,6 +200,50 @@ pub mod go_nested_lines {
     }
 }
 
+// Classic map fixture line numbers — for ebpf_classic_map_e2e.rs tests
+// Tests map capture with Go < 1.24 classic hash map implementation (hmap/bmap).
+// Update CLASSIC_MAIN_LINE if you add/remove lines before `func main()` in
+// fixtures/go/classic_map/main.go
+//
+// DWARF line verification (go tool objdump -s main.main):
+//   main.go:30 - func main() starts (MAIN_LINE)
+//   main.go:37 - iteration := 0
+//   main.go:39 - iteration++
+//   main.go:42 - order := Order{...} struct creation begins
+//   main.go:48 - order struct creation ends (Tags map assigned)
+//   main.go:51 - var nilMap map[string]int
+//   main.go:54 - logOrder(order) call
+//   main.go:57 - logNilMap(nilMap) call
+//   main.go:59 - time.Sleep(3 * time.Second)
+//
+// Key insight: The struct wrapper pattern (Order.Tags) is proven working.
+// Standalone maps may have incomplete DWARF location info in Go 1.23.
+pub mod go_classic_lines {
+    use super::FixtureCodeMap;
+
+    /// Line of `func main()` in classic_map/main.go
+    pub const CLASSIC_MAIN_LINE: u32 = 30;
+
+    /// Symbol map for classic map fixture.
+    /// Uses struct-wrapped map pattern: Order struct contains Tags map[string]string.
+    const SYMBOL_MAP: &[(&str, u32, u32)] = &[
+        // (name,            decl, logpt)
+        // iteration: simple int, good for smoke testing uprobe mechanism
+        ("iteration", 7, 9), // line 37: iteration := 0; line 39: iteration++
+        // order: struct with map field (struct wrapper pattern)
+        ("order", 12, 24), // line 42: order := Order{...}; line 54: logOrder(order)
+        // nilMap: nil map pointer (edge case)
+        ("nilMap", 21, 27), // line 51: var nilMap; line 57: logNilMap(nilMap)
+    ];
+
+    /// Code map for the classic map fixture.
+    pub static CODEMAP: FixtureCodeMap = FixtureCodeMap::new(CLASSIC_MAIN_LINE, SYMBOL_MAP);
+
+    pub const fn line(offset: u32) -> u32 {
+        CLASSIC_MAIN_LINE + offset
+    }
+}
+
 /// Python fixture line numbers — single source of truth.
 /// Update MAIN_LINE if you add/remove lines before `def main()` in
 /// fixtures/python/trade_bot_forever.py

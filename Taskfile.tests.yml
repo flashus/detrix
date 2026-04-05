@@ -294,6 +294,36 @@ tasks:
             -gcflags="all=-N -l" \
             -ldflags="-compressdwarf=false" \
             -o /out/nested_types .
+      # Build classic_map fixture (Go < 1.24 classic hash map tests)
+      # Uses Go 1.23 to trigger classic hmap/bmap implementation
+      # Note: Build for native architecture (no GOARCH override) to match Docker host
+      # and allow proper uprobe attachment. Go 1.23 runtime uses hmap/bmap on all archs.
+      - |
+        docker run --rm \
+          -v "{{.ROOT_DIR}}/fixtures/go/classic_map:/src/fixtures/go/classic_map:ro" \
+          -v "{{.ROOT_DIR}}/clients/go:/src/clients/go:ro" \
+          -v "{{.ROOT_DIR}}/out:/out" \
+          -v "ebpf-go-mod:/go/pkg/mod" \
+          -v "ebpf-go-build:/root/.cache/go-build" \
+          -w /src/fixtures/go/classic_map \
+          golang:1.23.12-bookworm \
+          go build \
+            -gcflags="all=-N -l" \
+            -ldflags="-compressdwarf=false" \
+            -o /out/classic_map .
+      # Build classic_map e2e test binary
+      - |
+        docker run --rm \
+          -v "{{.ROOT_DIR}}:/src" \
+          -v "ebpf-cargo-target:/build/target" \
+          -w /src \
+          {{.BUILDER}} \
+          sh -c "
+            CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
+              --package detrix-testing --test ebpf_classic_map_e2e &&
+            find /build/target/debug/deps -maxdepth 1 -name 'ebpf_classic_map_e2e-*' ! -name '*.d' \
+              | head -1 | xargs -I{} cp {} /src/out/ebpf_classic_map_e2e_test
+          "
 
   test-ebpf-inject:
     desc: "Run eBPF tests: compile binaries then mount into playground (fastest iteration)"
@@ -332,6 +362,28 @@ tasks:
           -e GO_FIXTURE_SOURCE=/src/fixtures/go/nested_types/main.go \
           {{.PLAYGROUND}} \
           /usr/local/bin/ebpf_nested_types_e2e_test --ignored --nocapture
+
+  # ── eBPF Classic Map E2E Test (inject variant) ──────────────────────────────
+  # Tests Go < 1.24 classic hash map (hmap/bmap/overflow chains).
+  # Uses Go 1.23-built fixture binary from ./out/classic_map.
+  test-ebpf-classic-inject:
+    desc: "Run eBPF classic map test (Go < 1.24): mount pre-built binaries into playground"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.ROOT_DIR}}/out"
+    deps: [build-ebpf-bins]
+    cmds:
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/classic_map:/usr/local/bin/classic_map:ro" \
+          -v "{{.OUT}}/ebpf_classic_map_e2e_test:/usr/local/bin/ebpf_classic_map_e2e_test:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/go/classic_map:/src/fixtures/go/classic_map:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e GO_FIXTURE_BINARY=/usr/local/bin/classic_map \
+          -e GO_FIXTURE_SOURCE=/src/fixtures/go/classic_map/main.go \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/ebpf_classic_map_e2e_test --ignored --nocapture
 
   # ── eBPF E2E Test (docker-build variant) ─────────────────────────────────────
   # Requires detrix-ebpf-playground to be present locally (run build-ebpf-playground first).

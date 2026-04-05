@@ -25,11 +25,8 @@ use crate::error::{Error, Result};
 use crate::mem_reader::ProcessMemoryReader;
 use crate::probe::types::{CaptureConfig, CapturedValue, ProbeEvent};
 
-/// Minimum event size: pid(4) + tid(4) + timestamp(8) = 16 bytes.
-/// Note: when capture_goid is true, an additional u64 goid field is present,
-/// making the actual minimum 24 bytes. The constant reflects the base layout
-/// without goid; callers handle the conditional offset adjustment.
-const MIN_EVENT_SIZE: usize = 16;
+/// Minimum event size: pid(4) + tid(4) + ns_pid(4) + reserved(4) + timestamp(8) = 24 bytes.
+const MIN_EVENT_SIZE: usize = 24;
 
 /// Parse a raw ring buffer entry into a ProbeEvent.
 ///
@@ -39,11 +36,12 @@ const MIN_EVENT_SIZE: usize = 16;
 ///
 /// Layout:
 /// ```text
-/// offset 0:  u32 pid
-/// offset 4:  u32 tid
-/// offset 8:  u64 goid        (if capture_goid)
-/// offset N:  u64 timestamp
-/// offset N+8: u64 var0
+/// offset 0:  u32 pid       (host/root-namespace PID — for logging)
+/// offset 4:  u32 tid       (OS thread ID)
+/// offset 8:  u32 ns_pid    (namespace-local PID — used for process_vm_readv)
+/// offset 12: u32 reserved  (alignment padding)
+/// offset 16: u64 timestamp
+/// offset 24: u64 var0
 /// ...
 /// ```
 pub fn parse_ring_buffer_event(
@@ -64,6 +62,11 @@ pub fn parse_ring_buffer_event(
 
     let pid = read_u32(data, &mut offset)?;
     let tid = read_u32(data, &mut offset)?;
+    // ns_pid: namespace-local PID emitted by bpf_get_ns_current_pid_tgid.
+    // Equals pid on bare Linux (no container); differs when inside a Docker
+    // container whose PID namespace differs from the root namespace.
+    let ns_pid = read_u32(data, &mut offset)?;
+    let _reserved = read_u32(data, &mut offset)?;
 
     let goid = if capture_goid {
         Some(read_u64(data, &mut offset)?)
@@ -76,161 +79,172 @@ pub fn parse_ring_buffer_event(
     let mut values = Vec::with_capacity(variables.len());
     for var in variables {
         let val = read_u64(data, &mut offset).unwrap_or(0);
-        let captured =
-            match &var.location {
-                crate::dwarf::types::VariableLocation::GoString { .. } => {
-                    // Read string length from the event (BPF read this from stack)
-                    let len = read_u64(data, &mut offset).unwrap_or(0) as usize;
-                    // Skip the empty buffer (BPF doesn't read Go heap)
-                    let _ = read_bytes(data, &mut offset, config.max_string_capture);
+        let captured = match &var.location {
+            crate::dwarf::types::VariableLocation::GoString { .. } => {
+                // Read string length from the event (BPF read this from stack)
+                let len = read_u64(data, &mut offset).unwrap_or(0) as usize;
+                // Skip the empty buffer (BPF doesn't read Go heap)
+                let _ = read_bytes(data, &mut offset, config.max_string_capture);
 
-                    // Validate string length against configured limit.
-                    // Strings longer than max_string_capture are rejected to prevent
-                    // unbounded memory reads from arbitrary user-space addresses.
-                    if len > config.max_string_capture {
-                        detrix_logging::warn!(
-                            "[ringbuf] Go string len={} exceeds max_string_capture={}, rejecting",
-                            len,
-                            config.max_string_capture
-                        );
-                        CapturedValue::String {
-                            data: vec![],
-                            len: 0,
-                        }
-                    } else {
-                        // ALWAYS use user-space memory reader for Go strings
-                        // BPF cannot access Go heap memory reliably
-                        detrix_logging::debug!(
-                            "[ringbuf] Reading Go string via user-space: pid={} ptr={:#x} len={}",
-                            pid,
-                            val,
-                            len
-                        );
-
-                        // Only use pid for memory reads. tid is an OS thread ID, NOT a process ID.
-                        // Using tid as PID for process_vm_readv could read from arbitrary processes.
-                        let result = mem_reader.read_string(pid, val, len);
-
-                        match result {
-                            Ok(s) => CapturedValue::String {
-                                data: s.into_bytes(),
-                                len,
-                            },
-                            Err(e) => {
-                                detrix_logging::warn!(
-                                "[ringbuf] Failed to read Go string: pid={} ptr={:#x} len={}: {}",
-                                pid, val, len, e
-                            );
-                                CapturedValue::String {
-                                    data: b"<read-failed>".to_vec(),
-                                    len,
-                                }
-                            }
-                        }
+                // Validate string length against configured limit.
+                // Strings longer than max_string_capture are rejected to prevent
+                // unbounded memory reads from arbitrary user-space addresses.
+                if len > config.max_string_capture {
+                    detrix_logging::warn!(
+                        "[ringbuf] Go string len={} exceeds max_string_capture={}, rejecting",
+                        len,
+                        config.max_string_capture
+                    );
+                    CapturedValue::String {
+                        data: vec![],
+                        len: 0,
                     }
-                }
-                crate::dwarf::types::VariableLocation::GoSlice { .. } => {
-                    let len = read_u64(data, &mut offset).unwrap_or(0);
-                    let cap = read_u64(data, &mut offset).unwrap_or(0);
-                    CapturedValue::Slice { len, cap }
-                }
-                crate::dwarf::types::VariableLocation::StackBlob { byte_size, .. } => {
-                    // var{idx} (u64) was already read above as `val` — it is 0 (unused).
-                    // The BPF program filled var{idx}_blob[N] with the actual bytes inline.
-                    let capture = (*byte_size).min(config.max_blob_capture);
-                    let bytes = read_bytes(data, &mut offset, capture)
-                        .unwrap_or_else(|_| vec![0u8; capture]);
-
-                    // If we have DWARF field info, parse the blob into named fields
-                    if let Some(crate::dwarf::nested_types::NestedType::Struct {
-                        fields: dwarf_fields,
-                        ..
-                    }) = &var.nested_type
-                    {
-                        parse_struct_fields_from_blob(
-                            &bytes,
-                            &var.type_name,
-                            dwarf_fields,
-                            config,
-                            mem_reader,
-                            pid,
-                        )
-                    } else {
-                        CapturedValue::Bytes(bytes)
-                    }
-                }
-                crate::dwarf::types::VariableLocation::StackIndirect { byte_size, .. } => {
-                    // `val` holds the pointer read from the stack slot by BPF.
-                    // Heap-escaped Go struct: dereference the pointer in user-space to read
-                    // the actual struct bytes, then parse fields using DWARF type info.
+                } else {
+                    // ALWAYS use user-space memory reader for Go strings
+                    // BPF cannot access Go heap memory reliably
                     detrix_logging::debug!(
-                        "[ringbuf] StackIndirect '{}': ptr={:#x} byte_size={}",
-                        var.name,
+                        "[ringbuf] Reading Go string via user-space: ns_pid={} ptr={:#x} len={}",
+                        ns_pid,
                         val,
-                        byte_size
+                        len
                     );
-                    let capture = (*byte_size).min(config.max_blob_capture);
-                    let bytes = if val != 0 {
-                        // Only use pid for memory reads. tid is an OS thread ID, NOT a process ID.
-                        match mem_reader.read_bytes(pid, val, capture) {
-                            Ok(b) => b,
-                            Err(e) => {
-                                detrix_logging::warn!(
-                                    "[ringbuf] StackIndirect read failed: pid={} ptr={:#x}: {}",
-                                    pid,
-                                    val,
-                                    e
-                                );
-                                vec![0u8; capture]
+
+                    let result = mem_reader.read_string(ns_pid, val, len);
+
+                    match result {
+                        Ok(s) => CapturedValue::String {
+                            data: s.into_bytes(),
+                            len,
+                        },
+                        Err(e) => {
+                            detrix_logging::warn!(
+                                "[ringbuf] Failed to read Go string: ns_pid={} ptr={:#x} len={}: {}",
+                                ns_pid,
+                                val,
+                                len,
+                                e
+                            );
+                            CapturedValue::String {
+                                data: b"<read-failed>".to_vec(),
+                                len,
                             }
                         }
-                    } else {
-                        vec![0u8; capture]
-                    };
+                    }
+                }
+            }
+            crate::dwarf::types::VariableLocation::GoSlice { .. } => {
+                let len = read_u64(data, &mut offset).unwrap_or(0);
+                let cap = read_u64(data, &mut offset).unwrap_or(0);
+                CapturedValue::Slice { len, cap }
+            }
+            crate::dwarf::types::VariableLocation::StackBlob { byte_size, .. } => {
+                // var{idx} (u64) was already read above as `val` — it is 0 (unused).
+                // The BPF program filled var{idx}_blob[N] with the actual bytes inline.
+                let capture = (*byte_size).min(config.max_blob_capture);
+                let bytes =
+                    read_bytes(data, &mut offset, capture).unwrap_or_else(|_| vec![0u8; capture]);
 
-                    if let Some(crate::dwarf::nested_types::NestedType::Struct {
-                        fields: dwarf_fields,
+                detrix_logging::debug!(
+                    "[ringbuf] StackBlob '{}' ns_pid={} byte_size={} capture={}",
+                    var.name, ns_pid, byte_size, capture
+                );
+
+                // If we have DWARF field info, parse the blob into named fields
+                if let Some(crate::dwarf::nested_types::NestedType::Struct {
+                    fields: dwarf_fields,
+                    ..
+                }) = &var.nested_type
+                {
+                    parse_struct_fields_from_blob(
+                        &bytes,
+                        &var.type_name,
+                        dwarf_fields,
+                        config,
+                        mem_reader,
+                        ns_pid,
+                    )
+                } else {
+                    CapturedValue::Bytes(bytes)
+                }
+            }
+            crate::dwarf::types::VariableLocation::StackIndirect { byte_size, .. } => {
+                // `val` holds the pointer read from the stack slot by BPF.
+                // Heap-escaped Go struct: dereference the pointer in user-space to read
+                // the actual struct bytes, then parse fields using DWARF type info.
+                detrix_logging::debug!(
+                    "[ringbuf] StackIndirect '{}': ptr={:#x} byte_size={}",
+                    var.name,
+                    val,
+                    byte_size
+                );
+                let capture = (*byte_size).min(config.max_blob_capture);
+                let bytes = if val != 0 {
+                    match mem_reader.read_bytes(ns_pid, val, capture) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            detrix_logging::warn!(
+                                "[ringbuf] StackIndirect read failed: ns_pid={} ptr={:#x}: {}",
+                                ns_pid,
+                                val,
+                                e
+                            );
+                            vec![0u8; capture]
+                        }
+                    }
+                } else {
+                    vec![0u8; capture]
+                };
+
+                if let Some(crate::dwarf::nested_types::NestedType::Struct {
+                    fields: dwarf_fields,
+                    ..
+                }) = &var.nested_type
+                {
+                    parse_struct_fields_from_blob(
+                        &bytes,
+                        &var.type_name,
+                        dwarf_fields,
+                        config,
+                        mem_reader,
+                        ns_pid,
+                    )
+                } else {
+                    CapturedValue::Bytes(bytes)
+                }
+            }
+            crate::dwarf::types::VariableLocation::GoMap { .. } => {
+                // `val` holds the hmap pointer captured by BPF.
+                // User-space iterates the map structure using the appropriate algorithm.
+                let (key_nested, val_nested) = match &var.nested_type {
+                    Some(crate::dwarf::nested_types::NestedType::Map {
+                        key_type,
+                        value_type,
                         ..
-                    }) = &var.nested_type
-                    {
-                        parse_struct_fields_from_blob(
-                            &bytes,
-                            &var.type_name,
-                            dwarf_fields,
-                            config,
-                            mem_reader,
-                            pid,
-                        )
-                    } else {
-                        CapturedValue::Bytes(bytes)
-                    }
+                    }) => (Some(key_type.as_ref()), Some(value_type.as_ref())),
+                    _ => (None, None),
+                };
+
+                super::map_iter::read_go_map(val, key_nested, val_nested, config, mem_reader, ns_pid)
+            }
+            crate::dwarf::types::VariableLocation::Register(_)
+            | crate::dwarf::types::VariableLocation::StackOffset { .. } => {
+                // When nested_type is present, `val` is the base address of a struct
+                // that BPF captured from a register or stack slot. Read the struct bytes
+                // from user-space and parse fields using DWARF info.
+                if var.nested_type.is_some() {
+                    parse_struct_fields_from_addr(
+                        val,
+                        &var.type_name,
+                        config,
+                        var.nested_type.as_ref(),
+                        mem_reader,
+                        ns_pid,
+                    )?
+                } else {
+                    CapturedValue::Scalar(val)
                 }
-                _ => {
-                    // Check if this is a struct type by checking if we have nested type info
-                    // DWARF resolution populates nested_type for struct types
-                    detrix_logging::debug!(
-                        "[ringbuf] Variable '{}' type='{}' nested_type={:?}",
-                        var.name,
-                        var.type_name,
-                        var.nested_type.as_ref().map(|_| "Some")
-                    );
-                    if var.nested_type.is_some() {
-                        // For structs, BPF captured the base address as `val` (the u64 we already read)
-                        // We need to use that address to read fields from user-space
-                        // Don't read more from ring buffer - use `val` as the struct base address
-                        parse_struct_fields_from_addr(
-                            val, // Use the value BPF already captured as struct base address
-                            &var.type_name,
-                            config,
-                            var.nested_type.as_ref(),
-                            mem_reader,
-                            pid,
-                        )?
-                    } else {
-                        CapturedValue::Scalar(val)
-                    }
-                }
-            };
+            }
+        };
         values.push(captured);
     }
 
@@ -372,6 +386,8 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&pid.to_le_bytes());
         buf.extend_from_slice(&tid.to_le_bytes());
+        buf.extend_from_slice(&pid.to_le_bytes()); // ns_pid (same as pid in tests)
+        buf.extend_from_slice(&0u32.to_le_bytes()); // reserved
         buf.extend_from_slice(&timestamp.to_le_bytes());
         for v in var_values {
             buf.extend_from_slice(&v.to_le_bytes());
@@ -389,6 +405,8 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&pid.to_le_bytes());
         buf.extend_from_slice(&tid.to_le_bytes());
+        buf.extend_from_slice(&pid.to_le_bytes()); // ns_pid (same as pid in tests)
+        buf.extend_from_slice(&0u32.to_le_bytes()); // reserved
         buf.extend_from_slice(&goid.to_le_bytes());
         buf.extend_from_slice(&timestamp.to_le_bytes());
         for v in var_values {
@@ -1444,7 +1462,7 @@ pub fn parse_struct_fields_from_addr(
                         }) => (Some(key_type.as_ref()), Some(value_type.as_ref())),
                         _ => (None, None),
                     };
-                    super::map_iter::read_go_swiss_map(
+                    super::map_iter::read_go_map(
                         map_ptr, key_nested, val_nested, config, mem_reader, pid,
                     )
                 }
@@ -1712,6 +1730,11 @@ fn parse_struct_fields_from_blob(
                 0
             };
 
+            detrix_logging::debug!(
+                "[ringbuf] map field '{}' at blob[{}..{}] map_ptr={:#x}",
+                field.name, start, end, map_ptr
+            );
+
             if map_ptr == 0 {
                 let (key_type, val_type) = parse_map_type_names(&field.type_info.name);
                 CapturedValue::Map {
@@ -1727,9 +1750,17 @@ fn parse_struct_fields_from_blob(
                         value_type,
                         ..
                     }) => (Some(key_type.as_ref()), Some(value_type.as_ref())),
-                    _ => (None, None),
+                    other => {
+                        detrix_logging::warn!(
+                            "[ringbuf] map field '{}' type='{}' has no Map nested type (got {:?}); key/val sizes will default to 8",
+                            field.name,
+                            field.type_info.name,
+                            other.as_ref().map(|n| n.type_info().name.as_str())
+                        );
+                        (None, None)
+                    }
                 };
-                super::map_iter::read_go_swiss_map(
+                super::map_iter::read_go_map(
                     map_ptr, key_nested, val_nested, config, mem_reader, pid,
                 )
             }

@@ -36,6 +36,9 @@ const DW_AT_GO_KIND: u16 = 0x2900;
 
 // Go reflect.Kind values
 const GO_KIND_STRING: i64 = 24;
+const GO_KIND_MAP: i64 = 21;
+#[allow(dead_code)] // Reserved for future slice detection via DW_AT_go_kind
+const GO_KIND_SLICE: i64 = 19;
 
 /// Resolved type info for a variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +59,8 @@ pub struct TypeInfo {
     pub is_array: bool,
     /// Whether this is a struct type (non-string, non-slice aggregate).
     pub is_struct: bool,
+    /// Whether this is a Go map type.
+    pub is_map: bool,
     /// Element count for arrays (0 for non-arrays).
     pub array_element_count: u64,
     /// Element type name for arrays (empty for non-arrays).
@@ -78,6 +83,7 @@ impl TypeInfo {
             is_slice: false,
             is_array: false,
             is_struct: false,
+            is_map: false,
             array_element_count: 0,
             array_element_type: String::new(),
             slice_element_type: String::new(),
@@ -280,6 +286,7 @@ fn resolve_type_at_offset<R: Reader>(
                 is_slice: false,
                 is_array: false,
                 is_struct: false,
+                is_map: false,
                 array_element_count: 0,
                 array_element_type: String::new(),
                 slice_element_type: String::new(),
@@ -296,23 +303,37 @@ fn resolve_type_at_offset<R: Reader>(
                 entry.offset()
             );
 
+            // Check for Go-specific attributes
+            let go_kind = read_go_kind(entry);
+
             // Get the inner type offset - may be unit-local or cross-unit
             let mut inner_info = resolve_typedef_target(entry, unit, dwarf, depth)?;
 
             detrix_logging::debug!(
-                "[DWARF typeinfo] TYPEDEF '{}' → inner: name='{}' is_string={} is_struct={} byte_size={}",
+                "[DWARF typeinfo] TYPEDEF '{}' → inner: name='{}' is_string={} is_struct={} is_map={} byte_size={}",
                 typedef_name.as_deref().unwrap_or("???"),
-                inner_info.name, inner_info.is_string, inner_info.is_struct, inner_info.byte_size
+                inner_info.name, inner_info.is_string, inner_info.is_struct, inner_info.is_map, inner_info.byte_size
             );
 
             // Override name with the typedef name if available
             if let Some(name) = read_attr_string(entry, dwarf, gimli::constants::DW_AT_name)? {
                 detrix_logging::debug!(
-                    "[DWARF typeinfo] TYPEDEF '{}' final: name='{}' is_string={} (preserved from inner)",
-                    name, inner_info.name, inner_info.is_string
+                    "[DWARF typeinfo] TYPEDEF '{}' final: name='{}' is_string={} is_map={} (preserved from inner)",
+                    name, inner_info.name, inner_info.is_string, inner_info.is_map
                 );
                 inner_info.name = name;
             }
+
+            // Detect map types via DW_AT_go_kind = reflect.Map (21)
+            // Go maps are typedefs with go_kind=21 pointing to a struct (runtime.hmap or Swiss Table Map)
+            if go_kind == Some(GO_KIND_MAP) {
+                detrix_logging::debug!(
+                    "[DWARF typeinfo] TYPEDEF '{}' detected as Go map (go_kind=21)",
+                    inner_info.name
+                );
+                inner_info.is_map = true;
+            }
+
             Ok(inner_info)
         }
 
@@ -343,6 +364,7 @@ fn resolve_type_at_offset<R: Reader>(
                 is_slice: false,
                 is_array: true,
                 is_struct: false,
+                is_map: false,
                 array_element_count: element_count,
                 array_element_type: elem_info.name.clone(),
                 slice_element_type: String::new(),
@@ -411,6 +433,7 @@ fn resolve_base_type<R: Reader>(
         is_slice: false,
         is_array: false,
         is_struct: false,
+        is_map: false,
         array_element_count: 0,
         array_element_type: String::new(),
         slice_element_type: String::new(),
@@ -617,6 +640,7 @@ fn resolve_struct_type<R: Reader>(
         is_slice,
         is_array: false,
         is_struct,
+        is_map: false,
         array_element_count: 0,
         array_element_type: String::new(),
         slice_element_type,
@@ -768,13 +792,21 @@ fn has_string_fields<R: Reader>(
 ///
 /// Reference: Delve pkg/dwarf/godwarf/type.go
 fn is_go_string_by_kind_attr<R: Reader>(entry: &DebuggingInformationEntry<R>) -> bool {
-    // Go's DW_AT_go_kind can be encoded as different attribute value types
-    // depending on the value size. Check for common encodings.
+    read_go_kind(entry) == Some(GO_KIND_STRING)
+}
+
+/// Read the Go reflect.Kind from DW_AT_go_kind attribute.
+///
+/// Go's DWARF emission includes a custom `DW_AT_go_kind` attribute (0x2900)
+/// that directly encodes the reflect.Kind value.
+///
+/// Reference: Delve pkg/dwarf/godwarf/type.go
+fn read_go_kind<R: Reader>(entry: &DebuggingInformationEntry<R>) -> Option<i64> {
     match entry.attr_value(DwAt(DW_AT_GO_KIND)) {
-        Some(AttributeValue::Sdata(kind)) => kind == GO_KIND_STRING,
-        Some(AttributeValue::Data1(kind)) => kind as i64 == GO_KIND_STRING,
-        Some(AttributeValue::Udata(kind)) => kind as i64 == GO_KIND_STRING,
-        _ => false,
+        Some(AttributeValue::Sdata(kind)) => Some(kind),
+        Some(AttributeValue::Data1(kind)) => Some(kind as i64),
+        Some(AttributeValue::Udata(kind)) => Some(kind as i64),
+        _ => None,
     }
 }
 

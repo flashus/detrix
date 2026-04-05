@@ -146,6 +146,13 @@ pub enum VariableLocation {
         /// Byte size of the pointed-to struct (from DWARF `DW_AT_byte_size`).
         byte_size: usize,
     },
+
+    /// Variable is a Go map (pointer to runtime.hmap or Swiss Table Map).
+    /// BPF captures the map pointer; user-space iterates the map structure.
+    GoMap {
+        /// Location of the map pointer (hmap* or Map*).
+        ptr: Box<VariableLocation>,
+    },
 }
 
 impl VariableLocation {
@@ -173,6 +180,7 @@ impl VariableLocation {
             Self::GoSlice { .. } => 3,
             Self::StackBlob { .. } => 1,
             Self::StackIndirect { .. } => 1,
+            Self::GoMap { .. } => 1,
         }
     }
 }
@@ -204,6 +212,7 @@ impl fmt::Display for VariableLocation {
                     write!(f, "indirect[{byte_size}b@*sp-{:#x}]", offset.unsigned_abs())
                 }
             }
+            Self::GoMap { .. } => write!(f, "go.map{{ptr}}"),
         }
     }
 }

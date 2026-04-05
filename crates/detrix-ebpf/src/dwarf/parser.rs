@@ -497,16 +497,15 @@ fn resolve_variables_at_pc<R: Reader>(
                     location,
                 );
 
-                // Resolve nested type structure for structs (depth-limited)
-                // Try to resolve for any type that might be a struct (not just is_struct=true)
-                // Go DWARF sometimes emits structs as typedefs or with different type info
+                // Resolve nested type structure for compound types only.
+                // Go DWARF sometimes emits structs as typedefs or with package-qualified names
+                // (e.g. "main.Order") without setting is_struct=true directly.
+                // Primitive types (int, float64, bool, etc.) are intentionally excluded —
+                // they have no nested fields and NestedType::Scalar in `_ =>` caused
+                // parse_struct_fields_from_addr to be called with the scalar VALUE as an address.
                 let should_resolve_nested = type_info.is_struct
                     || type_info.name.contains('.') // Package-qualified names like main.Order
-                    || (!type_info.name.starts_with("[]")
-                        && !type_info.name.starts_with("map[")
-                        && !type_info.name.starts_with('*')
-                        && !type_info.is_string
-                        && !type_info.is_slice);
+                    || type_info.name.starts_with("map["); // Map types need nested type info for iteration
 
                 let nested_type = if should_resolve_nested {
                     use crate::dwarf::nested_types::{resolve_nested_type, NestedTypeConfig};
@@ -858,6 +857,18 @@ fn upgrade_location_for_type(
                 }),
             };
         }
+    } else if type_info.is_map {
+        // Go map: single pointer to hmap (classic) or Map (Swiss Table).
+        // Wrap in GoMap so the ringbuf parser knows to iterate the map.
+        return VariableLocation::GoMap {
+            ptr: Box::new(location),
+        };
+    } else if type_info.name.starts_with("map[") {
+        // Go map: single pointer to hmap (classic) or Map (Swiss Table).
+        // Wrap in GoMap so the ringbuf parser knows to iterate the map.
+        return VariableLocation::GoMap {
+            ptr: Box::new(location),
+        };
     } else if (type_info.is_array || type_info.is_struct) && type_info.byte_size > 0 {
         match location {
             VariableLocation::StackOffset { offset } => {

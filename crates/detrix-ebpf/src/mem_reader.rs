@@ -50,97 +50,37 @@ pub trait ProcessMemoryReader: Send + Sync {
 
 /// Linux implementation using process_vm_readv syscall.
 ///
+/// The `pid` parameter passed to each method is the **namespace-local PID** emitted
+/// by the BPF program via `bpf_get_ns_current_pid_tgid()`. This is the PID as seen
+/// inside the daemon's PID namespace (i.e. the container-local PID when running in
+/// Docker), which is what `process_vm_readv` and `/proc/<pid>/mem` expect.
+///
 /// Falls back to /proc/pid/mem if process_vm_readv is unavailable.
 #[cfg(target_os = "linux")]
-pub struct LinuxProcessMemoryReader {
-    /// Cached PID for the target process (found by executable path)
-    target_pid: std::sync::Mutex<Option<u32>>,
-    /// Path to the target executable (used to find the PID)
-    target_exe: std::sync::Arc<str>,
-}
+pub struct LinuxProcessMemoryReader;
 
 #[cfg(target_os = "linux")]
 impl LinuxProcessMemoryReader {
-    pub fn new(target_exe: &str) -> Self {
-        Self {
-            target_pid: std::sync::Mutex::new(None),
-            target_exe: target_exe.into(),
-        }
-    }
-
-    /// Find the target process PID by searching /proc for matching executable
-    fn find_target_pid(&self) -> Option<u32> {
-        // Check cache first
-        {
-            let cache = self.target_pid.lock().ok()?;
-            if let Some(pid) = *cache {
-                // Verify process still exists
-                if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
-                    return Some(pid);
-                }
-            }
-        }
-
-        // Search /proc for matching executable
-        if let Ok(entries) = std::fs::read_dir("/proc") {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if let Ok(pid) = name_str.parse::<u32>() {
-                    // Check if /proc/[pid]/exe matches our target
-                    let exe_path = format!("/proc/{}/exe", pid);
-                    if let Ok(link_target) = std::fs::read_link(&exe_path) {
-                        let link_str = link_target.to_string_lossy();
-                        if link_str.as_ref() == self.target_exe.as_ref() {
-                            // Found it! Cache and return
-                            let mut cache = self.target_pid.lock().ok()?;
-                            *cache = Some(pid);
-                            detrix_logging::debug!(
-                                "[mem_reader] Found target PID {} for {}",
-                                pid,
-                                self.target_exe
-                            );
-                            return Some(pid);
-                        }
-                    }
-                }
-            }
-        }
-
-        detrix_logging::warn!(
-            "[mem_reader] Could not find target process: {}",
-            self.target_exe
-        );
-        None
+    pub fn new(_target_exe: &str) -> Self {
+        Self
     }
 }
 
 #[cfg(target_os = "linux")]
 impl ProcessMemoryReader for LinuxProcessMemoryReader {
-    fn read_string(&self, _kernel_pid: u32, ptr: u64, len: usize) -> Result<String> {
+    fn read_string(&self, pid: u32, ptr: u64, len: usize) -> Result<String> {
         use crate::error::Error;
 
-        // Find the target process PID in our namespace by searching /proc
-        let target_pid = self.find_target_pid().ok_or_else(|| {
-            Error::Ebpf(format!(
-                "Could not find target process: {}",
-                self.target_exe
-            ))
-        })?;
-
         detrix_logging::debug!(
-            "[mem_reader] Reading string from target PID {} (kernel reported {}): ptr={:#x} len={}",
-            target_pid,
-            _kernel_pid,
-            ptr,
-            len
+            "[mem_reader] Reading string from pid={}: ptr={:#x} len={}",
+            pid, ptr, len
         );
 
         // Limit read size to prevent excessive memory access
         let read_len = len.min(1024);
 
         // Try process_vm_readv first
-        match process_vm_read(target_pid, ptr, read_len) {
+        match process_vm_read(pid, ptr, read_len) {
             Ok(buf) => {
                 let actual_len = buf.len().min(len);
                 if actual_len > 0 && buf.iter().any(|&b| b != 0) {
@@ -150,14 +90,14 @@ impl ProcessMemoryReader for LinuxProcessMemoryReader {
             }
             Err(e) => {
                 detrix_logging::debug!(
-                    "[mem_reader] process_vm_readv failed: {}, trying /proc/mem fallback",
-                    e
+                    "[mem_reader] process_vm_readv failed for pid={}: {}, trying /proc/mem fallback",
+                    pid, e
                 );
             }
         }
 
-        // Fallback: try /proc/target_pid/mem
-        match read_proc_mem(target_pid, ptr, read_len) {
+        // Fallback: try /proc/pid/mem
+        match read_proc_mem(pid, ptr, read_len) {
             Ok(buf) => {
                 let actual_len = buf.len().min(len);
                 if actual_len > 0 && buf.iter().any(|&b| b != 0) {
@@ -166,37 +106,27 @@ impl ProcessMemoryReader for LinuxProcessMemoryReader {
                 }
             }
             Err(e) => {
-                detrix_logging::debug!("[mem_reader] /proc/{}/mem failed: {}", target_pid, e);
+                detrix_logging::debug!("[mem_reader] /proc/{}/mem failed: {}", pid, e);
             }
         }
 
         Err(Error::Ebpf(format!(
-            "Failed to read string from target_pid={} ptr={:#x} len={}",
-            target_pid, ptr, len
+            "Failed to read string from pid={} ptr={:#x} len={}",
+            pid, ptr, len
         )))
     }
 
-    fn read_bytes(&self, _kernel_pid: u32, ptr: u64, len: usize) -> Result<Vec<u8>> {
-        use crate::error::Error;
-
-        let target_pid = self.find_target_pid().ok_or_else(|| {
-            Error::Ebpf(format!(
-                "Could not find target process: {}",
-                self.target_exe
-            ))
-        })?;
-
+    fn read_bytes(&self, pid: u32, ptr: u64, len: usize) -> Result<Vec<u8>> {
         // Try process_vm_readv first
-        if let Ok(buf) = process_vm_read(target_pid, ptr, len) {
+        if let Ok(buf) = process_vm_read(pid, ptr, len) {
             return Ok(buf);
         }
-
         // Fallback to /proc/pid/mem
-        read_proc_mem(target_pid, ptr, len)
+        read_proc_mem(pid, ptr, len)
     }
 
-    fn read_u64(&self, kernel_pid: u32, ptr: u64) -> Result<u64> {
-        let bytes = self.read_bytes(kernel_pid, ptr, 8)?;
+    fn read_u64(&self, pid: u32, ptr: u64) -> Result<u64> {
+        let bytes = self.read_bytes(pid, ptr, 8)?;
         if bytes.len() < 8 {
             return Err(crate::error::Error::Ebpf(format!(
                 "read_u64: only got {} bytes",

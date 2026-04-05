@@ -478,13 +478,14 @@ fn resolve_struct_fields<R: Reader>(
             _ => field_type_info.byte_size,
         };
 
-        // For pointer, struct, slice, and array fields within depth limits, resolve nested type info so
+        // For pointer, struct, slice, array, and map fields within depth limits, resolve nested type info so
         // the ring buffer parser can dereference pointers, recursively parse embedded structs,
-        // read slice elements, and iterate array elements.
+        // read slice elements, iterate array elements, and iterate map buckets.
         let field_nested = if (field_type_info.is_pointer
             || field_type_info.is_struct
             || field_type_info.is_slice
-            || field_type_info.is_array)
+            || field_type_info.is_array
+            || field_type_info.is_map)
             && depth < config.max_depth
         {
             detrix_logging::debug!(
@@ -931,6 +932,7 @@ fn infer_nested_from_map_name(type_name: &str, component: usize) -> NestedType {
         is_slice: name.starts_with("[]"),
         is_array: false,
         is_struct: name.contains('.') && !name.starts_with('*') && !name.starts_with("[]"),
+        is_map: name.starts_with("map["),
         array_element_count: 0,
         array_element_type: String::new(),
         slice_element_type: String::new(),

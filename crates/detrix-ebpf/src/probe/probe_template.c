@@ -41,9 +41,27 @@ struct pt_regs {
 
 char LICENSE[] SEC("license") = "Dual MIT/GPL";
 
+// Namespace info for translating host PIDs to container-local PIDs.
+// Populated at load time by the Rust loader with the daemon's PID namespace
+// dev/ino (from stat("/proc/self/ns/pid")), enabling bpf_get_ns_current_pid_tgid
+// to return the PID as seen inside the container for process_vm_readv.
+struct ns_info_t {
+    u64 dev;
+    u64 ino;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, struct ns_info_t);
+    __uint(max_entries, 1);
+} DETRIX_NS_INFO SEC(".maps");
+
 struct probe_event {
-    u32 pid;
-    u32 tid;
+    u32 pid;       // host (root namespace) PID — for logging/debug
+    u32 tid;       // OS thread ID
+    u32 ns_pid;    // namespace-local PID (container PID) — for process_vm_readv
+    u32 reserved;  // alignment padding
     u64 timestamp;
     /*DETRIX_EVENT_FIELDS*/
 };
@@ -63,6 +81,23 @@ int detrix_capture(struct pt_regs *ctx) {
     event->pid = pid_tgid >> 32;
     event->tid = (u32)pid_tgid;
     event->timestamp = bpf_ktime_get_ns();
+
+    // Resolve namespace-local PID for process_vm_readv inside containers.
+    // When DETRIX_NS_INFO is populated, bpf_get_ns_current_pid_tgid returns the
+    // PID in the daemon's namespace (container-local), not the root namespace PID.
+    // Falls back to the host PID if namespace info is unavailable.
+    __u32 ns_key = 0;
+    struct ns_info_t *ns = bpf_map_lookup_elem(&DETRIX_NS_INFO, &ns_key);
+    if (ns && (ns->dev || ns->ino)) {
+        struct bpf_pidns_info nsdata = {};
+        if (bpf_get_ns_current_pid_tgid(ns->dev, ns->ino, &nsdata, sizeof(nsdata)) == 0) {
+            event->ns_pid = nsdata.tgid;
+        } else {
+            event->ns_pid = event->pid;
+        }
+    } else {
+        event->ns_pid = event->pid;
+    }
 
     /*DETRIX_VAR_READS*/
 

@@ -243,18 +243,40 @@ impl DapAdapter for EbpfAdapter {
             .as_ref()
             .ok_or_else(|| detrix_core::Error::Adapter("Adapter not started".to_string()))?;
 
+        detrix_logging::debug!(
+            "[EbpfAdapter] set_metric: name={} file={} line={} expressions={:?}",
+            metric.name, metric.location.file, metric.location.line, metric.expressions
+        );
+
         let probe_point = dwarf.resolve_probe_point(
             &metric.location.file,
             metric.location.line,
             &metric.expressions,
             self.capture_config.max_capture_depth,
-        )?;
+        ).map_err(|e| {
+            detrix_logging::error!("[EbpfAdapter] resolve_probe_point failed for '{}': {}", metric.name, e);
+            detrix_core::Error::Adapter(format!("DWARF resolution failed: {e}"))
+        })?;
+
+        detrix_logging::debug!(
+            "[EbpfAdapter] resolved probe_point: pc={:#x} function={} variables={} symbol_offset={:#x}",
+            probe_point.pc, probe_point.function_name, probe_point.variables.len(), probe_point.symbol_offset
+        );
+        for var in &probe_point.variables {
+            detrix_logging::debug!(
+                "[EbpfAdapter]   variable: name={} type={} location={:?}",
+                var.name, var.type_name, var.location
+            );
+        }
 
         self.uprobe_manager
             .write()
             .await
             .attach(&metric.name, &probe_point)
-            .map_err(|e| detrix_core::Error::Adapter(e.to_string()))?;
+            .map_err(|e| {
+                detrix_logging::error!("[EbpfAdapter] uprobe attach failed for '{}': {}", metric.name, e);
+                detrix_core::Error::Adapter(e.to_string())
+            })?;
 
         let actual_line = metric.location.line;
 
