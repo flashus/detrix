@@ -9,6 +9,24 @@ use crate::mem_reader::ProcessMemoryReader;
 use crate::probe::types::{CaptureConfig, CapturedValue};
 use std::collections::HashSet;
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Read a fixed-size byte array and convert to a native integer, returning an
+/// error instead of panicking on malformed input.
+fn le_bytes_to_u64(data: &[u8]) -> Result<u64, String> {
+    let arr: [u8; 8] = data
+        .try_into()
+        .map_err(|_| format!("expected 8 bytes, got {}", data.len()))?;
+    Ok(u64::from_le_bytes(arr))
+}
+
+fn le_bytes_to_i64(data: &[u8]) -> Result<i64, String> {
+    let arr: [u8; 8] = data
+        .try_into()
+        .map_err(|_| format!("expected 8 bytes, got {}", data.len()))?;
+    Ok(i64::from_le_bytes(arr))
+}
+
 // ── Swiss Table constants (Go 1.24+) ────────────────────────────────────────
 
 const SLOTS_PER_GROUP: u64 = 8;
@@ -86,8 +104,14 @@ pub fn read_go_map(
     }
 
     // Try to detect Swiss Table by checking dirLen (bytes 24-32)
-    let dir_len = i64::from_le_bytes(header[24..32].try_into().expect("8 bytes"));
-    let dir_ptr = u64::from_le_bytes(header[16..24].try_into().expect("8 bytes"));
+    let dir_len = match le_bytes_to_i64(&header[24..32]) {
+        Ok(v) => v,
+        Err(e) => return CapturedValue::Map { key_type: key_type_name, value_type: val_type_name, entries: vec![], reason: e },
+    };
+    let dir_ptr = match le_bytes_to_u64(&header[16..24]) {
+        Ok(v) => v,
+        Err(e) => return CapturedValue::Map { key_type: key_type_name, value_type: val_type_name, entries: vec![], reason: e },
+    };
 
     // Swiss Table detection heuristic:
     //
@@ -216,9 +240,9 @@ fn read_swiss_map_inner(
         return Err(format!("map header too short: {} bytes", header.len()));
     }
 
-    let used = u64::from_le_bytes(header[0..8].try_into().expect("8 bytes"));
-    let dir_ptr = u64::from_le_bytes(header[16..24].try_into().expect("8 bytes"));
-    let dir_len = i64::from_le_bytes(header[24..32].try_into().expect("8 bytes"));
+    let used = le_bytes_to_u64(&header[0..8]).map_err(|e| format!("map used: {e}"))?;
+    let dir_ptr = le_bytes_to_u64(&header[16..24]).map_err(|e| format!("map dirPtr: {e}"))?;
+    let dir_len = le_bytes_to_i64(&header[24..32]).map_err(|e| format!("map dirLen: {e}"))?;
 
     detrix_logging::debug!(
         "[map_iter] map={:#x} used={} dirPtr={:#x} dirLen={}",
@@ -331,8 +355,8 @@ fn read_table(
         return Err(format!("table header too short: {} bytes", hdr.len()));
     }
 
-    let groups_data = u64::from_le_bytes(hdr[16..24].try_into().expect("8 bytes"));
-    let length_mask = u64::from_le_bytes(hdr[24..32].try_into().expect("8 bytes"));
+    let groups_data = le_bytes_to_u64(&hdr[16..24]).map_err(|e| format!("table groups_data: {e}"))?;
+    let length_mask = le_bytes_to_u64(&hdr[24..32]).map_err(|e| format!("table length_mask: {e}"))?;
     let num_groups = length_mask.wrapping_add(1);
 
     if groups_data == 0 {
@@ -566,8 +590,14 @@ fn read_string_slot(
     if hdr.len() < 16 {
         return CapturedValue::Error("string header too short".to_string());
     }
-    let ptr = u64::from_le_bytes(hdr[0..8].try_into().expect("8 bytes"));
-    let len = u64::from_le_bytes(hdr[8..16].try_into().expect("8 bytes")) as usize;
+    let ptr = match le_bytes_to_u64(&hdr[0..8]) {
+        Ok(v) => v,
+        Err(e) => return CapturedValue::Error(e),
+    };
+    let len = match le_bytes_to_u64(&hdr[8..16]) {
+        Ok(v) => v as usize,
+        Err(e) => return CapturedValue::Error(e),
+    };
 
     if ptr == 0 || len == 0 {
         return CapturedValue::String {
@@ -656,10 +686,11 @@ fn read_classic_map_inner(
         ));
     }
 
-    let count = i64::from_le_bytes(header[0..8].try_into().expect("8 bytes"));
+    let count = le_bytes_to_i64(&header[0..8]).map_err(|e| format!("hmap count: {e}"))?;
     let b = header[9] as u64;
-    let buckets_ptr = u64::from_le_bytes(header[16..24].try_into().expect("8 bytes"));
-    let oldbuckets_ptr = u64::from_le_bytes(header[24..32].try_into().expect("8 bytes"));
+    let buckets_ptr = le_bytes_to_u64(&header[16..24]).map_err(|e| format!("hmap buckets: {e}"))?;
+    let oldbuckets_ptr = le_bytes_to_u64(&header[24..32])
+        .map_err(|e| format!("hmap oldbuckets: {e}"))?;
 
     detrix_logging::debug!(
         "[map_iter] classic map={:#x} pid={} count={} B={} buckets={:#x} oldbuckets={:#x} header={:02x?}",
@@ -771,8 +802,8 @@ fn read_classic_map_inner(
             }
         }
 
-        // Read bucket contents
-        match read_classic_bucket(
+        // Read bucket contents (including full overflow chain)
+        if let Err(e) = read_classic_bucket(
             bucket_addr,
             bucket_size,
             keys_offset,
@@ -790,31 +821,14 @@ fn read_classic_map_inner(
             &mut entries,
             max_entries,
         ) {
-            Ok(did_overflow) => {
-                if !did_overflow {
-                    // No overflow — move to next primary bucket.
-                    // If we read from oldbuckets, we need to advance bidx properly.
-                    if oldbuckets_ptr != 0 && bucket_addr >= oldbuckets_ptr {
-                        // We read from oldbuckets — advance to next primary bucket
-                        bidx += 1;
-                    } else {
-                        bidx += 1;
-                    }
-                } else {
-                    // Overflow bucket was followed — stay on same bidx to continue
-                    // with next overflow chain element. Actually, read_classic_bucket
-                    // already followed the full overflow chain, so advance.
-                    bidx += 1;
-                }
-            }
-            Err(e) => {
-                detrix_logging::warn!(
-                    "[map_iter] classic bucket read failed at {:#x}: {e}",
-                    bucket_addr
-                );
-                bidx += 1;
-            }
+            detrix_logging::warn!(
+                "[map_iter] classic bucket read failed at {:#x}: {e}",
+                bucket_addr
+            );
         }
+        // Always advance to next primary bucket — read_classic_bucket traverses
+        // the full overflow chain internally.
+        bidx += 1;
     }
 
     if entries.is_empty() && count > 0 {
@@ -867,8 +881,8 @@ fn is_evacuated(
 
 /// Read a classic bucket and its overflow chain, collecting entries.
 ///
-/// Returns `Ok(true)` if an overflow bucket was followed (caller should not
-/// advance bidx), or `Ok(false)` if no overflow (caller should advance bidx).
+/// Traverses the full overflow chain from the given bucket, collecting key-value
+/// pairs from each bucket until `max_entries` is reached or the chain ends.
 #[allow(clippy::too_many_arguments)]
 fn read_classic_bucket(
     mut bucket_addr: u64,
@@ -887,9 +901,7 @@ fn read_classic_bucket(
     hash_min_tophash: u64,
     entries: &mut Vec<(CapturedValue, CapturedValue)>,
     max_entries: usize,
-) -> Result<bool, String> {
-    let mut overflow_followed = false;
-
+) -> Result<(), String> {
     while bucket_addr != 0 && entries.len() < max_entries {
         // Read bucket: tophash[8] at offset 0
         let tophash = match mem_reader.read_bytes(pid, bucket_addr, BUCKET_COUNT as usize) {
@@ -907,7 +919,7 @@ fn read_classic_bucket(
 
         for slot in 0..BUCKET_COUNT {
             if entries.len() >= max_entries {
-                return Ok(overflow_followed);
+                return Ok(());
             }
 
             let tophash_val = tophash[slot as usize] as u64;
@@ -941,14 +953,13 @@ fn read_classic_bucket(
         };
 
         if overflow_addr != 0 {
-            overflow_followed = true;
             bucket_addr = overflow_addr;
         } else {
             break;
         }
     }
 
-    Ok(overflow_followed)
+    Ok(())
 }
 
 // ============================================================================
@@ -988,8 +999,7 @@ mod tests {
         fn read_u64(&self, _pid: u32, ptr: u64) -> crate::error::Result<u64> {
             if let Some(data) = self.data.get(&ptr) {
                 if data.len() >= 8 {
-                    let arr: [u8; 8] = data[0..8].try_into().expect("8 bytes");
-                    return Ok(u64::from_le_bytes(arr));
+                    return Ok(u64::from_le_bytes(data[0..8].try_into().unwrap_or([0; 8])));
                 }
             }
             Ok(0)
@@ -1162,5 +1172,47 @@ mod tests {
         );
         // Returns empty or error, but doesn't panic
         assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn read_classic_bucket_returns_unit_not_bool() {
+        // H4: The function used to return Ok(bool) indicating overflow_followed,
+        // but the caller always advanced bidx regardless — the bool was dead code.
+        // After the fix, it returns Result<(), String>.
+        // This test verifies the function completes without panicking.
+        let mut reader = MockMemReader::new();
+
+        // Build a minimal bucket: 8 tophash bytes + 8 slots * 8 bytes (keys+vals) + 8 overflow
+        // Total = 8 (tophash) + 64 (keys) + 64 (vals) + 8 (overflow) = 144 bytes
+        let mut bucket = vec![0xABu8; 144];
+        bucket[0] = 5; // tophash[0] = occupied
+        bucket[1] = 6; // tophash[1] = occupied
+        reader.put(0x30000, bucket);
+
+        let mut entries = Vec::new();
+        let result = read_classic_bucket(
+            0x30000,
+            144,   // bucket_size
+            8,     // keys_offset
+            72,    // vals_offset (8 + 8*8 = 72)
+            136,   // overflow_offset (72 + 8*8 = 136)
+            8,     // key_size
+            8,     // val_size
+            None,  // key_nested
+            None,  // val_nested
+            &CaptureConfig::default(),
+            &reader,
+            1234,
+            1,     // hash_tophash_empty_one
+            5,     // hash_min_tophash
+            &mut entries,
+            64,    // max_entries
+        );
+        // Function should succeed (not panic, not return bool)
+        assert!(result.is_ok());
+        // All 8 slots show as occupied (MockMemReader returns 0xAB for every slot,
+        // which is >= minTopHash=5). This is correct behavior — the function reads
+        // what the mock provides.
+        assert_eq!(entries.len(), 8);
     }
 }

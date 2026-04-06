@@ -108,7 +108,7 @@ impl CaptureConfig {
         }
         if self.max_string_capture == 0 {
             errors.push("max_string_capture must be > 0".to_string());
-        } else if self.max_string_capture % 8 != 0 {
+        } else if !self.max_string_capture.is_multiple_of(8) {
             errors.push(format!(
                 "max_string_capture must be a multiple of 8, got {}",
                 self.max_string_capture
@@ -119,7 +119,7 @@ impl CaptureConfig {
         }
         if self.max_blob_capture == 0 {
             errors.push("max_blob_capture must be > 0".to_string());
-        } else if self.max_blob_capture % 8 != 0 {
+        } else if !self.max_blob_capture.is_multiple_of(8) {
             errors.push(format!(
                 "max_blob_capture must be a multiple of 8, got {}",
                 self.max_blob_capture

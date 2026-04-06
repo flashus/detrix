@@ -160,7 +160,9 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
         }
         VariableLocation::StackOffset { offset } => {
             let size = var.size.bytes();
-            if *offset >= 0 {
+            // Zero-fill before read so failures leave zeros, not garbage.
+            let zero_fill = format!("    event->var{idx} = 0;");
+            let read = if *offset >= 0 {
                 format!(
                     "    bpf_probe_read_user(&event->var{idx}, {size}, (void *)(ctx->sp + {offset}));"
                 )
@@ -169,7 +171,8 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                     "    bpf_probe_read_user(&event->var{idx}, {size}, (void *)(ctx->sp - {}));",
                     offset.unsigned_abs()
                 )
-            }
+            };
+            format!("{zero_fill}\n{read}")
         }
         VariableLocation::GoString { ptr, len } => {
             // Go string struct {ptr uintptr, len int} lives on the stack.
@@ -191,7 +194,10 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
             // Read pointer from its location
             let ptr_read = match ptr_location {
                 VariableLocation::StackOffset { offset } => {
-                    format!("    bpf_probe_read_user(&event->var{idx}, 8, (void *)(ctx->sp + ({offset})));")
+                    format!(
+                        "    event->var{idx} = 0;\
+\n    bpf_probe_read_user(&event->var{idx}, 8, (void *)(ctx->sp + ({offset})));"
+                    )
                 }
                 VariableLocation::Register(reg) => {
                     format!("    event->var{idx} = (u64)ctx->{};", reg.pt_regs_field())
@@ -202,7 +208,10 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
             // Read length from its location
             let len_read = match len_location {
                 VariableLocation::StackOffset { offset } => {
-                    format!("    bpf_probe_read_user(&event->var{idx}_len, 8, (void *)(ctx->sp + ({offset})));")
+                    format!(
+                        "    event->var{idx}_len = 0;\
+\n    bpf_probe_read_user(&event->var{idx}_len, 8, (void *)(ctx->sp + ({offset})));"
+                    )
                 }
                 VariableLocation::Register(reg) => {
                     format!(
