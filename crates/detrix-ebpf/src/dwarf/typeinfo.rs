@@ -511,8 +511,12 @@ fn get_array_element_count<R: Reader>(
         }
     }
 
-    detrix_logging::debug!("[DWARF typeinfo] array element count not found, returning 0");
-    Ok(0) // Unknown count
+    detrix_logging::warn!(
+        "[DWARF typeinfo] array element count not found — array will be captured as raw bytes"
+    );
+    Err(Error::MissingDebugInfo(
+        "Array element count not found in DWARF — array will be captured as raw bytes".to_string(),
+    ))
 }
 
 /// Resolve a DW_TAG_structure_type DIE.

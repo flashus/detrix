@@ -107,11 +107,15 @@ pub fn parse_ring_buffer_event(
 
     let mut values = Vec::with_capacity(variables.len());
     for var in variables {
-        let val = read_u64(data, &mut offset).unwrap_or(0);
+        let val = read_u64(data, &mut offset).map_err(|e| {
+            Error::RingBuffer(format!("Failed to read variable '{}': {e}", var.name))
+        })?;
         let captured = match &var.location {
             crate::dwarf::types::VariableLocation::GoString { .. } => {
                 // Read string length from the event (BPF read this from stack)
-                let len = read_u64(data, &mut offset).unwrap_or(0) as usize;
+                let len = read_u64(data, &mut offset).map_err(|e| {
+                    Error::RingBuffer(format!("Failed to read string len for '{}': {e}", var.name))
+                })? as usize;
                 // Skip the empty buffer (BPF doesn't read Go heap)
                 let _ = read_bytes(data, &mut offset, config.max_string_capture);
 
@@ -162,8 +166,12 @@ pub fn parse_ring_buffer_event(
                 }
             }
             crate::dwarf::types::VariableLocation::GoSlice { .. } => {
-                let len = read_u64(data, &mut offset).unwrap_or(0);
-                let cap = read_u64(data, &mut offset).unwrap_or(0);
+                let len = read_u64(data, &mut offset).map_err(|e| {
+                    Error::RingBuffer(format!("Failed to read slice len for '{}': {e}", var.name))
+                })?;
+                let cap = read_u64(data, &mut offset).map_err(|e| {
+                    Error::RingBuffer(format!("Failed to read slice cap for '{}': {e}", var.name))
+                })?;
                 CapturedValue::Slice { len, cap }
             }
             crate::dwarf::types::VariableLocation::StackBlob { byte_size, .. } => {
@@ -540,16 +548,23 @@ mod tests {
         // Event with header but missing variable data
         let data = build_event_bytes(1, 2, 100, &[]);
         let vars = vec![scalar_var("x")]; // Expects 8 more bytes
-        let event = parse_ring_buffer_event(
+        let result = parse_ring_buffer_event(
             &data,
             &vars,
             false,
             &CaptureConfig::default(),
             &StubMemReader,
-        )
-        .unwrap();
-        // Should handle gracefully with default value
-        assert_eq!(event.values[0].as_u64(), Some(0));
+        );
+        // Truncated event data should return an error, not silently default to 0
+        assert!(
+            result.is_err(),
+            "Expected error for truncated event, got: {result:?}"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("x"),
+            "Error should mention variable name: {err}"
+        );
     }
 
     #[test]

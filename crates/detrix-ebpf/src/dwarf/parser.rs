@@ -174,8 +174,13 @@ fn load_dwarf<'a>(
 /// frame size added by the function prologue. A `DW_OP_fbreg: F` location means
 /// the variable is at `CFA + F = SP + (N + F)`.
 ///
-/// Returns `0` when the section is absent or the PC is not covered, which leaves
-/// `DW_OP_fbreg` offsets treated as SP-relative (the old behaviour).
+/// # Fallback behavior
+///
+/// Returns `0` when the section is absent or the PC is not covered. This leaves
+/// `DW_OP_fbreg` offsets treated as SP-relative — which is **correct for leaf
+/// functions** (no stack frame) but **incorrect for functions with stack frames**.
+/// When this fallback is used, a warning is logged and captured variable values
+/// may be wrong for non-leaf functions.
 fn get_cfa_sp_delta(obj: &object::File<'_>, endian: gimli::RunTimeEndian, pc: u64) -> i64 {
     use gimli::{BaseAddresses, CfaRule, DebugFrame, EndianSlice, UnwindSection};
 
