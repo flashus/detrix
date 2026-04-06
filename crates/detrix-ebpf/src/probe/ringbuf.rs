@@ -37,23 +37,23 @@ const MAX_PARSE_DEPTH: usize = 32;
 /// Read exactly N bytes from a slice as a native integer, returning an error
 /// instead of panicking on malformed input (e.g. truncated ring buffer events).
 fn read_u64_le(slice: &[u8], label: &str) -> std::result::Result<u64, Error> {
-    let arr: [u8; 8] = slice
-        .try_into()
-        .map_err(|_| Error::RingBuffer(format!("{label}: expected 8 bytes, got {}", slice.len())))?;
+    let arr: [u8; 8] = slice.try_into().map_err(|_| {
+        Error::RingBuffer(format!("{label}: expected 8 bytes, got {}", slice.len()))
+    })?;
     Ok(u64::from_le_bytes(arr))
 }
 
 fn read_u32_le(slice: &[u8], label: &str) -> std::result::Result<u32, Error> {
-    let arr: [u8; 4] = slice
-        .try_into()
-        .map_err(|_| Error::RingBuffer(format!("{label}: expected 4 bytes, got {}", slice.len())))?;
+    let arr: [u8; 4] = slice.try_into().map_err(|_| {
+        Error::RingBuffer(format!("{label}: expected 4 bytes, got {}", slice.len()))
+    })?;
     Ok(u32::from_le_bytes(arr))
 }
 
 fn read_u16_le(slice: &[u8], label: &str) -> std::result::Result<u16, Error> {
-    let arr: [u8; 2] = slice
-        .try_into()
-        .map_err(|_| Error::RingBuffer(format!("{label}: expected 2 bytes, got {}", slice.len())))?;
+    let arr: [u8; 2] = slice.try_into().map_err(|_| {
+        Error::RingBuffer(format!("{label}: expected 2 bytes, got {}", slice.len()))
+    })?;
     Ok(u16::from_le_bytes(arr))
 }
 
@@ -175,7 +175,10 @@ pub fn parse_ring_buffer_event(
 
                 detrix_logging::debug!(
                     "[ringbuf] StackBlob '{}' ns_pid={} byte_size={} capture={}",
-                    var.name, ns_pid, byte_size, capture
+                    var.name,
+                    ns_pid,
+                    byte_size,
+                    capture
                 );
 
                 // If we have DWARF field info, parse the blob into named fields
@@ -253,7 +256,9 @@ pub fn parse_ring_buffer_event(
                     _ => (None, None),
                 };
 
-                super::map_iter::read_go_map(val, key_nested, val_nested, config, mem_reader, ns_pid)
+                super::map_iter::read_go_map(
+                    val, key_nested, val_nested, config, mem_reader, ns_pid,
+                )
             }
             crate::dwarf::types::VariableLocation::Register(_)
             | crate::dwarf::types::VariableLocation::StackOffset { .. } => {
@@ -985,9 +990,7 @@ mod tests {
         let cv = result.unwrap();
         match cv {
             CapturedValue::Struct { fields, .. } => {
-                let has_marker = fields
-                    .iter()
-                    .any(|(name, _)| name == "__depth_exceeded");
+                let has_marker = fields.iter().any(|(name, _)| name == "__depth_exceeded");
                 assert!(
                     has_marker,
                     "Should contain __depth_exceeded field at max depth, got: {:?}",
@@ -1339,9 +1342,13 @@ pub fn parse_struct_fields_from_addr(
         );
         return Ok(CapturedValue::Struct {
             type_name: type_name.to_string(),
-            fields: vec![("__depth_exceeded".to_string(), Box::new(CapturedValue::Error(
-                format!("recursion depth {} exceeded MAX_PARSE_DEPTH ({})", depth, MAX_PARSE_DEPTH),
-            )))],
+            fields: vec![(
+                "__depth_exceeded".to_string(),
+                Box::new(CapturedValue::Error(format!(
+                    "recursion depth {} exceeded MAX_PARSE_DEPTH ({})",
+                    depth, MAX_PARSE_DEPTH
+                ))),
+            )],
         });
     }
 
@@ -1799,10 +1806,8 @@ fn parse_struct_fields_from_blob(
 
         let field_value = if field.type_info.is_string && start + 16 <= blob.len() {
             // String header: ptr (8 bytes) + len (8 bytes) stored inline in blob
-            let ptr = read_u64_le(&blob[start..start + 8], "string ptr")
-                .unwrap_or(0);
-            let len = read_u64_le(&blob[start + 8..start + 16], "string len")
-                .unwrap_or(0) as usize;
+            let ptr = read_u64_le(&blob[start..start + 8], "string ptr").unwrap_or(0);
+            let len = read_u64_le(&blob[start + 8..start + 16], "string len").unwrap_or(0) as usize;
 
             if ptr != 0 && len > 0 && len <= config.max_string_capture {
                 match mem_reader.read_string(pid, ptr, len) {
@@ -1895,7 +1900,10 @@ fn parse_struct_fields_from_blob(
 
             detrix_logging::debug!(
                 "[ringbuf] map field '{}' at blob[{}..{}] map_ptr={:#x}",
-                field.name, start, end, map_ptr
+                field.name,
+                start,
+                end,
+                map_ptr
             );
 
             if map_ptr == 0 {
@@ -1984,7 +1992,8 @@ fn parse_struct_fields_from_blob(
             if start + 24 <= blob.len() {
                 let slice_ptr = read_u64_le(&blob[start..start + 8], "slice ptr").unwrap_or(0);
                 let slice_len = read_u64_le(&blob[start + 8..start + 16], "slice len").unwrap_or(0);
-                let slice_cap = read_u64_le(&blob[start + 16..start + 24], "slice cap").unwrap_or(0);
+                let slice_cap =
+                    read_u64_le(&blob[start + 16..start + 24], "slice cap").unwrap_or(0);
                 detrix_logging::debug!(
                     "[ringbuf] slice field '{}' ptr={:#x} len={} cap={}, has_nested={}",
                     field.name,

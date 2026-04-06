@@ -201,8 +201,8 @@ impl DapAdapterFactory for EbpfGoFactory {
 #[cfg(test)]
 mod ebpf_go_factory_tests {
     use super::*;
-    use detrix_ports::DapAdapterRef;
     use detrix_core::Result;
+    use detrix_ports::DapAdapterRef;
 
     /// Minimal stub factory that records calls.
     struct StubFactory;

@@ -106,11 +106,25 @@ pub fn read_go_map(
     // Try to detect Swiss Table by checking dirLen (bytes 24-32)
     let dir_len = match le_bytes_to_i64(&header[24..32]) {
         Ok(v) => v,
-        Err(e) => return CapturedValue::Map { key_type: key_type_name, value_type: val_type_name, entries: vec![], reason: e },
+        Err(e) => {
+            return CapturedValue::Map {
+                key_type: key_type_name,
+                value_type: val_type_name,
+                entries: vec![],
+                reason: e,
+            }
+        }
     };
     let dir_ptr = match le_bytes_to_u64(&header[16..24]) {
         Ok(v) => v,
-        Err(e) => return CapturedValue::Map { key_type: key_type_name, value_type: val_type_name, entries: vec![], reason: e },
+        Err(e) => {
+            return CapturedValue::Map {
+                key_type: key_type_name,
+                value_type: val_type_name,
+                entries: vec![],
+                reason: e,
+            }
+        }
     };
 
     // Swiss Table detection heuristic:
@@ -194,7 +208,10 @@ pub fn read_go_map(
     if entries.is_empty() {
         detrix_logging::warn!(
             "[map_iter] read_go_map map={:#x} pid={} returned empty entries (key={} val={})",
-            map_ptr, pid, key_type_name, val_type_name
+            map_ptr,
+            pid,
+            key_type_name,
+            val_type_name
         );
     }
 
@@ -355,8 +372,10 @@ fn read_table(
         return Err(format!("table header too short: {} bytes", hdr.len()));
     }
 
-    let groups_data = le_bytes_to_u64(&hdr[16..24]).map_err(|e| format!("table groups_data: {e}"))?;
-    let length_mask = le_bytes_to_u64(&hdr[24..32]).map_err(|e| format!("table length_mask: {e}"))?;
+    let groups_data =
+        le_bytes_to_u64(&hdr[16..24]).map_err(|e| format!("table groups_data: {e}"))?;
+    let length_mask =
+        le_bytes_to_u64(&hdr[24..32]).map_err(|e| format!("table length_mask: {e}"))?;
     let num_groups = length_mask.wrapping_add(1);
 
     if groups_data == 0 {
@@ -689,8 +708,8 @@ fn read_classic_map_inner(
     let count = le_bytes_to_i64(&header[0..8]).map_err(|e| format!("hmap count: {e}"))?;
     let b = header[9] as u64;
     let buckets_ptr = le_bytes_to_u64(&header[16..24]).map_err(|e| format!("hmap buckets: {e}"))?;
-    let oldbuckets_ptr = le_bytes_to_u64(&header[24..32])
-        .map_err(|e| format!("hmap oldbuckets: {e}"))?;
+    let oldbuckets_ptr =
+        le_bytes_to_u64(&header[24..32]).map_err(|e| format!("hmap oldbuckets: {e}"))?;
 
     detrix_logging::debug!(
         "[map_iter] classic map={:#x} pid={} count={} B={} buckets={:#x} oldbuckets={:#x} header={:02x?}",
@@ -933,10 +952,8 @@ fn read_classic_bucket(
             let key_addr = bucket_addr + keys_offset + slot * key_size;
             let val_addr = bucket_addr + vals_offset + slot * val_size;
 
-            let key_val =
-                read_slot_value(key_addr, key_nested, key_size, config, mem_reader, pid);
-            let val_val =
-                read_slot_value(val_addr, val_nested, val_size, config, mem_reader, pid);
+            let key_val = read_slot_value(key_addr, key_nested, key_size, config, mem_reader, pid);
+            let val_val = read_slot_value(val_addr, val_nested, val_size, config, mem_reader, pid);
             entries.push((key_val, val_val));
         }
 
@@ -1074,9 +1091,9 @@ mod tests {
         classic_no_grow[0..8].copy_from_slice(&2i64.to_le_bytes()); // count = 2
         classic_no_grow[8] = 0; // flags = 0 (no iterator)
         classic_no_grow[9] = 1; // B = 1 (2 buckets)
-        // bytes 10-11: noverflow = 0
+                                // bytes 10-11: noverflow = 0
         classic_no_grow[16..24].copy_from_slice(&0x9000u64.to_le_bytes()); // buckets pointer
-        // bytes 24-32: oldbuckets = 0 (no growth) — same as dirLen=0 in Swiss
+                                                                           // bytes 24-32: oldbuckets = 0 (no growth) — same as dirLen=0 in Swiss
         reader.put(0x7000, classic_no_grow);
 
         // Should be detected as classic (flags=0 < 16 AND B=1 < 32)
@@ -1192,21 +1209,21 @@ mod tests {
         let mut entries = Vec::new();
         let result = read_classic_bucket(
             0x30000,
-            144,   // bucket_size
-            8,     // keys_offset
-            72,    // vals_offset (8 + 8*8 = 72)
-            136,   // overflow_offset (72 + 8*8 = 136)
-            8,     // key_size
-            8,     // val_size
-            None,  // key_nested
-            None,  // val_nested
+            144,  // bucket_size
+            8,    // keys_offset
+            72,   // vals_offset (8 + 8*8 = 72)
+            136,  // overflow_offset (72 + 8*8 = 136)
+            8,    // key_size
+            8,    // val_size
+            None, // key_nested
+            None, // val_nested
             &CaptureConfig::default(),
             &reader,
             1234,
-            1,     // hash_tophash_empty_one
-            5,     // hash_min_tophash
+            1, // hash_tophash_empty_one
+            5, // hash_min_tophash
             &mut entries,
-            64,    // max_entries
+            64, // max_entries
         );
         // Function should succeed (not panic, not return bool)
         assert!(result.is_ok());

@@ -167,9 +167,7 @@ impl EbpfConfig {
         }
 
         if self.string_capture_bytes == 0 {
-            errors.push(
-                "ebpf.string_capture_bytes must be > 0".to_string(),
-            );
+            errors.push("ebpf.string_capture_bytes must be > 0".to_string());
         } else if !self.string_capture_bytes.is_multiple_of(8) {
             errors.push(format!(
                 "ebpf.string_capture_bytes must be a multiple of 8 for struct alignment, got {}",
@@ -177,9 +175,8 @@ impl EbpfConfig {
             ));
         }
         if self.string_capture_bytes > 255 {
-            errors.push(
-                "ebpf.string_capture_bytes must be <= 255 (BPF verifier bound)".to_string(),
-            );
+            errors
+                .push("ebpf.string_capture_bytes must be <= 255 (BPF verifier bound)".to_string());
         }
 
         if self.blob_capture_bytes == 0 {

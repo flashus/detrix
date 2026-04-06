@@ -73,7 +73,9 @@ impl ProcessMemoryReader for LinuxProcessMemoryReader {
 
         detrix_logging::debug!(
             "[mem_reader] Reading string from pid={}: ptr={:#x} len={}",
-            pid, ptr, len
+            pid,
+            ptr,
+            len
         );
 
         // Limit read size to prevent excessive memory access

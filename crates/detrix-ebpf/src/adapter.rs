@@ -29,8 +29,8 @@ use crate::probe::types::{CaptureConfig, CapturedValue};
 use crate::probe::UprobeManager;
 
 use async_trait::async_trait;
-use detrix_ports::{DapAdapter, RemoveMetricResult, SetMetricResult};
 use detrix_core::{ExpressionValue, Metric, MetricEvent, MetricId, TypedValue};
+use detrix_ports::{DapAdapter, RemoveMetricResult, SetMetricResult};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -245,18 +245,27 @@ impl DapAdapter for EbpfAdapter {
 
         detrix_logging::debug!(
             "[EbpfAdapter] set_metric: name={} file={} line={} expressions={:?}",
-            metric.name, metric.location.file, metric.location.line, metric.expressions
+            metric.name,
+            metric.location.file,
+            metric.location.line,
+            metric.expressions
         );
 
-        let probe_point = dwarf.resolve_probe_point(
-            &metric.location.file,
-            metric.location.line,
-            &metric.expressions,
-            self.capture_config.max_capture_depth,
-        ).map_err(|e| {
-            detrix_logging::error!("[EbpfAdapter] resolve_probe_point failed for '{}': {}", metric.name, e);
-            detrix_core::Error::Adapter(format!("DWARF resolution failed: {e}"))
-        })?;
+        let probe_point = dwarf
+            .resolve_probe_point(
+                &metric.location.file,
+                metric.location.line,
+                &metric.expressions,
+                self.capture_config.max_capture_depth,
+            )
+            .map_err(|e| {
+                detrix_logging::error!(
+                    "[EbpfAdapter] resolve_probe_point failed for '{}': {}",
+                    metric.name,
+                    e
+                );
+                detrix_core::Error::Adapter(format!("DWARF resolution failed: {e}"))
+            })?;
 
         detrix_logging::debug!(
             "[EbpfAdapter] resolved probe_point: pc={:#x} function={} variables={} symbol_offset={:#x}",
@@ -265,7 +274,9 @@ impl DapAdapter for EbpfAdapter {
         for var in &probe_point.variables {
             detrix_logging::debug!(
                 "[EbpfAdapter]   variable: name={} type={} location={:?}",
-                var.name, var.type_name, var.location
+                var.name,
+                var.type_name,
+                var.location
             );
         }
 
@@ -274,7 +285,11 @@ impl DapAdapter for EbpfAdapter {
             .await
             .attach(&metric.name, &probe_point)
             .map_err(|e| {
-                detrix_logging::error!("[EbpfAdapter] uprobe attach failed for '{}': {}", metric.name, e);
+                detrix_logging::error!(
+                    "[EbpfAdapter] uprobe attach failed for '{}': {}",
+                    metric.name,
+                    e
+                );
                 detrix_core::Error::Adapter(e.to_string())
             })?;
 

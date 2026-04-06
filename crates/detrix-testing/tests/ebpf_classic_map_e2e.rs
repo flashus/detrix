@@ -46,7 +46,10 @@ async fn test_ebpf_classic_map_order_with_map() {
     let mut executor = TestExecutor::new();
 
     reporter.section("PHASE 1: START DAEMON");
-    let step = reporter.step_start("Start Daemon", "detrix serve (EbpfGoFactory active on Linux)");
+    let step = reporter.step_start(
+        "Start Daemon",
+        "detrix serve (EbpfGoFactory active on Linux)",
+    );
     if let Err(e) = executor.start_daemon().await {
         reporter.step_failed(step, &e.to_string());
         panic!("Failed to start daemon: {e}");
@@ -54,9 +57,8 @@ async fn test_ebpf_classic_map_order_with_map() {
     reporter.step_success(step, Some(&format!("HTTP port: {}", executor.http_port)));
 
     reporter.section("PHASE 2: START GO FIXTURE");
-    let fixture_binary = env::var("GO_FIXTURE_BINARY").unwrap_or_else(|_| {
-        "fixtures/go/classic_map/classic_map".to_string()
-    });
+    let fixture_binary = env::var("GO_FIXTURE_BINARY")
+        .unwrap_or_else(|_| "fixtures/go/classic_map/classic_map".to_string());
     let step = reporter.step_start("Start Go Fixture", &fixture_binary);
     let app = start_fixture(&fixture_binary);
     sleep(FIXTURE_START_WAIT).await;
@@ -79,7 +81,10 @@ async fn test_ebpf_classic_map_order_with_map() {
     });
 
     let conn_resp: serde_json::Value = http
-        .post(format!("http://127.0.0.1:{}/api/v1/connections", executor.http_port))
+        .post(format!(
+            "http://127.0.0.1:{}/api/v1/connections",
+            executor.http_port
+        ))
         .json(&conn_req)
         .send()
         .await
@@ -102,9 +107,8 @@ async fn test_ebpf_classic_map_order_with_map() {
     sleep(ADAPTER_START_WAIT).await;
 
     reporter.section("PHASE 4: ADD METRIC");
-    let fixture_source = env::var("GO_FIXTURE_SOURCE").unwrap_or_else(|_| {
-        "fixtures/go/classic_map/main.go".to_string()
-    });
+    let fixture_source = env::var("GO_FIXTURE_SOURCE")
+        .unwrap_or_else(|_| "fixtures/go/classic_map/main.go".to_string());
     let line = go_classic_lines::CODEMAP.find_logpoint("order");
     let location = format!("@{fixture_source}#{line}");
 
@@ -120,7 +124,10 @@ async fn test_ebpf_classic_map_order_with_map() {
 
     let step = reporter.step_start("Add Metric", &format!("order at main.go#{}", line));
     let metric_resp: serde_json::Value = http
-        .post(format!("http://127.0.0.1:{}/api/v1/metrics", executor.http_port))
+        .post(format!(
+            "http://127.0.0.1:{}/api/v1/metrics",
+            executor.http_port
+        ))
         .json(&metric_req)
         .send()
         .await
@@ -135,7 +142,9 @@ async fn test_ebpf_classic_map_order_with_map() {
         panic!("Failed to add metric: {metric_resp}");
     }
 
-    let metric_id = metric_resp["metricId"].as_u64().expect("No metricId in response");
+    let metric_id = metric_resp["metricId"]
+        .as_u64()
+        .expect("No metricId in response");
     reporter.step_success(step, Some(&format!("metricId={metric_id}")));
 
     reporter.section("PHASE 5: COLLECT EVENTS");
@@ -163,7 +172,11 @@ async fn test_ebpf_classic_map_order_with_map() {
         .await
         .expect("Event query failed");
 
-    assert!(resp.status().is_success(), "Event query failed: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "Event query failed: {}",
+        resp.status()
+    );
 
     let events: Vec<serde_json::Value> = resp.json().await.expect("Failed to parse response");
 
@@ -296,9 +309,8 @@ async fn test_ebpf_classic_map_nil_map() {
     reporter.step_success(step, Some(&format!("HTTP port: {}", executor.http_port)));
 
     reporter.section("PHASE 2: START GO FIXTURE");
-    let fixture_binary = env::var("GO_FIXTURE_BINARY").unwrap_or_else(|_| {
-        "fixtures/go/classic_map/classic_map".to_string()
-    });
+    let fixture_binary = env::var("GO_FIXTURE_BINARY")
+        .unwrap_or_else(|_| "fixtures/go/classic_map/classic_map".to_string());
     let step = reporter.step_start("Start Go Fixture", &fixture_binary);
     let app = start_fixture(&fixture_binary);
     sleep(FIXTURE_START_WAIT).await;
@@ -306,7 +318,10 @@ async fn test_ebpf_classic_map_nil_map() {
 
     reporter.section("PHASE 3: REGISTER CONNECTION");
     let http = reqwest::Client::new();
-    let step = reporter.step_start("Create Connection", &format!("host={fixture_binary}, language=go"));
+    let step = reporter.step_start(
+        "Create Connection",
+        &format!("host={fixture_binary}, language=go"),
+    );
 
     let conn_req = serde_json::json!({
         "host": fixture_binary,
@@ -318,7 +333,10 @@ async fn test_ebpf_classic_map_nil_map() {
     });
 
     let conn_resp: serde_json::Value = http
-        .post(format!("http://127.0.0.1:{}/api/v1/connections", executor.http_port))
+        .post(format!(
+            "http://127.0.0.1:{}/api/v1/connections",
+            executor.http_port
+        ))
         .json(&conn_req)
         .send()
         .await
@@ -341,9 +359,8 @@ async fn test_ebpf_classic_map_nil_map() {
     sleep(ADAPTER_START_WAIT).await;
 
     reporter.section("PHASE 4: ADD METRIC");
-    let fixture_source = env::var("GO_FIXTURE_SOURCE").unwrap_or_else(|_| {
-        "fixtures/go/classic_map/main.go".to_string()
-    });
+    let fixture_source = env::var("GO_FIXTURE_SOURCE")
+        .unwrap_or_else(|_| "fixtures/go/classic_map/main.go".to_string());
     let line = go_classic_lines::CODEMAP.find_logpoint("nilMap");
     let location = format!("@{fixture_source}#{line}");
 
@@ -358,7 +375,10 @@ async fn test_ebpf_classic_map_nil_map() {
 
     let step = reporter.step_start("Add Metric", &format!("nilMap at main.go#{}", line));
     let metric_resp: serde_json::Value = http
-        .post(format!("http://127.0.0.1:{}/api/v1/metrics", executor.http_port))
+        .post(format!(
+            "http://127.0.0.1:{}/api/v1/metrics",
+            executor.http_port
+        ))
         .json(&metric_req)
         .send()
         .await
@@ -373,7 +393,9 @@ async fn test_ebpf_classic_map_nil_map() {
         panic!("Failed to add metric: {metric_resp}");
     }
 
-    let metric_id = metric_resp["metricId"].as_u64().expect("No metricId in response");
+    let metric_id = metric_resp["metricId"]
+        .as_u64()
+        .expect("No metricId in response");
     reporter.step_success(step, Some(&format!("metricId={metric_id}")));
 
     reporter.section("PHASE 5: COLLECT EVENTS");
@@ -401,7 +423,11 @@ async fn test_ebpf_classic_map_nil_map() {
         .await
         .expect("Event query failed");
 
-    assert!(resp.status().is_success(), "Event query failed: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "Event query failed: {}",
+        resp.status()
+    );
 
     let events: Vec<serde_json::Value> = resp.json().await.expect("Failed to parse response");
 
@@ -487,7 +513,10 @@ async fn test_ebpf_classic_map_nil_map() {
 #[ignore = "requires Go < 1.24 fixture and CAP_BPF — run via: task test-ebpf-classic-inject"]
 async fn test_ebpf_classic_map_iteration_int() {
     // Smoke test: capture a plain int variable to verify uprobe mechanism works
-    let reporter = TestReporter::new("eBPF Classic Map — Iteration Int (smoke test)", "EbpfAdapter");
+    let reporter = TestReporter::new(
+        "eBPF Classic Map — Iteration Int (smoke test)",
+        "EbpfAdapter",
+    );
     reporter.print_header();
 
     let mut executor = TestExecutor::new();
@@ -501,9 +530,8 @@ async fn test_ebpf_classic_map_iteration_int() {
     reporter.step_success(step, Some(&format!("HTTP port: {}", executor.http_port)));
 
     reporter.section("PHASE 2: START GO FIXTURE");
-    let fixture_binary = env::var("GO_FIXTURE_BINARY").unwrap_or_else(|_| {
-        "fixtures/go/classic_map/classic_map".to_string()
-    });
+    let fixture_binary = env::var("GO_FIXTURE_BINARY")
+        .unwrap_or_else(|_| "fixtures/go/classic_map/classic_map".to_string());
     let step = reporter.step_start("Start Go Fixture", &fixture_binary);
     let app = start_fixture(&fixture_binary);
     sleep(FIXTURE_START_WAIT).await;
@@ -511,7 +539,10 @@ async fn test_ebpf_classic_map_iteration_int() {
 
     reporter.section("PHASE 3: REGISTER CONNECTION");
     let http = reqwest::Client::new();
-    let step = reporter.step_start("Create Connection", &format!("host={fixture_binary}, language=go"));
+    let step = reporter.step_start(
+        "Create Connection",
+        &format!("host={fixture_binary}, language=go"),
+    );
 
     let conn_req = serde_json::json!({
         "host": fixture_binary,
@@ -523,7 +554,10 @@ async fn test_ebpf_classic_map_iteration_int() {
     });
 
     let conn_resp: serde_json::Value = http
-        .post(format!("http://127.0.0.1:{}/api/v1/connections", executor.http_port))
+        .post(format!(
+            "http://127.0.0.1:{}/api/v1/connections",
+            executor.http_port
+        ))
         .json(&conn_req)
         .send()
         .await
@@ -546,9 +580,8 @@ async fn test_ebpf_classic_map_iteration_int() {
     sleep(ADAPTER_START_WAIT).await;
 
     reporter.section("PHASE 4: ADD METRIC");
-    let fixture_source = env::var("GO_FIXTURE_SOURCE").unwrap_or_else(|_| {
-        "fixtures/go/classic_map/main.go".to_string()
-    });
+    let fixture_source = env::var("GO_FIXTURE_SOURCE")
+        .unwrap_or_else(|_| "fixtures/go/classic_map/main.go".to_string());
     let line = go_classic_lines::CODEMAP.find_logpoint("iteration");
     let location = format!("@{fixture_source}#{line}");
 
@@ -563,7 +596,10 @@ async fn test_ebpf_classic_map_iteration_int() {
 
     let step = reporter.step_start("Add Metric", &format!("iteration at main.go#{}", line));
     let metric_resp: serde_json::Value = http
-        .post(format!("http://127.0.0.1:{}/api/v1/metrics", executor.http_port))
+        .post(format!(
+            "http://127.0.0.1:{}/api/v1/metrics",
+            executor.http_port
+        ))
         .json(&metric_req)
         .send()
         .await
@@ -578,7 +614,9 @@ async fn test_ebpf_classic_map_iteration_int() {
         panic!("Failed to add metric: {metric_resp}");
     }
 
-    let metric_id = metric_resp["metricId"].as_u64().expect("No metricId in response");
+    let metric_id = metric_resp["metricId"]
+        .as_u64()
+        .expect("No metricId in response");
     reporter.step_success(step, Some(&format!("metricId={metric_id}")));
 
     reporter.section("PHASE 5: COLLECT EVENTS");
@@ -606,7 +644,11 @@ async fn test_ebpf_classic_map_iteration_int() {
         .await
         .expect("Event query failed");
 
-    assert!(resp.status().is_success(), "Event query failed: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "Event query failed: {}",
+        resp.status()
+    );
 
     let events: Vec<serde_json::Value> = resp.json().await.expect("Failed to parse response");
 
@@ -629,7 +671,9 @@ async fn test_ebpf_classic_map_iteration_int() {
             .get("valueJson")
             .and_then(|v| v.as_str())
             .unwrap_or("null");
-        reporter.info(&format!("Event[{idx}] iteration valueJson: {value_json_str}"));
+        reporter.info(&format!(
+            "Event[{idx}] iteration valueJson: {value_json_str}"
+        ));
 
         let value_json: serde_json::Value =
             serde_json::from_str(value_json_str).expect("valueJson must be valid JSON");

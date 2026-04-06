@@ -351,9 +351,7 @@ fn populate_ns_info(ebpf: &mut aya::Ebpf) {
     };
 
     match array.set(0, [dev, ino], 0) {
-        Ok(()) => detrix_logging::debug!(
-            "[uprobe] PID namespace info set: dev={dev} ino={ino}"
-        ),
+        Ok(()) => detrix_logging::debug!("[uprobe] PID namespace info set: dev={dev} ino={ino}"),
         Err(e) => detrix_logging::warn!("[uprobe] Failed to set DETRIX_NS_INFO: {e}"),
     }
 }

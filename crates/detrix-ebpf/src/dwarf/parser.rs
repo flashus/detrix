@@ -810,9 +810,9 @@ fn upgrade_location_for_type(
     // ── Multi-piece: Go register ABI composite types ──────────────────────────
     if locations.len() == 2 && type_info.is_string {
         // Guarded by len() == 2 above — pattern match eliminates unwrap.
-        let [ptr, len]: [VariableLocation; 2] = locations.try_into().unwrap_or_else(|_| {
-            unreachable!("len() == 2 guarantees exactly 2 elements")
-        });
+        let [ptr, len]: [VariableLocation; 2] = locations
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("len() == 2 guarantees exactly 2 elements"));
         return VariableLocation::GoString {
             ptr: Box::new(ptr),
             len: Box::new(len),
@@ -820,9 +820,9 @@ fn upgrade_location_for_type(
     }
     if locations.len() == 3 && type_info.is_slice {
         // Guarded by len() == 3 above — pattern match eliminates unwrap.
-        let [ptr, len, cap]: [VariableLocation; 3] = locations.try_into().unwrap_or_else(|_| {
-            unreachable!("len() == 3 guarantees exactly 3 elements")
-        });
+        let [ptr, len, cap]: [VariableLocation; 3] = locations
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("len() == 3 guarantees exactly 3 elements"));
         return VariableLocation::GoSlice {
             ptr: Box::new(ptr),
             len: Box::new(len),
