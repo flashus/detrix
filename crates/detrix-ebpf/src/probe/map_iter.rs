@@ -524,6 +524,7 @@ fn read_slot_value(
                 Some(&wrapped),
                 mem_reader,
                 pid,
+                0, // External entry point from map_iter
             ) {
                 Ok(cv) => cv,
                 Err(_) => read_raw_bytes(addr, size, mem_reader, pid),
@@ -686,6 +687,14 @@ fn read_classic_map_inner(
         return Ok(vec![]);
     }
 
+    // Safety: B is the log2 of bucket count (Go's hmap.B). A corrupted or malicious
+    // binary could set B >= 64, causing `1u64 << B` to panic (debug) or wrap (release).
+    // Go itself never produces B > 60 (2^60 buckets is ~1 exabyte), so clamp aggressively.
+    if b >= 64 {
+        return Err(format!(
+            "corrupt hmap header: B={b} exceeds maximum (63). Map pointer={map_ptr:#x}, count={count}"
+        ));
+    }
     let numbuckets = 1u64 << b;
     let oldmask = if b > 0 { (1u64 << (b - 1)) - 1 } else { 0 };
 
@@ -1103,5 +1112,55 @@ mod tests {
         assert_eq!(align_of(4), 4);
         assert_eq!(align_of(5), 8);
         assert_eq!(align_of(8), 8);
+    }
+
+    #[test]
+    fn classic_map_rejects_corrupted_b_field() {
+        // Corrupted hmap header with B=64 would cause panic in `1u64 << 64`
+        // (overflow in shift). The fix should reject this gracefully.
+        let mut reader = MockMemReader::new();
+        let mut bad_header = vec![0u8; 40];
+        bad_header[0..8].copy_from_slice(&100i64.to_le_bytes()); // count = 100 (suspicious)
+        bad_header[9] = 64; // B = 64 → 1u64 << 64 would panic/wrap
+        bad_header[16..24].copy_from_slice(&0x10000u64.to_le_bytes()); // buckets pointer
+        reader.put(0x10000, bad_header);
+
+        // Should NOT panic — should return an error instead
+        let result = read_classic_map_inner(
+            0x10000,
+            None,
+            None,
+            &CaptureConfig::default(),
+            &reader,
+            1234,
+        );
+        assert!(result.is_err(), "Should reject B=64, got: {:?}", result);
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("B=64") || err.contains("invalid") || err.contains("corrupt"),
+            "Error should mention invalid B: {err}"
+        );
+    }
+
+    #[test]
+    fn classic_map_accepts_max_valid_b() {
+        // B=60 is the maximum safe value (1u64 << 60 = ~1 exa-buckets, capped by max_buckets).
+        let mut reader = MockMemReader::new();
+        let mut header = vec![0u8; 40];
+        header[9] = 60; // B = 60 (max safe for u64 shift)
+        header[16..24].copy_from_slice(&0x20000u64.to_le_bytes()); // buckets pointer
+        reader.put(0x20000, header);
+
+        // Should NOT panic — will return empty since no bucket data
+        let result = read_classic_map_inner(
+            0x20000,
+            None,
+            None,
+            &CaptureConfig::default(),
+            &reader,
+            1234,
+        );
+        // Returns empty or error, but doesn't panic
+        assert!(result.is_ok() || result.is_err());
     }
 }

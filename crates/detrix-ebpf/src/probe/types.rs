@@ -92,6 +92,53 @@ impl From<&detrix_config::EbpfConfig> for CaptureConfig {
     }
 }
 
+impl CaptureConfig {
+    /// Validate runtime capture config constraints.
+    ///
+    /// Returns a list of error strings. Empty means valid.
+    /// This mirrors `EbpfConfig::validate()` but operates on the runtime type.
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        if self.max_capture_vars == 0 {
+            errors.push("max_capture_vars must be >= 1".to_string());
+        }
+        if self.max_capture_vars > 16 {
+            errors.push("max_capture_vars must be <= 16 (BPF stack limit)".to_string());
+        }
+        if self.max_string_capture == 0 {
+            errors.push("max_string_capture must be > 0".to_string());
+        } else if self.max_string_capture % 8 != 0 {
+            errors.push(format!(
+                "max_string_capture must be a multiple of 8, got {}",
+                self.max_string_capture
+            ));
+        }
+        if self.max_string_capture > 255 {
+            errors.push("max_string_capture must be <= 255 (BPF verifier bound)".to_string());
+        }
+        if self.max_blob_capture == 0 {
+            errors.push("max_blob_capture must be > 0".to_string());
+        } else if self.max_blob_capture % 8 != 0 {
+            errors.push(format!(
+                "max_blob_capture must be a multiple of 8, got {}",
+                self.max_blob_capture
+            ));
+        }
+        if self.max_capture_depth > 32 {
+            errors.push(format!(
+                "max_capture_depth must be <= 32, got {}",
+                self.max_capture_depth
+            ));
+        }
+        if self.max_array_values == 0 {
+            errors.push("max_array_values must be >= 1".to_string());
+        }
+
+        errors
+    }
+}
+
 /// Raw captured value from a single BPF read.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CapturedValue {

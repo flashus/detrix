@@ -857,15 +857,10 @@ fn upgrade_location_for_type(
                 }),
             };
         }
-    } else if type_info.is_map {
+    } else if type_info.is_map || type_info.name.starts_with("map[") {
         // Go map: single pointer to hmap (classic) or Map (Swiss Table).
         // Wrap in GoMap so the ringbuf parser knows to iterate the map.
-        return VariableLocation::GoMap {
-            ptr: Box::new(location),
-        };
-    } else if type_info.name.starts_with("map[") {
-        // Go map: single pointer to hmap (classic) or Map (Swiss Table).
-        // Wrap in GoMap so the ringbuf parser knows to iterate the map.
+        // Detection: go_kind=21 (DWARF) or name prefix "map[" (fallback for stripped DWARF).
         return VariableLocation::GoMap {
             ptr: Box::new(location),
         };

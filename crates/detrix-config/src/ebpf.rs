@@ -138,3 +138,263 @@ impl Default for EbpfConfig {
         }
     }
 }
+
+impl EbpfConfig {
+    /// Validate all configuration constraints.
+    ///
+    /// Returns a list of human-readable error strings. An empty list means valid.
+    ///
+    /// # Validated constraints
+    ///
+    /// - `max_capture_vars` must be ≥ 1 and ≤ 16 (BPF stack limit)
+    /// - `string_capture_bytes` must be a multiple of 8 and ≤ 255 (BPF buffer cap)
+    /// - `blob_capture_bytes` must be a multiple of 8
+    /// - `max_capture_depth` must be ≤ 32 (matches `MAX_DEPTH` in ringbuf parser)
+    /// - `max_array_values` must be ≥ 1
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        if self.max_capture_vars == 0 {
+            errors.push(
+                "ebpf.max_capture_vars must be >= 1 (at least one variable required)".to_string(),
+            );
+        }
+        if self.max_capture_vars > 16 {
+            errors.push(
+                "ebpf.max_capture_vars must be <= 16 (higher values may exceed BPF stack limits)"
+                    .to_string(),
+            );
+        }
+
+        if self.string_capture_bytes == 0 {
+            errors.push(
+                "ebpf.string_capture_bytes must be > 0".to_string(),
+            );
+        } else if !self.string_capture_bytes.is_multiple_of(8) {
+            errors.push(format!(
+                "ebpf.string_capture_bytes must be a multiple of 8 for struct alignment, got {}",
+                self.string_capture_bytes
+            ));
+        }
+        if self.string_capture_bytes > 255 {
+            errors.push(
+                "ebpf.string_capture_bytes must be <= 255 (BPF verifier bound)".to_string(),
+            );
+        }
+
+        if self.blob_capture_bytes == 0 {
+            errors.push("ebpf.blob_capture_bytes must be > 0".to_string());
+        } else if !self.blob_capture_bytes.is_multiple_of(8) {
+            errors.push(format!(
+                "ebpf.blob_capture_bytes must be a multiple of 8 for struct alignment, got {}",
+                self.blob_capture_bytes
+            ));
+        }
+
+        if self.max_capture_depth > 32 {
+            errors.push(format!(
+                "ebpf.max_capture_depth must be <= 32 (hard safety cap), got {}",
+                self.max_capture_depth
+            ));
+        }
+
+        if self.max_array_values == 0 {
+            errors.push(
+                "ebpf.max_array_values must be >= 1 (at least one element required)".to_string(),
+            );
+        }
+
+        // max_struct_fields: -1 means "all", any positive value is valid, 0 is questionable
+        // but not invalid — it just means "capture no fields", which is a valid (if unusual) config.
+
+        errors
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_valid() {
+        let config = EbpfConfig::default();
+        let errors = config.validate();
+        assert!(
+            errors.is_empty(),
+            "Default config should be valid, but got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_capture_vars() {
+        let config = EbpfConfig {
+            max_capture_vars: 0,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("max_capture_vars")));
+    }
+
+    #[test]
+    fn validate_rejects_excessive_capture_vars() {
+        let config = EbpfConfig {
+            max_capture_vars: 17,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("max_capture_vars")));
+    }
+
+    #[test]
+    fn validate_accepts_max_capture_vars_at_boundary() {
+        let config = EbpfConfig {
+            max_capture_vars: 16,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        assert!(errors.iter().all(|e| !e.contains("max_capture_vars")));
+    }
+
+    #[test]
+    fn validate_rejects_non_aligned_string_capture_bytes() {
+        let config = EbpfConfig {
+            string_capture_bytes: 7,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("string_capture_bytes")));
+        assert!(errors.iter().any(|e| e.contains("multiple of 8")));
+    }
+
+    #[test]
+    fn validate_rejects_zero_string_capture_bytes() {
+        let config = EbpfConfig {
+            string_capture_bytes: 0,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("string_capture_bytes")));
+    }
+
+    #[test]
+    fn validate_rejects_string_capture_bytes_over_255() {
+        let config = EbpfConfig {
+            string_capture_bytes: 256,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("255")));
+    }
+
+    #[test]
+    fn validate_accepts_aligned_string_capture_bytes() {
+        let config = EbpfConfig {
+            string_capture_bytes: 64,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        assert!(errors.iter().all(|e| !e.contains("string_capture_bytes")));
+    }
+
+    #[test]
+    fn validate_rejects_non_aligned_blob_capture_bytes() {
+        let config = EbpfConfig {
+            blob_capture_bytes: 100,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("blob_capture_bytes")));
+        assert!(errors.iter().any(|e| e.contains("multiple of 8")));
+    }
+
+    #[test]
+    fn validate_rejects_excessive_capture_depth() {
+        let config = EbpfConfig {
+            max_capture_depth: 33,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("max_capture_depth")));
+        assert!(errors.iter().any(|e| e.contains("32")));
+    }
+
+    #[test]
+    fn validate_accepts_max_capture_depth_at_boundary() {
+        let config = EbpfConfig {
+            max_capture_depth: 32,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        assert!(errors.iter().all(|e| !e.contains("max_capture_depth")));
+    }
+
+    #[test]
+    fn validate_rejects_zero_array_values() {
+        let config = EbpfConfig {
+            max_array_values: 0,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("max_array_values")));
+    }
+
+    #[test]
+    fn validate_accepts_all_struct_fields() {
+        let config = EbpfConfig {
+            max_struct_fields: -1,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        assert!(errors.iter().all(|e| !e.contains("max_struct_fields")));
+    }
+
+    #[test]
+    fn validate_accepts_zero_struct_fields() {
+        // Zero fields is unusual but valid — just captures no fields
+        let config = EbpfConfig {
+            max_struct_fields: 0,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        assert!(errors.iter().all(|e| !e.contains("max_struct_fields")));
+    }
+
+    #[test]
+    fn validate_collects_multiple_errors() {
+        let config = EbpfConfig {
+            max_capture_vars: 0,
+            string_capture_bytes: 7,
+            blob_capture_bytes: 0,
+            max_capture_depth: 100,
+            max_array_values: 0,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        // Should have errors for all 5 invalid fields
+        assert!(
+            errors.len() >= 5,
+            "Expected >= 5 errors, got {}: {:?}",
+            errors.len(),
+            errors
+        );
+    }
+
+    #[test]
+    fn validate_accepts_min_valid_config() {
+        let config = EbpfConfig {
+            max_capture_vars: 1,
+            string_capture_bytes: 8,
+            blob_capture_bytes: 8,
+            max_capture_depth: 0,
+            max_struct_fields: 0,
+            max_array_values: 1,
+        };
+        let errors = config.validate();
+        assert!(
+            errors.is_empty(),
+            "Minimum valid config should pass, but got: {:?}",
+            errors
+        );
+    }
+}
