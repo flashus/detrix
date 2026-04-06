@@ -832,18 +832,16 @@ fn try_resolve_go_map_component<R: Reader>(
                 }
             }
             // Try one more hop (typedef → pointer → struct)
-            if let Some(inner_attr) = typedef_entry.attr_value(DwAt(gimli::constants::DW_AT_type.0))
+            if let Some(AttributeValue::UnitRef(inner_offset)) =
+                typedef_entry.attr_value(DwAt(gimli::constants::DW_AT_type.0))
             {
-                if let AttributeValue::UnitRef(inner_offset) = inner_attr {
-                    let mut inner_cursor = unit.entries_at_offset(inner_offset).ok()?;
-                    let inner_entry = inner_cursor.next_dfs().ok()??;
-                    if let Some(val) = inner_entry.attr_value(attr) {
-                        if let Ok(nt) =
-                            resolve_nested_from_attr_value(val, unit, dwarf, config, depth)
-                        {
-                            if nt.type_info().name != "unknown" {
-                                return Some(nt);
-                            }
+                let mut inner_cursor = unit.entries_at_offset(inner_offset).ok()?;
+                let inner_entry = inner_cursor.next_dfs().ok()??;
+                if let Some(val) = inner_entry.attr_value(attr) {
+                    if let Ok(nt) = resolve_nested_from_attr_value(val, unit, dwarf, config, depth)
+                    {
+                        if nt.type_info().name != "unknown" {
+                            return Some(nt);
                         }
                     }
                 }

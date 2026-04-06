@@ -38,6 +38,9 @@ use tokio::sync::{mpsc, RwLock};
 #[cfg(target_os = "linux")]
 use tokio::task::JoinHandle;
 
+/// Type alias for raw ring buffer event channel receiver.
+type RawEventReceiver = mpsc::UnboundedReceiver<(String, Vec<u8>)>;
+
 /// eBPF-based adapter for Go logpoints on Linux.
 ///
 /// Implements the same `DapAdapter` trait as DAP-based adapters,
@@ -61,7 +64,7 @@ pub struct EbpfAdapter {
     event_rx: RwLock<Option<mpsc::Receiver<MetricEvent>>>,
     /// Raw ring buffer events from UprobeManager polling tasks (Linux only).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    raw_event_rx: RwLock<Option<mpsc::UnboundedReceiver<(String, Vec<u8>)>>>,
+    raw_event_rx: RwLock<Option<RawEventReceiver>>,
     /// Whether the adapter is Started.
     started: RwLock<bool>,
     /// Handle to the event correlator task (Linux only). Stored for graceful shutdown.

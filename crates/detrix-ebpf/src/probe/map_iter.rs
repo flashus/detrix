@@ -460,11 +460,10 @@ fn read_groups(
             }
         };
 
-        for s in 0..(SLOTS_PER_GROUP as usize) {
+        for (s, &cb) in ctrl.iter().enumerate().take(SLOTS_PER_GROUP as usize) {
             if entries.len() >= max_entries {
                 break;
             }
-            let cb = ctrl[s];
             if cb == CTRL_EMPTY || cb == CTRL_DELETED {
                 continue;
             }

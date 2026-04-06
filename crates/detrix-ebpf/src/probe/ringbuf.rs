@@ -1189,15 +1189,14 @@ fn is_struct_type(type_name: &str) -> bool {
 /// We use DWARF type info to read each field from user-space memory.
 ///
 /// This follows the same pattern as string capture:
-///
 /// 1. BPF captures base address from stack (as u64 in ring buffer)
 /// 2. User-space reads DWARF field offsets
 /// 3. User-space reads each field via
 ///    `process_vm_readv(base_addr + field_offset)`
-
+///
 /// Parse a single slice/array element based on its NestedType.
 ///
-/// Following Delve's `loadArrayValues` which creates a new variable for each
+/// Following Delve's `loadArrayValues`, which creates a new variable for each
 /// element and recursively loads its value with incremented recursion level.
 fn parse_slice_element(
     elem_addr: u64,
