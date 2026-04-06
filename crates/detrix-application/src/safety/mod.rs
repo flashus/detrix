@@ -224,7 +224,10 @@ impl ValidatorRegistry {
                 Ok(analysis) => match analysis.level {
                     detrix_core::PurityLevel::Pure => {
                         result.unknown_functions.remove(func_name);
-                        result.warnings.retain(|w| !w.contains(func_name));
+                        // Remove warnings specifically about this function (exact name match)
+                        result
+                            .warnings
+                            .retain(|w| !w.contains(&format!("'{func_name}'")));
                         tracing::debug!(func = %func_name, "LSP: resolved as pure");
                     }
                     detrix_core::PurityLevel::Impure => {
@@ -259,6 +262,10 @@ impl ValidatorRegistry {
         // Update overall purity level
         if result.unknown_functions.is_empty() && result.impure_functions.is_empty() {
             result.purity = detrix_core::PurityLevel::Pure;
+            result.is_safe = result.purity.is_safe();
+        } else if !result.impure_functions.is_empty() {
+            result.purity = detrix_core::PurityLevel::Impure;
+            result.is_safe = result.purity.is_safe();
         }
     }
 }

@@ -270,6 +270,10 @@ impl EventRepository for SqliteStorage {
 
         for chunk in metric_ids.chunks(CHUNK_SIZE) {
             let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+            // SAFETY: Dynamic SQL is necessary here because the number of metric IDs
+            // is only known at runtime. The query uses parameterized placeholders
+            // (no user-controlled string interpolation). sqlx validates the query
+            // structure at prepare time; only the IN clause length varies dynamically.
             let query = format!(
                 "SELECT metric_id, COUNT(*) as cnt, MAX(timestamp) as last_ts \
                  FROM metric_events WHERE metric_id IN ({}) GROUP BY metric_id",

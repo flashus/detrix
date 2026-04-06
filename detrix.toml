@@ -834,7 +834,18 @@ source_host = "detrix-local"
 # hot_reload_ttl_seconds = 60
 
 [ebpf]
-  max_capture_depth = 3
+# Maximum number of variables captured per uprobe hit (1-16)
+max_capture_vars = 8
+# Maximum string content bytes per Go string variable (multiple of 8, max 255)
+string_capture_bytes = 64
+# Maximum bytes for fixed-size arrays and struct blobs (multiple of 8)
+blob_capture_bytes = 256
+# Maximum recursion depth for nested type capture (0-32)
+max_capture_depth = 3
+# Maximum struct fields to capture per struct (-1 = all, >= 0 = limit)
+max_struct_fields = -1
+# Maximum array/slice/map elements to capture
+max_array_values = 64
 
 # ════════════════════════════════════════════════════════════════════════════
 # End of Configuration

@@ -201,8 +201,10 @@ impl EbpfConfig {
             );
         }
 
-        // max_struct_fields: -1 means "all", any positive value is valid, 0 is questionable
-        // but not invalid — it just means "capture no fields", which is a valid (if unusual) config.
+        // max_struct_fields: -1 means "all", >= 0 limits fields. Values < -1 are meaningless.
+        if self.max_struct_fields < -1 {
+            errors.push("ebpf.max_struct_fields must be -1 (all fields) or >= 0".to_string());
+        }
 
         errors
     }
@@ -324,6 +326,18 @@ mod tests {
         };
         let errors = config.validate();
         assert!(errors.iter().all(|e| !e.contains("max_capture_depth")));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_struct_fields() {
+        // Values < -1 are meaningless and should be rejected
+        let config = EbpfConfig {
+            max_struct_fields: -2,
+            ..EbpfConfig::default()
+        };
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("max_struct_fields")));
+        assert!(errors.iter().any(|e| e.contains("-1")));
     }
 
     #[test]

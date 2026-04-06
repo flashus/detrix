@@ -42,6 +42,28 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::time::sleep;
 
+/// Ensures fixture app is killed even on test panic.
+struct AppGuard {
+    app: Option<Child>,
+}
+impl AppGuard {
+    fn new(app: Child) -> Self {
+        Self { app: Some(app) }
+    }
+    #[allow(dead_code)]
+    fn disarm(&mut self) {
+        self.app = None;
+    }
+}
+impl Drop for AppGuard {
+    fn drop(&mut self) {
+        if let Some(mut app) = self.app.take() {
+            let _ = app.kill();
+            let _ = app.wait();
+        }
+    }
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// How long to wait for the Go fixture process to be fully running before attaching.
@@ -130,8 +152,9 @@ async fn test_ebpf_go_uprobe_captures_variables() {
         .stderr(Stdio::null())
         .spawn()
         .expect("Failed to start Go fixture — check GO_FIXTURE_BINARY");
-
     let fixture_pid = app.id();
+    // Guard ensures cleanup on panic; kept alive until end of scope
+    let _app_guard = AppGuard::new(app);
 
     // Brief pause so the Go runtime has fully started before uprobe attachment.
     sleep(FIXTURE_START_WAIT).await;
@@ -153,9 +176,9 @@ async fn test_ebpf_go_uprobe_captures_variables() {
 
     let conn_req = serde_json::json!({
         "host": fixture_binary,
-        // EbpfGoFactory ignores port on Linux (uses host as binary path instead).
-        // Pass the minimum unreserved port to satisfy domain validation (port >= 1024).
-        "port": 1024,
+        // Ignored by EbpfGoFactory — host is binary path, not a socket.
+        // Port must be >= 1024 to pass validation, but is unused for eBPF.
+        "port": 65535,
         "language": "go",
         "name": connection_name,
         "workspaceRoot": "/",
@@ -178,7 +201,6 @@ async fn test_ebpf_go_uprobe_captures_variables() {
     if conn_resp.get("error").is_some() || conn_resp.get("connectionId").is_none() {
         reporter.step_failed(step, &conn_resp.to_string());
         executor.print_daemon_logs(80);
-        kill_app(app);
         panic!("Create connection failed: {conn_resp}");
     }
 
@@ -230,7 +252,6 @@ async fn test_ebpf_go_uprobe_captures_variables() {
         None => {
             reporter.step_failed(step, &metric_resp.to_string());
             executor.print_daemon_logs(120);
-            kill_app(app);
             panic!("No metricId in response: {metric_resp}");
         }
     };
@@ -271,7 +292,6 @@ async fn test_ebpf_go_uprobe_captures_variables() {
         None => {
             reporter.step_failed(step, &label_concat_resp.to_string());
             executor.print_daemon_logs(120);
-            kill_app(app);
             panic!("No metricId in labelConcat response: {label_concat_resp}");
         }
     };
@@ -312,7 +332,6 @@ async fn test_ebpf_go_uprobe_captures_variables() {
         None => {
             reporter.step_failed(step, &label_sprintf_resp.to_string());
             executor.print_daemon_logs(120);
-            kill_app(app);
             panic!("No metricId in labelSprintf response: {label_sprintf_resp}");
         }
     };
@@ -366,8 +385,8 @@ async fn test_ebpf_go_uprobe_captures_variables() {
     // ── PHASE 6: Assertions ──────────────────────────────────────────────────
     reporter.section("PHASE 6: ASSERTIONS");
 
-    kill_app(app);
     executor.print_daemon_logs(100);
+    // app_guard Drop handles cleanup — no manual kill_app needed.
 
     // ── symbol + quantity metric ──────────────────────────────────────────────
     assert!(
@@ -505,12 +524,4 @@ async fn test_ebpf_go_uprobe_captures_variables() {
     reporter.step_success(step, Some(&format!("labelSprintf={label_sprintf_val:?}")));
 
     reporter.info("eBPF uprobe test PASSED — static strings, concatenation, and fmt.Sprintf all captured via ring buffer");
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Send SIGTERM to the app process (best-effort cleanup).
-fn kill_app(mut app: Child) {
-    let _ = app.kill();
-    let _ = app.wait();
 }

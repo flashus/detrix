@@ -64,7 +64,7 @@ impl MockPurityAnalyzer {
     pub fn with_pure(self, function_name: &str) -> Self {
         self.responses
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(function_name.to_string(), PurityAnalysis::pure());
         self
     }
@@ -74,14 +74,14 @@ impl MockPurityAnalyzer {
         let analysis = PurityAnalysis::impure(vec![ImpureCall::new(function_name, reason)]);
         self.responses
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(function_name.to_string(), analysis);
         self
     }
 
     /// Configure ensure_ready() to fail with an error.
     pub fn with_ready_error(self, error: &str) -> Self {
-        *self.ready_error.lock().unwrap() = Some(error.to_string());
+        *self.ready_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.to_string());
         self
     }
 
@@ -97,7 +97,10 @@ impl MockPurityAnalyzer {
 
     /// Get the list of function names that were analyzed.
     pub fn analyzed_functions(&self) -> Vec<String> {
-        self.analyzed_functions.lock().unwrap().clone()
+        self.analyzed_functions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -120,14 +123,18 @@ impl PurityAnalyzer for MockPurityAnalyzer {
         self.analyze_count.fetch_add(1, Ordering::SeqCst);
         self.analyzed_functions
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .push(function_name.to_string());
 
-        let responses = self.responses.lock().unwrap();
+        let responses = self.responses.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(analysis) = responses.get(function_name) {
             Ok(analysis.clone())
         } else {
-            Ok(self.default_response.lock().unwrap().clone())
+            Ok(self
+                .default_response
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone())
         }
     }
 
@@ -137,7 +144,12 @@ impl PurityAnalyzer for MockPurityAnalyzer {
 
     async fn ensure_ready(&self) -> Result<()> {
         self.ready_count.fetch_add(1, Ordering::SeqCst);
-        if let Some(err) = self.ready_error.lock().unwrap().as_ref() {
+        if let Some(err) = self
+            .ready_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             return Err(detrix_core::Error::Io(err.clone()));
         }
         self.ready.store(true, Ordering::SeqCst);

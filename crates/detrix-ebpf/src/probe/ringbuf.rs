@@ -30,9 +30,9 @@ const MIN_EVENT_SIZE: usize = 24;
 
 /// Hard safety cap on user-space parse recursion depth.
 ///
-/// Mirrors `MAX_DEPTH` in `dwarf::nested_types` (also 32). Prevents stack overflow
-/// from deeply nested pointer chains like `*mut *mut *mut ...` in malformed DWARF.
-const MAX_PARSE_DEPTH: usize = 32;
+/// Re-exported from `crate::dwarf::nested_types::MAX_DEPTH` — single source of truth (32).
+/// Prevents stack overflow from deeply nested pointer chains in malformed DWARF.
+use crate::dwarf::nested_types::MAX_DEPTH as MAX_PARSE_DEPTH;
 
 /// Read exactly N bytes from a slice as a native integer, returning an error
 /// instead of panicking on malformed input (e.g. truncated ring buffer events).
@@ -1549,11 +1549,15 @@ pub fn parse_struct_fields_from_addr(
                         elements.len()
                     );
 
-                    let elem_type = if field.type_info.slice_element_type.is_empty() {
-                        "unknown".to_string()
-                    } else {
-                        field.type_info.slice_element_type.clone()
-                    };
+                    // Use nested_type for element type if available, fallback to slice_element_type
+                    let elem_type =
+                        if let Some(NestedType::Array { element_type, .. }) = &field.nested_type {
+                            element_type.type_info().name.clone()
+                        } else if field.type_info.slice_element_type.is_empty() {
+                            "unknown".to_string()
+                        } else {
+                            field.type_info.slice_element_type.clone()
+                        };
 
                     CapturedValue::Struct {
                         type_name: format!("[]<{}>", elem_type),

@@ -62,7 +62,8 @@ use gimli::{AttributeValue, DebuggingInformationEntry, DwAt, Reader, Unit};
 
 /// Hard safety cap on recursion depth (prevents cycles and stack overflow).
 /// Always >= any user-configured max_capture_depth.
-const MAX_DEPTH: usize = 32;
+/// Shared with `probe::ringbuf::MAX_PARSE_DEPTH` — single source of truth.
+pub const MAX_DEPTH: usize = 32;
 
 /// Returns true for type tags that should be transparently followed (typedef chains).
 ///
@@ -616,8 +617,7 @@ fn resolve_slice_element_type<R: Reader>(
     depth: usize,
 ) -> Result<NestedType> {
     detrix_logging::debug!(
-        "[nested_types] Resolving slice element type for '{}' at offset {:?}",
-        read_die_name_string(entry, dwarf).unwrap_or_else(|| "unknown".to_string()),
+        "[nested_types] Resolving slice element type at offset {:?}",
         entry.offset()
     );
 
@@ -656,7 +656,7 @@ fn resolve_slice_element_type<R: Reader>(
     }
 
     // Fallback: return unknown scalar type
-    detrix_logging::warn!("[nested_types] Slice 'array' field not found, returning unknown type");
+    detrix_logging::debug!("[nested_types] Slice 'array' field not found, returning unknown type");
     Ok(NestedType::Scalar(TypeInfo::unknown()))
 }
 
@@ -1069,6 +1069,29 @@ fn resolve_interface_type<R: Reader>(
     })
 }
 
+/// Helper to read a DIE name as a String.
+fn read_die_name_string<R: Reader>(
+    entry: &DebuggingInformationEntry<R>,
+    dwarf: &gimli::Dwarf<R>,
+) -> Option<String> {
+    let attr = entry.attr_value(DwAt(gimli::constants::DW_AT_name.0))?;
+
+    match attr {
+        AttributeValue::DebugStrRef(offset) => {
+            let s = dwarf.string(offset).ok()?;
+            match s.to_string_lossy() {
+                Ok(cow) => Some(cow.into_owned()),
+                Err(_) => Some("<invalid-utf8>".to_string()),
+            }
+        }
+        AttributeValue::String(ref s) => match s.to_string_lossy() {
+            Ok(cow) => Some(cow.into_owned()),
+            Err(_) => Some("<invalid-utf8>".to_string()),
+        },
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1099,28 +1122,5 @@ mod tests {
         };
         assert_eq!(deep.depth(), 5);
         assert!(!deep.should_recurse(2));
-    }
-}
-
-/// Helper to read a DIE name as a String.
-fn read_die_name_string<R: Reader>(
-    entry: &DebuggingInformationEntry<R>,
-    dwarf: &gimli::Dwarf<R>,
-) -> Option<String> {
-    let attr = entry.attr_value(DwAt(gimli::constants::DW_AT_name.0))?;
-
-    match attr {
-        AttributeValue::DebugStrRef(offset) => {
-            let s = dwarf.string(offset).ok()?;
-            match s.to_string_lossy() {
-                Ok(cow) => Some(cow.into_owned()),
-                Err(_) => Some("<invalid-utf8>".to_string()),
-            }
-        }
-        AttributeValue::String(ref s) => match s.to_string_lossy() {
-            Ok(cow) => Some(cow.into_owned()),
-            Err(_) => Some("<invalid-utf8>".to_string()),
-        },
-        _ => None,
     }
 }

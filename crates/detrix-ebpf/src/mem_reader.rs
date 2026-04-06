@@ -12,6 +12,10 @@
 //! 3. User-space reads each field via process_vm_readv(base_addr + field_offset)
 
 use crate::error::Result;
+use std::sync::Arc;
+
+/// Type alias for process memory reader — consistent with FooRef convention.
+pub type ProcessMemoryReaderRef = Arc<dyn ProcessMemoryReader>;
 
 /// Trait for reading memory from another process.
 pub trait ProcessMemoryReader: Send + Sync {

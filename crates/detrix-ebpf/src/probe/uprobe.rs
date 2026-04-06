@@ -264,8 +264,12 @@ impl UprobeManager {
         // ownership of the map data here (before boxing ebpf) and move it
         // into a spawn_blocking task that polls for new events.
         //
-        // NOTE: For lower latency, replace the sleep-poll loop with
-        // `tokio::io::unix::AsyncFd` event-driven notification.
+        // TODO: Replace spawn_blocking with AsyncFd for better efficiency.
+        // The AsyncFd approach requires careful handling of mutable borrows:
+        // - AsyncFdGuard from readable() borrows AsyncFd, blocking get_mut()
+        // - RingBuf.next() requires &mut self, conflicting with the guard
+        // - A working pattern would need interior mutability (e.g., Mutex<RingBuf>)
+        // - Or use AsyncFd<Mutex<RingBuf>> to separate notification from draining
         let poller: tokio::task::JoinHandle<()> = if let Some(ref tx) = self.raw_event_tx {
             let map_data = ebpf
                 .take_map("DETRIX_EVENTS")
@@ -373,7 +377,7 @@ mod tests {
     fn test_probe_point() -> ProbePoint {
         ProbePoint {
             binary_path: PathBuf::from("/test/binary"),
-            pc: 0x401100,
+            pc: 0x0040_1100,
             symbol_offset: 0x100,
             function_name: "main.handleOrder".to_string(),
             variables: vec![ResolvedVariable {

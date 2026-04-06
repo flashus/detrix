@@ -20,6 +20,28 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::time::sleep;
 
+/// Ensures fixture app is killed even on test panic.
+struct AppGuard {
+    app: Option<Child>,
+}
+impl AppGuard {
+    fn new(app: Child) -> Self {
+        Self { app: Some(app) }
+    }
+    #[allow(dead_code)]
+    fn disarm(&mut self) {
+        self.app = None;
+    }
+}
+impl Drop for AppGuard {
+    fn drop(&mut self) {
+        if let Some(mut app) = self.app.take() {
+            let _ = app.kill();
+            let _ = app.wait();
+        }
+    }
+}
+
 const FIXTURE_START_WAIT: Duration = Duration::from_secs(3);
 const ADAPTER_START_WAIT: Duration = Duration::from_secs(3);
 const EVENT_COLLECTION_WAIT: Duration = Duration::from_secs(20);
@@ -30,11 +52,6 @@ fn start_fixture(binary_path: &str) -> Child {
         .stderr(Stdio::null())
         .spawn()
         .expect("Failed to start classic_map fixture")
-}
-
-fn kill_fixture(mut child: Child) {
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[tokio::test]
@@ -61,8 +78,12 @@ async fn test_ebpf_classic_map_order_with_map() {
         .unwrap_or_else(|_| "fixtures/go/classic_map/classic_map".to_string());
     let step = reporter.step_start("Start Go Fixture", &fixture_binary);
     let app = start_fixture(&fixture_binary);
+    let app_guard = AppGuard::new(app);
     sleep(FIXTURE_START_WAIT).await;
-    reporter.step_success(step, Some(&format!("PID: {}", app.id())));
+    reporter.step_success(
+        step,
+        Some(&format!("PID: {}", app_guard.app.as_ref().unwrap().id())),
+    );
 
     reporter.section("PHASE 3: REGISTER CONNECTION");
     let http = reqwest::Client::new();
@@ -73,7 +94,9 @@ async fn test_ebpf_classic_map_order_with_map() {
 
     let conn_req = serde_json::json!({
         "host": fixture_binary,
-        "port": 1024,
+        // Ignored by EbpfGoFactory — host is binary path, not a socket.
+        // Port must be >= 1024 to pass validation, but is unused for eBPF.
+        "port": 65535,
         "language": "go",
         "name": "ebpf-classic-map-order",
         "workspaceRoot": "/",
@@ -155,10 +178,10 @@ async fn test_ebpf_classic_map_order_with_map() {
     sleep(EVENT_COLLECTION_WAIT).await;
 
     reporter.section("PHASE 6: DAEMON LOGS");
-    kill_fixture(app);
     reporter.info("=== DAEMON LOGS ===");
     executor.print_daemon_logs(200);
     reporter.info("=== END DAEMON LOGS ===");
+    // app_guard Drop handles cleanup — no manual kill_fixture needed.
 
     reporter.section("PHASE 7: ASSERTIONS");
     let step = reporter.step_start("Query Events", &format!("metricId={metric_id}"));
@@ -313,8 +336,12 @@ async fn test_ebpf_classic_map_nil_map() {
         .unwrap_or_else(|_| "fixtures/go/classic_map/classic_map".to_string());
     let step = reporter.step_start("Start Go Fixture", &fixture_binary);
     let app = start_fixture(&fixture_binary);
+    let app_guard = AppGuard::new(app);
     sleep(FIXTURE_START_WAIT).await;
-    reporter.step_success(step, Some(&format!("PID: {}", app.id())));
+    reporter.step_success(
+        step,
+        Some(&format!("PID: {}", app_guard.app.as_ref().unwrap().id())),
+    );
 
     reporter.section("PHASE 3: REGISTER CONNECTION");
     let http = reqwest::Client::new();
@@ -325,7 +352,9 @@ async fn test_ebpf_classic_map_nil_map() {
 
     let conn_req = serde_json::json!({
         "host": fixture_binary,
-        "port": 1024,
+        // Ignored by EbpfGoFactory — host is binary path, not a socket.
+        // Port must be >= 1024 to pass validation, but is unused for eBPF.
+        "port": 65535,
         "language": "go",
         "name": "ebpf-classic-map-nil",
         "workspaceRoot": "/",
@@ -406,10 +435,10 @@ async fn test_ebpf_classic_map_nil_map() {
     sleep(EVENT_COLLECTION_WAIT).await;
 
     reporter.section("PHASE 6: DAEMON LOGS");
-    kill_fixture(app);
     reporter.info("=== DAEMON LOGS ===");
     executor.print_daemon_logs(200);
     reporter.info("=== END DAEMON LOGS ===");
+    // app_guard Drop handles cleanup — no manual kill_fixture needed.
 
     reporter.section("PHASE 7: ASSERTIONS");
     let step = reporter.step_start("Query Events", &format!("metricId={metric_id}"));
@@ -534,8 +563,12 @@ async fn test_ebpf_classic_map_iteration_int() {
         .unwrap_or_else(|_| "fixtures/go/classic_map/classic_map".to_string());
     let step = reporter.step_start("Start Go Fixture", &fixture_binary);
     let app = start_fixture(&fixture_binary);
+    let app_guard = AppGuard::new(app);
     sleep(FIXTURE_START_WAIT).await;
-    reporter.step_success(step, Some(&format!("PID: {}", app.id())));
+    reporter.step_success(
+        step,
+        Some(&format!("PID: {}", app_guard.app.as_ref().unwrap().id())),
+    );
 
     reporter.section("PHASE 3: REGISTER CONNECTION");
     let http = reqwest::Client::new();
@@ -546,7 +579,9 @@ async fn test_ebpf_classic_map_iteration_int() {
 
     let conn_req = serde_json::json!({
         "host": fixture_binary,
-        "port": 1024,
+        // Ignored by EbpfGoFactory — host is binary path, not a socket.
+        // Port must be >= 1024 to pass validation, but is unused for eBPF.
+        "port": 65535,
         "language": "go",
         "name": "ebpf-classic-map-iteration",
         "workspaceRoot": "/",
@@ -627,10 +662,10 @@ async fn test_ebpf_classic_map_iteration_int() {
     sleep(EVENT_COLLECTION_WAIT).await;
 
     reporter.section("PHASE 6: DAEMON LOGS");
-    kill_fixture(app);
     reporter.info("=== DAEMON LOGS ===");
     executor.print_daemon_logs(200);
     reporter.info("=== END DAEMON LOGS ===");
+    // app_guard Drop handles cleanup — no manual kill_fixture needed.
 
     reporter.section("PHASE 7: ASSERTIONS");
     let step = reporter.step_start("Query Events", &format!("metricId={metric_id}"));

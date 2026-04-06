@@ -144,7 +144,6 @@ pub mod go_lines {
         ("direction", 29, 30),      // direction := ...; safe from +30 (labelConcat line)
         ("labelConcat", 31, 33), // labelConcat := ... (concatenation); safe from +33 (labelSprintf)
         ("labelSprintf", 32, 33), // labelSprintf := ... (fmt.Sprintf); safe from +33 (orderID)
-        ("label", 30, 33),       // [DEPRECATED] kept for backward compat; use labelConcat
         ("orderID", 33, 36),     // orderID := placeOrder(); safe from +36 (entryPrice)
         ("entryPrice", 36, 37),  // entryPrice := price; safe from +37 (currentPrice)
         ("currentPrice", 37, 38), // currentPrice := ...; safe from +38 (pnl)

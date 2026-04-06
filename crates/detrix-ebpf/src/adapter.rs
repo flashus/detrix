@@ -25,6 +25,9 @@
 //! ```
 
 use crate::dwarf::{DwarfInfo, ProbePoint, ResolvedVariable, VariableSize};
+#[cfg(target_os = "linux")]
+use crate::error::Error;
+use crate::error::Result;
 use crate::probe::types::{CaptureConfig, CapturedValue};
 use crate::probe::UprobeManager;
 
@@ -72,7 +75,7 @@ pub struct EbpfAdapter {
     correlator_handle: RwLock<Option<JoinHandle<()>>>,
     /// Process memory reader for dereferencing Go string pointers (Linux only).
     #[cfg(target_os = "linux")]
-    mem_reader: Arc<dyn crate::mem_reader::ProcessMemoryReader>,
+    mem_reader: crate::mem_reader::ProcessMemoryReaderRef,
 }
 
 /// A metric with its resolved probe point, ready for event correlation.
@@ -91,16 +94,34 @@ impl EbpfAdapter {
     ///
     /// The binary must be compiled with `-gcflags=all=-N -l` for
     /// reliable DWARF variable locations.
-    pub fn new(binary_path: impl AsRef<Path>) -> Self {
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidBinaryPath` if the path contains non-UTF-8 bytes.
+    pub fn new(binary_path: impl AsRef<Path>) -> Result<Self> {
         Self::new_with_config(binary_path, CaptureConfig::default())
     }
 
-    pub fn new_with_config(binary_path: impl AsRef<Path>, capture_config: CaptureConfig) -> Self {
+    pub fn new_with_config(
+        binary_path: impl AsRef<Path>,
+        capture_config: CaptureConfig,
+    ) -> Result<Self> {
         let path = binary_path.as_ref().to_path_buf();
         let (event_tx, event_rx) = mpsc::channel(1024);
         let (raw_tx, raw_rx) = mpsc::unbounded_channel();
 
-        Self {
+        #[cfg(target_os = "linux")]
+        let path_str = path.to_str().ok_or_else(|| {
+            detrix_logging::error!(
+                "[EbpfAdapter] Binary path contains non-UTF-8 bytes: {:?}",
+                path.as_os_str().as_encoded_bytes()
+            );
+            Error::InvalidBinaryPath(format!(
+                "Binary path contains non-UTF-8 bytes: {:?}",
+                path.as_os_str().as_encoded_bytes()
+            ))
+        })?;
+
+        Ok(Self {
             binary_path: path.clone(),
             dwarf: RwLock::new(None),
             uprobe_manager: RwLock::new(UprobeManager::new_with_events(&path, raw_tx)),
@@ -111,12 +132,10 @@ impl EbpfAdapter {
             started: RwLock::new(false),
             capture_config,
             #[cfg(target_os = "linux")]
-            mem_reader: Arc::new(crate::mem_reader::LinuxProcessMemoryReader::new(
-                path.to_str().unwrap_or("/unknown"),
-            )),
+            mem_reader: Arc::new(crate::mem_reader::LinuxProcessMemoryReader::new(path_str)),
             #[cfg(target_os = "linux")]
             correlator_handle: RwLock::new(None),
-        }
+        })
     }
 
     /// Convert a ring buffer probe event to a MetricEvent for a specific metric.
@@ -220,7 +239,11 @@ impl DapAdapter for EbpfAdapter {
             // The correlator will exit when raw_rx is exhausted (already taken in start()).
             // We don't need to send a cancellation signal — the channel is already closed.
             if let Err(e) = handle.await {
-                detrix_logging::warn!("[EbpfAdapter] Correlator task panicked: {e}");
+                // Correlator panic is a real error — don't silently return Ok(())
+                detrix_logging::error!("[EbpfAdapter] Correlator task panicked: {e}");
+                return Err(detrix_core::Error::Adapter(format!(
+                    "Event correlator task panicked: {e}"
+                )));
             }
         }
 
@@ -347,7 +370,7 @@ async fn run_event_correlator(
     active_metrics: Arc<RwLock<HashMap<String, ActiveMetric>>>,
     event_tx: mpsc::Sender<MetricEvent>,
     capture_config: CaptureConfig,
-    mem_reader: Arc<dyn crate::mem_reader::ProcessMemoryReader>,
+    mem_reader: crate::mem_reader::ProcessMemoryReaderRef,
 ) {
     use crate::probe::ringbuf::parse_ring_buffer_event;
 
@@ -527,13 +550,13 @@ mod tests {
 
     #[test]
     fn adapter_new_not_started() {
-        let adapter = EbpfAdapter::new("/tmp/test-binary");
+        let adapter = EbpfAdapter::new("/tmp/test-binary").unwrap();
         assert!(!adapter.is_connected());
     }
 
     #[tokio::test]
     async fn subscribe_events_only_once() {
-        let adapter = EbpfAdapter::new("/tmp/test-binary");
+        let adapter = EbpfAdapter::new("/tmp/test-binary").unwrap();
 
         let rx = adapter.subscribe_events().await;
         assert!(rx.is_ok());
@@ -544,7 +567,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_has_raw_event_channel() {
-        let adapter = EbpfAdapter::new("/tmp/test-binary");
+        let adapter = EbpfAdapter::new("/tmp/test-binary").unwrap();
         // raw_event_rx should be Some before start() is called
         let guard = adapter.raw_event_rx.read().await;
         assert!(guard.is_some());
@@ -552,7 +575,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_clears_metrics() {
-        let adapter = EbpfAdapter::new("/tmp/test-binary");
+        let adapter = EbpfAdapter::new("/tmp/test-binary").unwrap();
         // Directly insert into active_metrics to simulate a set_metric()
         {
             let metric = test_metric();

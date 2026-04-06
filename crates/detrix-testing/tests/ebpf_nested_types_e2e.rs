@@ -121,7 +121,8 @@ fn pretty_print_value(value: &serde_json::Value, indent_level: usize) -> String 
 
                 // Annotate Go map internals (runtime.hmap bucket directory)
                 if type_name.contains("table<") || type_name.contains("hmap") {
-                    // This is Go's internal map runtime structure - will be annotated below
+                    // TODO: Add map/table annotation for nested type display.
+                    // Planned: mark map types with "table<K,V>" annotation for better UI rendering.
                 }
             }
 

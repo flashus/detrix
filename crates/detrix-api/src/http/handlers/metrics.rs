@@ -200,7 +200,7 @@ pub async fn list_metrics(
     let hit_counts =
         EventRepository::count_by_metric_ids(state.event_repository.as_ref(), &metric_ids)
             .await
-            .unwrap_or_default();
+            .http_context("Failed to fetch event counts for metrics")?;
 
     // Convert to DTOs, injecting real hit counts
     let dtos: Vec<MetricInfo> = metrics

@@ -1411,6 +1411,13 @@ impl detrix_application::EventRepository for FailingEventRepository {
         Ok(Vec::new())
     }
 
+    async fn count_by_metric_ids(
+        &self,
+        _metric_ids: &[MetricId],
+    ) -> detrix_core::error::Result<std::collections::HashMap<MetricId, (u64, Option<i64>)>> {
+        Err(Error::Database("Simulated count failure".to_string()))
+    }
+
     async fn count_by_metric_id(&self, _metric_id: MetricId) -> detrix_core::error::Result<i64> {
         Ok(0)
     }

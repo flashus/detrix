@@ -220,8 +220,10 @@ fn sanitize_core_error(err: &detrix_core::Error) -> String {
         // Tenant ID validation - safe to expose
         Error::InvalidTenantId(msg) => format!("Invalid tenant ID: {}", msg),
 
-        // Adapter errors - expose the message for debugging
-        Error::Adapter(msg) => format!("Adapter error: {}", msg),
+        // Adapter errors may contain internal paths, PIDs, eBPF program names, etc.
+        // Log the full error server-side (done in From<Error> for HttpError),
+        // but return a generic message to avoid leaking internals.
+        Error::Adapter(_) => "An internal error occurred".to_string(),
 
         // All other core errors - generic message
         _ => "An internal error occurred".to_string(),

@@ -1085,6 +1085,6 @@ mod tests {
     #[test]
     fn max_type_depth_prevents_cycles() {
         // Verify the constant exists and is reasonable
-        assert!(MAX_TYPE_DEPTH >= 4 && MAX_TYPE_DEPTH <= 16);
+        const { assert!(MAX_TYPE_DEPTH >= 4 && MAX_TYPE_DEPTH <= 16) };
     }
 }

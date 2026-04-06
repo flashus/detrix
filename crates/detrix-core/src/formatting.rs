@@ -165,7 +165,7 @@ mod tests {
     #[test]
     fn test_format_timestamp_full_valid() {
         // Jan 1, 2024 00:00:00 UTC = 1704067200 seconds
-        let micros = 1704067200_000_000i64;
+        let micros = 1_704_067_200_000_000i64;
         let secs = micros / 1_000_000;
         let dt = Utc.timestamp_opt(secs, 0).single().unwrap();
         let result = dt.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn test_format_timestamp_time_valid() {
         // 12:00:45.123 UTC
-        let micros = 1704110445_123_000i64;
+        let micros = 1_704_110_445_123_000i64;
         let secs = micros / 1_000_000;
         let subsec_micros = (micros % 1_000_000).unsigned_abs() as u32;
         let dt = Utc
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn test_format_timestamp_short_valid() {
         // 12:00:45 UTC
-        let micros = 1704110445_000_000i64;
+        let micros = 1_704_110_445_000_000i64;
         let secs = micros / 1_000_000;
         let dt = Utc.timestamp_opt(secs, 0).single().unwrap();
         let result = dt.format("%H:%M:%S").to_string();
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_format_timestamp_custom_format() {
-        let micros = 1704067200_000_000i64;
+        let micros = 1_704_067_200_000_000i64;
         let secs = micros / 1_000_000;
         let dt = Utc.timestamp_opt(secs, 0).single().unwrap();
         let result = dt.format("%Y/%m/%d").to_string();
@@ -238,6 +238,6 @@ mod tests {
 
     #[test]
     fn test_format_uptime_multiple_days() {
-        assert_eq!(format_uptime(259200), "3d 00:00:00");
+        assert_eq!(format_uptime(259_200), "3d 00:00:00");
     }
 }

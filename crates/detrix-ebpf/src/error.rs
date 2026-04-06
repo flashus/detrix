@@ -39,6 +39,30 @@ pub enum Error {
     /// DWARF library error (gimli).
     #[error("DWARF library error: {0}")]
     Gimli(#[from] gimli::Error),
+
+    /// Binary path contains non-UTF-8 bytes.
+    #[error("Invalid binary path: {0}")]
+    InvalidBinaryPath(String),
+}
+
+// ── From impls for common error sources (project policy: no .map_err chains) ──
+
+impl From<std::string::FromUtf8Error> for Error {
+    fn from(err: std::string::FromUtf8Error) -> Self {
+        Error::DwarfParse(err.to_string())
+    }
+}
+
+impl From<std::str::Utf8Error> for Error {
+    fn from(err: std::str::Utf8Error) -> Self {
+        Error::DwarfParse(err.to_string())
+    }
+}
+
+impl From<object::read::Error> for Error {
+    fn from(err: object::read::Error) -> Self {
+        Error::DwarfParse(err.to_string())
+    }
 }
 
 impl From<Error> for CoreError {

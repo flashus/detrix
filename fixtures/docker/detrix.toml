@@ -17,3 +17,11 @@ path = "/data/detrix/data.db"
 [vfs]
 source_priority = ["bridge", "control_plane", "disk"]
 fetch_timeout_seconds = 10
+
+[ebpf]
+max_capture_vars = 4
+string_capture_bytes = 64
+blob_capture_bytes = 64
+max_capture_depth = 2
+max_struct_fields = -1
+max_array_values = 32

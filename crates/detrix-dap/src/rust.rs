@@ -184,6 +184,13 @@ impl OutputParser for RustOutputParser {
     /// an explicit continue to resume execution. This was `false` when
     /// using CodeLLDB (which starts in running state), but lldb-dap
     /// behaves like Delve — process is stopped after attach.
+    ///
+    /// NOTE (CodeLLDB double-continue): If you use CodeLLDB directly (not
+    /// lldb-dap), it auto-resumes after attach. Sending an explicit continue
+    /// to an already-running process is harmless but causes a brief pause.
+    /// If you observe a pause after attach with CodeLLDB, set
+    /// `needs_continue_after_connect = false` in your AdapterConfig or use
+    /// the lldb-dap wrapper which handles this transparently.
     fn needs_continue_after_connect() -> bool {
         true
     }

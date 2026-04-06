@@ -54,14 +54,12 @@ pub struct CompiledBpf {
 /// - `clang` with BPF target support on PATH
 /// - Linux kernel headers (usually via `linux-headers-$(uname -r)`)
 pub fn compile_bpf(program: &BpfProgram) -> Result<CompiledBpf> {
-    let temp_dir =
-        tempfile::tempdir().map_err(|e| Error::Ebpf(format!("Failed to create tempdir: {e}")))?;
+    let temp_dir = tempfile::tempdir().map_err(|e| Error::Ebpf(e.to_string()))?;
 
     let src_path = temp_dir.path().join("probe.c");
     let obj_path = temp_dir.path().join("probe.o");
 
-    std::fs::write(&src_path, &program.source)
-        .map_err(|e| Error::Ebpf(format!("Failed to write BPF source: {e}")))?;
+    std::fs::write(&src_path, &program.source).map_err(|e| Error::Ebpf(e.to_string()))?;
 
     let status = std::process::Command::new("clang")
         .args([
@@ -86,15 +84,14 @@ pub fn compile_bpf(program: &BpfProgram) -> Result<CompiledBpf> {
                 .ok_or_else(|| Error::Ebpf("Non-UTF8 path".to_string()))?,
         ])
         .output()
-        .map_err(|e| Error::Ebpf(format!("Failed to invoke clang: {e}. Is clang installed?")))?;
+        .map_err(|e| Error::Ebpf(e.to_string()))?;
 
     if !status.status.success() {
         let stderr = String::from_utf8_lossy(&status.stderr);
         return Err(Error::Ebpf(format!("clang compilation failed:\n{stderr}")));
     }
 
-    let elf_bytes = std::fs::read(&obj_path)
-        .map_err(|e| Error::Ebpf(format!("Failed to read compiled BPF object: {e}")))?;
+    let elf_bytes = std::fs::read(&obj_path).map_err(|e| Error::Ebpf(e.to_string()))?;
 
     Ok(CompiledBpf {
         elf_bytes,

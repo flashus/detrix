@@ -383,10 +383,10 @@ mod tests {
 
     #[test]
     fn captured_value_f64() {
-        let bits = f64::to_bits(3.14);
+        let bits = f64::to_bits(std::f64::consts::PI);
         let val = CapturedValue::Scalar(bits);
         let f = val.as_f64().unwrap();
-        assert!((f - 3.14).abs() < f64::EPSILON);
+        assert!((f - std::f64::consts::PI).abs() < f64::EPSILON);
     }
 
     #[test]

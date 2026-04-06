@@ -70,6 +70,9 @@ impl DwarfInfo {
     /// `max_nested_depth` controls how many levels of nested struct fields are resolved.
     /// Follows Delve's `MaxVariableRecurse` semantics: pointer chasing is free, each
     /// struct field level consumes one depth unit. Default: 2.
+    // PERF-03: Cache ELF/DWARF parse results. Currently reparsed on every
+    // resolve_probe_point call. Should cache per-connection and invalidate
+    // only on binary change. Track parsed_elf: Option<Box<dyn Any>> in DwarfInfo.
     pub fn resolve_probe_point(
         &self,
         file: &str,
@@ -467,7 +470,7 @@ fn resolve_variables_at_pc<R: Reader>(
                 // Upgrade scalar/piece locations to compound types (GoString, GoSlice).
                 // Multi-piece = Go register ABI; single-piece = stack-allocated.
                 let location = {
-                    let upgraded = upgrade_location_for_type(locations, &type_info);
+                    let upgraded = upgrade_location_for_type(locations, &type_info)?;
                     // For heap-escaped variables (& prefix in DWARF name): the location
                     // expression gives the stack slot of a pointer to the heap value.
                     // upgrade_location_for_type sees a struct type + StackOffset and returns
@@ -801,7 +804,7 @@ fn evaluate_location_expr<R: Reader>(
 fn upgrade_location_for_type(
     locations: Vec<VariableLocation>,
     type_info: &TypeInfo,
-) -> VariableLocation {
+) -> Result<VariableLocation> {
     // Debug logging for upgrade decision
     detrix_logging::debug!(
         "[DWARF upgrade] type={} is_string={} is_slice={} locations.len={} locations={:?}",
@@ -818,30 +821,28 @@ fn upgrade_location_for_type(
         let [ptr, len]: [VariableLocation; 2] = locations
             .try_into()
             .unwrap_or_else(|_| unreachable!("len() == 2 guarantees exactly 2 elements"));
-        return VariableLocation::GoString {
+        return Ok(VariableLocation::GoString {
             ptr: Box::new(ptr),
             len: Box::new(len),
-        };
+        });
     }
     if locations.len() == 3 && type_info.is_slice {
         // Guarded by len() == 3 above — pattern match eliminates unwrap.
         let [ptr, len, cap]: [VariableLocation; 3] = locations
             .try_into()
             .unwrap_or_else(|_| unreachable!("len() == 3 guarantees exactly 3 elements"));
-        return VariableLocation::GoSlice {
+        return Ok(VariableLocation::GoSlice {
             ptr: Box::new(ptr),
             len: Box::new(len),
             cap: Box::new(cap),
-        };
+        });
     }
 
     // ── Single-piece: stack-based or register scalar ──────────────────────────
-    // Safe: callers only reach this when locations is non-empty (resolve_location_attr
-    // returns None for empty, which is filtered before calling upgrade_location_for_type).
     let location = locations
         .into_iter()
         .next()
-        .unwrap_or(VariableLocation::Register(super::types::Register::Rax));
+        .ok_or_else(|| Error::DwarfParse("empty locations after DWARF resolution".to_string()))?;
 
     detrix_logging::debug!(
         "[DWARF upgrade] single-piece location={:?} is_string={}",
@@ -851,50 +852,50 @@ fn upgrade_location_for_type(
 
     if type_info.is_string {
         if let VariableLocation::StackOffset { offset } = location {
-            return VariableLocation::GoString {
+            return Ok(VariableLocation::GoString {
                 ptr: Box::new(VariableLocation::StackOffset { offset }),
                 len: Box::new(VariableLocation::StackOffset { offset: offset + 8 }),
-            };
+            });
         }
         // Register-based string with only one piece — can't reconstruct GoString.
         // Fall through as scalar (captures raw ptr word).
     } else if type_info.is_slice {
         if let VariableLocation::StackOffset { offset } = location {
-            return VariableLocation::GoSlice {
+            return Ok(VariableLocation::GoSlice {
                 ptr: Box::new(VariableLocation::StackOffset { offset }),
                 len: Box::new(VariableLocation::StackOffset { offset: offset + 8 }),
                 cap: Box::new(VariableLocation::StackOffset {
                     offset: offset + 16,
                 }),
-            };
+            });
         }
     } else if type_info.is_map || type_info.name.starts_with("map[") {
         // Go map: single pointer to hmap (classic) or Map (Swiss Table).
         // Wrap in GoMap so the ringbuf parser knows to iterate the map.
         // Detection: go_kind=21 (DWARF) or name prefix "map[" (fallback for stripped DWARF).
-        return VariableLocation::GoMap {
+        return Ok(VariableLocation::GoMap {
             ptr: Box::new(location),
-        };
+        });
     } else if (type_info.is_array || type_info.is_struct) && type_info.byte_size > 0 {
         match location {
             VariableLocation::StackOffset { offset } => {
-                return VariableLocation::StackBlob {
+                return Ok(VariableLocation::StackBlob {
                     offset,
                     byte_size: type_info.byte_size as usize,
-                };
+                });
             }
             VariableLocation::StackIndirect { offset, .. } => {
                 // Heap-escaped struct: BPF reads 8-byte pointer from stack,
                 // user-space dereferences the pointer to get actual struct bytes.
-                return VariableLocation::StackIndirect {
+                return Ok(VariableLocation::StackIndirect {
                     offset,
                     byte_size: type_info.byte_size as usize,
-                };
+                });
             }
             _ => {} // Register-based arrays/structs are unusual; fall through as scalar.
         }
     }
-    location
+    Ok(location)
 }
 
 /// Resolve byte size from a variable's DW_AT_byte_size.
@@ -981,7 +982,7 @@ mod tests {
     #[test]
     fn upgrade_stack_offset_to_go_string() {
         let loc = vec![VariableLocation::stack(-240)];
-        let result = upgrade_location_for_type(loc, &string_type());
+        let result = upgrade_location_for_type(loc, &string_type()).unwrap();
         assert_eq!(
             result,
             VariableLocation::GoString {
@@ -994,7 +995,7 @@ mod tests {
     #[test]
     fn upgrade_stack_offset_to_go_slice() {
         let loc = vec![VariableLocation::stack(-64)];
-        let result = upgrade_location_for_type(loc, &slice_type());
+        let result = upgrade_location_for_type(loc, &slice_type()).unwrap();
         assert_eq!(
             result,
             VariableLocation::GoSlice {
@@ -1008,7 +1009,7 @@ mod tests {
     #[test]
     fn upgrade_positive_stack_offset_to_go_string() {
         let loc = vec![VariableLocation::stack(16)];
-        let result = upgrade_location_for_type(loc, &string_type());
+        let result = upgrade_location_for_type(loc, &string_type()).unwrap();
         assert_eq!(
             result,
             VariableLocation::GoString {
@@ -1021,7 +1022,7 @@ mod tests {
     #[test]
     fn scalar_type_location_unchanged() {
         let loc = VariableLocation::stack(-16);
-        let result = upgrade_location_for_type(vec![loc.clone()], &scalar_type());
+        let result = upgrade_location_for_type(vec![loc.clone()], &scalar_type()).unwrap();
         assert_eq!(result, loc);
     }
 
@@ -1029,7 +1030,7 @@ mod tests {
     fn register_string_not_upgraded_falls_through() {
         // Single-register string (1 piece) — can't reconstruct GoString without len.
         let loc = VariableLocation::Register(Register::Rax);
-        let result = upgrade_location_for_type(vec![loc.clone()], &string_type());
+        let result = upgrade_location_for_type(vec![loc.clone()], &string_type()).unwrap();
         assert_eq!(
             result, loc,
             "single-register strings should pass through unchanged"
@@ -1044,7 +1045,7 @@ mod tests {
             VariableLocation::Register(Register::Rax),
             VariableLocation::Register(Register::Rbx),
         ];
-        let result = upgrade_location_for_type(pieces, &string_type());
+        let result = upgrade_location_for_type(pieces, &string_type()).unwrap();
         assert_eq!(
             result,
             VariableLocation::GoString {
@@ -1063,7 +1064,7 @@ mod tests {
             VariableLocation::Register(Register::Rbx),
             VariableLocation::Register(Register::Rcx),
         ];
-        let result = upgrade_location_for_type(pieces, &slice_type());
+        let result = upgrade_location_for_type(pieces, &slice_type()).unwrap();
         assert_eq!(
             result,
             VariableLocation::GoSlice {
@@ -1077,7 +1078,7 @@ mod tests {
     #[test]
     fn upgrade_stack_offset_to_stack_blob_array() {
         let loc = vec![VariableLocation::stack(-48)];
-        let result = upgrade_location_for_type(loc, &array_type(32));
+        let result = upgrade_location_for_type(loc, &array_type(32)).unwrap();
         assert_eq!(
             result,
             VariableLocation::StackBlob {
@@ -1090,7 +1091,7 @@ mod tests {
     #[test]
     fn upgrade_stack_offset_to_stack_blob_struct() {
         let loc = vec![VariableLocation::stack(-80)];
-        let result = upgrade_location_for_type(loc, &struct_type(40));
+        let result = upgrade_location_for_type(loc, &struct_type(40)).unwrap();
         assert_eq!(
             result,
             VariableLocation::StackBlob {
@@ -1104,7 +1105,7 @@ mod tests {
     fn array_type_with_zero_byte_size_falls_through() {
         // byte_size=0 means we couldn't read DW_AT_byte_size — don't upgrade.
         let loc = VariableLocation::stack(-8);
-        let result = upgrade_location_for_type(vec![loc.clone()], &array_type(0));
+        let result = upgrade_location_for_type(vec![loc.clone()], &array_type(0)).unwrap();
         assert_eq!(result, loc, "zero byte_size should not produce a StackBlob");
     }
 
@@ -1112,7 +1113,7 @@ mod tests {
     fn register_array_falls_through() {
         // Register-based arrays are unusual; fall through as scalar.
         let loc = VariableLocation::Register(Register::Rax);
-        let result = upgrade_location_for_type(vec![loc.clone()], &array_type(16));
+        let result = upgrade_location_for_type(vec![loc.clone()], &array_type(16)).unwrap();
         assert_eq!(result, loc);
     }
 
@@ -1125,7 +1126,7 @@ mod tests {
         // Simulates: DW_OP_breg31 -32  (string struct at SP-32 on ARM64)
         // After RegisterOffset fix → StackOffset{-32} → GoString{ptr:-32, len:-24}
         let loc = vec![VariableLocation::stack(-32)]; // what RegisterOffset{offset:-32} produces
-        let result = upgrade_location_for_type(loc, &string_type());
+        let result = upgrade_location_for_type(loc, &string_type()).unwrap();
         assert_eq!(
             result,
             VariableLocation::GoString {
@@ -1143,7 +1144,7 @@ mod tests {
             VariableLocation::stack(-32), // ptr piece: what RegisterOffset{-32} yields
             VariableLocation::stack(-24), // len piece: what RegisterOffset{-24} yields
         ];
-        let result = upgrade_location_for_type(pieces, &string_type());
+        let result = upgrade_location_for_type(pieces, &string_type()).unwrap();
         assert_eq!(
             result,
             VariableLocation::GoString {
@@ -1161,7 +1162,7 @@ mod tests {
             VariableLocation::stack(-40), // len
             VariableLocation::stack(-32), // cap
         ];
-        let result = upgrade_location_for_type(pieces, &slice_type());
+        let result = upgrade_location_for_type(pieces, &slice_type()).unwrap();
         assert_eq!(
             result,
             VariableLocation::GoSlice {
@@ -1170,6 +1171,15 @@ mod tests {
                 cap: Box::new(VariableLocation::stack(-32)),
             }
         );
+    }
+
+    #[test]
+    fn upgrade_empty_locations_returns_error() {
+        let loc: Vec<VariableLocation> = vec![];
+        let result = upgrade_location_for_type(loc, &scalar_type());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::DwarfParse(_)));
     }
 
     #[test]
@@ -1184,8 +1194,8 @@ mod tests {
     fn probe_point_symbol_offset_calculation() {
         let point = ProbePoint {
             binary_path: PathBuf::from("/test/binary"),
-            pc: 0x401100,
-            symbol_offset: 0x401100 - 0x401000,
+            pc: 0x0040_1100,
+            symbol_offset: 0x0040_1100 - 0x0040_1000,
             function_name: "main.handleOrder".to_string(),
             variables: vec![],
         };

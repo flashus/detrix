@@ -49,3 +49,11 @@ language = "python"
 enabled = true
 mode = { mode = "stream" }
 safety_level = "strict"
+
+[ebpf]
+max_capture_vars = 4
+string_capture_bytes = 64
+blob_capture_bytes = 64
+max_capture_depth = 2
+max_struct_fields = -1
+max_array_values = 32

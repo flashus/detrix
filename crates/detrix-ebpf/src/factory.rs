@@ -64,10 +64,9 @@ impl EbpfAdapterFactory {
             )));
         }
 
-        Ok(Arc::new(EbpfAdapter::new_with_config(
-            path,
-            self.capture_config.clone(),
-        )))
+        let adapter = EbpfAdapter::new_with_config(path, self.capture_config.clone())
+            .map_err(|e: crate::error::Error| Error::Adapter(e.to_string()))?;
+        Ok(Arc::new(adapter) as DapAdapterRef)
     }
 
     /// Check if eBPF adapters are available on this platform.
@@ -175,6 +174,12 @@ impl DapAdapterFactory for EbpfGoFactory {
         #[cfg(target_os = "linux")]
         {
             let _ = port;
+            // Validate that Go connections on Linux provide a binary path as host
+            if !host.starts_with('/') {
+                return Err(detrix_core::Error::InvalidConfig(
+                    format!("Go connection on Linux requires a binary path as host (starting with '/'), got: '{}'", host).into(),
+                ));
+            }
             self.ebpf
                 .create_go_adapter(host)
                 .map_err(|e| detrix_core::Error::Adapter(e.to_string()))
@@ -268,5 +273,17 @@ mod ebpf_go_factory_tests {
             .create_go_adapter(tmp.path().to_str().unwrap(), 0)
             .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn go_rejects_non_path_host_on_linux() {
+        let factory = EbpfGoFactory::new(Arc::new(StubFactory), "/tmp");
+        // host = "127.0.0.1" (not a path) should be rejected
+        let result = factory.create_go_adapter("127.0.0.1", 0).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("binary path as host"));
+        assert!(err.to_string().contains("127.0.0.1"));
     }
 }
