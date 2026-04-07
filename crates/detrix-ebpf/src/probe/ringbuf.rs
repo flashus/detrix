@@ -1560,7 +1560,7 @@ pub fn parse_struct_fields_from_addr(
                         };
 
                     CapturedValue::Struct {
-                        type_name: format!("[]<{}>", elem_type),
+                        type_name: format!("[]{}", elem_type),
                         fields: vec![
                             (
                                 "len".to_string(),
@@ -2042,8 +2042,9 @@ fn parse_struct_fields_from_blob(
                             });
                             elements.push(elem_value);
                         }
+                        let elem_type_name = element_type.type_info().name.clone();
                         CapturedValue::Struct {
-                            type_name: format!("[] (len={}, cap={})", slice_len, slice_cap),
+                            type_name: format!("[]{}", elem_type_name),
                             fields: vec![
                                 (
                                     "len".to_string(),
@@ -2056,7 +2057,7 @@ fn parse_struct_fields_from_blob(
                                 (
                                     "elements".to_string(),
                                     Box::new(CapturedValue::Array {
-                                        element_type: field.type_info.slice_element_type.clone(),
+                                        element_type: elem_type_name,
                                         elements,
                                     }),
                                 ),
