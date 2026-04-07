@@ -357,6 +357,23 @@ pub trait DapAdapter: Send + Sync {
     fn supports_batch_operations(&self) -> bool {
         false
     }
+
+    /// Get the number of events dropped due to ring buffer overflow.
+    ///
+    /// For eBPF adapters, this returns the per-CPU drop counter sum for the metric.
+    /// For DAP adapters (debugpy, Delve, lldb-dap), this returns 0 (no ring buffer).
+    ///
+    /// Returns `Ok(0)` if the metric doesn't exist or the adapter doesn't track drops.
+    ///
+    /// # Arguments
+    /// * `metric_name` - Name of the metric to query
+    ///
+    /// # Returns
+    /// Sum of per-CPU drop counters for eBPF, 0 for DAP adapters.
+    fn get_drop_count(&self, _metric_name: &str) -> Result<u64> {
+        // Default: DAP adapters don't have ring buffer drops
+        Ok(0)
+    }
 }
 
 // ============================================================================

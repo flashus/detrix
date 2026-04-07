@@ -71,11 +71,28 @@ struct {
     __uint(max_entries, 256 * 1024); // 256 KB
 } DETRIX_EVENTS SEC(".maps");
 
+// Per-probe drop counter — incremented when ring buffer is full.
+// PERCPU_ARRAY avoids contention: each CPU has its own counter, summed in userspace.
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __type(key, __u32);
+    __type(value, __u64);  // drop count (per-CPU)
+    __uint(max_entries, 1);
+} DETRIX_DROP_CNT SEC(".maps");
+
 SEC("uprobe")
 int detrix_capture(struct pt_regs *ctx) {
     struct probe_event *event;
     event = bpf_ringbuf_reserve(&DETRIX_EVENTS, sizeof(*event), 0);
-    if (!event) return 0;
+    if (!event) {
+        // Ring buffer full — increment drop counter and exit.
+        __u32 key = 0;
+        __u64 *cnt = bpf_map_lookup_elem(&DETRIX_DROP_CNT, &key);
+        if (cnt) {
+            (*cnt)++;  // Per-CPU increment, no atomic needed
+        }
+        return 0;
+    }
 
     u64 pid_tgid = bpf_get_current_pid_tgid();
     event->pid = pid_tgid >> 32;

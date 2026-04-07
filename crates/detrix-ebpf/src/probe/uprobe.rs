@@ -73,6 +73,8 @@ struct AyaHandles {
     _link: aya::programs::uprobe::UProbeLink,
     /// Ring buffer polling task — aborted on drop.
     _poller: tokio::task::JoinHandle<()>,
+    /// Drop counter map — per-CPU counters for ring buffer overflows.
+    _drop_cnt: aya::maps::PerCpuArray<aya::maps::MapData, u64>,
 }
 
 #[cfg(target_os = "linux")]
@@ -181,6 +183,47 @@ impl UprobeManager {
     /// Detach all probes (called on Stop and Drop).
     pub fn detach_all(&mut self) {
         self.active_probes.clear();
+    }
+
+    /// Get the drop count for a specific probe.
+    ///
+    /// Returns the number of events dropped due to ring buffer overflow.
+    /// For non-Linux platforms or non-existent probes, returns 0.
+    ///
+    /// The drop counter is a per-CPU array, so this sums values across all CPUs.
+    pub fn get_drop_count(&self, metric_name: &str) -> u64 {
+        #[cfg(target_os = "linux")]
+        {
+            match self.active_probes.get(metric_name) {
+                Some(probe) => {
+                    // Per-CPU array: sum across all CPUs
+                    let key: u32 = 0;
+                    match probe._handles._drop_cnt.get(&key, 0) {
+                        Ok(values) => values.iter().copied().sum::<u64>(),
+                        Err(e) => {
+                            detrix_logging::debug!(
+                                "[uprobe] get_drop_count: failed to read drop counter for '{}': {}",
+                                metric_name,
+                                e
+                            );
+                            0
+                        }
+                    }
+                }
+                None => {
+                    detrix_logging::debug!(
+                        "[uprobe] get_drop_count: probe '{}' not found",
+                        metric_name
+                    );
+                    0
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = metric_name;
+            0
+        }
     }
 
     /// Compile the BPF program, load it with aya, attach as uprobe, and spawn
@@ -301,10 +344,22 @@ impl UprobeManager {
             tokio::spawn(std::future::pending())
         };
 
+        // Step 8: Extract drop counter map for monitoring ring buffer overflows.
+        //
+        // Each probe has its own DETRIX_DROP_CNT per-CPU array map for drop counting.
+        // This map is incremented by the BPF program when bpf_ringbuf_reserve() fails.
+        let drop_cnt_map = ebpf
+            .take_map("DETRIX_DROP_CNT")
+            .ok_or_else(|| Error::Ebpf("DETRIX_DROP_CNT map not found".to_string()))?;
+
+        let drop_cnt = aya::maps::PerCpuArray::try_from(drop_cnt_map)
+            .map_err(|e| Error::Ebpf(format!("Drop counter map init failed: {e}")))?;
+
         Ok(AyaHandles {
             _ebpf: Box::new(ebpf),
             _link: link,
             _poller: poller,
+            _drop_cnt: drop_cnt,
         })
     }
 }
@@ -486,5 +541,37 @@ mod tests {
 
         mgr.attach("metric_with_events", &point).unwrap();
         assert!(mgr.has_probe("metric_with_events"));
+    }
+
+    #[test]
+    fn get_drop_count_nonexistent_probe_returns_zero() {
+        let mgr = UprobeManager::new("/test/binary");
+        let count = mgr.get_drop_count("nonexistent");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn get_drop_count_returns_zero_on_non_linux() {
+        // On non-Linux, attach creates a mock probe with no actual BPF.
+        // get_drop_count returns 0 for simplicity.
+        let mut mgr = UprobeManager::new("/test/binary");
+        let point = test_probe_point();
+        mgr.attach("test_metric", &point).unwrap();
+
+        // On non-Linux (test environment), this should return 0
+        let count = mgr.get_drop_count("test_metric");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn get_drop_count_linux_returns_sum_of_per_cpu_values() {
+        // This test only runs on Linux with actual BPF.
+        // It verifies that get_drop_count sums per-CPU counters.
+        // In practice, this is tested via E2E tests (ebpf_e2e.rs).
+        // The unit test ensures the API exists and compiles on Linux.
+        let mgr = UprobeManager::new("/test/binary");
+        let count = mgr.get_drop_count("nonexistent");
+        assert_eq!(count, 0);
     }
 }

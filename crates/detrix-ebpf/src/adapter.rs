@@ -356,6 +356,15 @@ impl DapAdapter for EbpfAdapter {
             .take()
             .ok_or_else(|| detrix_core::Error::Adapter("Events already subscribed".to_string()))
     }
+
+    fn get_drop_count(&self, metric_name: &str) -> detrix_core::Result<u64> {
+        let count = self
+            .uprobe_manager
+            .try_read()
+            .map(|guard| guard.get_drop_count(metric_name))
+            .unwrap_or(0);
+        Ok(count)
+    }
 }
 
 /// Correlates raw ring buffer bytes with active metric context and emits MetricEvents.

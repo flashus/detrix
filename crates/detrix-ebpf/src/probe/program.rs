@@ -648,4 +648,31 @@ mod tests {
         assert!(prog.source.contains("var0_len"));
         assert!(prog.source.contains("var0_cap"));
     }
+
+    #[test]
+    fn program_has_drop_counter_map() {
+        let prog = generate_bpf_program(&[], false, &CaptureConfig::default()).unwrap();
+        assert!(
+            prog.source.contains("DETRIX_DROP_CNT"),
+            "generated program missing DETRIX_DROP_CNT map"
+        );
+        assert!(
+            prog.source.contains("BPF_MAP_TYPE_PERCPU_ARRAY"),
+            "drop counter should use PERCPU_ARRAY for zero-contention increments"
+        );
+    }
+
+    #[test]
+    fn program_has_drop_increment_logic() {
+        let prog = generate_bpf_program(&[], false, &CaptureConfig::default()).unwrap();
+        // Check drop counter increment on ring buffer reserve failure
+        assert!(
+            prog.source.contains("bpf_map_lookup_elem(&DETRIX_DROP_CNT"),
+            "missing drop counter lookup in ringbuf reserve failure path"
+        );
+        assert!(
+            prog.source.contains("(*cnt)++"),
+            "missing drop counter increment"
+        );
+    }
 }
