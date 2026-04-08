@@ -65,6 +65,34 @@ impl From<object::read::Error> for Error {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl From<aya::EbpfError> for Error {
+    fn from(err: aya::EbpfError) -> Self {
+        Error::Ebpf(err.to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<aya::programs::ProgramError> for Error {
+    fn from(err: aya::programs::ProgramError) -> Self {
+        Error::Ebpf(err.to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<aya::maps::MapError> for Error {
+    fn from(err: aya::maps::MapError) -> Self {
+        Error::Ebpf(err.to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<tempfile::PathPersistError> for Error {
+    fn from(err: tempfile::PathPersistError) -> Self {
+        Error::Ebpf(err.to_string())
+    }
+}
+
 impl From<Error> for CoreError {
     fn from(err: Error) -> Self {
         CoreError::Adapter(err.to_string())

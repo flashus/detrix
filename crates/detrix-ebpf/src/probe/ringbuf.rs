@@ -178,8 +178,16 @@ pub fn parse_ring_buffer_event(
                 // var{idx} (u64) was already read above as `val` — it is 0 (unused).
                 // The BPF program filled var{idx}_blob[N] with the actual bytes inline.
                 let capture = (*byte_size).min(config.max_blob_capture);
-                let bytes =
-                    read_bytes(data, &mut offset, capture).unwrap_or_else(|_| vec![0u8; capture]);
+                let bytes = read_bytes(data, &mut offset, capture).map_err(|e| {
+                    detrix_logging::warn!(
+                        "[ringbuf] StackBlob '{}' read failed (ns_pid={} byte_size={}): {}",
+                        var.name,
+                        ns_pid,
+                        byte_size,
+                        e
+                    );
+                    Error::RingBuffer(format!("Failed to read StackBlob '{}': {}", var.name, e))
+                })?;
 
                 detrix_logging::debug!(
                     "[ringbuf] StackBlob '{}' ns_pid={} byte_size={} capture={}",

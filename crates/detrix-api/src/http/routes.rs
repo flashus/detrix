@@ -34,11 +34,11 @@ use crate::http::handlers::references::{
 use crate::http::handlers::{
     add_metric, cleanup_connections, close_connection, create_connection, delete_metric,
     disable_group, disable_metric, disconnect_all, enable_group, enable_metric, get_cached_hashes,
-    get_config, get_connection, get_mcp_usage, get_metric, get_metric_history, get_metric_value,
-    health_check, inspect_file, list_connections, list_group_metrics, list_groups, list_metrics,
-    prometheus_metrics, provide_file, query_events, reload_config, sleep, status,
-    touch_connections, update_config, update_metric, validate_cache, validate_config,
-    validate_expression, wake,
+    get_config, get_connection, get_mcp_usage, get_metric, get_metric_drop_count,
+    get_metric_history, get_metric_value, health_check, inspect_file, list_connections,
+    list_group_metrics, list_groups, list_metrics, prometheus_metrics, provide_file, query_events,
+    reload_config, sleep, status, touch_connections, update_config, update_metric, validate_cache,
+    validate_config, validate_expression, wake,
 };
 use crate::state::ApiState;
 use axum::{
@@ -306,6 +306,7 @@ pub fn create_router_with_jwt_validator(
         .route(paths::API_V1_METRIC_DISABLE, post(disable_metric))
         .route(paths::API_V1_METRIC_VALUE, get(get_metric_value))
         .route(paths::API_V1_METRIC_HISTORY, get(get_metric_history))
+        .route(paths::API_V1_METRIC_DROP_COUNT, get(get_metric_drop_count))
         // REST API v1 - Events
         .route(paths::API_V1_EVENTS, get(query_events))
         // REST API v1 - Groups

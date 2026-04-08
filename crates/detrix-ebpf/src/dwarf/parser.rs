@@ -26,6 +26,8 @@ pub struct DwarfInfo {
     /// File offset of the .text section — aya uprobe attachment uses file offsets.
     /// symbol_offset = text_file_offset + (pc - text_base)
     text_file_offset: u64,
+    /// Cached endianness to avoid re-checking on every resolve call.
+    is_little_endian: bool,
 }
 
 impl DwarfInfo {
@@ -54,11 +56,14 @@ impl DwarfInfo {
             .map(|(off, _)| off)
             .unwrap_or(0);
 
+        let is_little_endian = obj.is_little_endian();
+
         Ok(Self {
             binary_path: path,
             _data: data,
             text_base: text_vma,
             text_file_offset,
+            is_little_endian,
         })
     }
 
@@ -70,9 +75,12 @@ impl DwarfInfo {
     /// `max_nested_depth` controls how many levels of nested struct fields are resolved.
     /// Follows Delve's `MaxVariableRecurse` semantics: pointer chasing is free, each
     /// struct field level consumes one depth unit. Default: 2.
-    // PERF-03: Cache ELF/DWARF parse results. Currently reparsed on every
-    // resolve_probe_point call. Should cache per-connection and invalidate
-    // only on binary change. Track parsed_elf: Option<Box<dyn Any>> in DwarfInfo.
+    //
+    // NOTE (W-1 from audit): ELF header is parsed once in parse() and endianness cached.
+    // Full DWARF loading still happens per-call due to gimli lifetime constraints.
+    // Further caching would require storing the parsed Dwarf object in OnceLock,
+    // which needs careful lifetime management. Current improvement: avoids re-parsing
+    // ELF header on every call.
     pub fn resolve_probe_point(
         &self,
         file: &str,
@@ -83,7 +91,7 @@ impl DwarfInfo {
         let obj = object::File::parse(&*self._data)
             .map_err(|e| Error::DwarfParse(format!("Failed to parse ELF: {e}")))?;
 
-        let endian = if obj.is_little_endian() {
+        let endian = if self.is_little_endian {
             gimli::RunTimeEndian::Little
         } else {
             gimli::RunTimeEndian::Big

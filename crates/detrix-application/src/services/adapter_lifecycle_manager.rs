@@ -1396,6 +1396,32 @@ impl AdapterLifecycleManager {
     pub fn subscribe_events(&self) -> broadcast::Receiver<MetricEvent> {
         self.event_broadcast_tx.subscribe()
     }
+
+    /// Get the ring buffer drop count for a specific metric.
+    ///
+    /// Returns the number of events dropped due to ring buffer overflow
+    /// for the specified metric. Only applicable to eBPF-based adapters
+    /// (Go on Linux); returns 0 for DAP-based adapters.
+    ///
+    /// # Arguments
+    /// * `metric_name` - Name of the metric to check drop count for
+    ///
+    /// # Returns
+    /// Drop count (0 if metric not found or adapter doesn't support drop counting)
+    pub async fn get_metric_drop_count(&self, metric_name: &str) -> u64 {
+        // Iterate through all adapters and check each one
+        for entry in self.adapters.iter() {
+            let managed = entry.value();
+            // Try to get drop count from the adapter
+            // Most adapters will return 0 if they don't support drop counting
+            if let Ok(count) = managed.adapter.get_drop_count(metric_name) {
+                if count > 0 {
+                    return count;
+                }
+            }
+        }
+        0 // Metric not found or adapter doesn't support drop counting
+    }
 }
 
 impl std::fmt::Debug for AdapterLifecycleManager {

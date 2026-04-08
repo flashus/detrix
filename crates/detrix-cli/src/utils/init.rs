@@ -387,27 +387,31 @@ fn init_adapter_factory(
 
     // On Linux, wrap with EbpfGoFactory so Go connections use eBPF uprobes.
     // Pass capture config from [ebpf] section so max_capture_depth etc. are respected.
-    #[cfg(target_os = "linux")]
-    let dap_factory: DapAdapterFactoryRef = Arc::new(detrix_ebpf::EbpfGoFactory::new_with_config(
-        dap_factory,
-        base_path.to_path_buf(),
-        detrix_ebpf::CaptureConfig::from(&config.ebpf),
-    ));
-    #[cfg(not(target_os = "linux"))]
-    let dap_factory: DapAdapterFactoryRef = dap_factory;
+    let factory: DapAdapterFactoryRef = {
+        #[cfg(target_os = "linux")]
+        let dap_factory: DapAdapterFactoryRef =
+            Arc::new(detrix_ebpf::EbpfGoFactory::new_with_config(
+                dap_factory,
+                base_path.to_path_buf(),
+                detrix_ebpf::CaptureConfig::from(&config.ebpf),
+            ));
 
-    let factory: DapAdapterFactoryRef = if options.enable_reconnection {
-        let reconnect_config = options
-            .reconnect_config
-            .clone()
-            .unwrap_or_else(|| config.adapter.reconnect.clone());
+        #[cfg(not(target_os = "linux"))]
+        let dap_factory: DapAdapterFactoryRef = dap_factory;
 
-        Arc::new(ReconnectingAdapterFactory::new(
-            dap_factory,
-            reconnect_config,
-        ))
-    } else {
-        dap_factory
+        if options.enable_reconnection {
+            let reconnect_config = options
+                .reconnect_config
+                .clone()
+                .unwrap_or_else(|| config.adapter.reconnect.clone());
+
+            Arc::new(ReconnectingAdapterFactory::new(
+                dap_factory,
+                reconnect_config,
+            ))
+        } else {
+            dap_factory
+        }
     };
 
     debug!(

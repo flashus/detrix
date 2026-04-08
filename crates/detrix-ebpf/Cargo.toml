@@ -35,8 +35,8 @@ tempfile.workspace = true
 
 # eBPF (Linux-only, optional)
 [target.'cfg(target_os = "linux")'.dependencies]
-aya = "0.13.1"
-aya-log = "0.2.1"
+aya = { workspace = true }
+aya-log = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]

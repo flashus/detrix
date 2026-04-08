@@ -29,6 +29,9 @@ license = "MIT"
 anyhow = "1.0"
 async-stream = "0.3"
 async-trait = "0.1"
+# eBPF (Linux-only)
+aya = "0.13.1"
+aya-log = "0.2.1"
 # API frameworks
 axum = { version = "0.8.7", features = ["macros", "ws"] }
 axum-extra = { version = "0.9", features = ["typed-header"] }

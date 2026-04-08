@@ -81,7 +81,7 @@ pub struct EbpfAdapter {
 /// A metric with its resolved probe point, ready for event correlation.
 ///
 /// Fields are read by `run_event_correlator` (Linux-only).
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct ActiveMetric {
     metric: Metric,
     probe_point: ProbePoint,
