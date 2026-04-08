@@ -118,7 +118,7 @@ impl FixtureCodeMap {
 pub mod go_lines {
     use super::FixtureCodeMap;
 
-    /// Line of `func main()` in detrix_example_app.go.
+    /// Line of `func main()` in fixtures/go/string_capture/main.go.
     /// Update this if you add/remove lines before `func main()`.
     pub const MAIN_LINE: u32 = 101;
 
@@ -137,21 +137,22 @@ pub mod go_lines {
     const SYMBOL_MAP: &[(&str, u32, u32)] = &[
         // (name,             decl, logpt)
         // Offsets are relative to MAIN_LINE (func main() line).
+        // Updated for fixtures/go/string_capture/main.go
         ("signal_handler", 13, 13), // go signalHandler() goroutine — no new var
         ("symbol", 26, 27),         // symbol := ...; safe from +27 (quantity)
         ("quantity", 27, 28),       // quantity := ...; safe from +28 (price)
-        ("price", 28, 30),          // price := ...; safe from +30 (direction line)
-        ("direction", 29, 30),      // direction := ...; safe from +30 (labelConcat line)
-        ("labelConcat", 31, 33), // labelConcat := ... (concatenation); safe from +33 (labelSprintf)
-        ("labelSprintf", 32, 33), // labelSprintf := ... (fmt.Sprintf); safe from +33 (orderID)
-        ("orderID", 33, 36),     // orderID := placeOrder(); safe from +36 (entryPrice)
-        ("entryPrice", 36, 37),  // entryPrice := price; safe from +37 (currentPrice)
-        ("currentPrice", 37, 38), // currentPrice := ...; safe from +38 (pnl)
-        ("pnl", 38, 41),         // pnl := calculatePnl(); safe from +41 (totalPnl)
-        ("totalPnl", 41, 42),    // totalPnl = ...; safe from +42 (lastOrderID)
-        ("lastOrderID", 42, 44), // lastOrderID := orderID; safe from +44 (log)
-        ("log", 44, 44),         // log(...) call — all vars in scope
-        ("sleep", 46, 46),       // time.Sleep — all vars in scope
+        ("price", 28, 29),          // price := ...; safe from +29 (direction line)
+        ("direction", 29, 33),      // direction := ...; safe from +33 (labelConcat line)
+        ("labelConcat", 33, 35), // labelConcat := ... (concatenation); safe from +35 (labelSprintf)
+        ("labelSprintf", 35, 38), // labelSprintf := ... (fmt.Sprintf); safe from +38 (orderID)
+        ("orderID", 38, 41),     // orderID := placeOrder(); safe from +41 (entryPrice)
+        ("entryPrice", 41, 42),  // entryPrice := price; safe from +42 (currentPrice)
+        ("currentPrice", 42, 43), // currentPrice := ...; safe from +43 (pnl)
+        ("pnl", 43, 46),         // pnl := calculatePnl(); safe from +46 (totalPnl)
+        ("totalPnl", 46, 47),    // totalPnl = ...; safe from +47 (lastOrderID)
+        ("lastOrderID", 47, 50), // lastOrderID := orderID; safe from +50 (log)
+        ("log", 50, 50),         // log(...) call — all vars in scope
+        ("sleep", 52, 52),       // time.Sleep — all vars in scope
     ];
 
     /// Code map for the Go fixture.

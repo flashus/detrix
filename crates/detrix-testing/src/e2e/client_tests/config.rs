@@ -98,7 +98,7 @@ impl ClientTestConfig {
 
     /// Create configuration for Go client testing
     ///
-    /// Uses `fixtures/go/` with Detrix client enabled.
+    /// Uses `fixtures/go/string_capture/` with Detrix client enabled.
     /// The fixture imports the Go client via go.mod replace directive.
     pub fn go() -> Self {
         let mut env_vars = HashMap::new();
@@ -107,9 +107,9 @@ impl ClientTestConfig {
         Self {
             language: ClientLanguage::Go,
             // Directory containing go.mod (used for exists check and working dir)
-            fixture_path: PathBuf::from("fixtures/go"),
-            // Working dir is fixtures/go where go.mod is located
-            working_dir: PathBuf::from("fixtures/go"),
+            fixture_path: PathBuf::from("fixtures/go/string_capture"),
+            // Working dir is fixtures/go/string_capture where go.mod and main.go are located
+            working_dir: PathBuf::from("fixtures/go/string_capture"),
             // spawn_args are not used when compiled_binary is set
             spawn_args_before: vec![],
             spawn_args_after: vec![],
@@ -178,13 +178,15 @@ impl ClientTestConfig {
             }
             ClientLanguage::Go => {
                 // go build with debug symbols for Delve attach
+                // Note: -gcflags takes a quoted string argument when run from shell,
+                // but with Command::args() we pass it as a single argument
                 let mut args = vec!["build".to_string()];
                 args.push("-gcflags=all=-N -l".to_string());
                 if let Some(ref binary_name) = self.compiled_binary {
                     args.push("-o".to_string());
                     args.push(binary_name.clone());
                 }
-                // Build current package (working_dir is fixtures/go)
+                // Build current package (working_dir is fixtures/go/string_capture)
                 args.push(".".to_string());
                 Some((self.language.spawn_command().to_string(), args))
             }

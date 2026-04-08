@@ -52,7 +52,7 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     // ====================================================================
     reporter.section("PHASE 2: START GO APP WITH EMBEDDED CLIENT");
 
-    let fixture_dir = executor.workspace_root.join("fixtures/go");
+    let fixture_dir = executor.workspace_root.join("fixtures/go/string_capture");
     let binary_path = fixture_dir.join("detrix_example_app");
 
     // Build the Go app with debug symbols
@@ -153,7 +153,7 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
     // ====================================================================
     reporter.section("PHASE 4: ADD METRICS (2 LOGPOINTS + 2 BREAKPOINTS)");
 
-    let fixture_file = fixture_dir.join("detrix_example_app.go");
+    let fixture_file = fixture_dir.join("main.go");
 
     // Metric 1: LOGPOINT - simple variable 'symbol' at OFFSET_QUANTITY line
     let step = reporter.step_start(
