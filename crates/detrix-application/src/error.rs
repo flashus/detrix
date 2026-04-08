@@ -830,8 +830,15 @@ pub enum OperationWarning {
         error: String,
     },
 
-    /// LSP purity analysis informational message
-    LspPurityInfo(String),
+    /// LSP purity analysis resolved an unknown function (informational).
+    PurityResolution {
+        /// Function name that was resolved
+        function_name: String,
+        /// Resolution result: "pure" or "impure"
+        resolution: String,
+        /// How it was resolved (e.g., "LSP call hierarchy analysis")
+        source: String,
+    },
 }
 
 impl std::fmt::Display for OperationWarning {
@@ -940,8 +947,16 @@ impl std::fmt::Display for OperationWarning {
                     metric_name, location, error
                 )
             }
-            Self::LspPurityInfo(msg) => {
-                write!(f, "LSP purity: {}", msg)
+            Self::PurityResolution {
+                function_name,
+                resolution,
+                source,
+            } => {
+                write!(
+                    f,
+                    "LSP purity: '{}' resolved as {} ({})",
+                    function_name, resolution, source
+                )
             }
         }
     }

@@ -192,6 +192,14 @@ impl MetricService {
                         }
                         .into());
                     }
+
+                    for func in &result.resolved_functions {
+                        warnings.push(OperationWarning::PurityResolution {
+                            function_name: func.name.clone(),
+                            resolution: func.resolution.clone(),
+                            source: func.source.clone(),
+                        });
+                    }
                 }
             }
         } else {

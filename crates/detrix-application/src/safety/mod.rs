@@ -35,6 +35,7 @@ pub use go::GoValidator;
 pub use python::PythonValidator;
 pub use rust::RustValidator;
 pub use treesitter::TreeSitterResult;
+pub use validation_result::ResolvedFunction;
 pub use validation_result::ValidationResult;
 
 use crate::error::{Result, SafetyError};
@@ -224,10 +225,14 @@ impl ValidatorRegistry {
                 Ok(analysis) => match analysis.level {
                     detrix_core::PurityLevel::Pure => {
                         result.unknown_functions.remove(func_name);
-                        // Remove warnings specifically about this function (exact name match)
                         result
                             .warnings
                             .retain(|w| !w.contains(&format!("'{func_name}'")));
+                        result.resolved_functions.push(ResolvedFunction {
+                            name: func_name.clone(),
+                            resolution: "pure".to_string(),
+                            source: "LSP call hierarchy analysis".to_string(),
+                        });
                         tracing::debug!(func = %func_name, "LSP: resolved as pure");
                     }
                     detrix_core::PurityLevel::Impure => {
@@ -243,6 +248,11 @@ impl ValidatorRegistry {
                             func_name,
                             reasons.join(", ")
                         ));
+                        result.resolved_functions.push(ResolvedFunction {
+                            name: func_name.clone(),
+                            resolution: "impure".to_string(),
+                            source: "LSP call hierarchy analysis".to_string(),
+                        });
                         tracing::info!(func = %func_name, "LSP: resolved as impure, blocked");
                     }
                     detrix_core::PurityLevel::Unknown => {

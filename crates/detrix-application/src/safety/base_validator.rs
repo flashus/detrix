@@ -247,6 +247,7 @@ pub trait BaseValidator {
             function_calls,
             unknown_functions,
             impure_functions,
+            resolved_functions: Vec::new(),
         }
     }
 }
