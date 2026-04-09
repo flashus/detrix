@@ -21,6 +21,8 @@
 //! ```
 
 use crate::dwarf::types::ProbePoint;
+#[allow(unused_imports)] // used inside #[cfg(target_os = "linux")] blocks
+use crate::error::ErrContext;
 use crate::error::{Error, Result};
 use crate::probe::types::{CaptureConfig, ProbeConfig};
 
@@ -242,8 +244,11 @@ impl UprobeManager {
         use aya::programs::UProbe;
 
         // Step 1: Generate BPF C source from variable locations
-        let bpf_program =
-            generate_bpf_program(&probe_point.variables, false, &self.capture_config)?;
+        let bpf_program = generate_bpf_program(
+            &probe_point.variables,
+            self.capture_config.capture_goid,
+            &self.capture_config,
+        )?;
 
         // Debug: log generated BPF source
         detrix_logging::debug!(
@@ -256,8 +261,7 @@ impl UprobeManager {
         let compiled = compile_bpf(&bpf_program)?;
 
         // Step 3: Load the ELF object with aya
-        let mut ebpf = aya::Ebpf::load(&compiled.elf_bytes)
-            .map_err(|e| Error::Ebpf(format!("aya load failed: {e}")))?;
+        let mut ebpf = aya::Ebpf::load(&compiled.elf_bytes).context("aya load failed")?;
 
         // Step 3a: Populate DETRIX_NS_INFO with our PID namespace dev/ino so
         // the BPF program can call bpf_get_ns_current_pid_tgid() and emit
@@ -278,11 +282,9 @@ impl UprobeManager {
                 .program_mut("detrix_capture")
                 .ok_or_else(|| Error::Ebpf("BPF program 'detrix_capture' not found".to_string()))?
                 .try_into()
-                .map_err(|e| Error::Ebpf(format!("Not a uprobe program: {e}")))?;
+                .context("Not a uprobe program")?;
 
-            program
-                .load()
-                .map_err(|e| Error::Ebpf(format!("BPF verifier rejected: {e}")))?;
+            program.load().context("BPF verifier rejected")?;
 
             // Attach at symbol_offset in the target binary.
             // fn_name=None + offset=symbol_offset → mid-function attachment.
@@ -293,11 +295,9 @@ impl UprobeManager {
                     binary_path_str,
                     None, // namespace (cgroups)
                 )
-                .map_err(|e| Error::Ebpf(format!("uprobe attach failed: {e}")))?;
+                .context("uprobe attach failed")?;
 
-            program
-                .take_link(link_id)
-                .map_err(|e| Error::Ebpf(format!("take_link failed: {e}")))?
+            program.take_link(link_id).context("take_link failed")?
             // &mut UProbe borrow released here
         };
 
@@ -323,8 +323,8 @@ impl UprobeManager {
                 .take_map("DETRIX_EVENTS")
                 .ok_or_else(|| Error::Ebpf("DETRIX_EVENTS map not found".to_string()))?;
 
-            let mut ring_buf = aya::maps::RingBuf::try_from(map_data)
-                .map_err(|e| Error::Ebpf(format!("RingBuf init failed: {e}")))?;
+            let mut ring_buf =
+                aya::maps::RingBuf::try_from(map_data).context("RingBuf init failed")?;
 
             let tx = tx.clone();
             let name = metric_name.to_string();
@@ -366,7 +366,7 @@ impl UprobeManager {
             .ok_or_else(|| Error::Ebpf("DETRIX_DROP_CNT map not found".to_string()))?;
 
         let drop_cnt = aya::maps::PerCpuArray::try_from(drop_cnt_map)
-            .map_err(|e| Error::Ebpf(format!("Drop counter map init failed: {e}")))?;
+            .context("Drop counter map init failed")?;
 
         Ok(AyaHandles {
             _ebpf: Box::new(ebpf),

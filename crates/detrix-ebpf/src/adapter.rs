@@ -85,7 +85,12 @@ pub struct EbpfAdapter {
 struct ActiveMetric {
     metric: Metric,
     probe_point: ProbePoint,
-    /// Whether the BPF program captures the goroutine ID (from runtime.g via R14).
+    /// Whether the BPF program captures the goroutine ID (from `runtime.g` via R14).
+    ///
+    /// Set from `capture_config.capture_goid` in `set_metric()`. When `true`,
+    /// the generated BPF program includes `GOID_EXTRACT` code to read `runtime.g.goid`.
+    /// The correlator passes this flag to `parse_ring_buffer_event` to parse the
+    /// goid field from ring buffer events.
     capture_goid: bool,
 }
 
@@ -326,7 +331,7 @@ impl DapAdapter for EbpfAdapter {
             ActiveMetric {
                 metric: metric.clone(),
                 probe_point,
-                capture_goid: false,
+                capture_goid: self.capture_config.capture_goid,
             },
         );
 

@@ -100,6 +100,17 @@ pub struct EbpfConfig {
     /// entries (which are captured recursively based on `max_capture_depth`).
     #[serde(default = "default_max_array_values")]
     pub max_array_values: usize,
+
+    /// Whether to capture the goroutine ID (goid) in BPF event data.
+    ///
+    /// When enabled, the generated BPF program reads `runtime.g.goid` from the
+    /// goroutine struct pointer stored in R14 (x86-64) or X28 (arm64).
+    /// The offset is Go-version-dependent and compiled with `-DGOID_OFFSET=N`.
+    ///
+    /// Default: `false` (no goid capture — uses OS thread ID for correlation).
+    /// Set to `true` to correlate events by goroutine instead of OS thread.
+    #[serde(default = "default_capture_goid")]
+    pub capture_goid: bool,
 }
 
 fn default_max_capture_vars() -> usize {
@@ -126,6 +137,10 @@ fn default_max_array_values() -> usize {
     64 // Match Delve's default
 }
 
+fn default_capture_goid() -> bool {
+    false // Disabled by default — OS thread ID used for correlation
+}
+
 impl Default for EbpfConfig {
     fn default() -> Self {
         EbpfConfig {
@@ -135,6 +150,7 @@ impl Default for EbpfConfig {
             max_capture_depth: default_max_capture_depth(),
             max_struct_fields: default_max_struct_fields(),
             max_array_values: default_max_array_values(),
+            capture_goid: default_capture_goid(),
         }
     }
 }

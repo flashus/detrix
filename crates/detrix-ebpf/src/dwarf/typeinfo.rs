@@ -26,7 +26,7 @@
 //! ```
 
 use crate::dwarf::types::VariableSize;
-use crate::error::{Error, Result};
+use crate::error::{ErrContext, Error, Result};
 
 use gimli::{AttributeValue, DebuggingInformationEntry, DwAt, Reader, Unit};
 
@@ -175,9 +175,7 @@ fn resolve_type_from_debug_info_ref<R: Reader>(
         };
 
         if is_in_range {
-            let unit = dwarf
-                .unit(unit_header.clone())
-                .map_err(|e| Error::DwarfParse(format!("Unit load: {e}")))?;
+            let unit = dwarf.unit(unit_header.clone()).context("Unit load")?;
 
             let unit_local_offset_val = target_offset - unit_start;
             let unit_local_offset = gimli::UnitOffset(unit_local_offset_val);
@@ -250,12 +248,9 @@ fn resolve_type_at_offset<R: Reader>(
 
     let mut cursor = unit
         .entries_at_offset(offset)
-        .map_err(|e| Error::DwarfParse(format!("entries_at_offset: {e}")))?;
+        .context("entries_at_offset")?;
 
-    let entry = match cursor
-        .next_dfs()
-        .map_err(|e| Error::DwarfParse(format!("next_dfs: {e}")))?
-    {
+    let entry = match cursor.next_dfs().context("next_dfs")? {
         Some(e) => e,
         None => return Ok(TypeInfo::unknown()),
     };
@@ -822,18 +817,12 @@ fn read_attr_string<R: Reader>(
 ) -> Result<Option<String>> {
     match entry.attr_value(DwAt(attr.0)) {
         Some(AttributeValue::DebugStrRef(offset)) => {
-            let s = dwarf
-                .string(offset)
-                .map_err(|e| Error::DwarfParse(format!("{e}")))?;
-            let name = s
-                .to_string_lossy()
-                .map_err(|e| Error::DwarfParse(format!("UTF-8: {e}")))?;
+            let s = dwarf.string(offset).context("name read")?;
+            let name = s.to_string_lossy().context("UTF-8")?;
             Ok(Some(name.to_string()))
         }
         Some(AttributeValue::String(ref s)) => {
-            let name = s
-                .to_string_lossy()
-                .map_err(|e| Error::DwarfParse(format!("UTF-8: {e}")))?;
+            let name = s.to_string_lossy().context("UTF-8")?;
             Ok(Some(name.to_string()))
         }
         _ => Ok(None),

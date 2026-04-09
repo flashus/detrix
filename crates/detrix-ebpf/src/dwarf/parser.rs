@@ -8,7 +8,7 @@
 
 use super::typeinfo::{resolve_type_info, TypeInfo};
 use super::types::{ProbePoint, ProgramCounter, ResolvedVariable, VariableLocation, VariableSize};
-use crate::error::{Error, Result};
+use crate::error::{ErrContext, Error, Result};
 
 use gimli::{AttributeValue, DebuggingInformationEntry, DwAt, EndianSlice, Reader};
 use object::{CompressionFormat, Object, ObjectSection};
@@ -37,13 +37,11 @@ impl DwarfInfo {
     /// DWARF variable locations.
     pub fn parse(binary_path: impl AsRef<Path>) -> Result<Self> {
         let path = binary_path.as_ref().to_path_buf();
-        let data = std::fs::read(&path).map_err(|e| {
-            Error::DwarfParse(format!("Failed to read binary {}: {e}", path.display()))
-        })?;
+        let data =
+            std::fs::read(&path).context(&format!("Failed to read binary {}", path.display()))?;
 
-        let obj = object::File::parse(&*data).map_err(|e| {
-            Error::DwarfParse(format!("Failed to parse ELF {}: {e}", path.display()))
-        })?;
+        let obj = object::File::parse(&*data)
+            .context(&format!("Failed to parse ELF {}", path.display()))?;
 
         let text_section = obj.section_by_name(".text");
         // VMA of .text — used to convert DWARF virtual addresses to offsets.
@@ -88,8 +86,7 @@ impl DwarfInfo {
         requested_vars: &[String],
         max_nested_depth: usize,
     ) -> Result<ProbePoint> {
-        let obj = object::File::parse(&*self._data)
-            .map_err(|e| Error::DwarfParse(format!("Failed to parse ELF: {e}")))?;
+        let obj = object::File::parse(&*self._data).context("Failed to parse ELF")?;
 
         let endian = if self.is_little_endian {
             gimli::RunTimeEndian::Little
@@ -176,7 +173,7 @@ fn load_dwarf<'a>(
         Ok(EndianSlice::new(data, endian))
     };
 
-    gimli::Dwarf::load(load_section).map_err(|e| Error::DwarfParse(format!("Load DWARF: {e}")))
+    gimli::Dwarf::load(load_section).context("Load DWARF")
 }
 
 /// Parse `.debug_frame` to find CFA = SP + N at the given PC.
@@ -265,13 +262,8 @@ fn resolve_line_to_pc<R: Reader>(
     let mut seen_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     let mut units = dwarf.units();
-    while let Some(header) = units
-        .next()
-        .map_err(|e| Error::DwarfParse(format!("Unit iteration: {e}")))?
-    {
-        let unit = dwarf
-            .unit(header)
-            .map_err(|e| Error::DwarfParse(format!("Unit parse: {e}")))?;
+    while let Some(header) = units.next().context("Unit iteration")? {
+        let unit = dwarf.unit(header).context("Unit parse")?;
 
         // DW_AT_comp_dir: needed for DWARF v4 files where dir_index=0 means comp_dir.
         // Gimli returns None for v4 dir index 0, so we read it explicitly from the unit.
@@ -282,10 +274,7 @@ fn resolve_line_to_pc<R: Reader>(
 
         if let Some(program) = unit.line_program.clone() {
             let mut rows = program.rows();
-            while let Some((header, row)) = rows
-                .next_row()
-                .map_err(|e| Error::DwarfParse(format!("Line row: {e}")))?
-            {
+            while let Some((header, row)) = rows.next_row().context("Line row")? {
                 let Some(row_line) = row.line().map(|n| n.get()) else {
                     continue;
                 };
@@ -296,10 +285,8 @@ fn resolve_line_to_pc<R: Reader>(
                 if let Some(file_entry) = row.file(header) {
                     let name_reader = dwarf
                         .attr_string(&unit, file_entry.path_name())
-                        .map_err(|e| Error::DwarfParse(format!("File name: {e}")))?;
-                    let name_s = name_reader
-                        .to_string_lossy()
-                        .map_err(|e| Error::DwarfParse(format!("Name UTF-8: {e}")))?;
+                        .context("File name")?;
+                    let name_s = name_reader.to_string_lossy().context("Name UTF-8")?;
                     let name_str: &str = &name_s;
 
                     let file_path: String = if name_str.starts_with('/') {
@@ -308,12 +295,8 @@ fn resolve_line_to_pc<R: Reader>(
                         name_str.to_owned()
                     } else if let Some(dir) = file_entry.directory(header) {
                         // Explicit directory from line table header (DWARF v5 dir≥0, v4 dir≥1).
-                        let dir_reader = dwarf
-                            .attr_string(&unit, dir)
-                            .map_err(|e| Error::DwarfParse(format!("Dir string: {e}")))?;
-                        let dir_s = dir_reader
-                            .to_string_lossy()
-                            .map_err(|e| Error::DwarfParse(format!("Dir UTF-8: {e}")))?;
+                        let dir_reader = dwarf.attr_string(&unit, dir).context("Dir string")?;
+                        let dir_s = dir_reader.to_string_lossy().context("Dir UTF-8")?;
                         let dir_str: &str = &dir_s;
                         if dir_str.is_empty() {
                             name_str.to_owned()
@@ -375,19 +358,11 @@ fn resolve_line_to_pc<R: Reader>(
 /// Find the function name containing a given PC.
 fn find_function_at_pc<R: Reader>(dwarf: &gimli::Dwarf<R>, pc: ProgramCounter) -> Result<String> {
     let mut units = dwarf.units();
-    while let Some(header) = units
-        .next()
-        .map_err(|e| Error::DwarfParse(format!("{e}")))?
-    {
-        let unit = dwarf
-            .unit(header)
-            .map_err(|e| Error::DwarfParse(format!("{e}")))?;
+    while let Some(header) = units.next().context("find_function: unit iteration")? {
+        let unit = dwarf.unit(header).context("find_function: unit parse")?;
         let mut entries = unit.entries();
 
-        while let Some(entry) = entries
-            .next_dfs()
-            .map_err(|e| Error::DwarfParse(format!("{e}")))?
-        {
+        while let Some(entry) = entries.next_dfs().context("find_function: DFS traversal")? {
             if entry.tag() != gimli::DW_TAG_subprogram {
                 continue;
             }
@@ -418,19 +393,11 @@ fn resolve_variables_at_pc<R: Reader>(
     let mut resolved = Vec::new();
     let mut units = dwarf.units();
 
-    while let Some(header) = units
-        .next()
-        .map_err(|e| Error::DwarfParse(format!("{e}")))?
-    {
-        let unit = dwarf
-            .unit(header)
-            .map_err(|e| Error::DwarfParse(format!("{e}")))?;
+    while let Some(header) = units.next().context("resolve_vars: unit iteration")? {
+        let unit = dwarf.unit(header).context("resolve_vars: unit parse")?;
         let mut entries = unit.entries();
 
-        while let Some(entry) = entries
-            .next_dfs()
-            .map_err(|e| Error::DwarfParse(format!("{e}")))?
-        {
+        while let Some(entry) = entries.next_dfs().context("resolve_vars: DFS traversal")? {
             if entry.tag() != gimli::DW_TAG_variable
                 && entry.tag() != gimli::DW_TAG_formal_parameter
             {
@@ -607,18 +574,12 @@ fn read_die_name<R: Reader>(
 
     match attr {
         AttributeValue::DebugStrRef(offset) => {
-            let s = dwarf
-                .string(offset)
-                .map_err(|e| Error::DwarfParse(format!("{e}")))?;
-            let name = s
-                .to_string_lossy()
-                .map_err(|e| Error::DwarfParse(format!("UTF-8: {e}")))?;
+            let s = dwarf.string(offset).context("read_die_name: string read")?;
+            let name = s.to_string_lossy().context("read_die_name: UTF-8")?;
             Ok(Some(name.to_string()))
         }
         AttributeValue::String(ref s) => {
-            let name = s
-                .to_string_lossy()
-                .map_err(|e| Error::DwarfParse(format!("UTF-8: {e}")))?;
+            let name = s.to_string_lossy().context("UTF-8")?;
             Ok(Some(name.to_string()))
         }
         _ => Ok(None),
@@ -660,14 +621,9 @@ fn resolve_location_attr<R: Reader>(
             evaluate_location_expr(expr, unit.encoding(), cfa_sp_delta)
         }
         AttributeValue::LocationListsRef(offset) => {
-            let mut loclists = dwarf
-                .locations(unit, offset)
-                .map_err(|e| Error::DwarfParse(format!("Location list: {e}")))?;
+            let mut loclists = dwarf.locations(unit, offset).context("Location list")?;
 
-            while let Some(entry) = loclists
-                .next()
-                .map_err(|e| Error::DwarfParse(format!("Location entry: {e}")))?
-            {
+            while let Some(entry) = loclists.next().context("Location entry")? {
                 let gimli::LocationListEntry { range, data, .. } = entry;
                 if pc >= range.begin && pc < range.end {
                     return evaluate_location_expr(data, unit.encoding(), cfa_sp_delta);
@@ -705,10 +661,7 @@ fn evaluate_location_expr<R: Reader>(
     detrix_logging::debug!("[DWARF eval] Starting location expression evaluation");
 
     loop {
-        match ops
-            .next()
-            .map_err(|e| Error::DwarfParse(format!("Op parse: {e}")))?
-        {
+        match ops.next().context("Op parse")? {
             None => break,
             Some(gimli::Operation::Register { register }) => {
                 detrix_logging::debug!("[DWARF eval] Register {:?}", register);

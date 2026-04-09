@@ -11,7 +11,8 @@
 //! 2. User-space reads DWARF field offsets
 //! 3. User-space reads each field via process_vm_readv(base_addr + field_offset)
 
-use crate::error::Result;
+#[allow(unused_imports)] // used inside #[cfg(target_os = "linux")] blocks
+use crate::error::{ErrContext, Error, Result};
 use std::sync::Arc;
 
 /// Type alias for process memory reader — consistent with FooRef convention.
@@ -68,6 +69,11 @@ impl LinuxProcessMemoryReader {
     pub fn new(_target_exe: &str) -> Self {
         Self
     }
+
+    /// Check if a process is still alive. Returns false if the process has exited.
+    fn pid_exists(pid: u32) -> bool {
+        std::path::Path::new(&format!("/proc/{}", pid)).exists()
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -82,6 +88,13 @@ impl ProcessMemoryReader for LinuxProcessMemoryReader {
             len
         );
 
+        if !Self::pid_exists(pid) {
+            return Err(Error::Ebpf(format!(
+                "Process {pid} has exited — cannot read string at {:#x}",
+                ptr
+            )));
+        }
+
         // Limit read size to prevent excessive memory access
         let read_len = len.min(1024);
 
@@ -91,7 +104,7 @@ impl ProcessMemoryReader for LinuxProcessMemoryReader {
                 let actual_len = buf.len().min(len);
                 if actual_len > 0 && buf.iter().any(|&b| b != 0) {
                     return String::from_utf8(buf[..actual_len].to_vec())
-                        .map_err(|e| Error::Ebpf(format!("Invalid UTF-8 in string: {e}")));
+                        .context("Invalid UTF-8 in string")?;
                 }
             }
             Err(e) => {
@@ -108,7 +121,7 @@ impl ProcessMemoryReader for LinuxProcessMemoryReader {
                 let actual_len = buf.len().min(len);
                 if actual_len > 0 && buf.iter().any(|&b| b != 0) {
                     return String::from_utf8(buf[..actual_len].to_vec())
-                        .map_err(|e| Error::Ebpf(format!("Invalid UTF-8 in string: {e}")));
+                        .context("Invalid UTF-8 in string")?;
                 }
             }
             Err(e) => {
@@ -123,6 +136,12 @@ impl ProcessMemoryReader for LinuxProcessMemoryReader {
     }
 
     fn read_bytes(&self, pid: u32, ptr: u64, len: usize) -> Result<Vec<u8>> {
+        if !Self::pid_exists(pid) {
+            return Err(crate::error::Error::Ebpf(format!(
+                "Process {pid} has exited — cannot read bytes at {:#x}",
+                ptr
+            )));
+        }
         // Try process_vm_readv first
         if let Ok(buf) = process_vm_read(pid, ptr, len) {
             return Ok(buf);

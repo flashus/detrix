@@ -101,6 +101,10 @@ fn build_event_fields(
                 out.push_str(&format!("    u64 var{i}_len;\n"));
                 // Fixed-size buffer for string content — filled by bpf_probe_read_user.
                 // Capped at 255 to match the verifier hint (_len &= 0xFF) in build_var_reads.
+                // NOTE: Buffer boundary may split multi-byte UTF-8 characters.
+                // User-space rejects invalid UTF-8 via String::from_utf8 (returns <read-failed>).
+                // For full UTF-8 safety, keep max_string_capture as a multiple of 4
+                // (max UTF-8 sequence is 4 bytes).
                 let buf_size = config.max_string_capture.min(255);
                 out.push_str(&format!("    u8  var{i}_str[{}];\n", buf_size));
             }

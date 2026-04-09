@@ -6,6 +6,78 @@ use detrix_core::Error as CoreError;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+// ── .context() extension trait for ergonomic error context enrichment ─────────
+//
+// Replaces the repetitive pattern:
+//   .map_err(|e| Error::X(format!("context: {e}")))?
+// With:
+//   .context("context")?
+//
+// The target error variant is inferred via the `ErrContext` trait, which is
+// implemented for each source error type (gimli::Error, std::io::Error, etc.)
+// with the appropriate Error::Xxx constructor.
+
+/// Extension trait for adding context to errors. Auto-detects the error variant
+/// via trait impl — call sites only provide the context string.
+pub trait ErrContext<T, E> {
+    /// Add context to the error message. Replaces
+    /// `.map_err(|e| Error::Xxx(format!("context: {e}")))`.
+    fn context(self, ctx: &str) -> Result<T>;
+}
+
+impl<T, E: std::fmt::Display + 'static> ErrContext<T, E> for std::result::Result<T, E> {
+    fn context(self, ctx: &str) -> Result<T> {
+        self.map_err(|e| {
+            // Try downcasting the source error to apply a targeted context prefix
+            // based on the error type. Each error type gets its own mapping.
+            wrap_with_context::<E>(ctx, &e)
+        })
+    }
+}
+
+/// Internal: map a source error to `Error` with context prefix, using type inference.
+fn wrap_with_context<E: std::fmt::Display + 'static>(ctx: &str, e: &E) -> Error {
+    // Try downcasting known error types to their canonical Error variant.
+    // This keeps the mapping centralized and type-safe.
+    use std::any::Any;
+    let any: &dyn Any = e;
+
+    if let Some(e) = any.downcast_ref::<gimli::Error>() {
+        return Error::DwarfParse(format!("{ctx}: {e}"));
+    }
+    if let Some(e) = any.downcast_ref::<object::read::Error>() {
+        return Error::DwarfParse(format!("{ctx}: {e}"));
+    }
+    if let Some(e) = any.downcast_ref::<std::io::Error>() {
+        return Error::DwarfParse(format!("{ctx}: {e}"));
+    }
+    if let Some(e) = any.downcast_ref::<std::string::FromUtf8Error>() {
+        return Error::DwarfParse(format!("{ctx}: {e}"));
+    }
+    if let Some(e) = any.downcast_ref::<std::str::Utf8Error>() {
+        return Error::DwarfParse(format!("{ctx}: {e}"));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(e) = any.downcast_ref::<aya::EbpfError>() {
+        return Error::Ebpf(format!("{ctx}: {e}"));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(e) = any.downcast_ref::<aya::programs::ProgramError>() {
+        return Error::Ebpf(format!("{ctx}: {e}"));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(e) = any.downcast_ref::<aya::maps::MapError>() {
+        return Error::Ebpf(format!("{ctx}: {e}"));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(e) = any.downcast_ref::<tempfile::PathPersistError>() {
+        return Error::Ebpf(format!("{ctx}: {e}"));
+    }
+
+    // Fallback: unknown error type — use DwarfParse as default
+    Error::DwarfParse(format!("{ctx}: {e}"))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// DWARF parsing or resolution failure.

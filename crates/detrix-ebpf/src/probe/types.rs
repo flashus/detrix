@@ -64,6 +64,13 @@ pub struct CaptureConfig {
     ///
     /// Follows Delve's `MaxArrayValues` semantics. Prevents ring buffer blowup.
     pub max_array_values: usize,
+    /// Whether the BPF program captures the goroutine ID (goid).
+    ///
+    /// When `true`, the generated BPF program reads `runtime.g.goid` from the
+    /// goroutine struct pointer (R14 on x86-64). The event struct includes
+    /// a `goid` field, and user-space parses it from the ring buffer.
+    /// When `false`, events use OS thread ID (tid) for correlation.
+    pub capture_goid: bool,
 }
 
 impl Default for CaptureConfig {
@@ -75,6 +82,7 @@ impl Default for CaptureConfig {
             max_capture_depth: 2,
             max_struct_fields: -1,
             max_array_values: 64,
+            capture_goid: false,
         }
     }
 }
@@ -88,6 +96,7 @@ impl From<&detrix_config::EbpfConfig> for CaptureConfig {
             max_capture_depth: cfg.max_capture_depth,
             max_struct_fields: cfg.max_struct_fields,
             max_array_values: cfg.max_array_values,
+            capture_goid: cfg.capture_goid,
         }
     }
 }
