@@ -12,7 +12,7 @@ COPY clients/go /src/clients/go
 # Copy fixture (its go.mod has replace directive to local client)
 COPY fixtures/go /src/fixtures/go
 
-WORKDIR /src/fixtures/go
+WORKDIR /src/fixtures/go/string_capture
 
 # Build with debug symbols (required for Delve), static binary (no CGO)
 RUN --mount=type=cache,target=/root/.cache/go-build \

@@ -45,6 +45,7 @@ COPY crates/detrix-cli/Cargo.toml         crates/detrix-cli/
 COPY crates/detrix-config/Cargo.toml      crates/detrix-config/
 COPY crates/detrix-core/Cargo.toml        crates/detrix-core/
 COPY crates/detrix-dap/Cargo.toml         crates/detrix-dap/
+COPY crates/detrix-ebpf/Cargo.toml        crates/detrix-ebpf/
 COPY crates/detrix-logging/Cargo.toml     crates/detrix-logging/
 COPY crates/detrix-lsp/Cargo.toml         crates/detrix-lsp/
 COPY crates/detrix-output/Cargo.toml      crates/detrix-output/

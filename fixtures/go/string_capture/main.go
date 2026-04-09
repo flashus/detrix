@@ -2,10 +2,10 @@
 // This file matches the Python trade_bot_forever.py algorithm exactly
 //
 // To run with Delve DAP:
-//   dlv debug --listen=:13640 --headless --api-version=2 --accept-multiclient ./detrix_example_app.go
+//   dlv debug --listen=:13640 --headless --api-version=2 --accept-multiclient .
 //
 // Or build and run separately:
-//   go build -gcflags="all=-N -l" -o detrix_example_app detrix_example_app.go
+//   go build -gcflags="all=-N -l" -o detrix_example_app .
 //   dlv exec --listen=:13640 --headless --api-version=2 --accept-multiclient ./detrix_example_app
 //
 // With Detrix client enabled (for client tests):
@@ -124,11 +124,11 @@ func main() {
 		iteration++
 		// LINE NUMBERS: single source of truth is dap_scenarios.rs::go_lines
 		// If you add/remove lines before func main(), update go_lines::MAIN_LINE only.
-		symbol := symbols[rand.Intn(len(symbols))]                            // OFFSET_SYMBOL
-		quantity := rand.Intn(50) + 1                                         // OFFSET_QUANTITY
-		price := rand.Float64()*900 + 100                                     // OFFSET_PRICE
-		direction := [2]string{"BUY", "SELL"}[rand.Intn(2)]                  // OFFSET_DIRECTION
-		
+		symbol := symbols[rand.Intn(len(symbols))]          // OFFSET_SYMBOL
+		quantity := rand.Intn(50) + 1                       // OFFSET_QUANTITY
+		price := rand.Float64()*900 + 100                   // OFFSET_PRICE
+		direction := [2]string{"BUY", "SELL"}[rand.Intn(2)] // OFFSET_DIRECTION
+
 		// Two different dynamic string creation methods for comprehensive testing:
 		// 1. String concatenation with + operator (uses runtime.concatstrings)
 		labelConcat := symbol + "_" + direction + "_" + fmt.Sprintf("%.0f", price) // OFFSET_LABEL_CONCAT
@@ -144,10 +144,10 @@ func main() {
 		pnl := calculatePnl(entryPrice, currentPrice, quantity) // OFFSET_PNL (all vars in scope)
 
 		// Introspection breakpoint targets (must be real statements, not `_ = x`)
-		totalPnl = totalPnl + pnl                                 // OFFSET_TOTAL_PNL (all vars in scope)
-		lastOrderID := orderID                                           // OFFSET_LAST_ORDER_ID (all vars in scope)
-		_ = lastOrderID                                                  // suppress unused
-		_ = labelSprintf                                                 // suppress unused (captured by eBPF)
+		totalPnl = totalPnl + pnl                                               // OFFSET_TOTAL_PNL (all vars in scope)
+		lastOrderID := orderID                                                  // OFFSET_LAST_ORDER_ID (all vars in scope)
+		_ = lastOrderID                                                         // suppress unused
+		_ = labelSprintf                                                        // suppress unused (captured by eBPF)
 		log("  -> [%s] P&L: $%.2f (iteration %d)", labelConcat, pnl, iteration) // OFFSET_LOG (all vars in scope)
 
 		time.Sleep(3 * time.Second) // Same as Python - 3 seconds

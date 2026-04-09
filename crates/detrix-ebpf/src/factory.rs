@@ -169,20 +169,19 @@ impl DapAdapterFactory for EbpfGoFactory {
     }
 
     async fn create_go_adapter(&self, host: &str, port: u16) -> detrix_core::Result<DapAdapterRef> {
-        // On Linux: `host` is the binary path; attach via eBPF uprobe. `port` unused.
-        // On non-Linux: fall through to Delve/DAP as usual.
+        // On Linux: if host is a binary path (starts with '/'), use eBPF uprobe.
+        // Otherwise (IP address for Delve/DAP), fall through to inner factory.
+        // On non-Linux: always delegate to inner factory.
         #[cfg(target_os = "linux")]
         {
-            let _ = port;
-            // Validate that Go connections on Linux provide a binary path as host
-            if !host.starts_with('/') {
-                return Err(detrix_core::Error::InvalidConfig(
-                    format!("Go connection on Linux requires a binary path as host (starting with '/'), got: '{}'", host).into(),
-                ));
+            if host.starts_with('/') {
+                let _ = port;
+                self.ebpf
+                    .create_go_adapter(host)
+                    .map_err(|e| detrix_core::Error::Adapter(e.to_string()))
+            } else {
+                self.inner.create_go_adapter(host, port).await
             }
-            self.ebpf
-                .create_go_adapter(host)
-                .map_err(|e| detrix_core::Error::Adapter(e.to_string()))
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -277,13 +276,13 @@ mod ebpf_go_factory_tests {
 
     #[tokio::test]
     #[cfg(target_os = "linux")]
-    async fn go_rejects_non_path_host_on_linux() {
+    async fn go_falls_back_to_dap_for_non_path_host_on_linux() {
         let factory = EbpfGoFactory::new(Arc::new(StubFactory), "/tmp");
-        // host = "127.0.0.1" (not a path) should be rejected
+        // host = "127.0.0.1" (not a path) should fall back to inner DAP factory
         let result = factory.create_go_adapter("127.0.0.1", 0).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("binary path as host"));
-        assert!(err.to_string().contains("127.0.0.1"));
+        // StubFactory returns "stub go" — proves it fell through to inner factory
+        assert!(err.to_string().contains("stub go"));
     }
 }
