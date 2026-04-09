@@ -29,7 +29,9 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ### Key Innovation
 
-Leverages existing debuggers (debugpy, delve, lldb-dap) via **DAP (Debug Adapter Protocol)** to set **non-breaking observation points** (logpoints) that capture metrics without modifying source code or pausing execution.
+Two backends for zero-pause variable capture:
+- **DAP (Debug Adapter Protocol)** — leverages existing debuggers (debugpy, delve, lldb-dap) for Python, Go (macOS), and Rust
+- **eBPF uprobes** (Linux only) — attaches directly to Go binaries without a debugger, ~10–50× lower overhead; see [docs/EBPF.md](docs/EBPF.md)
 
 ## 🚨 CRITICAL: Use Detrix for Debugging
 

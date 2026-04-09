@@ -6,28 +6,34 @@ Detrix is an LLM-first dynamic observability platform that enables developers an
 
 ## How It Works
 
-Detrix uses **debugger protocols (DAP - Debug Adapter Protocol)** to set **non-breaking observation points** (logpoints) that capture metrics without modifying source code or pausing execution.
+Detrix uses two backends for capturing metrics without modifying source code or pausing execution:
+
+- **DAP (Debug Adapter Protocol)** — connects to a running debugger (debugpy, Delve, lldb-dap)
+- **eBPF uprobes** — attaches directly to Go binaries on Linux without a debugger (10–50× lower overhead)
 
 ```
                               stdio (JSON-RPC)              HTTP POST /mcp
 ┌─────────────────┐         ┌─────────────────┐         ┌──────────────────┐
 │   Claude Code   │────────▶│  detrix mcp     │────────▶│  Detrix Daemon   │
 │   (AI Agent)    │◀────────│  (MCP Bridge)   │◀────────│                  │
-└─────────────────┘         └─────────────────┘         └────────┬─────────┘
-                                                                 │
-                                                                 │ DAP Protocol
-                                                                 │
-                         ┌───────────────────────────────────────┼───────────────┐
-                         │                                       │               │
-                         ▼                                       ▼               ▼
-                    ┌─────────┐                             ┌─────────┐    ┌─────────┐
-                    │ debugpy │                             │  delve  │    │lldb-dap │
-                    │(Python) │                             │  (Go)   │    │ (Rust)  │
-                    └────┬────┘                             └────┬────┘    └────┬────┘
-                         │                                       │               │
-                         ▼                                       ▼               ▼
-                    Your Python                             Your Go App   Your Rust App
+└─────────────────┘         └─────────────────┘         └──────┬─────┬─────┘
+                                                               │     │
+                                             ┌─────────────────┘     └──────────────────┐
+                                             │ DAP Protocol                              │ eBPF (Linux Go)
+                                             │                                           │
+                         ┌───────────────────┼───────────────┐                    ┌─────┴──────┐
+                         │                   │               │                    │   uprobe   │
+                         ▼                   ▼               ▼                    │  (kernel)  │
+                    ┌─────────┐         ┌─────────┐    ┌─────────┐               └─────┬──────┘
+                    │ debugpy │         │  delve  │    │lldb-dap │                     │
+                    │(Python) │         │(Go/mac) │    │ (Rust)  │                     │ process_vm_readv
+                    └────┬────┘         └────┬────┘    └────┬────┘                     │
+                         │                   │               │                          ▼
+                         ▼                   ▼               ▼                   Your Go App
+                    Your Python         Your Go App   Your Rust App              (Linux only)
 ```
+
+**Go on Linux** uses eBPF automatically — set `host` to the binary path instead of a Delve address. See [EBPF.md](EBPF.md) for details.
 
 **Flow (Bridge Mode - Default):**
 1. **Claude Code** calls MCP tools (e.g., `add_metric`) via stdio
@@ -107,6 +113,7 @@ detrix-application→ detrix-ports, detrix-core, detrix-config ONLY (NO infrastr
 detrix-ports      → detrix-core, detrix-config ONLY (port definitions)
 detrix-storage    → detrix-ports, detrix-core, detrix-application* (implements traits)
 detrix-dap        → detrix-ports, detrix-core, detrix-application* (implements traits)
+detrix-ebpf       → detrix-ports, detrix-core (eBPF adapter for Go/Linux)
 detrix-lsp        → detrix-ports, detrix-core, detrix-application* (implements traits)
 detrix-output     → detrix-ports, detrix-core, detrix-application* (implements traits)
 detrix-core       → NOTHING (pure domain)
@@ -216,6 +223,16 @@ detrix-testing    → detrix-ports, detrix-core, detrix-application (test mocks)
 - `GoOutputParser` - Go/delve specifics
 - `RustOutputParser` - Rust/lldb-dap specifics
 - All use same logpoint format: `DETRICS:name={expr1}\x1F{expr2}\x1F...` (expressions delimited by ASCII Unit Separator)
+
+**detrix-ebpf** - eBPF uprobe adapter for Go on Linux
+- `EbpfAdapter` - Implements `DapAdapter` trait via eBPF uprobes (Linux-only, gated with `cfg(target_os = "linux")`)
+- `EbpfGoFactory` - Composite factory: routes Go connections to eBPF on Linux, falls back to Delve/DAP on macOS
+- DWARF parsing (`dwarf/`) - Reads variable locations, types, and struct layouts from ELF debug info
+- BPF C codegen (`probe/program.rs`) - Generates uprobe C source from variable locations, compiles at runtime
+- Ring buffer parsing (`probe/ringbuf.rs`) - Reads raw BPF events; resolves strings/slices/maps via `process_vm_readv`
+- Per-probe drop counter (`DETRIX_DROP_CNT`) - Per-CPU counter for ring buffer overflow events, queried via `DapAdapter::get_drop_count()`
+- PID namespace handling - Uses `bpf_get_ns_current_pid_tgid` (kernel ≥ 5.7) to get container-local PIDs for Docker
+- See [EBPF.md](EBPF.md) for usage details
 
 **detrix-lsp** - LSP-based purity analysis (optional)
 - Call hierarchy traversal for user-defined functions
