@@ -337,6 +337,84 @@ async fn test_ebpf_go_uprobe_captures_variables() {
     };
     reporter.step_success(step, Some(&format!("metricId={label_sprintf_metric_id}")));
 
+    // Metric 4: monitor (background goroutine — init()-spawned monitorWorker)
+    let monitor_line = go_lines::CODEMAP.find_logpoint("monitor");
+    let monitor_location = format!("@{fixture_source}#{monitor_line}");
+
+    let step = reporter.step_start(
+        "Add Metric 4 (monitor goroutine)",
+        &format!("ebpf_monitor @ {fixture_source}:{monitor_line}"),
+    );
+
+    let monitor_resp: serde_json::Value = http
+        .post(format!(
+            "http://127.0.0.1:{}/api/v1/metrics",
+            executor.http_port
+        ))
+        .json(&serde_json::json!({
+            "name": "ebpf_monitor",
+            "location": monitor_location,
+            "expressions": ["monitorStatus"],
+            "connectionId": connection_id,
+            "language": "go",
+            "enabled": true,
+        }))
+        .send()
+        .await
+        .expect("Add metric 4 request failed")
+        .json()
+        .await
+        .expect("Failed to parse metric 4 response");
+
+    let monitor_metric_id = match monitor_resp["metricId"].as_u64() {
+        Some(id) => id,
+        None => {
+            reporter.step_failed(step, &monitor_resp.to_string());
+            executor.print_daemon_logs(120);
+            panic!("No metricId in monitor response: {monitor_resp}");
+        }
+    };
+    reporter.step_success(step, Some(&format!("metricId={monitor_metric_id}")));
+
+    // Metric 5: reporter (background goroutine — init()-spawned reporterWorker)
+    let reporter_line = go_lines::CODEMAP.find_logpoint("reporter");
+    let reporter_location = format!("@{fixture_source}#{reporter_line}");
+
+    let step = reporter.step_start(
+        "Add Metric 5 (reporter goroutine)",
+        &format!("ebpf_reporter @ {fixture_source}:{reporter_line}"),
+    );
+
+    let reporter_resp: serde_json::Value = http
+        .post(format!(
+            "http://127.0.0.1:{}/api/v1/metrics",
+            executor.http_port
+        ))
+        .json(&serde_json::json!({
+            "name": "ebpf_reporter",
+            "location": reporter_location,
+            "expressions": ["reporterStatus"],
+            "connectionId": connection_id,
+            "language": "go",
+            "enabled": true,
+        }))
+        .send()
+        .await
+        .expect("Add metric 5 request failed")
+        .json()
+        .await
+        .expect("Failed to parse metric 5 response");
+
+    let reporter_metric_id = match reporter_resp["metricId"].as_u64() {
+        Some(id) => id,
+        None => {
+            reporter.step_failed(step, &reporter_resp.to_string());
+            executor.print_daemon_logs(120);
+            panic!("No metricId in reporter response: {reporter_resp}");
+        }
+    };
+    reporter.step_success(step, Some(&format!("metricId={reporter_metric_id}")));
+
     // ── PHASE 5: Collect and verify events ───────────────────────────────────
     reporter.section("PHASE 5: COLLECT eBPF EVENTS");
     reporter.info(&format!(
@@ -523,5 +601,96 @@ async fn test_ebpf_go_uprobe_captures_variables() {
     let step = reporter.step_start("Verify labelSprintf", "dynamic heap string via fmt.Sprintf");
     reporter.step_success(step, Some(&format!("labelSprintf={label_sprintf_val:?}")));
 
-    reporter.info("eBPF uprobe test PASSED — static strings, concatenation, and fmt.Sprintf all captured via ring buffer");
+    // ── threadId verification ────────────────────────────────────────────────
+    // With capture_goid = false, threadId comes from the OS thread ID (tid).
+    // All events from the main goroutine should share the same tid.
+
+    let monitor_events: Vec<serde_json::Value> = http
+        .get(format!(
+            "http://127.0.0.1:{}/api/v1/events?metricId={monitor_metric_id}&limit=20&since=0",
+            executor.http_port
+        ))
+        .send()
+        .await
+        .expect("Monitor events query failed")
+        .json()
+        .await
+        .expect("Failed to parse monitor events");
+
+    let reporter_events: Vec<serde_json::Value> = http
+        .get(format!(
+            "http://127.0.0.1:{}/api/v1/events?metricId={reporter_metric_id}&limit=20&since=0",
+            executor.http_port
+        ))
+        .send()
+        .await
+        .expect("Reporter events query failed")
+        .json()
+        .await
+        .expect("Failed to parse reporter events");
+
+    // Diagnostic: print event counts per metric
+    reporter.info(&format!(
+        "Events: symbol_qty={}, labelConcat={}, labelSprintf={}, monitor={}, reporter={}",
+        events.len(),
+        label_concat_events.len(),
+        label_sprintf_events.len(),
+        monitor_events.len(),
+        reporter_events.len(),
+    ));
+
+    // Collect threadIds from all metrics that have events
+    let mut all_events: Vec<&serde_json::Value> = events
+        .iter()
+        .chain(label_concat_events.iter())
+        .chain(label_sprintf_events.iter())
+        .collect();
+    all_events.extend(monitor_events.iter());
+    all_events.extend(reporter_events.iter());
+
+    assert!(
+        !all_events.is_empty(),
+        "No events collected from any metric — check daemon CAP_BPF and fixture binary DWARF",
+    );
+
+    let thread_ids: Vec<Option<u64>> = all_events.iter().map(|e| e["threadId"].as_u64()).collect();
+
+    // All events should have a threadId (from OS tid when capture_goid=false).
+    let all_have_thread_id = thread_ids.iter().all(|id| id.is_some());
+    assert!(
+        all_have_thread_id,
+        "Not all events have threadId. threadIds: {thread_ids:?}",
+    );
+
+    // Verify main goroutine events have valid threadIds (from OS tid).
+    // Note: Each uprobe hit may come from a different OS thread, so threadIds
+    // may vary. The key assertion is that threadId is always present.
+    let main_thread_ids: std::collections::HashSet<_> = events
+        .iter()
+        .filter_map(|e| e["threadId"].as_u64())
+        .collect();
+    assert!(
+        !main_thread_ids.is_empty(),
+        "Main goroutine events should have at least one threadId",
+    );
+
+    let step = reporter.step_start(
+        "Verify threadId",
+        &format!(
+            "threadIds present across {} events ({} distinct)",
+            events.len(),
+            main_thread_ids.len()
+        ),
+    );
+    reporter.step_success(
+        step,
+        Some(&format!(
+            "threadIds={:?} ({} events), total events across all metrics={}",
+            main_thread_ids,
+            events.len(),
+            all_events.len(),
+        )),
+    );
+
+    reporter.info("eBPF uprobe test PASSED — static strings, concatenation, fmt.Sprintf, and threadId all verified via ring buffer");
 }

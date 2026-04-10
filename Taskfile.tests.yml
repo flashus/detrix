@@ -257,11 +257,11 @@ tasks:
               --package detrix-testing --test ebpf_e2e &&
             CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
               --package detrix-testing --test ebpf_nested_types_e2e &&
-            cp /build/target/release/detrix /src/out/detrix &&
+            cp -p /build/target/release/detrix /src/out/detrix &&
             find /build/target/debug/deps -maxdepth 1 -name 'ebpf_e2e-*' ! -name '*.d' \
-              | head -1 | xargs -I{} cp {} /src/out/ebpf_e2e_test &&
+              | head -1 | xargs -I{} cp -p {} /src/out/ebpf_e2e_test &&
             find /build/target/debug/deps -maxdepth 1 -name 'ebpf_nested_types_e2e-*' ! -name '*.d' \
-              | head -1 | xargs -I{} cp {} /src/out/ebpf_nested_types_e2e_test
+              | head -1 | xargs -I{} cp -p {} /src/out/ebpf_nested_types_e2e_test
           "
       # ── Go: fixture binary with DWARF (no cgo → cross-compiles cleanly) ────
       # Named volumes keep downloaded modules and build cache between runs.
@@ -322,7 +322,7 @@ tasks:
             CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
               --package detrix-testing --test ebpf_classic_map_e2e &&
             find /build/target/debug/deps -maxdepth 1 -name 'ebpf_classic_map_e2e-*' ! -name '*.d' \
-              | head -1 | xargs -I{} cp {} /src/out/ebpf_classic_map_e2e_test
+              | head -1 | xargs -I{} cp -p {} /src/out/ebpf_classic_map_e2e_test
           "
 
   test-ebpf-inject:

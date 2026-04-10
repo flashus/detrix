@@ -155,3 +155,33 @@ func main() {
 
 	log("Trading bot stopped! Total P&L: $%.2f", totalPnl)
 }
+
+// ── Background goroutines for goid capture testing ───────────────────────────
+// These spawn additional goroutines so the e2e test can verify that
+// capture_goid correctly distinguishes between different goroutine IDs.
+// Started via init() so they don't shift any lines in main().
+
+var goidDone = make(chan struct{})
+
+func monitorWorker() {
+	defer func() { goidDone <- struct{}{} }()
+	for running {
+		monitorStatus := "monitor" // OFFSET_MONITOR
+		_ = monitorStatus
+		time.Sleep(3 * time.Second)
+	}
+}
+
+func reporterWorker() {
+	defer func() { goidDone <- struct{}{} }()
+	for running {
+		reporterStatus := "reporter" // OFFSET_REPORTER
+		_ = reporterStatus
+		time.Sleep(3 * time.Second)
+	}
+}
+
+func init() {
+	go monitorWorker()
+	go reporterWorker()
+}

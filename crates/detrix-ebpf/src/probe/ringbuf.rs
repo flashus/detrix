@@ -97,13 +97,16 @@ pub fn parse_ring_buffer_event(
     let ns_pid = read_u32(data, &mut offset)?;
     let _reserved = read_u32(data, &mut offset)?;
 
+    // BPF template layout: timestamp comes BEFORE goid (goid is in DETRIX_EVENT_FIELDS).
+    // Fixed: parser order now matches BPF struct layout (timestamp at offset 16, goid at 24).
+    // Note: This was broken when capture_goid was enabled — parser read goid before timestamp.
+    let timestamp_ns = read_u64(data, &mut offset)?;
+
     let goid = if capture_goid {
         Some(read_u64(data, &mut offset)?)
     } else {
         None
     };
-
-    let timestamp_ns = read_u64(data, &mut offset)?;
 
     let mut values = Vec::with_capacity(variables.len());
     for var in variables {
@@ -494,8 +497,9 @@ mod tests {
         buf.extend_from_slice(&tid.to_le_bytes());
         buf.extend_from_slice(&pid.to_le_bytes()); // ns_pid (same as pid in tests)
         buf.extend_from_slice(&0u32.to_le_bytes()); // reserved
-        buf.extend_from_slice(&goid.to_le_bytes());
+                                                    // BPF template layout: timestamp BEFORE goid (goid is in DETRIX_EVENT_FIELDS)
         buf.extend_from_slice(&timestamp.to_le_bytes());
+        buf.extend_from_slice(&goid.to_le_bytes());
         for v in var_values {
             buf.extend_from_slice(&v.to_le_bytes());
         }

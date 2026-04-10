@@ -103,8 +103,8 @@ impl ProcessMemoryReader for LinuxProcessMemoryReader {
             Ok(buf) => {
                 let actual_len = buf.len().min(len);
                 if actual_len > 0 && buf.iter().any(|&b| b != 0) {
-                    return String::from_utf8(buf[..actual_len].to_vec())
-                        .context("Invalid UTF-8 in string")?;
+                    return Ok(String::from_utf8(buf[..actual_len].to_vec())
+                        .context("Invalid UTF-8 in string")?);
                 }
             }
             Err(e) => {
@@ -120,8 +120,8 @@ impl ProcessMemoryReader for LinuxProcessMemoryReader {
             Ok(buf) => {
                 let actual_len = buf.len().min(len);
                 if actual_len > 0 && buf.iter().any(|&b| b != 0) {
-                    return String::from_utf8(buf[..actual_len].to_vec())
-                        .context("Invalid UTF-8 in string")?;
+                    return Ok(String::from_utf8(buf[..actual_len].to_vec())
+                        .context("Invalid UTF-8 in string")?);
                 }
             }
             Err(e) => {

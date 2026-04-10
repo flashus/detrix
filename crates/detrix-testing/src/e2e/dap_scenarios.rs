@@ -153,6 +153,9 @@ pub mod go_lines {
         ("lastOrderID", 47, 50), // lastOrderID := orderID; safe from +50 (log)
         ("log", 50, 50),         // log(...) call — all vars in scope
         ("sleep", 52, 52),       // time.Sleep — all vars in scope
+        // Background goroutines for goid capture testing (init()-spawned workers).
+        ("monitor", 68, 68),  // monitorStatus := "monitor" in monitorWorker
+        ("reporter", 77, 77), // reporterStatus := "reporter" in reporterWorker
     ];
 
     /// Code map for the Go fixture.
