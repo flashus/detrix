@@ -199,6 +199,7 @@ tasks:
   #                             (extracted from Dockerfile.ebpf-test rust-deps stage)
   #
   # Named Docker volumes persist cargo/go caches between builds:
+  #   ebpf-cargo-home    — Rust registry (CARGO_HOME); survives --rm; avoids re-downloading crates
   #   ebpf-cargo-target  — Rust incremental build cache (avoids full recompile)
   #   ebpf-go-mod        — Go module download cache
   #   ebpf-go-build      — Go build cache
@@ -243,11 +244,14 @@ tasks:
       - mkdir -p {{.OUT}}
       # ── Rust: daemon + test binary ──────────────────────────────────────────
       # Source is mounted read-write (output written to ./out/).
-      # Named volume ebpf-cargo-target persists the incremental build cache across
-      # runs — first compile is slow, subsequent compiles only rebuild changed crates.
+      # Named volumes persist caches across runs:
+      #   ebpf-cargo-home   — CARGO_HOME registry; Docker initialises from image on first use,
+      #                        then caches any newly-downloaded crates so --rm never loses them.
+      #   ebpf-cargo-target — incremental build artefacts (avoids full recompile).
       - |
         docker run --rm \
           -v "{{.ROOT_DIR}}:/src" \
+          -v "ebpf-cargo-home:/usr/local/cargo" \
           -v "ebpf-cargo-target:/build/target" \
           -w /src \
           {{.BUILDER}} \
@@ -315,6 +319,7 @@ tasks:
       - |
         docker run --rm \
           -v "{{.ROOT_DIR}}:/src" \
+          -v "ebpf-cargo-home:/usr/local/cargo" \
           -v "ebpf-cargo-target:/build/target" \
           -w /src \
           {{.BUILDER}} \

@@ -142,7 +142,16 @@ impl UprobeManager {
     /// On Linux: compiles and loads a BPF program, attaches as uprobe, and
     /// spawns a ring buffer polling task that sends raw events to `raw_event_tx`.
     /// On other platforms: records the probe config for testing.
-    pub fn attach(&mut self, metric_name: &str, probe_point: &ProbePoint) -> Result<()> {
+    pub fn attach(
+        &mut self,
+        metric_name: &str,
+        probe_point: &ProbePoint,
+        g_addr_offset: Option<i64>,
+        goid_offset: Option<u64>,
+    ) -> Result<()> {
+        #[allow(unused_variables)]
+        // g_addr_offset/goid_offset are only used on Linux for TLS-based goid capture
+        let _ = (g_addr_offset, goid_offset);
         if self.active_probes.contains_key(metric_name) {
             return Err(Error::Ebpf(format!(
                 "Probe already attached for metric '{metric_name}'"
@@ -157,7 +166,8 @@ impl UprobeManager {
         };
 
         #[cfg(target_os = "linux")]
-        let handles = self.load_and_attach_linux(metric_name, probe_point)?;
+        let handles =
+            self.load_and_attach_linux(metric_name, probe_point, g_addr_offset, goid_offset)?;
 
         let probe = AttachedProbe {
             _config: config,
@@ -237,6 +247,8 @@ impl UprobeManager {
         &self,
         metric_name: &str,
         probe_point: &ProbePoint,
+        g_addr_offset: Option<i64>,
+        goid_offset: Option<u64>,
     ) -> Result<AyaHandles> {
         use crate::probe::loader::compile_bpf;
         use crate::probe::program::generate_bpf_program;
@@ -247,6 +259,8 @@ impl UprobeManager {
         let bpf_program = generate_bpf_program(
             &probe_point.variables,
             self.capture_config.capture_goid,
+            g_addr_offset,
+            goid_offset,
             &self.capture_config,
         )?;
 
@@ -477,7 +491,7 @@ mod tests {
         let mut mgr = UprobeManager::new("/test/binary");
         let point = test_probe_point();
 
-        mgr.attach("order_amount", &point).unwrap();
+        mgr.attach("order_amount", &point, None, None).unwrap();
         assert_eq!(mgr.active_count(), 1);
         assert!(mgr.has_probe("order_amount"));
 
@@ -491,8 +505,8 @@ mod tests {
         let mut mgr = UprobeManager::new("/test/binary");
         let point = test_probe_point();
 
-        mgr.attach("metric1", &point).unwrap();
-        let result = mgr.attach("metric1", &point);
+        mgr.attach("metric1", &point, None, None).unwrap();
+        let result = mgr.attach("metric1", &point, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already attached"));
     }
@@ -513,8 +527,8 @@ mod tests {
         let mut mgr = UprobeManager::new("/test/binary");
         let point = test_probe_point();
 
-        mgr.attach("m1", &point).unwrap();
-        mgr.attach("m2", &point.clone()).unwrap();
+        mgr.attach("m1", &point, None, None).unwrap();
+        mgr.attach("m2", &point.clone(), None, None).unwrap();
         assert_eq!(mgr.active_count(), 2);
 
         mgr.detach_all();
@@ -527,7 +541,8 @@ mod tests {
         let point = test_probe_point();
 
         for i in 0..5 {
-            mgr.attach(&format!("metric_{i}"), &point).unwrap();
+            mgr.attach(&format!("metric_{i}"), &point, None, None)
+                .unwrap();
         }
         assert_eq!(mgr.active_count(), 5);
 
@@ -541,7 +556,7 @@ mod tests {
     fn drop_detaches_all() {
         let mut mgr = UprobeManager::new("/test/binary");
         let point = test_probe_point();
-        mgr.attach("m1", &point).unwrap();
+        mgr.attach("m1", &point, None, None).unwrap();
         // Drop mgr — should not panic even with active probes
         drop(mgr);
     }
@@ -552,7 +567,8 @@ mod tests {
         let mut mgr = UprobeManager::new_with_events("/test/binary", tx);
         let point = test_probe_point();
 
-        mgr.attach("metric_with_events", &point).unwrap();
+        mgr.attach("metric_with_events", &point, None, None)
+            .unwrap();
         assert!(mgr.has_probe("metric_with_events"));
     }
 
@@ -569,7 +585,7 @@ mod tests {
         // get_drop_count returns 0 for simplicity.
         let mut mgr = UprobeManager::new("/test/binary");
         let point = test_probe_point();
-        mgr.attach("test_metric", &point).unwrap();
+        mgr.attach("test_metric", &point, None, None).unwrap();
 
         // On non-Linux (test environment), this should return 0
         let count = mgr.get_drop_count("test_metric");

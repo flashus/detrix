@@ -2553,6 +2553,7 @@ enable_ast_analysis = false
 
 [ebpf]
 max_capture_depth = 10
+capture_goid = true
 "#,
             workspace_path_str,
             db_path_str,

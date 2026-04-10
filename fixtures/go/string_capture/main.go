@@ -98,6 +98,39 @@ func calculatePnl(entryPrice, currentPrice float64, quantity int) float64 {
 	return pnl
 }
 
+// tradeTick executes one trading iteration. Called by multiple goroutines
+// so the e2e test can verify distinct goid capture across goroutines.
+func tradeTick(workerID int) {
+	symbols := []string{"BTCUSD", "ETHUSD", "SOLUSD"}
+	// LINE NUMBERS: single source of truth is dap_scenarios.rs::go_lines
+	// If you add/remove lines before tradeTick(), update go_lines::MAIN_LINE only.
+	symbol := symbols[rand.Intn(len(symbols))]          // OFFSET_SYMBOL
+	quantity := rand.Intn(50) + 1                       // OFFSET_QUANTITY
+	price := rand.Float64()*900 + 100                   // OFFSET_PRICE
+	direction := [2]string{"BUY", "SELL"}[rand.Intn(2)] // OFFSET_DIRECTION
+
+	// Two different dynamic string creation methods for comprehensive testing:
+	// 1. String concatenation with + operator (uses runtime.concatstrings)
+	labelConcat := symbol + "_" + direction + "_" + fmt.Sprintf("%.0f", price) // OFFSET_LABEL_CONCAT
+	// 2. Pure fmt.Sprintf (uses different runtime path)
+	labelSprintf := fmt.Sprintf("%s_%s_%.0f", symbol, direction, price) // OFFSET_LABEL_SPRINTF
+
+	// OFFSET_ORDER_ID - place_order call (symbol, quantity, price, label in scope)
+	orderID := placeOrder(symbol, quantity, price) // OFFSET_ORDER_ID
+
+	// Calculate pnl
+	entryPrice := price                                     // OFFSET_ENTRY_PRICE
+	currentPrice := price * (0.95 + rand.Float64()*0.1)     // OFFSET_CURRENT_PRICE
+	pnl := calculatePnl(entryPrice, currentPrice, quantity) // OFFSET_PNL (all vars in scope)
+
+	// Introspection breakpoint targets (must be real statements, not `_ = x`)
+	_ = orderID                                                    // suppress unused
+	_ = entryPrice                                                 // suppress unused
+	_ = currentPrice                                               // suppress unused
+	_ = labelSprintf                                               // suppress unused (captured by eBPF)
+	log("  -> [%s] P&L: $%.2f (worker %d)", labelConcat, pnl, workerID) // OFFSET_LOG (all vars in scope)
+}
+
 func main() {
 	// Ignore SIGPIPE to prevent exit when stdout is closed by test harness
 	signal.Ignore(syscall.SIGPIPE)
@@ -117,71 +150,30 @@ func main() {
 	log("Add metrics with Detrix to observe values!")
 	log("")
 
-	symbols := []string{"BTCUSD", "ETHUSD", "SOLUSD"}
-	iteration, totalPnl := 0, 0.0
-
+	// Main goroutine runs trading loop alongside workers.
 	for running {
-		iteration++
-		// LINE NUMBERS: single source of truth is dap_scenarios.rs::go_lines
-		// If you add/remove lines before func main(), update go_lines::MAIN_LINE only.
-		symbol := symbols[rand.Intn(len(symbols))]          // OFFSET_SYMBOL
-		quantity := rand.Intn(50) + 1                       // OFFSET_QUANTITY
-		price := rand.Float64()*900 + 100                   // OFFSET_PRICE
-		direction := [2]string{"BUY", "SELL"}[rand.Intn(2)] // OFFSET_DIRECTION
-
-		// Two different dynamic string creation methods for comprehensive testing:
-		// 1. String concatenation with + operator (uses runtime.concatstrings)
-		labelConcat := symbol + "_" + direction + "_" + fmt.Sprintf("%.0f", price) // OFFSET_LABEL_CONCAT
-		// 2. Pure fmt.Sprintf (uses different runtime path)
-		labelSprintf := fmt.Sprintf("%s_%s_%.0f", symbol, direction, price) // OFFSET_LABEL_SPRINTF
-
-		// OFFSET_ORDER_ID - place_order call (symbol, quantity, price, label in scope)
-		orderID := placeOrder(symbol, quantity, price) // OFFSET_ORDER_ID
-
-		// Calculate pnl
-		entryPrice := price                                     // OFFSET_ENTRY_PRICE
-		currentPrice := price * (0.95 + rand.Float64()*0.1)     // OFFSET_CURRENT_PRICE
-		pnl := calculatePnl(entryPrice, currentPrice, quantity) // OFFSET_PNL (all vars in scope)
-
-		// Introspection breakpoint targets (must be real statements, not `_ = x`)
-		totalPnl = totalPnl + pnl                                               // OFFSET_TOTAL_PNL (all vars in scope)
-		lastOrderID := orderID                                                  // OFFSET_LAST_ORDER_ID (all vars in scope)
-		_ = lastOrderID                                                         // suppress unused
-		_ = labelSprintf                                                        // suppress unused (captured by eBPF)
-		log("  -> [%s] P&L: $%.2f (iteration %d)", labelConcat, pnl, iteration) // OFFSET_LOG (all vars in scope)
-
+		tradeTick(0)
 		time.Sleep(3 * time.Second) // Same as Python - 3 seconds
 	}
 
-	log("Trading bot stopped! Total P&L: $%.2f", totalPnl)
+	log("Trading bot stopped!")
 }
 
 // ── Background goroutines for goid capture testing ───────────────────────────
-// These spawn additional goroutines so the e2e test can verify that
-// capture_goid correctly distinguishes between different goroutine IDs.
-// Started via init() so they don't shift any lines in main().
-
-var goidDone = make(chan struct{})
-
-func monitorWorker() {
-	defer func() { goidDone <- struct{}{} }()
-	for running {
-		monitorStatus := "monitor" // OFFSET_MONITOR
-		_ = monitorStatus
-		time.Sleep(3 * time.Second)
-	}
-}
-
-func reporterWorker() {
-	defer func() { goidDone <- struct{}{} }()
-	for running {
-		reporterStatus := "reporter" // OFFSET_REPORTER
-		_ = reporterStatus
-		time.Sleep(3 * time.Second)
-	}
-}
+// Spawn worker goroutines that call tradeTick() with different IDs.
+// All workers hit the same PC offsets as main(), producing events with
+// distinct goids that the e2e test verifies.
+// Started via init() so they don't shift any lines in tradeTick().
 
 func init() {
-	go monitorWorker()
-	go reporterWorker()
+	// 3 worker goroutines — each gets a unique ID so they produce
+	// different log output and distinct goids in captured events.
+	for w := 1; w <= 3; w++ {
+		go func(id int) {
+			for running {
+				tradeTick(id)
+				time.Sleep(3 * time.Second)
+			}
+		}(w)
+	}
 }

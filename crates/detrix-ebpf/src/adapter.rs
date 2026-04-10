@@ -129,7 +129,11 @@ impl EbpfAdapter {
         Ok(Self {
             binary_path: path.clone(),
             dwarf: RwLock::new(None),
-            uprobe_manager: RwLock::new(UprobeManager::new_with_events(&path, raw_tx)),
+            uprobe_manager: RwLock::new(UprobeManager::new_with_config(
+                &path,
+                raw_tx,
+                capture_config.clone(),
+            )),
             active_metrics: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             event_rx: RwLock::new(Some(event_rx)),
@@ -311,10 +315,30 @@ impl DapAdapter for EbpfAdapter {
             );
         }
 
+        // Compute TLS-based goid offset when goid capture is enabled.
+        // This offset tells the BPF program where to find the G pointer
+        // in the thread's TLS block (via fs_base on x86_64).
+        let g_addr_offset = if self.capture_config.capture_goid {
+            dwarf.g_addr_offset().unwrap_or(None)
+        } else {
+            None
+        };
+        let goid_offset = if self.capture_config.capture_goid {
+            dwarf.goid_field_offset()
+        } else {
+            None
+        };
+        detrix_logging::debug!(
+            "[EbpfAdapter] g_addr_offset={:?} goid_offset={:?} for '{}'",
+            g_addr_offset,
+            goid_offset,
+            metric.name
+        );
+
         self.uprobe_manager
             .write()
             .await
-            .attach(&metric.name, &probe_point)
+            .attach(&metric.name, &probe_point, g_addr_offset, goid_offset)
             .map_err(|e| {
                 detrix_logging::error!(
                     "[EbpfAdapter] uprobe attach failed for '{}': {}",

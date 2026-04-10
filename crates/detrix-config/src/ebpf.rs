@@ -416,6 +416,7 @@ mod tests {
             max_capture_depth: 0,
             max_struct_fields: 0,
             max_array_values: 1,
+            capture_goid: false,
         };
         let errors = config.validate();
         assert!(

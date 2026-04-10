@@ -11,6 +11,7 @@
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
 
 // linux/types.h (via linux/bpf.h) defines __u32/__u64 but NOT u32/u64 in userspace.
 typedef __u8 u8;

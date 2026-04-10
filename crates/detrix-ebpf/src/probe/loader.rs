@@ -61,29 +61,39 @@ pub fn compile_bpf(program: &BpfProgram) -> Result<CompiledBpf> {
 
     std::fs::write(&src_path, &program.source)?;
 
-    let status = std::process::Command::new("clang")
-        .args([
-            "-O2",
-            "-target",
-            "bpf",
-            "-g", // Include BTF debug info
-            // Tell bpf_tracing.h which arch we're targeting.
-            // -target bpf strips __aarch64__/__x86_64__ so we set it explicitly.
-            BPF_ARCH_FLAG,
-            "-Wall",
-            "-Wno-unused-value",
-            "-Wno-pointer-sign",
-            "-Wno-compare-distinct-pointer-types",
-            "-c",
-            src_path
-                .to_str()
-                .ok_or_else(|| Error::Ebpf("Non-UTF8 path".to_string()))?,
-            "-o",
-            obj_path
-                .to_str()
-                .ok_or_else(|| Error::Ebpf("Non-UTF8 path".to_string()))?,
-        ])
-        .output()?;
+    let mut clang_cmd = std::process::Command::new("clang");
+    clang_cmd.args([
+        "-O2",
+        "-target",
+        "bpf",
+        "-g", // Include BTF debug info
+        // Tell bpf_tracing.h which arch we're targeting.
+        // -target bpf strips __aarch64__/__x86_64__ so we set it explicitly.
+        BPF_ARCH_FLAG,
+        "-Wall",
+        "-Wno-unused-value",
+        "-Wno-pointer-sign",
+        "-Wno-compare-distinct-pointer-types",
+        "-c",
+        src_path
+            .to_str()
+            .ok_or_else(|| Error::Ebpf("Non-UTF8 path".to_string()))?,
+        "-o",
+        obj_path
+            .to_str()
+            .ok_or_else(|| Error::Ebpf("Non-UTF8 path".to_string()))?,
+    ]);
+
+    // Pass TLS offset for x86_64 goid capture via BPF CO-RE.
+    if let Some(offset) = program.g_addr_offset {
+        clang_cmd.arg(format!("-DG_ADDR_OFFSET={offset}"));
+    }
+    // Pass goid field offset from DWARF (overrides the #ifndef default of 160).
+    if let Some(offset) = program.goid_offset {
+        clang_cmd.arg(format!("-DGOID_OFFSET={offset}"));
+    }
+
+    let status = clang_cmd.output()?;
 
     if !status.status.success() {
         let stderr = String::from_utf8_lossy(&status.stderr);
@@ -211,7 +221,7 @@ mod tests {
         // On machines with clang+BPF support, this would actually compile.
         use crate::probe::program::generate_bpf_program;
         use crate::probe::types::CaptureConfig;
-        let prog = generate_bpf_program(&[], false, &CaptureConfig::default()).unwrap();
+        let prog = generate_bpf_program(&[], false, None, None, &CaptureConfig::default()).unwrap();
 
         // We don't assert success/failure here — just that it doesn't panic.
         // The actual compilation result depends on the host environment.

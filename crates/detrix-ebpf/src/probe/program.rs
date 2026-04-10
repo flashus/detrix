@@ -33,6 +33,10 @@ pub struct BpfProgram {
     pub var_count: usize,
     /// Whether goroutine ID extraction is included.
     pub captures_goid: bool,
+    /// TLS offset for reading the G pointer (x86_64 only; None for ARM64 or disabled).
+    pub g_addr_offset: Option<i64>,
+    /// Byte offset of goid field within runtime.g (from DWARF; None = use #ifndef default).
+    pub goid_offset: Option<u64>,
 }
 
 /// Generate a BPF C program that captures the given variables at a uprobe hit.
@@ -47,6 +51,8 @@ pub struct BpfProgram {
 pub fn generate_bpf_program(
     variables: &[ResolvedVariable],
     capture_goid: bool,
+    g_addr_offset: Option<i64>,
+    goid_offset: Option<u64>,
     config: &CaptureConfig,
 ) -> Result<BpfProgram> {
     if variables.len() > config.max_capture_vars {
@@ -71,6 +77,8 @@ pub fn generate_bpf_program(
         source,
         var_count,
         captures_goid: capture_goid,
+        g_addr_offset,
+        goid_offset,
     })
 }
 
@@ -343,21 +351,49 @@ fn simple_read_expr(loc: &VariableLocation, field: &str) -> String {
     }
 }
 
-const GOID_EXTRACT: &str = r#"    // Extract goroutine ID from runtime.g struct.
-    // goid offset is Go-version-dependent — define GOID_OFFSET via -D at compile time.
-    // Go stores g in R14 (x86-64) or X28/R28 (arm64) per runtime/asm_ARCH.s.
+const GOID_EXTRACT: &str = r#"    // Extract goroutine ID (goid) from runtime.g struct.
+    // ARM64 (non-cgo): X28 register holds G pointer directly (callee-saved, reliable).
+    // x86-64: TLS-based approach using BPF CO-RE to read thread.fsbase from task_struct,
+    //         then read G pointer from TLS + G_ADDR_OFFSET, then goid from G struct.
+    // This mirrors Delve's approach — reliable at any instruction, not register-dependent.
 #ifndef GOID_OFFSET
-#define GOID_OFFSET 152  // Go 1.21+ default; override via -DGOID_OFFSET=N
+#define GOID_OFFSET 160  // Go 1.17+ default (param field added before atomicstatus/goid); override via -DGOID_OFFSET=N
+#endif
+#ifndef G_ADDR_OFFSET
+#define G_ADDR_OFFSET -8  // fallback for pure Go (no PT_TLS); override via -DG_ADDR_OFFSET=N
 #endif
     u64 goid = 0;
 #if defined(__TARGET_ARCH_arm64)
-    void *g_ptr = (void *)ctx->regs[28]; // arm64: Go uses X28 for g
-#else
-    void *g_ptr = (void *)ctx->r14;      // x86-64: Go uses R14 for g
-#endif
-    if (g_ptr) {
-        bpf_probe_read_user(&goid, sizeof(goid), g_ptr + GOID_OFFSET);
+    {
+        // ARM64: Go uses X28 as callee-saved goroutine register.
+        void *g_ptr = (void *)ctx->regs[28];
+        if (g_ptr) {
+            bpf_probe_read_user(&goid, sizeof(goid), g_ptr + GOID_OFFSET);
+        }
     }
+#else
+    {
+        // x86-64: TLS-based approach via BPF CO-RE.
+        // Minimal struct definitions for CO-RE field relocation — the actual
+        // offsets are resolved at load time from the kernel's BTF vmlinux.
+        struct thread_struct___detrix { unsigned long fsbase; };
+        struct task_struct___detrix   { struct thread_struct___detrix thread; };
+
+        struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+        u64 fsbase = 0;
+        if (task) {
+            bpf_core_read(&fsbase, sizeof(fsbase),
+                          &((struct task_struct___detrix *)task)->thread.fsbase);
+        }
+        if (fsbase) {
+            void *g_ptr = NULL;
+            bpf_probe_read_user(&g_ptr, sizeof(g_ptr), (void *)(fsbase + G_ADDR_OFFSET));
+            if (g_ptr) {
+                bpf_probe_read_user(&goid, sizeof(goid), (u8 *)g_ptr + GOID_OFFSET);
+            }
+        }
+    }
+#endif
     event->goid = goid;
 
 "#;
@@ -380,7 +416,7 @@ mod tests {
 
     #[test]
     fn generate_empty_program() {
-        let prog = generate_bpf_program(&[], false, &CaptureConfig::default()).unwrap();
+        let prog = generate_bpf_program(&[], false, None, None, &CaptureConfig::default()).unwrap();
         assert_eq!(prog.var_count, 0);
         assert!(!prog.captures_goid);
         assert!(prog.source.contains("detrix_capture"));
@@ -394,7 +430,8 @@ mod tests {
             VariableLocation::Register(Register::Rax),
             VariableSize::QWord,
         )];
-        let prog = generate_bpf_program(&vars, false, &CaptureConfig::default()).unwrap();
+        let prog =
+            generate_bpf_program(&vars, false, None, None, &CaptureConfig::default()).unwrap();
         assert_eq!(prog.var_count, 1);
         assert!(prog.source.contains("ctx->rax"));
         assert!(prog.source.contains("var0"));
@@ -408,19 +445,22 @@ mod tests {
             VariableLocation::stack(-16),
             VariableSize::DWord,
         )];
-        let prog = generate_bpf_program(&vars, false, &CaptureConfig::default()).unwrap();
+        let prog =
+            generate_bpf_program(&vars, false, None, None, &CaptureConfig::default()).unwrap();
         assert!(prog.source.contains("bpf_probe_read_user"));
         assert!(prog.source.contains("ctx->sp"));
     }
 
     #[test]
     fn generate_with_goid() {
-        let prog = generate_bpf_program(&[], true, &CaptureConfig::default()).unwrap();
+        let prog = generate_bpf_program(&[], true, None, None, &CaptureConfig::default()).unwrap();
         assert!(prog.captures_goid);
         assert!(prog.source.contains("goid"));
         assert!(prog.source.contains("GOID_OFFSET"));
-        // g register is arch-specific; check both are present in the arch-guarded block
-        assert!(prog.source.contains("r14") || prog.source.contains("regs[28]"));
+        // x86-64: TLS-based via bpf_core_read(fsbase); ARM64: X28 register.
+        // Both branches are present in the source as text (C preprocessor, not Rust).
+        assert!(prog.source.contains("fsbase")); // x86-64 TLS path
+        assert!(prog.source.contains("regs[28]")); // ARM64 register path
     }
 
     #[test]
@@ -438,7 +478,8 @@ mod tests {
             ),
             make_var("c", VariableLocation::stack(8), VariableSize::DWord),
         ];
-        let prog = generate_bpf_program(&vars, false, &CaptureConfig::default()).unwrap();
+        let prog =
+            generate_bpf_program(&vars, false, None, None, &CaptureConfig::default()).unwrap();
         assert_eq!(prog.var_count, 3);
         assert!(prog.source.contains("var0"));
         assert!(prog.source.contains("var1"));
@@ -456,7 +497,7 @@ mod tests {
                 )
             })
             .collect();
-        let result = generate_bpf_program(&vars, false, &CaptureConfig::default());
+        let result = generate_bpf_program(&vars, false, None, None, &CaptureConfig::default());
         assert!(result.is_err());
     }
 
@@ -472,7 +513,8 @@ mod tests {
             type_name: "string".to_string(),
             nested_type: None,
         }];
-        let prog = generate_bpf_program(&vars, false, &CaptureConfig::default()).unwrap();
+        let prog =
+            generate_bpf_program(&vars, false, None, None, &CaptureConfig::default()).unwrap();
         assert!(prog.source.contains("var0")); // ptr field
         assert!(prog.source.contains("var0_len")); // len field
         assert!(prog.source.contains("var0_str")); // content buffer field
@@ -491,7 +533,8 @@ mod tests {
             type_name: "string".to_string(),
             nested_type: None,
         }];
-        let prog = generate_bpf_program(&vars, false, &CaptureConfig::default()).unwrap();
+        let prog =
+            generate_bpf_program(&vars, false, None, None, &CaptureConfig::default()).unwrap();
         // Struct must have the fixed-size string buffer
         assert!(
             prog.source.contains("var0_str["),
@@ -517,7 +560,8 @@ mod tests {
             type_name: "string".to_string(),
             nested_type: None,
         }];
-        let prog = generate_bpf_program(&vars, false, &CaptureConfig::default()).unwrap();
+        let prog =
+            generate_bpf_program(&vars, false, None, None, &CaptureConfig::default()).unwrap();
         // The probe function must dereference the ptr to fill the str buffer
         assert!(
             prog.source.contains("bpf_probe_read_user(event->var0_str"),
@@ -554,14 +598,14 @@ mod tests {
 
     #[test]
     fn program_has_license() {
-        let prog = generate_bpf_program(&[], false, &CaptureConfig::default()).unwrap();
+        let prog = generate_bpf_program(&[], false, None, None, &CaptureConfig::default()).unwrap();
         assert!(prog.source.contains("LICENSE"));
         assert!(prog.source.contains("Dual MIT/GPL"));
     }
 
     #[test]
     fn program_has_ringbuf_map() {
-        let prog = generate_bpf_program(&[], false, &CaptureConfig::default()).unwrap();
+        let prog = generate_bpf_program(&[], false, None, None, &CaptureConfig::default()).unwrap();
         assert!(prog.source.contains("BPF_MAP_TYPE_RINGBUF"));
         assert!(prog.source.contains("DETRIX_EVENTS"));
     }
@@ -578,7 +622,8 @@ mod tests {
             type_name: "TradeRequest".to_string(),
             nested_type: None,
         }];
-        let prog = generate_bpf_program(&vars, false, &CaptureConfig::default()).unwrap();
+        let prog =
+            generate_bpf_program(&vars, false, None, None, &CaptureConfig::default()).unwrap();
         // Struct must have the fixed-size blob buffer
         assert!(
             prog.source.contains("var0_blob["),
@@ -609,7 +654,7 @@ mod tests {
             max_blob_capture: 64,
             ..CaptureConfig::default()
         };
-        let prog = generate_bpf_program(&vars, false, &config).unwrap();
+        let prog = generate_bpf_program(&vars, false, None, None, &config).unwrap();
         // Clamped: min(256, 64) = 64
         assert!(prog.source.contains("var0_blob[64]"));
     }
@@ -648,14 +693,15 @@ mod tests {
             type_name: "[]int64".to_string(),
             nested_type: None,
         }];
-        let prog = generate_bpf_program(&vars, false, &CaptureConfig::default()).unwrap();
+        let prog =
+            generate_bpf_program(&vars, false, None, None, &CaptureConfig::default()).unwrap();
         assert!(prog.source.contains("var0_len"));
         assert!(prog.source.contains("var0_cap"));
     }
 
     #[test]
     fn program_has_drop_counter_map() {
-        let prog = generate_bpf_program(&[], false, &CaptureConfig::default()).unwrap();
+        let prog = generate_bpf_program(&[], false, None, None, &CaptureConfig::default()).unwrap();
         assert!(
             prog.source.contains("DETRIX_DROP_CNT"),
             "generated program missing DETRIX_DROP_CNT map"
@@ -668,7 +714,7 @@ mod tests {
 
     #[test]
     fn program_has_drop_increment_logic() {
-        let prog = generate_bpf_program(&[], false, &CaptureConfig::default()).unwrap();
+        let prog = generate_bpf_program(&[], false, None, None, &CaptureConfig::default()).unwrap();
         // Check drop counter increment on ring buffer reserve failure
         assert!(
             prog.source.contains("bpf_map_lookup_elem(&DETRIX_DROP_CNT"),

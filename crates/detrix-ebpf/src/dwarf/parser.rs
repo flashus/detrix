@@ -14,6 +14,91 @@ use gimli::{AttributeValue, DebuggingInformationEntry, DwAt, EndianSlice, Reader
 use object::{CompressionFormat, Object, ObjectSection};
 use std::path::{Path, PathBuf};
 
+/// Find a symbol by name in the raw ELF bytes using direct header parsing.
+/// Avoids the `object::ObjectSymbol` trait to prevent version conflicts
+/// when multiple `object` versions exist in the dependency graph.
+fn find_symbol_address(data: &[u8], name: &[u8]) -> Option<u64> {
+    use object::elf::{Sym64, ELFDATA2LSB, SHN_UNDEF, SHT_DYNSYM, SHT_SYMTAB};
+
+    if data.len() < 64 {
+        return None;
+    }
+
+    // Parse ELF header
+    let ehdr: &object::elf::FileHeader64<object::Endianness> =
+        unsafe { &*(data.as_ptr() as *const _) };
+    let endian = if ehdr.e_ident.data == ELFDATA2LSB {
+        object::Endianness::Little
+    } else {
+        object::Endianness::Big
+    };
+
+    let shoff = ehdr.e_shoff.get(endian) as usize;
+    let shnum = ehdr.e_shnum.get(endian) as usize;
+
+    if shoff == 0 || shnum == 0 {
+        return None;
+    }
+
+    // Scan all sections for symbol tables
+    for i in 0..shnum {
+        let shdr = unsafe {
+            &*((data.as_ptr().add(shoff + i * 64))
+                as *const object::elf::SectionHeader64<object::Endianness>)
+        };
+        let sh_type = shdr.sh_type.get(endian);
+        if sh_type != SHT_SYMTAB && sh_type != SHT_DYNSYM {
+            continue;
+        }
+
+        let offset = shdr.sh_offset.get(endian) as usize;
+        let size = shdr.sh_size.get(endian) as usize;
+        let entsize = shdr.sh_entsize.get(endian) as usize;
+        let link = shdr.sh_link.get(endian) as usize;
+
+        if offset + size > data.len() || entsize == 0 {
+            continue;
+        }
+
+        // Read string table for this symbol table
+        if link >= shnum {
+            continue;
+        }
+        let strhdr = unsafe {
+            &*((data.as_ptr().add(shoff + link * 64))
+                as *const object::elf::SectionHeader64<object::Endianness>)
+        };
+        let stroff = strhdr.sh_offset.get(endian) as usize;
+        let strsize = strhdr.sh_size.get(endian) as usize;
+        if stroff + strsize > data.len() {
+            continue;
+        }
+        let strtab = &data[stroff..stroff + strsize];
+
+        // Scan symbols
+        let nsyms = size / entsize;
+        for j in 0..nsyms {
+            let sym: &Sym64<object::Endianness> = unsafe {
+                &*((data.as_ptr().add(offset + j * entsize)) as *const Sym64<object::Endianness>)
+            };
+            let name_off = sym.st_name.get(endian) as usize;
+            if name_off == SHN_UNDEF as usize || name_off >= strtab.len() {
+                continue;
+            }
+
+            // Find null terminator
+            let end = strtab[name_off..].iter().position(|&b| b == 0).unwrap_or(0);
+            let sym_name = &strtab[name_off..name_off + end];
+
+            if sym_name == name {
+                return Some(sym.st_value.get(endian));
+            }
+        }
+    }
+
+    None
+}
+
 /// Parsed Go binary with DWARF debug info ready for probe point resolution.
 #[derive(Debug)]
 pub struct DwarfInfo {
@@ -63,6 +148,192 @@ impl DwarfInfo {
             text_file_offset,
             is_little_endian,
         })
+    }
+
+    /// Compute the TLS offset where Go stores the `*g` (goroutine) pointer.
+    ///
+    /// This follows Delve's `setGStructOffsetELF` formula, using the ELF binary's
+    /// PT_TLS segment and `runtime.tlsg`/`runtime.tls_g` symbol values.
+    ///
+    /// # Returns
+    /// - `Some(offset)`: the offset within the TLS register to add to get the G pointer.
+    ///   Pass this to the BPF program as `-DG_ADDR_OFFSET=N`.
+    /// - `None`: if the binary has no PT_TLS segment or TLS symbol (pure Go fallback: -8).
+    ///
+    /// # Architecture-specific formulas
+    /// - **AMD64**: `-memsz_rounded + tlsg_value` (Delve: `gStructOffset = -tls.Memsz + tlsg.Value`)
+    /// - **ARM64**: `tls_g + 2*ptrSize + ((tls.Vaddr - 2*ptrSize) & (tls.Align - 1))`
+    pub fn g_addr_offset(&self) -> Result<Option<i64>> {
+        use object::elf::{ProgramHeader64, ELFDATA2LSB, PT_TLS};
+
+        let data = &*self._data;
+        if data.len() < std::mem::size_of::<object::elf::FileHeader64<object::Endianness>>() {
+            return Ok(Some(-8)); // fallback for tiny binaries
+        }
+
+        // Parse ELF header to get program header info
+        let ehdr: &object::elf::FileHeader64<object::Endianness> =
+            unsafe { &*(data.as_ptr() as *const object::elf::FileHeader64<object::Endianness>) };
+        let endian = if ehdr.e_ident.data == ELFDATA2LSB {
+            object::Endianness::Little
+        } else {
+            object::Endianness::Big
+        };
+        let phoff = ehdr.e_phoff.get(endian) as usize;
+        let phnum = ehdr.e_phnum.get(endian) as usize;
+        let machine = ehdr.e_machine.get(endian);
+
+        if phoff == 0 || phnum == 0 || phoff + phnum * 56 > data.len() {
+            return Ok(Some(-8)); // fallback
+        }
+
+        // Find PT_TLS segment
+        let mut tls_memsz: u64 = 0;
+        let mut tls_vaddr: u64 = 0;
+        let mut tls_align: u64 = 0;
+        let mut has_tls = false;
+
+        for i in 0..phnum {
+            let ph: &ProgramHeader64<object::Endianness> = unsafe {
+                &*((data.as_ptr().add(phoff + i * 56))
+                    as *const ProgramHeader64<object::Endianness>)
+            };
+            if ph.p_type.get(endian) == PT_TLS {
+                tls_memsz = ph.p_memsz.get(endian);
+                tls_vaddr = ph.p_vaddr.get(endian);
+                tls_align = ph.p_align.get(endian);
+                has_tls = true;
+                break;
+            }
+        }
+
+        if !has_tls {
+            return Ok(Some(-8)); // pure Go binary fallback
+        }
+
+        // Find runtime.tlsg (AMD64) or runtime.tls_g (ARM64) symbol
+        // Use raw ELF symbol table parsing to avoid trait version conflicts
+        // between different `object` crate versions in the dep graph.
+        let tlsg_value = find_symbol_address(data, b"runtime.tlsg")
+            .or_else(|| find_symbol_address(data, b"runtime.tls_g"))
+            .unwrap_or(0) as i64;
+
+        let tls_memsz = tls_memsz as i64;
+        let tls_vaddr = tls_vaddr as i64;
+        let tls_align = tls_align as i64;
+
+        let offset = match machine {
+            object::elf::EM_X86_64 | object::elf::EM_386 => {
+                // Delve formula (AMD64 Linux)
+                if tls_align == 0 {
+                    return Ok(Some(-8));
+                }
+                let memsz_rounded = tls_memsz + ((-tls_vaddr - tls_memsz) & (tls_align - 1));
+                -memsz_rounded + tlsg_value
+            }
+            object::elf::EM_AARCH64 => {
+                // Delve formula (ARM64 Linux)
+                if tls_align == 0 {
+                    return Ok(Some(16));
+                }
+                let ptr_size = 8i64;
+                tlsg_value + 2 * ptr_size + ((tls_vaddr - 2 * ptr_size) & (tls_align - 1))
+            }
+            _ => return Ok(Some(-8)),
+        };
+
+        detrix_logging::debug!(
+            "[DWARF TLS] g_addr_offset={offset} (tlsg={tlsg_value}, tls_memsz={tls_memsz}, tls_vaddr={tls_vaddr}, tls_align={tls_align})"
+        );
+
+        Ok(Some(offset))
+    }
+
+    /// Find the byte offset of the `goid` field in the `runtime.g` struct via DWARF.
+    ///
+    /// Mirrors Delve's approach of reading `goid` from DWARF type info rather than
+    /// hardcoding an offset. The offset changes across Go versions (e.g. Go 1.17 added
+    /// `param *unsafe.Pointer` before `atomicstatus`, shifting `goid` from 152 → 160).
+    ///
+    /// Returns `Some(offset)` when found, `None` on any parse failure (caller falls back
+    /// to the `#ifndef GOID_OFFSET` default of 160 in the BPF template).
+    pub fn goid_field_offset(&self) -> Option<u64> {
+        let obj = object::File::parse(&*self._data).ok()?;
+        let endian = if self.is_little_endian {
+            gimli::RunTimeEndian::Little
+        } else {
+            gimli::RunTimeEndian::Big
+        };
+        let dwarf = load_dwarf(&obj, endian).ok()?;
+
+        let mut units = dwarf.units();
+        loop {
+            let header = match units.next() {
+                Ok(Some(h)) => h,
+                _ => break,
+            };
+            let unit = match dwarf.unit(header) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            let mut entries = unit.entries();
+            loop {
+                let entry = match entries.next_dfs() {
+                    Ok(Some(e)) => e,
+                    _ => break,
+                };
+                if entry.tag() != gimli::DW_TAG_structure_type {
+                    continue;
+                }
+                let name = match read_die_name(entry, &dwarf) {
+                    Ok(Some(n)) => n,
+                    _ => continue,
+                };
+                if name != "runtime.g" {
+                    continue;
+                }
+                // Found runtime.g — iterate its direct children via entries_tree.
+                let struct_offset = entry.offset();
+                let mut tree = match unit.entries_tree(Some(struct_offset)) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                let root = match tree.root() {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let mut children = root.children();
+                loop {
+                    let child = match children.next() {
+                        Ok(Some(c)) => c,
+                        _ => break,
+                    };
+                    let child_entry = child.entry();
+                    if child_entry.tag() != gimli::DW_TAG_member {
+                        continue;
+                    }
+                    let mname = match read_die_name(child_entry, &dwarf) {
+                        Ok(Some(n)) => n,
+                        _ => continue,
+                    };
+                    if mname != "goid" {
+                        continue;
+                    }
+                    let offset = child_entry
+                        .attr_value(gimli::DW_AT_data_member_location)
+                        .and_then(|v| match v {
+                            AttributeValue::Udata(n) => Some(n),
+                            AttributeValue::Sdata(n) if n >= 0 => Some(n as u64),
+                            _ => None,
+                        });
+                    if let Some(off) = offset {
+                        detrix_logging::debug!("[DWARF] runtime.g.goid field offset = {off}");
+                        return Some(off);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Resolve a source location to a probe point with variable locations.

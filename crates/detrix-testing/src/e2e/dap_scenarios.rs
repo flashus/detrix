@@ -113,14 +113,15 @@ impl FixtureCodeMap {
 }
 
 // Go fixture line numbers — single source of truth.
-// Update MAIN_LINE if you add/remove lines before `func main()` in
+// Update MAIN_LINE if you add/remove lines before `func tradeTick()` in
 // fixtures/go/string_capture/main.go
 pub mod go_lines {
     use super::FixtureCodeMap;
 
-    /// Line of `func main()` in fixtures/go/string_capture/main.go.
-    /// Update this if you add/remove lines before `func main()`.
-    pub const MAIN_LINE: u32 = 101;
+    /// Line of `func tradeTick()` in fixtures/go/string_capture/main.go.
+    /// All offsets are relative to this line.
+    /// Update this if you add/remove lines before `tradeTick`.
+    pub const MAIN_LINE: u32 = 103;
 
     /// Last line of the Order struct (`}` on line 87).
     /// Used by scope-aware tests to verify struct fields are deprioritized.
@@ -128,7 +129,7 @@ pub mod go_lines {
 
     /// Symbol map: (name, decl_offset, first_safe_logpoint_offset)
     ///
-    /// Each entry describes a named point in func main():
+    /// Each entry describes a named point in func tradeTick():
     ///   - decl_offset: offset from MAIN_LINE where the symbol is assigned/declared.
     ///   - first_safe_logpoint_offset: first offset where the symbol is safely in scope.
     ///
@@ -136,26 +137,18 @@ pub mod go_lines {
     /// RHS executes), so a variable is NOT yet in scope at its own declaration line.
     const SYMBOL_MAP: &[(&str, u32, u32)] = &[
         // (name,             decl, logpt)
-        // Offsets are relative to MAIN_LINE (func main() line).
-        // Updated for fixtures/go/string_capture/main.go
-        ("signal_handler", 13, 13), // go signalHandler() goroutine — no new var
-        ("symbol", 26, 27),         // symbol := ...; safe from +27 (quantity)
-        ("quantity", 27, 28),       // quantity := ...; safe from +28 (price)
-        ("price", 28, 29),          // price := ...; safe from +29 (direction line)
-        ("direction", 29, 33),      // direction := ...; safe from +33 (labelConcat line)
-        ("labelConcat", 33, 35), // labelConcat := ... (concatenation); safe from +35 (labelSprintf)
-        ("labelSprintf", 35, 38), // labelSprintf := ... (fmt.Sprintf); safe from +38 (orderID)
-        ("orderID", 38, 41),     // orderID := placeOrder(); safe from +41 (entryPrice)
-        ("entryPrice", 41, 42),  // entryPrice := price; safe from +42 (currentPrice)
-        ("currentPrice", 42, 43), // currentPrice := ...; safe from +43 (pnl)
-        ("pnl", 43, 46),         // pnl := calculatePnl(); safe from +46 (totalPnl)
-        ("totalPnl", 46, 47),    // totalPnl = ...; safe from +47 (lastOrderID)
-        ("lastOrderID", 47, 50), // lastOrderID := orderID; safe from +50 (log)
-        ("log", 50, 50),         // log(...) call — all vars in scope
-        ("sleep", 52, 52),       // time.Sleep — all vars in scope
-        // Background goroutines for goid capture testing (init()-spawned workers).
-        ("monitor", 68, 68),  // monitorStatus := "monitor" in monitorWorker
-        ("reporter", 77, 77), // reporterStatus := "reporter" in reporterWorker
+        // Offsets are relative to MAIN_LINE (func tradeTick line).
+        ("symbol", 3, 4),         // symbol := ...; safe from +4 (quantity)
+        ("quantity", 4, 5),       // quantity := ...; safe from +5 (price)
+        ("price", 5, 6),          // price := ...; safe from +6 (direction)
+        ("direction", 6, 11),     // direction := ...; safe from +11 (labelSprintf)
+        ("labelConcat", 9, 14),   // labelConcat := ...; safe from +14 (orderID)
+        ("labelSprintf", 11, 14), // labelSprintf := ...; safe from +14 (orderID)
+        ("orderID", 14, 17),      // orderID := ...; safe from +17 (entryPrice)
+        ("entryPrice", 17, 18),   // entryPrice := price; safe from +18 (currentPrice)
+        ("currentPrice", 18, 19), // currentPrice := ...; safe from +19 (pnl)
+        ("pnl", 19, 26),          // pnl := ...; safe from +26 (log)
+        ("log", 26, 26),          // log(...) call — all vars in scope
     ];
 
     /// Code map for the Go fixture.
