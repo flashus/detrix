@@ -100,10 +100,11 @@ func calculatePnl(entryPrice, currentPrice float64, quantity int) float64 {
 
 // tradeTick executes one trading iteration. Called by multiple goroutines
 // so the e2e test can verify distinct goid capture across goroutines.
-func tradeTick(workerID int) {
+func tradeTick(workerID int, iteration *int, totalPnl *float64) {
 	symbols := []string{"BTCUSD", "ETHUSD", "SOLUSD"}
 	// LINE NUMBERS: single source of truth is dap_scenarios.rs::go_lines
 	// If you add/remove lines before tradeTick(), update go_lines::MAIN_LINE only.
+	*iteration++
 	symbol := symbols[rand.Intn(len(symbols))]          // OFFSET_SYMBOL
 	quantity := rand.Intn(50) + 1                       // OFFSET_QUANTITY
 	price := rand.Float64()*900 + 100                   // OFFSET_PRICE
@@ -124,11 +125,13 @@ func tradeTick(workerID int) {
 	pnl := calculatePnl(entryPrice, currentPrice, quantity) // OFFSET_PNL (all vars in scope)
 
 	// Introspection breakpoint targets (must be real statements, not `_ = x`)
-	_ = orderID                                                    // suppress unused
-	_ = entryPrice                                                 // suppress unused
-	_ = currentPrice                                               // suppress unused
-	_ = labelSprintf                                               // suppress unused (captured by eBPF)
+	*totalPnl = *totalPnl + pnl     // OFFSET_TOTAL_PNL (all vars in scope)
+	lastOrderID := orderID          // OFFSET_LAST_ORDER_ID (all vars in scope)
+	_ = lastOrderID                 // suppress unused
+	_ = labelSprintf                // suppress unused (captured by eBPF)
 	log("  -> [%s] P&L: $%.2f (worker %d)", labelConcat, pnl, workerID) // OFFSET_LOG (all vars in scope)
+
+	time.Sleep(3 * time.Second) // Same as Python - 3 seconds // OFFSET_SLEEP
 }
 
 func main() {
@@ -150,13 +153,17 @@ func main() {
 	log("Add metrics with Detrix to observe values!")
 	log("")
 
-	// Main goroutine runs trading loop alongside workers.
+	// Main goroutine runs trading loop — same pattern as original fixture.
+	// Worker goroutines (spawned via init()) also call tradeTick() but with
+	// their own iteration/totalPnl locals, so they don't interfere with
+	// Delve-based tests that inspect the main goroutine's variables.
+	iteration, totalPnl := 0, 0.0
 	for running {
-		tradeTick(0)
-		time.Sleep(3 * time.Second) // Same as Python - 3 seconds
+		iteration++
+		tradeTick(0, &iteration, &totalPnl)
 	}
 
-	log("Trading bot stopped!")
+	log("Trading bot stopped! Total P&L: $%.2f", totalPnl)
 }
 
 // ── Background goroutines for goid capture testing ───────────────────────────
@@ -168,11 +175,16 @@ func main() {
 func init() {
 	// 3 worker goroutines — each gets a unique ID so they produce
 	// different log output and distinct goids in captured events.
+	// Workers call the same tradeTick() as main (same PC offsets → same
+	// eBPF probes fire with different goids) but at a slower rate so
+	// Delve-based tests don't get flooded with extra events.
 	for w := 1; w <= 3; w++ {
 		go func(id int) {
+			iter, tpnl := 0, 0.0
 			for running {
-				tradeTick(id)
-				time.Sleep(3 * time.Second)
+				iter++
+				tradeTick(id, &iter, &tpnl)
+				time.Sleep(30 * time.Second) // much slower than main's 3s
 			}
 		}(w)
 	}

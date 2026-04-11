@@ -138,17 +138,21 @@ pub mod go_lines {
     const SYMBOL_MAP: &[(&str, u32, u32)] = &[
         // (name,             decl, logpt)
         // Offsets are relative to MAIN_LINE (func tradeTick line).
-        ("symbol", 3, 4),         // symbol := ...; safe from +4 (quantity)
-        ("quantity", 4, 5),       // quantity := ...; safe from +5 (price)
-        ("price", 5, 6),          // price := ...; safe from +6 (direction)
-        ("direction", 6, 11),     // direction := ...; safe from +11 (labelSprintf)
-        ("labelConcat", 9, 14),   // labelConcat := ...; safe from +14 (orderID)
-        ("labelSprintf", 11, 14), // labelSprintf := ...; safe from +14 (orderID)
-        ("orderID", 14, 17),      // orderID := ...; safe from +17 (entryPrice)
-        ("entryPrice", 17, 18),   // entryPrice := price; safe from +18 (currentPrice)
-        ("currentPrice", 18, 19), // currentPrice := ...; safe from +19 (pnl)
-        ("pnl", 19, 26),          // pnl := ...; safe from +26 (log)
-        ("log", 26, 26),          // log(...) call — all vars in scope
+        ("iteration", 4, 5),      // *iteration++; safe from +5 (symbol)
+        ("symbol", 5, 6),         // symbol := ...; safe from +6 (quantity)
+        ("quantity", 6, 7),       // quantity := ...; safe from +7 (price)
+        ("price", 7, 8),          // price := ...; safe from +8 (direction)
+        ("direction", 8, 12),     // direction := ...; safe from +12 (labelConcat)
+        ("labelConcat", 12, 17),  // labelConcat := ...; safe from +17 (orderID)
+        ("labelSprintf", 14, 17), // labelSprintf := ...; safe from +17 (orderID)
+        ("orderID", 17, 20),      // orderID := ...; safe from +20 (entryPrice)
+        ("entryPrice", 20, 21),   // entryPrice := ...; safe from +21 (currentPrice)
+        ("currentPrice", 21, 22), // currentPrice := ...; safe from +22 (pnl)
+        ("pnl", 22, 25),          // pnl := ...; safe from +25 (totalPnl)
+        ("totalPnl", 25, 26),     // totalPnl = ...; safe from +26 (lastOrderID)
+        ("lastOrderID", 26, 29),  // lastOrderID := ...; safe from +29 (log)
+        ("log", 29, 29),          // log(...) call — all vars in scope
+        ("sleep", 31, 31),        // time.Sleep — all vars in scope
     ];
 
     /// Code map for the Go fixture.
@@ -546,13 +550,9 @@ impl DapWorkflowConfig {
             inspect_line: CODEMAP.find_decl("pnl"),
             inspect_variable: "price".to_string(),
             invalid_metric: Some(
-                // signal_handler line: only sigChan in scope — good for "not in scope" test
-                MetricPoint::new(
-                    "bad_metric",
-                    CODEMAP.find_decl("signal_handler"),
-                    "nonexistent_var",
-                )
-                .with_group("go_workflow"),
+                // symbol line: good for "not in scope" test (expression "nonexistent_var" won't be found)
+                MetricPoint::new("bad_metric", CODEMAP.find_decl("symbol"), "nonexistent_var")
+                    .with_group("go_workflow"),
             ),
             group_name: "go_workflow".to_string(),
             event_wait_secs: 15,

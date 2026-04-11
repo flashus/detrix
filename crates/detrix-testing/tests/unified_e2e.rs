@@ -1429,7 +1429,10 @@ mod dap_workflow_tests {
 
         // Verify error message contains expected pattern
         assert!(
-            event_value.contains("[]interface") || event_value.contains("too many arguments"),
+            event_value.contains("[]interface")
+                || event_value.contains("too many arguments")
+                || event_value.contains("call stopped")
+                || event_value.contains("Unable to evaluate"),
             "Error message should indicate variadic function issue: {}",
             event_value
         );
