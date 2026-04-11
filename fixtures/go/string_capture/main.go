@@ -184,7 +184,7 @@ func init() {
 			for running {
 				iter++
 				tradeTick(id, &iter, &tpnl)
-				time.Sleep(30 * time.Second) // much slower than main's 3s
+				time.Sleep(5 * time.Second) // offset from main's 3s
 			}
 		}(w)
 	}

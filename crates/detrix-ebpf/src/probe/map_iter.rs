@@ -66,16 +66,18 @@ pub fn read_go_map(
     pid: u32,
 ) -> CapturedValue {
     let key_type_name = key_nested
+        .as_ref()
         .map(|n| n.type_info().name.clone())
         .unwrap_or_else(|| "unknown".to_string());
     let val_type_name = val_nested
+        .as_ref()
         .map(|n| n.type_info().name.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
     if map_ptr == 0 {
         return CapturedValue::Map {
-            key_type: key_type_name,
-            value_type: val_type_name,
+            key_type: key_type_name.clone(),
+            value_type: val_type_name.clone(),
             entries: vec![],
             reason: "nil map".to_string(),
         };
@@ -206,32 +208,68 @@ pub fn read_go_map(
     );
 
     let entries = if is_swiss {
-        match read_swiss_map_inner(map_ptr, key_nested, val_nested, config, mem_reader, pid) {
+        match read_swiss_map_inner(
+            map_ptr,
+            key_nested,
+            val_nested,
+            &key_type_name,
+            &val_type_name,
+            config,
+            mem_reader,
+            pid,
+        ) {
             Ok(e) => e,
             Err(reason) => {
                 detrix_logging::debug!(
                     "[map_iter] Swiss Table failed ({reason}), falling back to classic"
                 );
                 // Fall back to classic map iterator
-                read_classic_map_inner(map_ptr, key_nested, val_nested, config, mem_reader, pid)
-                    .unwrap_or_else(|e| {
-                        detrix_logging::warn!("[map_iter] Classic fallback also failed: {e}");
-                        vec![]
-                    })
+                read_classic_map_inner(
+                    map_ptr,
+                    key_nested,
+                    val_nested,
+                    &key_type_name,
+                    &val_type_name,
+                    config,
+                    mem_reader,
+                    pid,
+                )
+                .unwrap_or_else(|e| {
+                    detrix_logging::warn!("[map_iter] Classic fallback also failed: {e}");
+                    vec![]
+                })
             }
         }
     } else {
-        match read_classic_map_inner(map_ptr, key_nested, val_nested, config, mem_reader, pid) {
+        match read_classic_map_inner(
+            map_ptr,
+            key_nested,
+            val_nested,
+            &key_type_name,
+            &val_type_name,
+            config,
+            mem_reader,
+            pid,
+        ) {
             Ok(e) => e,
             Err(reason) => {
                 detrix_logging::debug!(
                     "[map_iter] Classic failed ({reason}), falling back to Swiss Table"
                 );
-                read_swiss_map_inner(map_ptr, key_nested, val_nested, config, mem_reader, pid)
-                    .unwrap_or_else(|e| {
-                        detrix_logging::warn!("[map_iter] Swiss fallback also failed: {e}");
-                        vec![]
-                    })
+                read_swiss_map_inner(
+                    map_ptr,
+                    key_nested,
+                    val_nested,
+                    &key_type_name,
+                    &val_type_name,
+                    config,
+                    mem_reader,
+                    pid,
+                )
+                .unwrap_or_else(|e| {
+                    detrix_logging::warn!("[map_iter] Swiss fallback also failed: {e}");
+                    vec![]
+                })
             }
         }
     };
@@ -258,6 +296,8 @@ fn read_swiss_map_inner(
     map_ptr: u64,
     key_nested: Option<&NestedType>,
     val_nested: Option<&NestedType>,
+    key_type_name: &str,
+    val_type_name: &str,
     config: &CaptureConfig,
     mem_reader: &dyn ProcessMemoryReader,
     pid: u32,
@@ -307,9 +347,10 @@ fn read_swiss_map_inner(
         // Small-map mode (Go 1.24 dirLen==0): dirPtr points directly to the
         // raw groups array — [8 ctrl bytes][8 × slot_size bytes].  There is
         // NO table struct wrapper; just 1 group.
-        let key_size = slot_type_size(key_nested);
-        let val_size = slot_type_size(val_nested);
-        let (val_offset, slot_size) = compute_slot_layout(key_size, val_size);
+        let (val_offset, slot_size) =
+            compute_slot_layout(key_nested, val_nested, key_type_name, val_type_name);
+        let key_size = slot_type_size_fallback(key_nested, key_type_name);
+        let val_size = slot_type_size_fallback(val_nested, val_type_name);
         detrix_logging::debug!(
             "[map_iter] small-map dirPtr={:#x} key_size={} val_size={} slot_size={}",
             dir_ptr,
@@ -351,6 +392,8 @@ fn read_swiss_map_inner(
                 table_ptr,
                 key_nested,
                 val_nested,
+                key_type_name,
+                val_type_name,
                 max_entries - entries.len(),
                 config,
                 mem_reader,
@@ -372,10 +415,13 @@ fn read_swiss_map_inner(
 ///   +0x08: index (int64)
 ///   +0x10: groups.data       (uint64) -> *groups_array
 ///   +0x18: groups.lengthMask (uint64)  = num_groups - 1
+#[allow(clippy::too_many_arguments)]
 fn read_table(
     table_ptr: u64,
     key_nested: Option<&NestedType>,
     val_nested: Option<&NestedType>,
+    key_type_name: &str,
+    val_type_name: &str,
     max_entries: usize,
     config: &CaptureConfig,
     mem_reader: &dyn ProcessMemoryReader,
@@ -407,9 +453,10 @@ fn read_table(
         ));
     }
 
-    let key_size = slot_type_size(key_nested);
-    let val_size = slot_type_size(val_nested);
-    let (val_offset, slot_size) = compute_slot_layout(key_size, val_size);
+    let key_size = slot_type_size_fallback(key_nested, key_type_name);
+    let val_size = slot_type_size_fallback(val_nested, val_type_name);
+    let (val_offset, slot_size) =
+        compute_slot_layout(key_nested, val_nested, key_type_name, val_type_name);
 
     detrix_logging::debug!(
         "[map_iter] table={:#x} groups={:#x} num_groups={} key_size={} val_size={} slot_size={}",
@@ -506,13 +553,58 @@ fn read_groups(
 ///   key at offset 0 (size = key_size)
 ///   val at offset align_up(key_size, min(val_size, 8))
 ///   slot_size = align_up(val_offset + val_size, max(key_align, val_align))
-fn compute_slot_layout(key_size: u64, val_size: u64) -> (u64, u64) {
+///
+/// Falls back to inferring key/val sizes from `key_type`/`val_type` names when
+/// nested type info is unavailable (e.g. depth limit exceeded).
+fn compute_slot_layout(
+    key_nested: Option<&NestedType>,
+    val_nested: Option<&NestedType>,
+    key_type: &str,
+    val_type: &str,
+) -> (u64, u64) {
+    let key_size = slot_type_size_fallback(key_nested, key_type);
+    let val_size = slot_type_size_fallback(val_nested, val_type);
     let key_align = align_of(key_size);
     let val_align = align_of(val_size);
     let slot_align = key_align.max(val_align);
     let val_offset = align_up(key_size, val_align);
     let slot_size = align_up(val_offset + val_size, slot_align);
     (val_offset, slot_size)
+}
+
+/// Get the slot field size from nested type info, or infer from the type name.
+/// For strings the slot is always 16 bytes ({ptr, len} header).
+fn slot_type_size_fallback(nested: Option<&NestedType>, type_name: &str) -> u64 {
+    match nested {
+        // Go string in a slot: always 16 bytes (ptr + len header)
+        Some(NestedType::Scalar(ti)) if ti.is_string || ti.name == "string" => 16,
+        // Use DWARF byte_size if available
+        Some(n) => {
+            let s = n.type_info().byte_size;
+            if s > 0 {
+                s
+            } else {
+                known_type_byte_size(&n.type_info().name)
+            }
+        }
+        None => known_type_byte_size(type_name),
+    }
+}
+
+/// Infer byte size from common Go type names (used as fallback when nested type
+/// info is unavailable due to depth limits).
+fn known_type_byte_size(name: &str) -> u64 {
+    match name {
+        "string" => 16,
+        "bool" | "int8" | "uint8" | "byte" => 1,
+        "int16" | "uint16" => 2,
+        "int32" | "uint32" | "float32" | "rune" => 4,
+        "int" | "int64" | "uint" | "uint64" | "uintptr" | "float64" | "complex64" | "error" => 8,
+        "complex128" => 16,
+        _ if name.starts_with('*') => 8,
+        _ if name.starts_with("[]") => 24,
+        _ => 8, // struct or unknown — conservative
+    }
 }
 
 /// Natural alignment for a type of `size` bytes (up to 8).
@@ -532,27 +624,6 @@ fn align_up(n: u64, align: u64) -> u64 {
         return n;
     }
     n.div_ceil(align) * align
-}
-
-/// Byte size to use when reading a slot field.
-///
-/// For strings, the slot contains a Go string header: {ptr uintptr, len int} = 16 bytes.
-/// For other types, we use the DWARF byte_size or fall back to 8.
-fn slot_type_size(nested: Option<&NestedType>) -> u64 {
-    match nested {
-        // Go string in a slot: always 16 bytes (ptr + len header)
-        Some(NestedType::Scalar(ti)) if ti.is_string || ti.name == "string" => 16,
-        // Other types: use DWARF byte_size, fallback to 8
-        Some(n) => {
-            let s = n.type_info().byte_size;
-            if s > 0 {
-                s
-            } else {
-                8
-            }
-        }
-        None => 8,
-    }
 }
 
 /// Read and decode a single key or value from a slot at `addr`.
@@ -712,6 +783,8 @@ fn read_classic_map_inner(
     map_ptr: u64,
     key_nested: Option<&NestedType>,
     val_nested: Option<&NestedType>,
+    key_type_name: &str,
+    val_type_name: &str,
     config: &CaptureConfig,
     mem_reader: &dyn ProcessMemoryReader,
     pid: u32,
@@ -776,9 +849,8 @@ fn read_classic_map_inner(
     let hash_tophash_empty_one = HASH_TOPHASH_EMPTY_ONE_GO112;
     let hash_min_tophash = HASH_MIN_TOPHASH_GO112;
 
-    let key_size = slot_type_size(key_nested);
-    let val_size = slot_type_size(val_nested);
-    let _key_align = align_of(key_size);
+    let key_size = slot_type_size_fallback(key_nested, key_type_name);
+    let val_size = slot_type_size_fallback(val_nested, val_type_name);
     let val_align = align_of(val_size);
 
     // Bucket layout: tophash[8] + keys[8] + values[8] + overflow
@@ -1131,23 +1203,23 @@ mod tests {
     #[test]
     fn compute_slot_layout_basic() {
         // int64 key, int64 value
-        let (val_offset, slot_size) = compute_slot_layout(8, 8);
+        let (val_offset, slot_size) = compute_slot_layout(None, None, "int64", "int64");
         assert_eq!(val_offset, 8); // key at 0, val at 8
         assert_eq!(slot_size, 16); // total slot = 16
 
         // string key (16 bytes), int64 value (8 bytes)
-        let (val_offset, slot_size) = compute_slot_layout(16, 8);
+        let (val_offset, slot_size) = compute_slot_layout(None, None, "string", "int64");
         assert_eq!(val_offset, 16);
         assert_eq!(slot_size, 24);
 
         // int32 key (4 bytes), int64 value (8 bytes) — val needs 8-byte alignment
-        let (val_offset, slot_size) = compute_slot_layout(4, 8);
+        let (val_offset, slot_size) = compute_slot_layout(None, None, "int32", "int64");
         assert_eq!(val_offset, 8); // val aligned to 8
         assert_eq!(slot_size, 16); // 8 + 8 = 16
     }
 
     #[test]
-    fn slot_type_size_string_is_16_bytes() {
+    fn slot_type_size_fallback_string_is_16_bytes() {
         // Go string in a map slot: {ptr uintptr, len int} = 16 bytes
         let string_nested = NestedType::Scalar(TypeInfo {
             name: "string".to_string(),
@@ -1165,7 +1237,7 @@ mod tests {
             slice_element_type: String::new(),
         });
         assert_eq!(
-            slot_type_size(Some(&string_nested)),
+            slot_type_size_fallback(Some(&string_nested), "string"),
             16,
             "string slot should be 16 bytes"
         );
@@ -1187,16 +1259,23 @@ mod tests {
             slice_element_type: String::new(),
         });
         assert_eq!(
-            slot_type_size(Some(&string_named)),
+            slot_type_size_fallback(Some(&string_named), "string"),
             16,
             "string-named slot should also be 16 bytes"
+        );
+
+        // When nested is None, fallback to type name lookup
+        assert_eq!(
+            slot_type_size_fallback(None, "string"),
+            16,
+            "string type name fallback should be 16 bytes"
         );
     }
 
     #[test]
     fn compute_slot_layout_map_string_string() {
         // map[string]string: key=16, val=16 → val_offset=16, slot_size=32
-        let (val_offset, slot_size) = compute_slot_layout(16, 16);
+        let (val_offset, slot_size) = compute_slot_layout(None, None, "string", "string");
         assert_eq!(val_offset, 16, "value should start at offset 16");
         assert_eq!(slot_size, 32, "slot should be 32 bytes total");
     }
@@ -1238,6 +1317,8 @@ mod tests {
             0x10000,
             None,
             None,
+            "int64",
+            "int64",
             &CaptureConfig::default(),
             &reader,
             1234,
@@ -1264,6 +1345,8 @@ mod tests {
             0x20000,
             None,
             None,
+            "int64",
+            "int64",
             &CaptureConfig::default(),
             &reader,
             1234,
