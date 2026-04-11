@@ -684,6 +684,27 @@ async fn test_ebpf_captures_nested_types() {
                 ));
             }
 
+            // Check Extra map (map[string]string) — verify key-value pairs are correct,
+            // not just keys with empty values. This catches the slot layout bug where
+            // values were read at wrong offsets, producing empty strings.
+            if !value_json.contains("\"Extra\":") {
+                mismatches.push(format!("Order[{}] missing Extra", idx));
+            }
+            // Known fixture values: Extra["source"]="api", Extra["version"]="1.0"
+            // The valueJson contains these as substrings (with various escaping)
+            if !value_json.contains("api") {
+                mismatches.push(format!(
+                    "Order[{}] Extra should contain source→\"api\" (slot layout may be wrong)",
+                    idx
+                ));
+            }
+            if !value_json.contains("1.0") {
+                mismatches.push(format!(
+                    "Order[{}] Extra should contain version→\"1.0\" (slot layout may be wrong)",
+                    idx
+                ));
+            }
+
             // Check Total (float) - should be a numeric value
             if !value_json.contains("\"Total\":") {
                 mismatches.push(format!("Order[{}] missing Total", idx));

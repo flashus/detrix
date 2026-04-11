@@ -267,21 +267,13 @@ impl DwarfInfo {
         let dwarf = load_dwarf(&obj, endian).ok()?;
 
         let mut units = dwarf.units();
-        loop {
-            let header = match units.next() {
-                Ok(Some(h)) => h,
-                _ => break,
-            };
+        while let Ok(Some(header)) = units.next() {
             let unit = match dwarf.unit(header) {
                 Ok(u) => u,
                 Err(_) => continue,
             };
             let mut entries = unit.entries();
-            loop {
-                let entry = match entries.next_dfs() {
-                    Ok(Some(e)) => e,
-                    _ => break,
-                };
+            while let Ok(Some(entry)) = entries.next_dfs() {
                 if entry.tag() != gimli::DW_TAG_structure_type {
                     continue;
                 }
@@ -303,11 +295,7 @@ impl DwarfInfo {
                     Err(_) => continue,
                 };
                 let mut children = root.children();
-                loop {
-                    let child = match children.next() {
-                        Ok(Some(c)) => c,
-                        _ => break,
-                    };
+                while let Ok(Some(child)) = children.next() {
                     let child_entry = child.entry();
                     if child_entry.tag() != gimli::DW_TAG_member {
                         continue;

@@ -535,8 +535,14 @@ fn align_up(n: u64, align: u64) -> u64 {
 }
 
 /// Byte size to use when reading a slot field.
+///
+/// For strings, the slot contains a Go string header: {ptr uintptr, len int} = 16 bytes.
+/// For other types, we use the DWARF byte_size or fall back to 8.
 fn slot_type_size(nested: Option<&NestedType>) -> u64 {
     match nested {
+        // Go string in a slot: always 16 bytes (ptr + len header)
+        Some(NestedType::Scalar(ti)) if ti.is_string || ti.name == "string" => 16,
+        // Other types: use DWARF byte_size, fallback to 8
         Some(n) => {
             let s = n.type_info().byte_size;
             if s > 0 {
@@ -563,7 +569,7 @@ fn read_slot_value(
     }
 
     match nested {
-        Some(NestedType::Scalar(ti)) if ti.is_string => {
+        Some(NestedType::Scalar(ti)) if ti.is_string || ti.name == "string" => {
             read_string_slot(addr, mem_reader, pid, config)
         }
         Some(NestedType::Struct {
@@ -1003,6 +1009,9 @@ fn read_classic_bucket(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dwarf::nested_types::NestedType;
+    use crate::dwarf::typeinfo::TypeInfo;
+    use crate::dwarf::types::VariableSize;
 
     /// Stub memory reader that returns predefined bytes at known addresses.
     struct MockMemReader {
@@ -1135,6 +1144,61 @@ mod tests {
         let (val_offset, slot_size) = compute_slot_layout(4, 8);
         assert_eq!(val_offset, 8); // val aligned to 8
         assert_eq!(slot_size, 16); // 8 + 8 = 16
+    }
+
+    #[test]
+    fn slot_type_size_string_is_16_bytes() {
+        // Go string in a map slot: {ptr uintptr, len int} = 16 bytes
+        let string_nested = NestedType::Scalar(TypeInfo {
+            name: "string".to_string(),
+            size: VariableSize::QWord,
+            byte_size: 0, // DWARF may not set byte_size for strings
+            is_string: true,
+            is_slice: false,
+            is_array: false,
+            is_struct: false,
+            is_pointer: false,
+            is_map: false,
+            array_element_count: 0,
+            element_byte_size: 0,
+            array_element_type: String::new(),
+            slice_element_type: String::new(),
+        });
+        assert_eq!(
+            slot_type_size(Some(&string_nested)),
+            16,
+            "string slot should be 16 bytes"
+        );
+
+        // Also handle case where is_string is false but name is "string"
+        let string_named = NestedType::Scalar(TypeInfo {
+            name: "string".to_string(),
+            size: VariableSize::QWord,
+            byte_size: 0,
+            is_string: false,
+            is_slice: false,
+            is_array: false,
+            is_struct: false,
+            is_pointer: false,
+            is_map: false,
+            array_element_count: 0,
+            element_byte_size: 0,
+            array_element_type: String::new(),
+            slice_element_type: String::new(),
+        });
+        assert_eq!(
+            slot_type_size(Some(&string_named)),
+            16,
+            "string-named slot should also be 16 bytes"
+        );
+    }
+
+    #[test]
+    fn compute_slot_layout_map_string_string() {
+        // map[string]string: key=16, val=16 → val_offset=16, slot_size=32
+        let (val_offset, slot_size) = compute_slot_layout(16, 16);
+        assert_eq!(val_offset, 16, "value should start at offset 16");
+        assert_eq!(slot_size, 32, "slot should be 32 bytes total");
     }
 
     #[test]
