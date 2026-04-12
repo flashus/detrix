@@ -173,19 +173,28 @@ func main() {
 // Started via init() so they don't shift any lines in tradeTick().
 
 func init() {
-	// 3 worker goroutines — each gets a unique ID so they produce
-	// different log output and distinct goids in captured events.
-	// Workers call the same tradeTick() as main (same PC offsets → same
-	// eBPF probes fire with different goids) but at a slower rate so
-	// Delve-based tests don't get flooded with extra events.
-	for w := 1; w <= 3; w++ {
-		go func(id int) {
-			iter, tpnl := 0, 0.0
-			for running {
-				iter++
-				tradeTick(id, &iter, &tpnl)
-				time.Sleep(5 * time.Second) // offset from main's 3s
-			}
-		}(w)
+	// Spawn 3 background goroutines that call tradeTick() with unique IDs
+	// for eBPF goid testing, but only when DETRIX_EBPF_WORKERS is set.
+	// Default: workers sleep in a loop (don't interfere with Delve tests).
+	if os.Getenv("DETRIX_EBPF_WORKERS") == "1" {
+		for w := 1; w <= 3; w++ {
+			go func(id int) {
+				iter, tpnl := 0, 0.0
+				time.Sleep(5 * time.Second)
+				for running {
+					iter++
+					tradeTick(id, &iter, &tpnl)
+					time.Sleep(5 * time.Second)
+				}
+			}(w)
+		}
+	} else {
+		for w := 1; w <= 3; w++ {
+			go func(id int) {
+				for running {
+					time.Sleep(30 * time.Second)
+				}
+			}(w)
+		}
 	}
 }

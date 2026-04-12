@@ -146,8 +146,10 @@ async fn test_ebpf_go_uprobe_captures_variables() {
 
     // Run as a plain binary — no Detrix client, no Delve dependency.
     // eBPF uprobes attach from the daemon side; the process needs no cooperation.
+    // DETRIX_EBPF_WORKERS=1: enables worker goroutines that produce distinct goids.
     // Discard stdout/stderr to avoid pipe buffer accumulation.
     let app = Command::new(&fixture_binary)
+        .env("DETRIX_EBPF_WORKERS", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -523,7 +525,8 @@ async fn test_ebpf_go_uprobe_captures_variables() {
     reporter.step_success(step, Some(&format!("labelSprintf={label_sprintf_val:?}")));
 
     // ── goid capture (capture_goid = true in [ebpf] config) ──────────────────
-    // The fixture spawns 4 goroutines (main + 3 workers) all calling tradeTick().
+    // The fixture uses DETRIX_EBPF_WORKERS=1 to spawn worker goroutines
+    // that call tradeTick() with unique IDs, producing distinct goids.
     // Each has a unique goid, so we expect to see distinct goids across events.
 
     // Print captured values + goid for each metric
