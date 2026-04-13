@@ -64,6 +64,61 @@ impl ConnectionRepository for SqliteStorage {
         Ok(connection.id.clone())
     }
 
+    async fn save_batch(&self, connections: &[Connection]) -> Result<usize> {
+        if connections.is_empty() {
+            return Ok(0);
+        }
+
+        let insert_sql = format!(
+            "INSERT INTO connections ({}) VALUES ({})
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                workspace_root = excluded.workspace_root,
+                hostname = excluded.hostname,
+                host = excluded.host,
+                port = excluded.port,
+                language = excluded.language,
+                status = excluded.status,
+                auto_reconnect = excluded.auto_reconnect,
+                safe_mode = excluded.safe_mode,
+                last_connected_at = excluded.last_connected_at,
+                last_active = excluded.last_active,
+                control_plane_url = excluded.control_plane_url,
+                build_commit = excluded.build_commit,
+                build_tag = excluded.build_tag,
+                user_id = COALESCE(excluded.user_id, connections.user_id)",
+            CONNECTION_COLUMNS, CONNECTION_PLACEHOLDERS
+        );
+
+        let mut tx = self.pool().begin().await?;
+        for connection in connections {
+            sqlx::query(&insert_sql)
+                .bind(&connection.id.0)
+                .bind(&connection.name)
+                .bind(&connection.workspace_root)
+                .bind(&connection.hostname)
+                .bind(&connection.host)
+                .bind(connection.port as i64)
+                .bind(connection.language.as_str())
+                .bind(connection.status.to_string())
+                .bind(connection.auto_reconnect)
+                .bind(connection.safe_mode)
+                .bind(connection.created_at)
+                .bind(connection.last_connected_at)
+                .bind(connection.last_active)
+                .bind(&connection.control_plane_url)
+                .bind(&connection.build_commit)
+                .bind(&connection.build_tag)
+                .bind(&connection.user_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+
+        debug!(count = connections.len(), "Batch connections saved");
+        Ok(connections.len())
+    }
+
     async fn find_by_id(&self, id: &ConnectionId) -> Result<Option<Connection>> {
         let row = sqlx::query(&format!(
             "SELECT {} FROM connections WHERE id = ?",
@@ -830,5 +885,83 @@ mod tests {
 
         assert_eq!(found1.workspace_root, "/workspace1");
         assert_eq!(found2.workspace_root, "/workspace2");
+    }
+
+    #[tokio::test]
+    async fn test_connection_save_batch() {
+        use detrix_core::ConnectionIdentity;
+
+        let storage = create_test_storage().await;
+
+        let identity1 =
+            ConnectionIdentity::new("app1", SourceLanguage::Go, "/workspace", "host1");
+        let conn1 =
+            Connection::new_with_identity(identity1, "127.0.0.1".to_string(), 5680).unwrap();
+
+        let identity2 =
+            ConnectionIdentity::new("app2", SourceLanguage::Go, "/workspace", "host1");
+        let conn2 =
+            Connection::new_with_identity(identity2, "127.0.0.1".to_string(), 5681).unwrap();
+
+        let identity3 =
+            ConnectionIdentity::new("app3", SourceLanguage::Go, "/workspace", "host1");
+        let conn3 =
+            Connection::new_with_identity(identity3, "127.0.0.1".to_string(), 5682).unwrap();
+
+        let connections = vec![conn1, conn2, conn3];
+        let result = ConnectionRepository::save_batch(&storage, &connections).await.unwrap();
+        assert_eq!(result, 3);
+
+        // All should be findable
+        for conn in &connections {
+            let found = ConnectionRepository::find_by_id(&storage, &conn.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(found.id, conn.id);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connection_save_batch_empty() {
+        let storage = create_test_storage().await;
+
+        let result = ConnectionRepository::save_batch(&storage, &[]).await.unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[tokio::test]
+    async fn test_connection_save_batch_upsert() {
+        use detrix_core::ConnectionIdentity;
+
+        let storage = create_test_storage().await;
+
+        let identity =
+            ConnectionIdentity::new("app", SourceLanguage::Go, "/workspace", "host1");
+        let mut conn =
+            Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5680).unwrap();
+
+        // Initial batch save
+        ConnectionRepository::save_batch(&storage, &[conn.clone()])
+            .await
+            .unwrap();
+
+        // Modify and save again (upsert)
+        conn.host = "localhost".to_string();
+        let result = ConnectionRepository::save_batch(&storage, &[conn.clone()])
+            .await
+            .unwrap();
+        assert_eq!(result, 1);
+
+        // Should still be only one connection with updated host
+        let found = ConnectionRepository::find_by_id(&storage, &conn.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.host, "localhost");
+
+        // Total count should still be 1
+        let all = ConnectionRepository::list_all(&storage).await.unwrap();
+        assert_eq!(all.len(), 1);
     }
 }

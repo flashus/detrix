@@ -5,6 +5,7 @@
 //! handle DTO mapping and delegate to these services.
 
 pub mod adapter_lifecycle_manager;
+pub mod agent_connection_manager;
 pub mod anchor_service;
 pub mod config_service;
 pub mod connection_service;

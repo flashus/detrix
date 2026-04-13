@@ -333,6 +333,14 @@ pub trait ConnectionRepository: Send + Sync {
         workspace_root: &str,
         exclude_id: &ConnectionId,
     ) -> Result<Vec<ConnectionId>>;
+
+    /// Save multiple connections in a single SQLite transaction.
+    ///
+    /// All connections are upserted atomically (INSERT OR REPLACE).
+    /// If any insert fails, the entire transaction is rolled back.
+    ///
+    /// Returns the number of connections saved on success.
+    async fn save_batch(&self, connections: &[Connection]) -> Result<usize>;
 }
 
 /// Minimal read-only lookup for connections.

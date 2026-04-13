@@ -867,6 +867,14 @@ impl ConnectionRepository for MockConnectionRepository {
             .collect();
         Ok(stale_ids)
     }
+
+    async fn save_batch(&self, connections: &[Connection]) -> Result<usize> {
+        let mut conns = self.connections.lock().await;
+        for connection in connections {
+            conns.insert(connection.id.clone(), connection.clone());
+        }
+        Ok(connections.len())
+    }
 }
 
 // ============================================================================

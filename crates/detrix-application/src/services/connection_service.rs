@@ -405,6 +405,42 @@ impl ConnectionService {
         Ok(connection_id)
     }
 
+    /// Access the connection repository for direct status updates.
+    /// Used by AgentConnectionManager to update connection status
+    /// without going through adapter lifecycle management.
+    #[allow(dead_code)]
+    pub(crate) fn connection_repo(&self) -> &ConnectionRepositoryRef {
+        &self.connection_repo
+    }
+
+    /// Create multiple connections in a single SQLite transaction.
+    ///
+    /// This method:
+    /// 1. Creates Connection entities from identities
+    /// 2. Saves all connections atomically via `save_batch`
+    /// 3. Does NOT start adapters or emit events — caller handles lifecycle
+    ///
+    /// Used by agent mode registration where the server receives multiple
+    /// binaries at once and needs to create connections without starting
+    /// individual adapters.
+    pub async fn create_connections_batch(
+        &self,
+        identities: Vec<(ConnectionIdentity, String, u16, bool)>,
+    ) -> Result<Vec<ConnectionId>> {
+        let mut connections = Vec::with_capacity(identities.len());
+        for (identity, host, port, safe_mode) in identities {
+            Connection::validate_user_id(None)?;
+            let mut connection = Connection::new_with_identity(identity, host, port)?;
+            connection.safe_mode = safe_mode;
+            connections.push(connection);
+        }
+
+        let ids: Vec<ConnectionId> = connections.iter().map(|c| c.id.clone()).collect();
+        self.connection_repo.save_batch(&connections).await?;
+
+        Ok(ids)
+    }
+
     /// Finalize a successful adapter start: update status to Connected, add client
     /// reference, and emit the connection-created system event.
     ///
