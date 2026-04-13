@@ -15,7 +15,7 @@ use crate::ports::{
     ConnectionRepositoryRef, DapAdapterFactoryRef, DapAdapterRef, EventOutputRef,
     MetricRepositoryRef, VfsRef,
 };
-use crate::services::EventCaptureService;
+use crate::services::{EventCaptureService, RemoteAdapter};
 use dashmap::DashMap;
 use detrix_config::{AdapterConnectionConfig, DaemonConfig, EventBatchingConfig};
 use detrix_core::{
@@ -124,6 +124,10 @@ pub struct AdapterLifecycleManager {
     /// Factory for creating adapters
     adapter_factory: DapAdapterFactoryRef,
 
+    /// Agent connection manager (optional — when present, agent-managed connections
+    /// bypass the factory and use RemoteAdapter instead).
+    agent_manager: Option<crate::AgentConnectionManagerRef>,
+
     /// Repository for loading metrics to sync on connect
     metric_repository: MetricRepositoryRef,
 
@@ -230,6 +234,41 @@ impl AdapterLifecycleManager {
         event_output: Option<EventOutputRef>,
         vfs: VfsRef,
     ) -> Self {
+        Self::with_agent_manager(
+            event_capture_service,
+            event_broadcast_tx,
+            system_event_tx,
+            adapter_factory,
+            metric_repository,
+            connection_repository,
+            batching_config,
+            adapter_config,
+            drain_timeout_ms,
+            event_output,
+            vfs,
+            None, // No agent manager
+        )
+    }
+
+    /// Create a new AdapterLifecycleManager with optional agent connection manager.
+    ///
+    /// When `agent_manager` is Some, connections managed by an agent bypass the
+    /// factory dispatch and use `RemoteAdapter` instead.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_agent_manager(
+        event_capture_service: Arc<EventCaptureService>,
+        event_broadcast_tx: broadcast::Sender<MetricEvent>,
+        system_event_tx: broadcast::Sender<SystemEvent>,
+        adapter_factory: DapAdapterFactoryRef,
+        metric_repository: MetricRepositoryRef,
+        connection_repository: ConnectionRepositoryRef,
+        batching_config: EventBatchingConfig,
+        adapter_config: AdapterConnectionConfig,
+        drain_timeout_ms: u64,
+        event_output: Option<EventOutputRef>,
+        vfs: VfsRef,
+        agent_manager: Option<crate::AgentConnectionManagerRef>,
+    ) -> Self {
         let (flush_tx, flush_rx) = mpsc::channel(1);
         let (cleanup_tx, cleanup_rx) = mpsc::channel(16); // Buffer for cleanup requests
         let event_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(
@@ -257,6 +296,7 @@ impl AdapterLifecycleManager {
             event_output,
             pending_starts: Arc::new(DashMap::new()),
             connection_repository: Arc::clone(&connection_repository),
+            agent_manager,
         };
 
         // Start the flush task if flush interval is configured
@@ -678,23 +718,52 @@ impl AdapterLifecycleManager {
             self.stop_adapter(&connection_id).await?;
         }
 
-        // Create adapter via factory, dispatch by language
-        let adapter = match language {
-            SourceLanguage::Go => self.adapter_factory.create_go_adapter(host, port).await?,
-            SourceLanguage::Python => {
-                self.adapter_factory
-                    .create_python_adapter(host, port)
-                    .await?
+        // Create adapter via factory, dispatch by language.
+        // If this connection is managed by an agent, construct RemoteAdapter instead.
+        let adapter: DapAdapterRef = if let Some(ref mgr) = self.agent_manager {
+            if mgr.is_agent_managed(&connection_id) {
+                Arc::new(RemoteAdapter::new(
+                    connection_id.clone(),
+                    mgr.clone(),
+                ))
+            } else {
+                match language {
+                    SourceLanguage::Go => self.adapter_factory.create_go_adapter(host, port).await?,
+                    SourceLanguage::Python => {
+                        self.adapter_factory
+                            .create_python_adapter(host, port)
+                            .await?
+                    }
+                    SourceLanguage::Rust => {
+                        self.adapter_factory
+                            .create_rust_adapter(host, port, program.as_deref(), pid)
+                            .await?
+                    }
+                    _ => {
+                        return Err(detrix_core::Error::InvalidConfig(
+                            SourceLanguage::language_error(language.as_str()).into(),
+                        ));
+                    }
+                }
             }
-            SourceLanguage::Rust => {
-                self.adapter_factory
-                    .create_rust_adapter(host, port, program.as_deref(), pid)
-                    .await?
-            }
-            _ => {
-                return Err(detrix_core::Error::InvalidConfig(
-                    SourceLanguage::language_error(language.as_str()).into(),
-                ));
+        } else {
+            match language {
+                SourceLanguage::Go => self.adapter_factory.create_go_adapter(host, port).await?,
+                SourceLanguage::Python => {
+                    self.adapter_factory
+                        .create_python_adapter(host, port)
+                        .await?
+                }
+                SourceLanguage::Rust => {
+                    self.adapter_factory
+                        .create_rust_adapter(host, port, program.as_deref(), pid)
+                        .await?
+                }
+                _ => {
+                    return Err(detrix_core::Error::InvalidConfig(
+                        SourceLanguage::language_error(language.as_str()).into(),
+                    ));
+                }
             }
         };
 

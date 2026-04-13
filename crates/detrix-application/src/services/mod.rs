@@ -22,6 +22,7 @@ pub mod jwt_validator;
 pub mod mcp_usage_service;
 pub mod metric_service;
 pub mod remote_adapter;
+pub use remote_adapter::RemoteAdapter;
 pub mod remote_app_service;
 pub mod shutdown;
 pub mod streaming_service;
