@@ -38,6 +38,8 @@ pub enum SourceKind {
     ControlPlane,
     /// Fetch from MCP bridge's file server (supports git-pinned serving)
     Bridge,
+    /// Fetch from agent (remote file access via gRPC stream)
+    Agent,
     /// Read from local filesystem
     Disk,
 }
@@ -48,6 +50,7 @@ impl SourceKind {
         match self {
             SourceKind::ControlPlane => "control_plane",
             SourceKind::Bridge => "bridge",
+            SourceKind::Agent => "agent",
             SourceKind::Disk => "disk",
         }
     }

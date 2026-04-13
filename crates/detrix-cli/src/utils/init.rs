@@ -9,12 +9,13 @@
 use anyhow::{Context, Result};
 use detrix_application::ports::{DlqRepositoryRef, EventOutputRef, RemoteAppControlRef};
 use detrix_application::{
-    middleware::ReconnectingAdapterFactory, AppContext, ConnectionRepositoryRef,
-    DapAdapterFactoryRef, EventRepositoryRef, FileSourceChain, FileSourceRef, MetricRepositoryRef,
+    middleware::ReconnectingAdapterFactory, AgentConnectionManager, AgentConnectionManagerRef,
+    AppContext, ConnectionRepositoryRef, DapAdapterFactoryRef, EventRepositoryRef, FileSourceChain,
+    FileSourceRef, MetricRepositoryRef,
 };
 use detrix_config::{
-    AdapterConnectionConfig, AnchorConfig, ApiConfig, Config, DaemonConfig, DlqBackend,
-    LimitsConfig, SafetyConfig, StorageConfig, VfsConfig,
+    AdapterConnectionConfig, AgentConfig, AnchorConfig, ApiConfig, Config, DaemonConfig,
+    DlqBackend, LimitsConfig, SafetyConfig, StorageConfig, VfsConfig,
 };
 use detrix_dap::DapAdapterFactoryImpl;
 use detrix_logging::{debug, info};
@@ -72,7 +73,7 @@ impl InfrastructureComponents {
         limits_config: &LimitsConfig,
         vfs_config: &VfsConfig,
         output: Option<EventOutputRef>,
-        agent_config: Option<detrix_config::AgentConfig>,
+        agent_config: Option<AgentConfig>,
     ) -> AppContextWithStorage {
         // Convert DlqStorage to DlqRepositoryRef if available
         let dlq_repo: Option<DlqRepositoryRef> = self.dlq_storage.map(|s| s as DlqRepositoryRef);
@@ -101,15 +102,38 @@ impl InfrastructureComponents {
         let bridge_source = Arc::new(detrix_api::file_sources::BridgeSource::new(
             timeout, max_size,
         ));
-        let available_sources: Vec<FileSourceRef> = vec![
+
+        // Create AgentConnectionManager if agent mode is configured
+        let agent_manager: Option<AgentConnectionManagerRef> = agent_config
+            .as_ref()
+            .filter(|cfg| {
+                !cfg.agent_tokens.is_empty() || cfg.min_compatible_agent_version.is_some()
+            })
+            .map(|cfg| {
+                Arc::new(AgentConnectionManager::new(
+                    Arc::clone(&self.storage) as ConnectionRepositoryRef,
+                    Some(cfg.clone()),
+                    None, // system_event_tx — not available yet; events still flow via dispatch
+                ))
+            });
+
+        // Build available sources, adding AgentFileSource if agent mode is active
+        let mut available_sources: Vec<FileSourceRef> = vec![
             Arc::new(detrix_api::file_sources::ControlPlaneSource::new(
                 timeout,
                 max_size,
                 std::env::var("DETRIX_TOKEN").ok(),
             )),
             Arc::clone(&bridge_source) as FileSourceRef,
-            Arc::new(detrix_api::file_sources::DiskSource),
         ];
+        if let Some(ref mgr) = agent_manager {
+            available_sources.push(Arc::new(
+                detrix_application::AgentFileSource::new(mgr.clone()),
+            ) as FileSourceRef);
+            info!("AgentFileSource added to file source chain (highest priority)");
+        }
+        available_sources.push(Arc::new(detrix_api::file_sources::DiskSource) as FileSourceRef);
+
         let file_source_chain = Arc::new(FileSourceChain::new(
             Arc::clone(&vfs),
             available_sources,
@@ -172,7 +196,7 @@ impl InfrastructureComponents {
             file_source_chain,
             Arc::clone(&self.storage) as detrix_application::ConnectionReferenceRepositoryRef,
             purity_analyzers,
-            agent_config,
+            agent_manager,
         );
         AppContextWithStorage {
             app_context,

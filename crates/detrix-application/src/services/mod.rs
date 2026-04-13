@@ -17,6 +17,7 @@ pub mod file_inspection_service;
 pub mod file_inspection_types;
 pub mod file_serving;
 pub mod file_source_chain;
+pub mod file_sources;
 pub mod file_watcher_service;
 pub mod jwt_validator;
 pub mod mcp_usage_service;
@@ -37,6 +38,7 @@ pub use agent_connection_manager::{
     AgentBinaryInfo, AgentCapabilities, AgentConnectionManager, AgentConnectionManagerRef,
     IncomingAgentMessage, OutgoingAgentMessage, RegisterResult, VariableInfo,
 };
+pub use file_sources::AgentFileSource;
 pub use anchor_service::{
     AnchorServiceConfig, DefaultAnchorService, LspSymbolLookup, LspSymbolLookupRef, NullLspLookup,
 };
