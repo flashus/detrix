@@ -8,9 +8,8 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use detrix_core::{ConnectionId, MetricEvent, SystemEvent};
+use detrix_ports::ConnectionRepositoryRef;
 use tokio::sync::{mpsc, oneshot};
-
-use crate::ConnectionService;
 
 // ============================================================================
 // Agent Capabilities & Binary Info
@@ -211,7 +210,7 @@ pub struct AgentConnectionManager {
     /// connection_id → set of active request_ids (for cancel_pending_for_connection).
     /// Independent DashMap — avoids holding AgentInfo write guard across await points.
     pub(super) connection_requests: Arc<DashMap<ConnectionId, HashSet<String>>>,
-    pub(super) connection_service: Arc<ConnectionService>,
+    pub(super) connection_repo: ConnectionRepositoryRef,
     pub(super) agent_config: Option<detrix_config::AgentConfig>,
     pub(super) system_event_tx: Option<tokio::sync::broadcast::Sender<SystemEvent>>,
 }
@@ -219,7 +218,7 @@ pub struct AgentConnectionManager {
 impl AgentConnectionManager {
     /// Create a new AgentConnectionManager.
     pub fn new(
-        connection_service: Arc<ConnectionService>,
+        connection_repo: ConnectionRepositoryRef,
         agent_config: Option<detrix_config::AgentConfig>,
         system_event_tx: Option<tokio::sync::broadcast::Sender<SystemEvent>>,
     ) -> Self {
@@ -230,7 +229,7 @@ impl AgentConnectionManager {
             event_channels: Arc::new(DashMap::new()),
             event_receivers: Arc::new(DashMap::new()),
             connection_requests: Arc::new(DashMap::new()),
-            connection_service,
+            connection_repo,
             agent_config,
             system_event_tx,
         }

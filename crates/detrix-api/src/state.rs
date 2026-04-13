@@ -386,6 +386,7 @@ mod tests {
             file_source_chain,
             Arc::clone(&storage) as detrix_application::ConnectionReferenceRepositoryRef,
             HashMap::new(),
+        None, // agent_config
         );
 
         (context, storage as EventRepositoryRef, temp_dir)

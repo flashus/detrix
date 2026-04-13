@@ -338,6 +338,7 @@ pub async fn run(
         &config.limits,
         &config.vfs,
         gelf_output.clone(),
+        Some(config.agent.clone()),
     );
     let app_context = ctx.app_context;
     let storage = ctx.storage;

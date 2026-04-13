@@ -262,6 +262,7 @@ async fn run_direct(config_path: &str, config: &Config) -> Result<()> {
         &config.limits,
         &config.vfs,
         gelf_output.clone(),
+        Some(config.agent.clone()),
     );
 
     // Create API state from the pre-configured AppContext

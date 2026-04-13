@@ -105,6 +105,7 @@ impl TestServer {
             file_source_chain,
             Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
             HashMap::new(),
+        None, // agent_config
         );
 
         // Create a mock connection so metrics can be added
@@ -217,6 +218,7 @@ impl TestServer {
             file_source_chain,
             Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
             HashMap::new(),
+        None, // agent_config
         );
 
         let identity = detrix_core::ConnectionIdentity::new(

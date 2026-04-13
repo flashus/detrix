@@ -26,8 +26,9 @@ use crate::ports::{
 };
 use crate::safety::ValidatorRegistry;
 use crate::services::{
-    AdapterLifecycleManager, AgentConnectionManagerRef, AnchorServiceConfig, ConnectionService,
-    DefaultAnchorService, EventCaptureService, FileInspectionService, FileSourceChain,
+    AdapterLifecycleManager, AgentConnectionManager, AgentConnectionManagerRef, AnchorServiceConfig,
+    ConnectionService, DefaultAnchorService, EventCaptureService, FileInspectionService,
+    FileSourceChain,
     McpUsageService, MetricService, RemoteAppService, StreamingService,
 };
 use detrix_config::{
@@ -129,6 +130,7 @@ impl AppContext {
         file_source_chain: Arc<FileSourceChain>,
         reference_repo: ConnectionReferenceRepositoryRef,
         purity_analyzers: HashMap<SourceLanguage, PurityAnalyzerRef>,
+        agent_config: Option<detrix_config::AgentConfig>,
     ) -> Self {
         // Create broadcast channels for real-time events
         let (event_tx, _) = broadcast::channel::<MetricEvent>(api_config.event_buffer_capacity);
@@ -145,8 +147,23 @@ impl AppContext {
             None => EventCaptureService::new(event_storage.clone()),
         });
 
+        // Create AgentConnectionManager if agent mode is configured on the server
+        // (agent_tokens or min_compatible_agent_version set)
+        let agent_manager: Option<AgentConnectionManagerRef> = agent_config
+            .as_ref()
+            .filter(|cfg| {
+                !cfg.agent_tokens.is_empty() || cfg.min_compatible_agent_version.is_some()
+            })
+            .map(|cfg| {
+                Arc::new(AgentConnectionManager::new(
+                    Arc::clone(&connection_repo),
+                    Some(cfg.clone()),
+                    Some(system_event_tx.clone()),
+                ))
+            });
+
         // Create the AdapterLifecycleManager with event batching and adapter config
-        let adapter_lifecycle_manager = Arc::new(AdapterLifecycleManager::with_config(
+        let adapter_lifecycle_manager = Arc::new(AdapterLifecycleManager::with_agent_manager(
             Arc::clone(&event_capture_service),
             event_tx.clone(),
             system_event_tx.clone(),
@@ -158,6 +175,7 @@ impl AppContext {
             daemon_config.drain_timeout_ms,
             output.clone(), // Pass GELF output to lifecycle manager
             Arc::clone(&vfs),
+            agent_manager.clone(),
         ));
 
         // Create the ConnectionService with the lifecycle manager
@@ -267,6 +285,7 @@ impl AppContext {
             file_source_chain,
             reference_repo,
             HashMap::new(), // No LSP purity analyzers
+            None,           // No agent config
         )
     }
 

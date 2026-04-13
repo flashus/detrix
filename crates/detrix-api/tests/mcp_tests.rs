@@ -73,6 +73,7 @@ impl McpTestFixture {
             file_source_chain,
             Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
             HashMap::new(),
+        None, // agent_config
         );
 
         let state = Arc::new(

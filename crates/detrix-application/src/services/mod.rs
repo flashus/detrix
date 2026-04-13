@@ -34,8 +34,8 @@ pub use adapter_lifecycle_manager::{
 };
 // Agent connection manager (for server-side agent support)
 pub use agent_connection_manager::{
-    AgentBinaryInfo, AgentCapabilities, AgentConnectionManagerRef, IncomingAgentMessage,
-    OutgoingAgentMessage, RegisterResult, VariableInfo,
+    AgentBinaryInfo, AgentCapabilities, AgentConnectionManager, AgentConnectionManagerRef,
+    IncomingAgentMessage, OutgoingAgentMessage, RegisterResult, VariableInfo,
 };
 pub use anchor_service::{
     AnchorServiceConfig, DefaultAnchorService, LspSymbolLookup, LspSymbolLookupRef, NullLspLookup,

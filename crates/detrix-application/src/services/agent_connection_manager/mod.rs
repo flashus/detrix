@@ -141,11 +141,19 @@ impl AgentConnectionManager {
         // ── Release write lock (drop guard) ──
 
         // ── No lock: SQLite batch ──
-        match self
-            .connection_service
-            .create_connections_batch(identities)
-            .await
-        {
+        let mut connections = Vec::with_capacity(conn_ids.len());
+        for (identity, host, port, safe) in &identities {
+            let mut conn = detrix_core::Connection::new_with_identity(
+                identity.clone(),
+                host.clone(),
+                *port,
+            )
+            .map_err(|e| detrix_core::Error::Adapter(format!("Invalid connection identity: {e}")))?;
+            conn.safe_mode = *safe;
+            connections.push(conn);
+        }
+
+        match self.connection_repo.save_batch(&connections).await {
             Ok(_) => {
                 // Populate routing table only after successful commit
                 for conn_id in conn_ids {
@@ -177,8 +185,8 @@ impl AgentConnectionManager {
                 error: _,
             } => {
                 if let Err(e) = self
-                    .connection_service
-                    .connection_repo()
+                    .connection_repo
+                    
                     .update_status(&connection_id, status.clone())
                     .await
                 {
@@ -370,8 +378,8 @@ impl AgentConnectionManager {
 
             // d. Mark disconnected + emit event
             if let Err(e) = self
-                .connection_service
-                .connection_repo()
+                .connection_repo
+                
                 .update_status(&conn_id, detrix_core::ConnectionStatus::Disconnected)
                 .await
             {
@@ -419,18 +427,22 @@ impl AgentConnectionManager {
             });
 
             // Save to DB
-            let identities = vec![(
+            let mut conn = detrix_core::Connection::new_with_identity(
                 identity,
                 binary.binary_path.clone(),
-                0u16,
-                true,
-            )];
-            if let Err(e) = self
-                .connection_service
-                .create_connections_batch(identities)
-                .await
-            {
-                error!(connection_id = %conn_id.0, error = %e, "Failed to save added connection");
+                0,
+            )
+            .map_err(|e| {
+                error!(error = %e, "Failed to create connection identity");
+                detrix_core::Error::Adapter(format!("Invalid connection identity: {e}"))
+            });
+            if let Ok(ref mut c) = conn {
+                c.safe_mode = true;
+                if let Err(e) = self.connection_repo.save_batch(std::slice::from_ref(c)).await {
+                    error!(connection_id = %conn_id.0, error = %e, "Failed to save added connection");
+                    continue;
+                }
+            } else {
                 continue;
             }
 
@@ -636,8 +648,8 @@ impl AgentConnectionManager {
 
             // d. Mark disconnected + emit event
             if let Err(e) = self
-                .connection_service
-                .connection_repo()
+                .connection_repo
+                
                 .update_status(&conn_id, detrix_core::ConnectionStatus::Disconnected)
                 .await
             {

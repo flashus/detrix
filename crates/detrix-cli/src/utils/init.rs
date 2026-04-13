@@ -72,6 +72,7 @@ impl InfrastructureComponents {
         limits_config: &LimitsConfig,
         vfs_config: &VfsConfig,
         output: Option<EventOutputRef>,
+        agent_config: Option<detrix_config::AgentConfig>,
     ) -> AppContextWithStorage {
         // Convert DlqStorage to DlqRepositoryRef if available
         let dlq_repo: Option<DlqRepositoryRef> = self.dlq_storage.map(|s| s as DlqRepositoryRef);
@@ -171,6 +172,7 @@ impl InfrastructureComponents {
             file_source_chain,
             Arc::clone(&self.storage) as detrix_application::ConnectionReferenceRepositoryRef,
             purity_analyzers,
+            agent_config,
         );
         AppContextWithStorage {
             app_context,
@@ -192,6 +194,7 @@ impl InfrastructureComponents {
             &LimitsConfig::default(),
             &VfsConfig::default(),
             None,
+            None, // No agent config
         )
     }
 }
