@@ -4806,3 +4806,694 @@ pub mod connection_service_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AgentMessage {
+    #[prost(oneof = "agent_message::Msg", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
+    pub msg: ::core::option::Option<agent_message::Msg>,
+}
+/// Nested message and enum types in `AgentMessage`.
+pub mod agent_message {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Msg {
+        /// initial + mid-session scanner updates
+        #[prost(message, tag = "1")]
+        Register(super::RegisterAgent),
+        #[prost(message, tag = "2")]
+        ConnectionUpdate(super::AgentConnectionUpdate),
+        #[prost(message, tag = "3")]
+        Events(super::MetricEventBatch),
+        #[prost(message, tag = "4")]
+        Heartbeat(super::Heartbeat),
+        #[prost(message, tag = "5")]
+        FileResponse(super::FileResponse),
+        #[prost(message, tag = "6")]
+        InspectResponse(super::InspectResponse),
+        #[prost(message, tag = "7")]
+        DropCount(super::DropCountUpdate),
+        #[prost(message, tag = "8")]
+        SetMetricAck(super::SetMetricAck),
+        #[prost(message, tag = "9")]
+        RemoveMetricAck(super::RemoveMetricAck),
+        #[prost(message, tag = "10")]
+        Pong(super::Pong),
+        #[prost(message, tag = "11")]
+        Error(super::AgentError),
+    }
+}
+/// Sent as the first message on connect, and re-sent by the scanner when binaries change.
+/// On re-send the server diffs against the previously registered binary list:
+///
+/// * new binary_path entries → CreateConnection + upsert
+/// * removed entries → CloseConnection + mark Disconnected
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RegisterAgent {
+    #[prost(string, tag = "1")]
+    pub agent_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub hostname: ::prost::alloc::string::String,
+    /// semver e.g. "1.3.0"
+    #[prost(string, tag = "3")]
+    pub agent_version: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub capabilities: ::core::option::Option<AgentCapabilities>,
+    /// full current list, not a delta
+    #[prost(message, repeated, tag = "5")]
+    pub binaries: ::prost::alloc::vec::Vec<BinaryInfo>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentCapabilities {
+    #[prost(bool, tag = "1")]
+    pub ebpf: bool,
+    #[prost(bool, tag = "2")]
+    pub dap_python: bool,
+    #[prost(bool, tag = "3")]
+    pub dap_go: bool,
+    #[prost(bool, tag = "4")]
+    pub dap_rust: bool,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BinaryInfo {
+    #[prost(string, tag = "1")]
+    pub binary_path: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub pid: u32,
+    /// Go build version string
+    #[prost(string, tag = "3")]
+    pub build_info: ::prost::alloc::string::String,
+    #[prost(bool, tag = "4")]
+    pub has_dwarf: bool,
+    #[prost(string, repeated, tag = "5")]
+    pub exported_functions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Reuses ConnectionStatus from connections.proto
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentConnectionUpdate {
+    #[prost(string, tag = "1")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(enumeration = "ConnectionStatus", tag = "2")]
+    pub status: i32,
+    #[prost(string, tag = "3")]
+    pub error_message: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MetricEventBatch {
+    #[prost(string, tag = "1")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "2")]
+    pub events: ::prost::alloc::vec::Vec<SerializedMetricEvent>,
+}
+/// values_json is capped to 64 KB on the agent side. If the original captured JSON exceeds
+/// this limit, the entire field is replaced with {"\_truncated":true,"\_size_bytes":<N>} to
+/// ensure the result is always valid JSON. The tonic channel enforces a 4 MB per-message
+/// limit at the transport level.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SerializedMetricEvent {
+    #[prost(uint64, tag = "1")]
+    pub metric_id: u64,
+    #[prost(string, tag = "2")]
+    pub metric_name: ::prost::alloc::string::String,
+    #[prost(int64, tag = "3")]
+    pub timestamp_ns: i64,
+    #[prost(string, tag = "4")]
+    pub thread_name: ::prost::alloc::string::String,
+    #[prost(int64, tag = "5")]
+    pub thread_id: i64,
+    #[prost(string, tag = "6")]
+    pub values_json: ::prost::alloc::string::String,
+    #[prost(bool, tag = "7")]
+    pub is_error: bool,
+    #[prost(string, tag = "8")]
+    pub error_message: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct Heartbeat {
+    #[prost(float, tag = "1")]
+    pub cpu_usage: f32,
+    #[prost(uint64, tag = "2")]
+    pub memory_bytes: u64,
+    #[prost(uint32, tag = "3")]
+    pub active_probes: u32,
+    #[prost(uint64, tag = "4")]
+    pub uptime_seconds: u64,
+    /// cumulative since start
+    #[prost(uint32, tag = "5")]
+    pub events_forwarded: u32,
+    /// cumulative since start
+    #[prost(uint32, tag = "6")]
+    pub events_dropped: u32,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Pong {}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FileResponse {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub path: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "3")]
+    pub content: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "4")]
+    pub error: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct InspectResponse {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "2")]
+    pub variables: ::prost::alloc::vec::Vec<VariableInfo>,
+    #[prost(string, tag = "3")]
+    pub error: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct VariableInfo {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub r#type: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub line: u32,
+}
+/// Sent when the agent's event channel is full and a batch is dropped.
+/// connection_id identifies which connection's events were dropped.
+/// total_events_dropped is cumulative since agent start (monotonically increasing).
+/// The server logs this at warn level; the AdapterLifecycleManager does not treat it as a failure.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DropCountUpdate {
+    #[prost(string, tag = "1")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub total_events_dropped: u64,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetMetricAck {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag = "2")]
+    pub verified: bool,
+    #[prost(uint32, tag = "3")]
+    pub actual_line: u32,
+    #[prost(string, tag = "4")]
+    pub message: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub error: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveMetricAck {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag = "2")]
+    pub confirmed: bool,
+    #[prost(string, tag = "3")]
+    pub error: ::prost::alloc::string::String,
+}
+/// Agent-specific error (renamed to avoid conflict with common.proto Error)
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentError {
+    #[prost(string, tag = "1")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub message: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ServerMessage {
+    #[prost(oneof = "server_message::Msg", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
+    pub msg: ::core::option::Option<server_message::Msg>,
+}
+/// Nested message and enum types in `ServerMessage`.
+pub mod server_message {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Msg {
+        #[prost(message, tag = "1")]
+        RegisterAck(super::RegisterAck),
+        #[prost(message, tag = "2")]
+        CreateConnection(super::AgentCreateConnection),
+        #[prost(message, tag = "3")]
+        CloseConnection(super::AgentCloseConnection),
+        #[prost(message, tag = "4")]
+        SetMetric(super::SetMetric),
+        #[prost(message, tag = "5")]
+        RemoveMetric(super::RemoveMetric),
+        #[prost(message, tag = "6")]
+        ReadFile(super::ReadFile),
+        #[prost(message, tag = "7")]
+        InspectFile(super::InspectFile),
+        #[prost(message, tag = "8")]
+        Ping(super::Ping),
+    }
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RegisterAck {
+    #[prost(bool, tag = "1")]
+    pub accepted: bool,
+    /// populated when !accepted
+    #[prost(string, tag = "2")]
+    pub rejection_reason: ::prost::alloc::string::String,
+    /// server's minimum (aids agent self-diagnosis)
+    #[prost(string, tag = "3")]
+    pub min_compatible_version: ::prost::alloc::string::String,
+}
+/// Reuses ConnectionInfo from connections.proto; adds language/binary_path for agent context
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentCreateConnection {
+    #[prost(string, tag = "1")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub language: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub binary_path: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub host: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "5")]
+    pub port: u32,
+    #[prost(bool, tag = "6")]
+    #[serde(default)]
+    pub safe_mode: bool,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentCloseConnection {
+    #[prost(string, tag = "1")]
+    pub connection_id: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetMetric {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub metric_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub file: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "5")]
+    pub line: u32,
+    #[prost(string, repeated, tag = "6")]
+    pub expressions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(bool, tag = "7")]
+    #[serde(default)]
+    pub enabled: bool,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveMetric {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub metric_name: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReadFile {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub path: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InspectFile {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub file: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "4")]
+    pub line: u32,
+    #[prost(string, tag = "5")]
+    pub find_variable: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Ping {}
+/// Generated client implementations.
+pub mod agent_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    #[derive(Debug, Clone)]
+    pub struct AgentServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl AgentServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> AgentServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> AgentServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            AgentServiceClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// Agent opens a persistent bidi stream to the server.
+        /// The first AgentMessage MUST be RegisterAgent.
+        /// Server responds with RegisterAck followed by CreateConnection for each known binary.
+        /// Agent may re-send RegisterAgent mid-session to report scanner changes (full binary list);
+        /// the server diffs and creates/removes connections as needed.
+        pub async fn connect_agent(
+            &mut self,
+            request: impl tonic::IntoStreamingRequest<Message = super::AgentMessage>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::ServerMessage>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/detrix.v1.AgentService/ConnectAgent",
+            );
+            let mut req = request.into_streaming_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("detrix.v1.AgentService", "ConnectAgent"));
+            self.inner.streaming(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod agent_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with AgentServiceServer.
+    #[async_trait]
+    pub trait AgentService: std::marker::Send + std::marker::Sync + 'static {
+        /// Server streaming response type for the ConnectAgent method.
+        type ConnectAgentStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::ServerMessage, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        /// Agent opens a persistent bidi stream to the server.
+        /// The first AgentMessage MUST be RegisterAgent.
+        /// Server responds with RegisterAck followed by CreateConnection for each known binary.
+        /// Agent may re-send RegisterAgent mid-session to report scanner changes (full binary list);
+        /// the server diffs and creates/removes connections as needed.
+        async fn connect_agent(
+            &self,
+            request: tonic::Request<tonic::Streaming<super::AgentMessage>>,
+        ) -> std::result::Result<
+            tonic::Response<Self::ConnectAgentStream>,
+            tonic::Status,
+        >;
+    }
+    #[derive(Debug)]
+    pub struct AgentServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> AgentServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for AgentServiceServer<T>
+    where
+        T: AgentService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/detrix.v1.AgentService/ConnectAgent" => {
+                    #[allow(non_camel_case_types)]
+                    struct ConnectAgentSvc<T: AgentService>(pub Arc<T>);
+                    impl<
+                        T: AgentService,
+                    > tonic::server::StreamingService<super::AgentMessage>
+                    for ConnectAgentSvc<T> {
+                        type Response = super::ServerMessage;
+                        type ResponseStream = T::ConnectAgentStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                tonic::Streaming<super::AgentMessage>,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AgentService>::connect_agent(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ConnectAgentSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for AgentServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "detrix.v1.AgentService";
+    impl<T> tonic::server::NamedService for AgentServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}

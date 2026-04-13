@@ -42,6 +42,8 @@ color-eyre = "0.6"
 # Testing
 criterion = { version = "0.5", features = ["html_reports"] }
 crossterm = "0.29"
+# Concurrent hash map
+dashmap = "6"
 detrix-logging = { path = "crates/detrix-logging" }
 fs2 = "0.4"  # Cross-platform file locking
 futures = "0.3"

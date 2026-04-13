@@ -45,7 +45,7 @@ tree-sitter-go.workspace = true
 tree-sitter-rust.workspace = true
 
 # Concurrent hashmap for better performance
-dashmap = "6"
+dashmap.workspace = true
 
 # File system notifications for anchor tracking
 notify = "8.2"

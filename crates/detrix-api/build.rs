@@ -46,6 +46,7 @@ fn main() -> Result<()> {
                 "proto/metrics.proto",
                 "proto/streaming.proto",
                 "proto/connections.proto",
+                "proto/agent.proto",
             ],
             &["proto"],
         )?;
@@ -55,6 +56,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=proto/metrics.proto");
     println!("cargo:rerun-if-changed=proto/streaming.proto");
     println!("cargo:rerun-if-changed=proto/connections.proto");
+    println!("cargo:rerun-if-changed=proto/agent.proto");
 
     Ok(())
 }

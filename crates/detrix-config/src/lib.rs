@@ -53,6 +53,7 @@ pub mod machine_id;
 
 // Config modules - organized by domain
 mod adapter;
+mod agent;
 mod anchor;
 mod api;
 pub mod credentials;
@@ -77,6 +78,9 @@ pub use ports::{
     PortRegistry, PortResult, ServiceType, TestPortAllocator,
 };
 pub use types::*;
+
+// Re-export agent config types
+pub use agent::{AgentConfig, ScannerConfig};
 
 // Re-export commonly used constants for convenience
 pub use constants::{

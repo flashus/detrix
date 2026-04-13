@@ -59,6 +59,7 @@ pub use storage_mod::*;
 pub use tui_mod::*;
 pub use vfs_mod::*;
 
+use crate::agent::AgentConfig;
 use crate::constants::{
     DEFAULT_AUDIT_RETENTION_DAYS, DEFAULT_AUTO_SLEEP_SECONDS, DEFAULT_MAX_EVAL_TIME_MS,
     DEFAULT_MAX_EXPRESSIONS_PER_METRIC, DEFAULT_MAX_EXPRESSION_LENGTH,
@@ -111,6 +112,8 @@ pub struct Config {
     pub vfs: VfsConfig,
     #[serde(default)]
     pub ebpf: EbpfConfig,
+    #[serde(default)]
+    pub agent: AgentConfig,
     #[serde(default)]
     pub metric: Vec<MetricDefinition>,
     /// Connection TTL in calendar days. Default 7. Set to -1 for indefinite.

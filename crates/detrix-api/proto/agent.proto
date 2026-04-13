@@ -1,0 +1,211 @@
+syntax = "proto3";
+
+package detrix.v1;
+
+import "common.proto";
+import "connections.proto";
+
+service AgentService {
+  // Agent opens a persistent bidi stream to the server.
+  // The first AgentMessage MUST be RegisterAgent.
+  // Server responds with RegisterAck followed by CreateConnection for each known binary.
+  // Agent may re-send RegisterAgent mid-session to report scanner changes (full binary list);
+  // the server diffs and creates/removes connections as needed.
+  rpc ConnectAgent(stream AgentMessage) returns (stream ServerMessage);
+}
+
+// ── Agent → Server ──────────────────────────────────────────────
+
+message AgentMessage {
+  oneof msg {
+    RegisterAgent    register          = 1;   // initial + mid-session scanner updates
+    AgentConnectionUpdate connection_update = 2;
+    MetricEventBatch events            = 3;
+    Heartbeat        heartbeat         = 4;
+    FileResponse     file_response     = 5;
+    InspectResponse  inspect_response  = 6;
+    DropCountUpdate  drop_count        = 7;
+    SetMetricAck     set_metric_ack    = 8;
+    RemoveMetricAck  remove_metric_ack = 9;
+    Pong             pong              = 10;
+    AgentError       error             = 11;
+  }
+}
+
+// Sent as the first message on connect, and re-sent by the scanner when binaries change.
+// On re-send the server diffs against the previously registered binary list:
+//   - new binary_path entries → CreateConnection + upsert
+//   - removed entries → CloseConnection + mark Disconnected
+message RegisterAgent {
+  string            agent_id      = 1;
+  string            hostname      = 2;
+  string            agent_version = 3;   // semver e.g. "1.3.0"
+  AgentCapabilities capabilities  = 4;
+  repeated BinaryInfo binaries    = 5;   // full current list, not a delta
+}
+
+message AgentCapabilities {
+  bool ebpf       = 1;
+  bool dap_python = 2;
+  bool dap_go     = 3;
+  bool dap_rust   = 4;
+}
+
+message BinaryInfo {
+  string binary_path                 = 1;
+  uint32 pid                         = 2;
+  string build_info                  = 3;   // Go build version string
+  bool   has_dwarf                   = 4;
+  repeated string exported_functions = 5;
+}
+
+// Reuses ConnectionStatus from connections.proto
+message AgentConnectionUpdate {
+  string           connection_id = 1;
+  ConnectionStatus status        = 2;
+  string           error_message = 3;
+}
+
+message MetricEventBatch {
+  string                         connection_id = 1;
+  repeated SerializedMetricEvent events        = 2;
+}
+
+// values_json is capped to 64 KB on the agent side. If the original captured JSON exceeds
+// this limit, the entire field is replaced with {"_truncated":true,"_size_bytes":<N>} to
+// ensure the result is always valid JSON. The tonic channel enforces a 4 MB per-message
+// limit at the transport level.
+message SerializedMetricEvent {
+  uint64 metric_id     = 1;
+  string metric_name   = 2;
+  int64  timestamp_ns  = 3;
+  string thread_name   = 4;
+  int64  thread_id     = 5;
+  string values_json   = 6;
+  bool   is_error      = 7;
+  string error_message = 8;
+}
+
+message Heartbeat {
+  float  cpu_usage        = 1;
+  uint64 memory_bytes     = 2;
+  uint32 active_probes    = 3;
+  uint64 uptime_seconds   = 4;
+  uint32 events_forwarded = 5;   // cumulative since start
+  uint32 events_dropped   = 6;   // cumulative since start
+}
+
+message Pong {}
+
+message FileResponse {
+  string request_id = 1;
+  string path       = 2;
+  bytes  content    = 3;
+  string error       = 4;
+}
+
+message InspectResponse {
+  string               request_id = 1;
+  repeated VariableInfo variables = 2;
+  string               error       = 3;
+}
+
+message VariableInfo {
+  string name = 1;
+  string type = 2;
+  uint32 line = 3;
+}
+
+// Sent when the agent's event channel is full and a batch is dropped.
+// connection_id identifies which connection's events were dropped.
+// total_events_dropped is cumulative since agent start (monotonically increasing).
+// The server logs this at warn level; the AdapterLifecycleManager does not treat it as a failure.
+message DropCountUpdate {
+  string connection_id        = 1;
+  uint64 total_events_dropped = 2;
+}
+
+message SetMetricAck {
+  string request_id  = 1;
+  bool   verified    = 2;
+  uint32 actual_line = 3;
+  string message     = 4;
+  string error       = 5;
+}
+
+message RemoveMetricAck {
+  string request_id = 1;
+  bool   confirmed  = 2;
+  string error       = 3;
+}
+
+// Agent-specific error (renamed to avoid conflict with common.proto Error)
+message AgentError {
+  string code    = 1;
+  string message = 2;
+}
+
+// ── Server → Agent ──────────────────────────────────────────────
+
+message ServerMessage {
+  oneof msg {
+    RegisterAck      register_ack      = 1;
+    AgentCreateConnection create_connection = 2;
+    AgentCloseConnection  close_connection  = 3;
+    SetMetric        set_metric        = 4;
+    RemoveMetric     remove_metric     = 5;
+    ReadFile         read_file         = 6;
+    InspectFile      inspect_file      = 7;
+    Ping             ping              = 8;
+  }
+}
+
+message RegisterAck {
+  bool   accepted               = 1;
+  string rejection_reason       = 2;   // populated when !accepted
+  string min_compatible_version = 3;   // server's minimum (aids agent self-diagnosis)
+}
+
+// Reuses ConnectionInfo from connections.proto; adds language/binary_path for agent context
+message AgentCreateConnection {
+  string connection_id = 1;
+  string language      = 2;
+  string binary_path   = 3;
+  string host          = 4;
+  uint32 port          = 5;
+  bool   safe_mode     = 6;
+}
+
+message AgentCloseConnection { string connection_id = 1; }
+
+message SetMetric {
+  string          request_id    = 1;
+  string          connection_id = 2;
+  string          metric_name   = 3;
+  string          file          = 4;
+  uint32          line          = 5;
+  repeated string expressions   = 6;
+  bool            enabled       = 7;
+}
+
+message RemoveMetric {
+  string request_id    = 1;
+  string connection_id = 2;
+  string metric_name   = 3;
+}
+
+message ReadFile {
+  string request_id    = 1;
+  string connection_id = 2;
+  string path          = 3;
+}
+
+message InspectFile {
+  string request_id    = 1;
+  string connection_id = 2;
+  string file          = 3;
+  uint32 line          = 4;
+  string find_variable = 5;
+}
+
+message Ping {}
