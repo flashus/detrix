@@ -17,6 +17,7 @@ detrix-application = { path = "../detrix-application" }
 
 # Async runtime
 tokio.workspace = true
+tokio-stream.workspace = true
 futures.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true

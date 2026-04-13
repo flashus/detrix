@@ -1,5 +1,6 @@
 // gRPC service implementations
 
+pub mod agent;
 pub mod client;
 pub mod connections;
 pub mod conversions;
@@ -17,7 +18,7 @@ pub use conversions::{
     proto_to_core_event, proto_to_core_memory_snapshot, proto_to_core_metric,
     proto_to_core_stack_trace, ConversionError,
 };
-pub use interceptor::{create_auth_interceptor, AuthInterceptorState};
+pub use interceptor::{create_agent_auth_interceptor, create_auth_interceptor, AuthInterceptorState};
 pub use metrics::MetricsServiceImpl;
 pub use streaming::StreamingServiceImpl;
 

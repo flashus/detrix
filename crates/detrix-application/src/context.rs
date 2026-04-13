@@ -26,9 +26,9 @@ use crate::ports::{
 };
 use crate::safety::ValidatorRegistry;
 use crate::services::{
-    AdapterLifecycleManager, AnchorServiceConfig, ConnectionService, DefaultAnchorService,
-    EventCaptureService, FileInspectionService, FileSourceChain, McpUsageService, MetricService,
-    RemoteAppService, StreamingService,
+    AdapterLifecycleManager, AgentConnectionManagerRef, AnchorServiceConfig, ConnectionService,
+    DefaultAnchorService, EventCaptureService, FileInspectionService, FileSourceChain,
+    McpUsageService, MetricService, RemoteAppService, StreamingService,
 };
 use detrix_config::{
     AdapterConnectionConfig, AnchorConfig, ApiConfig, DaemonConfig, LimitsConfig, SafetyConfig,
@@ -62,6 +62,9 @@ pub struct AppContext {
 
     /// Adapter lifecycle manager (protocol-agnostic)
     pub adapter_lifecycle_manager: Arc<AdapterLifecycleManager>,
+
+    /// Agent connection manager (optional — present when agent mode is configured)
+    pub agent_connection_manager: Option<AgentConnectionManagerRef>,
 
     /// MCP usage tracking service for tool usage analytics
     pub mcp_usage: Arc<McpUsageService>,
@@ -218,12 +221,20 @@ impl AppContext {
             event_capture_service,
             connection_service,
             adapter_lifecycle_manager,
+            agent_connection_manager: None, // Set via with_agent_connection_manager()
             mcp_usage,
             remote_app_service,
             file_inspection,
             vfs,
             file_source_chain,
         }
+    }
+
+    /// Set the agent connection manager on this context.
+    /// Returns a new AppContext with the agent manager configured.
+    pub fn with_agent_connection_manager(mut self, mgr: AgentConnectionManagerRef) -> Self {
+        self.agent_connection_manager = Some(mgr);
+        self
     }
 
     /// Create new application context with default config

@@ -17,6 +17,44 @@ pub use crate::common::AuthenticatedUser;
 /// Type alias — gRPC interceptor uses the same auth state as HTTP middleware.
 pub type AuthInterceptorState = crate::common::auth::AuthState;
 
+/// Create an auth interceptor function for the AgentService.
+///
+/// Unlike the main gRPC auth interceptor, this one validates agent bearer tokens
+/// by checking SHA-256(token) against the configured agent token hashes.
+/// This allows agents to authenticate independently of user/JWT tokens.
+pub fn create_agent_auth_interceptor(
+    agent_token_hashes: Vec<String>,
+) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone + Send + Sync + 'static {
+    use sha2::{Digest, Sha256};
+
+    move |request: Request<()>| {
+        // When no agent tokens configured, allow all connections (dev mode).
+        if agent_token_hashes.is_empty() {
+            return Ok(request);
+        }
+
+        let auth_value = request
+            .metadata()
+            .get(AUTHORIZATION_METADATA_KEY)
+            .and_then(|v| v.to_str().ok());
+
+        let token = match auth_value {
+            Some(header) => header
+                .strip_prefix(BEARER_PREFIX)
+                .ok_or_else(|| Status::unauthenticated("Must use Bearer scheme"))?,
+            None => return Err(Status::unauthenticated("Missing authorization")),
+        };
+
+        // Check SHA-256(token) against configured agent token hashes
+        let hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+        if agent_token_hashes.contains(&hash) {
+            Ok(request)
+        } else {
+            Err(Status::unauthenticated("Invalid agent token"))
+        }
+    }
+}
+
 /// Create an auth interceptor function for gRPC services
 ///
 /// This returns a closure that can be used with tonic's `with_interceptor` method.
