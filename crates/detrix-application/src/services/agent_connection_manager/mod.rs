@@ -527,6 +527,55 @@ impl AgentConnectionManager {
         }
     }
 
+    /// Send a command and await the raw IncomingAgentMessage response.
+    /// Unlike `send_and_await`, this doesn't require a TryFrom conversion.
+    pub async fn send_and_await_raw(
+        &self,
+        connection_id: &ConnectionId,
+        msg: OutgoingAgentMessage,
+        timeout: Duration,
+    ) -> Result<IncomingAgentMessage, detrix_core::Error> {
+        let request_id = extract_request_id(&msg)
+            .ok_or_else(|| {
+                detrix_core::Error::Adapter("OutgoingAgentMessage has no request_id".to_string())
+            })?
+            .to_string();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        if let Some(mut set) = self.connection_requests.get_mut(connection_id) {
+            set.insert(request_id.clone());
+        }
+        self.pending_requests.insert(request_id.clone(), tx);
+
+        self.send_to_agent(connection_id, msg).await?;
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(response)) => {
+                if let Some(mut set) = self.connection_requests.get_mut(connection_id) {
+                    set.remove(&request_id);
+                }
+                self.pending_requests.remove(&request_id);
+                Ok(response)
+            }
+            Ok(Err(_)) => {
+                self.pending_requests.remove(&request_id);
+                Err(detrix_core::Error::Adapter(
+                    "Agent disconnected while waiting for response".to_string(),
+                ))
+            }
+            Err(_) => {
+                self.pending_requests.remove(&request_id);
+                if let Some(mut set) = self.connection_requests.get_mut(connection_id) {
+                    set.remove(&request_id);
+                }
+                Err(detrix_core::Error::Adapter(
+                    "Request timed out waiting for agent response".to_string(),
+                ))
+            }
+        }
+    }
+
     /// Get or create an event receiver for connection_id.
     /// The channel is created during register_atomic before CreateConnection
     /// is sent — so this is always available by the time start_adapter()

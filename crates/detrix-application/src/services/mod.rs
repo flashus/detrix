@@ -7,6 +7,7 @@
 pub mod adapter_lifecycle_manager;
 pub mod agent_connection_manager;
 pub mod anchor_service;
+pub mod circuit_breaker;
 pub mod config_service;
 pub mod connection_service;
 pub mod dlq_recovery_service;
@@ -20,6 +21,7 @@ pub mod file_watcher_service;
 pub mod jwt_validator;
 pub mod mcp_usage_service;
 pub mod metric_service;
+pub mod remote_adapter;
 pub mod remote_app_service;
 pub mod shutdown;
 pub mod streaming_service;
