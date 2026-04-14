@@ -1023,6 +1023,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "detrix-agent"
+version = "1.2.0"
+dependencies = [
+ "axum",
+ "clap",
+ "dashmap",
+ "detrix-api",
+ "detrix-config",
+ "detrix-core",
+ "detrix-ebpf",
+ "detrix-logging",
+ "futures",
+ "glob",
+ "hostname",
+ "prost",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "detrix-api"
 version = "1.2.0"
 dependencies = [
@@ -1822,6 +1848,12 @@ checksum = "19e16c5073773ccf057c282be832a59ee53ef5ff98db3aeff7f8314f52ffc196"
 dependencies = [
  "stable_deref_trait",
 ]
+
+[[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "governor"

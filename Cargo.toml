@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/detrix-agent",
   "crates/detrix-api",
   "crates/detrix-application",
   "crates/detrix-cli",
