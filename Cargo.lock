@@ -1033,6 +1033,7 @@ dependencies = [
  "detrix-api",
  "detrix-config",
  "detrix-core",
+ "detrix-dap",
  "detrix-ebpf",
  "detrix-logging",
  "futures",

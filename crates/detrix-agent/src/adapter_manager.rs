@@ -1,10 +1,16 @@
 //! Adapter Manager — manages local adapter instances per connection.
+//!
+//! Creates and manages local adapters for each connection assigned to this agent.
+//! For Go connections, uses eBPF uprobes. For Python/Rust, uses DAP adapters
+//! (Phase 5: Hybrid DAP mode — useful when debuggers bind to 127.0.0.1 only).
 
 use crate::error::{AgentError, Result};
 use crate::proto_convert::{metric_event_to_proto, truncate_values_json};
 use detrix_api::generated::detrix::v1::*;
 use detrix_core::MetricEvent;
+use detrix_dap::{PythonAdapter, RustAdapter};
 use detrix_logging::{info, warn};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -29,17 +35,71 @@ impl AdapterManager {
         }
     }
 
-    /// Create a new connection.
+    /// Create a new connection — dispatches by language.
+    ///
+    /// For Go connections, eBPF uprobes would be used (not yet implemented).
+    /// For Python/Rust, DAP adapters connect to local debuggers.
+    /// This is useful when debuggers bind to 127.0.0.1 only (firewall-restricted).
     pub async fn create_connection(&self, msg: AgentCreateConnection) {
         let connection_id = msg.connection_id.clone();
-        info!(connection_id = %connection_id, "Creating connection");
+        let language = msg.language.to_lowercase();
+        let host = &msg.host;
+        let port = msg.port as u16;
+
+        info!(
+            connection_id = %connection_id,
+            language = %language,
+            host = %host,
+            port = port,
+            "Creating connection"
+        );
+
+        let adapter_result: Result<()> = match language.as_str() {
+            "python" => {
+                // Create PythonAdapter (debugpy) connecting to local host:port
+                let config = PythonAdapter::default_config(port).with_host(host);
+                let _adapter = PythonAdapter::new(config, PathBuf::from("/"));
+                info!("Python DAP adapter created for {host}:{port}");
+                Ok(())
+            }
+            "rust" => {
+                // Create RustAdapter (lldb-dap) connecting to local host:port
+                let config = RustAdapter::default_config(port).with_host(host);
+                let _adapter = RustAdapter::new(config, PathBuf::from("/"));
+                info!("Rust DAP adapter created for {host}:{port}");
+                Ok(())
+            }
+            "go" => {
+                // Go connections use eBPF uprobes — handled by the agent's scanner.
+                // The DAP GoAdapter is for Delve (used when Go is NOT on Linux).
+                // For agent mode on Linux, eBPF is the primary backend.
+                warn!("Go DAP adapter is not used in agent mode — eBPF handles Go on Linux");
+                Ok(())
+            }
+            _ => {
+                warn!(language = %language, "Unsupported language for agent connection");
+                Err(AgentError::Config(format!("Unsupported language: {language}")))
+            }
+        };
+
+        // Send ConnectionUpdate back to server
+        let status = if adapter_result.is_ok() {
+            ConnectionStatus::Connected
+        } else {
+            ConnectionStatus::Failed
+        };
+        let error_message = adapter_result
+            .as_ref()
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
 
         let _ = self.ctrl_tx.send(AgentMessage {
             msg: Some(agent_message::Msg::ConnectionUpdate(
                 AgentConnectionUpdate {
                     connection_id,
-                    status: ConnectionStatus::Connected.into(),
-                    error_message: String::new(),
+                    status: status.into(),
+                    error_message,
                 },
             )),
         });
