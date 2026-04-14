@@ -990,6 +990,7 @@ dependencies = [
  "chrono",
  "clap",
  "comfy-table",
+ "detrix-agent",
  "detrix-api",
  "detrix-application",
  "detrix-config",

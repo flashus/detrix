@@ -294,6 +294,15 @@ enum Commands {
         #[arg(long)]
         full: bool,
     },
+
+    /// Run Detrix agent mode — observes local binaries and streams to server.
+    ///
+    /// Requires an [agent] section in the config file with server_grpc_url
+    /// and token_file set.
+    Agent {
+        #[command(subcommand)]
+        action: commands::agent::AgentAction,
+    },
 }
 
 #[tokio::main]
@@ -514,6 +523,7 @@ async fn main() -> Result<()> {
         Commands::Usage => {
             commands::usage::run(require_ctx()?, cli.format, cli.quiet, cli.no_color).await
         }
+        Commands::Agent { action } => commands::agent::run(action, &cli.config).await,
     }
 }
 
