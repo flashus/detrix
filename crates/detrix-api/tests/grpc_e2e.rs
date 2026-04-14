@@ -164,7 +164,7 @@ impl E2ETestServer {
             vfs,
             file_source_chain,
             HashMap::new(),
-        None, // agent_config
+            None, // agent_config
         );
 
         // Connect to debugpy using ConnectionService

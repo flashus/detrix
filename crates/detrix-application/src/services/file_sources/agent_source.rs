@@ -53,11 +53,7 @@ impl FileSource for AgentFileSource {
             )
             .await
         {
-            Ok(IncomingAgentMessage::FileResponse {
-                content,
-                error,
-                ..
-            }) => {
+            Ok(IncomingAgentMessage::FileResponse { content, error, .. }) => {
                 if let Some(err) = error {
                     warn!(
                         file = file_path,

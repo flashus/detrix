@@ -3,8 +3,8 @@
 //! Contains settings for both the agent binary and the server-side
 //! agent connection management.
 
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Agent mode configuration.
 ///
@@ -183,10 +183,7 @@ mod tests {
         let config = AgentConfig::default();
         let result = config.validate_for_agent();
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            "agent.server_grpc_url must be set"
-        );
+        assert_eq!(result.unwrap_err(), "agent.server_grpc_url must be set");
     }
 
     #[test]
@@ -260,7 +257,10 @@ mod tests {
         assert_eq!(parsed.server_grpc_url, config.server_grpc_url);
         assert_eq!(parsed.token_file, config.token_file);
         assert_eq!(parsed.verify_tls, config.verify_tls);
-        assert_eq!(parsed.scanner.include_patterns, config.scanner.include_patterns);
+        assert_eq!(
+            parsed.scanner.include_patterns,
+            config.scanner.include_patterns
+        );
         assert_eq!(parsed.agent_tokens, config.agent_tokens);
         assert_eq!(
             parsed.min_compatible_agent_version,

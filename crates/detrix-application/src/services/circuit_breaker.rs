@@ -50,8 +50,8 @@ impl CircuitBreaker {
         let state = self.inner.state.load(Ordering::Relaxed);
         if state == STATE_OPEN {
             // Check if we should transition to HalfOpen (30s cooldown)
-            let elapsed = now_ms()
-                .saturating_sub(self.inner.last_transition_ms.load(Ordering::Relaxed));
+            let elapsed =
+                now_ms().saturating_sub(self.inner.last_transition_ms.load(Ordering::Relaxed));
             if elapsed >= 30_000 {
                 self.inner
                     .state
@@ -183,9 +183,7 @@ mod tests {
         assert!(cb.is_open());
 
         // Next call fails immediately
-        let result = cb
-            .call(|| async { Ok::<_, Error>(42) })
-            .await;
+        let result = cb.call(|| async { Ok::<_, Error>(42) }).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("circuit open"));
     }

@@ -38,7 +38,6 @@ pub use agent_connection_manager::{
     AgentBinaryInfo, AgentCapabilities, AgentConnectionManager, AgentConnectionManagerRef,
     IncomingAgentMessage, OutgoingAgentMessage, RegisterResult, VariableInfo,
 };
-pub use file_sources::AgentFileSource;
 pub use anchor_service::{
     AnchorServiceConfig, DefaultAnchorService, LspSymbolLookup, LspSymbolLookupRef, NullLspLookup,
 };
@@ -54,6 +53,7 @@ pub use file_inspection_types::{
 };
 pub use file_serving::{FileServingError, FileServingService, ReadFileRequest, ReadFileResponse};
 pub use file_source_chain::FileSourceChain;
+pub use file_sources::AgentFileSource;
 pub use file_watcher_service::{FileWatcherOrchestrator, NotifyFileWatcher};
 pub use metric_service::{FileChangeResult, MetricService, MetricServiceBuilder};
 pub use streaming_service::{

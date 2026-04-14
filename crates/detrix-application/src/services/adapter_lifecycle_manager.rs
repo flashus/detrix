@@ -722,13 +722,12 @@ impl AdapterLifecycleManager {
         // If this connection is managed by an agent, construct RemoteAdapter instead.
         let adapter: DapAdapterRef = if let Some(ref mgr) = self.agent_manager {
             if mgr.is_agent_managed(&connection_id) {
-                Arc::new(RemoteAdapter::new(
-                    connection_id.clone(),
-                    mgr.clone(),
-                ))
+                Arc::new(RemoteAdapter::new(connection_id.clone(), mgr.clone()))
             } else {
                 match language {
-                    SourceLanguage::Go => self.adapter_factory.create_go_adapter(host, port).await?,
+                    SourceLanguage::Go => {
+                        self.adapter_factory.create_go_adapter(host, port).await?
+                    }
                     SourceLanguage::Python => {
                         self.adapter_factory
                             .create_python_adapter(host, port)

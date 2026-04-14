@@ -893,23 +893,22 @@ mod tests {
 
         let storage = create_test_storage().await;
 
-        let identity1 =
-            ConnectionIdentity::new("app1", SourceLanguage::Go, "/workspace", "host1");
+        let identity1 = ConnectionIdentity::new("app1", SourceLanguage::Go, "/workspace", "host1");
         let conn1 =
             Connection::new_with_identity(identity1, "127.0.0.1".to_string(), 5680).unwrap();
 
-        let identity2 =
-            ConnectionIdentity::new("app2", SourceLanguage::Go, "/workspace", "host1");
+        let identity2 = ConnectionIdentity::new("app2", SourceLanguage::Go, "/workspace", "host1");
         let conn2 =
             Connection::new_with_identity(identity2, "127.0.0.1".to_string(), 5681).unwrap();
 
-        let identity3 =
-            ConnectionIdentity::new("app3", SourceLanguage::Go, "/workspace", "host1");
+        let identity3 = ConnectionIdentity::new("app3", SourceLanguage::Go, "/workspace", "host1");
         let conn3 =
             Connection::new_with_identity(identity3, "127.0.0.1".to_string(), 5682).unwrap();
 
         let connections = vec![conn1, conn2, conn3];
-        let result = ConnectionRepository::save_batch(&storage, &connections).await.unwrap();
+        let result = ConnectionRepository::save_batch(&storage, &connections)
+            .await
+            .unwrap();
         assert_eq!(result, 3);
 
         // All should be findable
@@ -926,7 +925,9 @@ mod tests {
     async fn test_connection_save_batch_empty() {
         let storage = create_test_storage().await;
 
-        let result = ConnectionRepository::save_batch(&storage, &[]).await.unwrap();
+        let result = ConnectionRepository::save_batch(&storage, &[])
+            .await
+            .unwrap();
         assert_eq!(result, 0);
     }
 
@@ -936,8 +937,7 @@ mod tests {
 
         let storage = create_test_storage().await;
 
-        let identity =
-            ConnectionIdentity::new("app", SourceLanguage::Go, "/workspace", "host1");
+        let identity = ConnectionIdentity::new("app", SourceLanguage::Go, "/workspace", "host1");
         let mut conn =
             Connection::new_with_identity(identity, "127.0.0.1".to_string(), 5680).unwrap();
 

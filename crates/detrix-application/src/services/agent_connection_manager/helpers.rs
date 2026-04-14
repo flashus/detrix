@@ -23,7 +23,10 @@ pub(super) fn semver_compare(agent_version: &str, min_version: &str) -> SemverCm
         }
         let major = parts[0].parse::<u64>().ok()?;
         let minor = parts[1].parse::<u64>().ok()?;
-        let patch = parts.get(2).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        let patch = parts
+            .get(2)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
         Some((major, minor, patch))
     };
 

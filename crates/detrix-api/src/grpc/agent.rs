@@ -80,10 +80,7 @@ impl AgentService for AgentServiceImpl {
                 .as_ref()
                 .is_some_and(|c| c.dap_python),
             dap_go: agent_msg.capabilities.as_ref().is_some_and(|c| c.dap_go),
-            dap_rust: agent_msg
-                .capabilities
-                .as_ref()
-                .is_some_and(|c| c.dap_rust),
+            dap_rust: agent_msg.capabilities.as_ref().is_some_and(|c| c.dap_rust),
         };
 
         let binaries: Vec<AgentBinaryInfo> = agent_msg
@@ -121,7 +118,14 @@ impl AgentService for AgentServiceImpl {
 
         // Register the agent (sends RegisterAck + CreateConnection via out_tx)
         match agent_manager
-            .register_atomic(agent_id.clone(), hostname, agent_version, capabilities, binaries, out_tx)
+            .register_atomic(
+                agent_id.clone(),
+                hostname,
+                agent_version,
+                capabilities,
+                binaries,
+                out_tx,
+            )
             .await
         {
             Ok(RegisterResult::Accepted) => {

@@ -143,12 +143,11 @@ impl AgentConnectionManager {
         // ── No lock: SQLite batch ──
         let mut connections = Vec::with_capacity(conn_ids.len());
         for (identity, host, port, safe) in &identities {
-            let mut conn = detrix_core::Connection::new_with_identity(
-                identity.clone(),
-                host.clone(),
-                *port,
-            )
-            .map_err(|e| detrix_core::Error::Adapter(format!("Invalid connection identity: {e}")))?;
+            let mut conn =
+                detrix_core::Connection::new_with_identity(identity.clone(), host.clone(), *port)
+                    .map_err(|e| {
+                    detrix_core::Error::Adapter(format!("Invalid connection identity: {e}"))
+                })?;
             conn.safe_mode = *safe;
             connections.push(conn);
         }
@@ -186,7 +185,6 @@ impl AgentConnectionManager {
             } => {
                 if let Err(e) = self
                     .connection_repo
-                    
                     .update_status(&connection_id, status.clone())
                     .await
                 {
@@ -379,7 +377,6 @@ impl AgentConnectionManager {
             // d. Mark disconnected + emit event
             if let Err(e) = self
                 .connection_repo
-                
                 .update_status(&conn_id, detrix_core::ConnectionStatus::Disconnected)
                 .await
             {
@@ -417,28 +414,31 @@ impl AgentConnectionManager {
                 .insert(conn_id.clone(), std::collections::HashSet::new());
 
             // Enqueue CreateConnection
-            let _ = entry.outgoing_tx.send(OutgoingAgentMessage::CreateConnection {
-                connection_id: conn_id.0.clone(),
-                language: "go".to_string(),
-                binary_path: binary.binary_path.clone(),
-                host: binary.binary_path.clone(),
-                port: 0,
-                safe_mode: true,
-            });
+            let _ = entry
+                .outgoing_tx
+                .send(OutgoingAgentMessage::CreateConnection {
+                    connection_id: conn_id.0.clone(),
+                    language: "go".to_string(),
+                    binary_path: binary.binary_path.clone(),
+                    host: binary.binary_path.clone(),
+                    port: 0,
+                    safe_mode: true,
+                });
 
             // Save to DB
-            let mut conn = detrix_core::Connection::new_with_identity(
-                identity,
-                binary.binary_path.clone(),
-                0,
-            )
-            .map_err(|e| {
-                error!(error = %e, "Failed to create connection identity");
-                detrix_core::Error::Adapter(format!("Invalid connection identity: {e}"))
-            });
+            let mut conn =
+                detrix_core::Connection::new_with_identity(identity, binary.binary_path.clone(), 0)
+                    .map_err(|e| {
+                        error!(error = %e, "Failed to create connection identity");
+                        detrix_core::Error::Adapter(format!("Invalid connection identity: {e}"))
+                    });
             if let Ok(ref mut c) = conn {
                 c.safe_mode = true;
-                if let Err(e) = self.connection_repo.save_batch(std::slice::from_ref(c)).await {
+                if let Err(e) = self
+                    .connection_repo
+                    .save_batch(std::slice::from_ref(c))
+                    .await
+                {
                     error!(connection_id = %conn_id.0, error = %e, "Failed to save added connection");
                     continue;
                 }
@@ -471,9 +471,7 @@ impl AgentConnectionManager {
                 agent_info
                     .outgoing_tx
                     .send(msg)
-                    .map_err(|_| {
-                        detrix_core::Error::Adapter("Agent stream closed".to_string())
-                    })?;
+                    .map_err(|_| detrix_core::Error::Adapter("Agent stream closed".to_string()))?;
                 return Ok(());
             }
         }
@@ -649,7 +647,6 @@ impl AgentConnectionManager {
             // d. Mark disconnected + emit event
             if let Err(e) = self
                 .connection_repo
-                
                 .update_status(&conn_id, detrix_core::ConnectionStatus::Disconnected)
                 .await
             {

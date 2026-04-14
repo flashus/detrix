@@ -72,9 +72,8 @@ impl RemoteAdapter {
         T: TryFrom<IncomingAgentMessage>,
     {
         let result = self.send_and_await_raw(msg, timeout).await?;
-        T::try_from(result).map_err(|_| {
-            Error::Adapter("Unexpected response type from agent".to_string())
-        })
+        T::try_from(result)
+            .map_err(|_| Error::Adapter("Unexpected response type from agent".to_string()))
     }
 
     /// Send a command and await the raw IncomingAgentMessage (no type conversion).
@@ -174,9 +173,7 @@ impl DapAdapter for RemoteAdapter {
             Ok(other) => Err(Error::Adapter(format!(
                 "Unexpected response to Ping: {other:?}"
             ))),
-            Err(e) => Err(Error::Adapter(format!(
-                "ensure_connected failed: {e}"
-            ))),
+            Err(e) => Err(Error::Adapter(format!("ensure_connected failed: {e}"))),
         }
     }
 
@@ -246,12 +243,9 @@ impl DapAdapter for RemoteAdapter {
             })
             .await
             .map(|resp| match resp {
-                IncomingAgentMessage::RemoveMetricAck { confirmed, error, .. } => {
-                    detrix_ports::RemoveMetricResult::new(
-                        confirmed,
-                        error,
-                    )
-                }
+                IncomingAgentMessage::RemoveMetricAck {
+                    confirmed, error, ..
+                } => detrix_ports::RemoveMetricResult::new(confirmed, error),
                 _ => detrix_ports::RemoveMetricResult::new(
                     false,
                     Some("Unexpected response".to_string()),
@@ -261,9 +255,10 @@ impl DapAdapter for RemoteAdapter {
 
     /// Subscribe to metric events from the agent.
     async fn subscribe_events(&self) -> Result<tokio::sync::mpsc::Receiver<MetricEvent>> {
-        let mut guard = self.event_rx.lock().map_err(|e| {
-            Error::Adapter(format!("Event receiver lock poisoned: {e}"))
-        })?;
+        let mut guard = self
+            .event_rx
+            .lock()
+            .map_err(|e| Error::Adapter(format!("Event receiver lock poisoned: {e}")))?;
         guard
             .take()
             .ok_or_else(|| Error::Adapter("Event receiver already consumed".to_string()))

@@ -127,9 +127,9 @@ impl InfrastructureComponents {
             Arc::clone(&bridge_source) as FileSourceRef,
         ];
         if let Some(ref mgr) = agent_manager {
-            available_sources.push(Arc::new(
-                detrix_application::AgentFileSource::new(mgr.clone()),
-            ) as FileSourceRef);
+            available_sources.push(
+                Arc::new(detrix_application::AgentFileSource::new(mgr.clone())) as FileSourceRef,
+            );
             info!("AgentFileSource added to file source chain (highest priority)");
         }
         available_sources.push(Arc::new(detrix_api::file_sources::DiskSource) as FileSourceRef);
