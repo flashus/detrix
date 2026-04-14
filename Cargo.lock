@@ -1294,6 +1294,7 @@ dependencies = [
  "axum",
  "base64",
  "chrono",
+ "detrix-agent",
  "detrix-api",
  "detrix-application",
  "detrix-config",

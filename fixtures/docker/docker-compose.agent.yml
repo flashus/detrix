@@ -1,0 +1,63 @@
+# Detrix Agent Mode — Docker Compose example
+#
+# This compose file demonstrates:
+# - detrix-server: centralized server with agent auth configured
+# - detrix-agent: agent container observing the host machine
+# - my-go-app: a Go application being observed by the agent
+#
+# Usage:
+#   docker compose -f docker-compose.agent.yml up -d
+#   docker compose -f docker-compose.agent.yml logs -f detrix-agent
+#
+# IMPORTANT: The agent needs CAP_BPF, CAP_PERFMON, and SYS_PTRACE to
+# attach uprobes. It also needs pid: host to see host PIDs in /proc.
+
+services:
+  detrix-server:
+    build:
+      dockerfile: fixtures/docker/Dockerfile.server
+    ports:
+      - "8090:8090"
+      - "50061:50061"
+    volumes:
+      - server-data:/data/detrix
+      - ./fixtures/docker/detrix.toml:/data/detrix/detrix.toml:ro
+    environment:
+      DETRIX_CONFIG: /data/detrix/detrix.toml
+
+  detrix-agent:
+    build:
+      dockerfile: fixtures/docker/Dockerfile.agent
+    environment:
+      DETRIX_CONFIG: /etc/detrix/detrix.toml
+    volumes:
+      # Agent config with server URL and token
+      - ./fixtures/docker/detrix.agent.toml:/etc/detrix/detrix.toml:ro
+      # Auth token file
+      - ./fixtures/docker/agent-token:/etc/detrix/agent-token:ro
+      # Persist agent ID across restarts
+      - agent-data:/var/lib/detrix
+      # Kernel debugfs for eBPF
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+      # Uncomment if host kernel != bookworm default (~6.1):
+      # - /usr/src:/usr/src:ro
+    cap_add:
+      - CAP_BPF
+      - CAP_PERFMON
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+    pid: host  # required to see host PIDs in /proc
+    depends_on:
+      - detrix-server
+    restart: unless-stopped
+
+  my-go-app:
+    build:
+      dockerfile: fixtures/docker/Dockerfile.go
+    # The agent observes this app's binary via /proc on the shared PID namespace
+    # No special capabilities needed — the agent does the eBPF work
+
+volumes:
+  server-data:
+  agent-data:

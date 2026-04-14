@@ -1,0 +1,37 @@
+# Detrix Agent — Example Configuration
+#
+# This file goes in the agent container at /etc/detrix/detrix.toml
+# and is mounted via docker-compose.agent.yml.
+
+[agent]
+# gRPC URL of the centralised detrix server
+server_grpc_url = "http://detrix-server:50061"
+
+# Bearer token file for authenticating with the server
+token_file = "/etc/detrix/agent-token"
+
+# File where the agent persists its generated ID across restarts
+agent_id_file = "/var/lib/detrix/agent-id"
+
+# Verify server TLS certificate (false for dev with self-signed certs)
+verify_tls = true
+
+# Uncomment for self-signed server certificate:
+# ca_cert_file = "/etc/detrix/server-ca.pem"
+
+# ── Scanner configuration ──────────────────────────────────────────
+[agent.scanner]
+scan_interval_secs = 30
+include_patterns = ["/app/*", "/usr/local/bin/*"]
+exclude_patterns = []
+require_dwarf = true
+
+# ── eBPF capture settings ──────────────────────────────────────────
+[ebpf]
+max_capture_vars = 8
+string_capture_bytes = 64
+blob_capture_bytes = 256
+max_capture_depth = 3
+max_struct_fields = -1
+max_array_values = 64
+capture_goid = true
