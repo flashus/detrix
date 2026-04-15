@@ -68,7 +68,8 @@ impl ProcScanner {
         let binaries = self.do_scan();
         self.known.clear();
         for binary in &binaries {
-            self.known.insert((binary.pid, binary.inode), binary.clone());
+            self.known
+                .insert((binary.pid, binary.inode), binary.clone());
         }
         binaries
     }
@@ -141,9 +142,7 @@ impl ProcScanner {
 
             // Read inode from `/proc/<pid>/exe` metadata (follows symlink to binary).
             // Used for PID-reuse detection — same PID + different inode = new process.
-            let inode = fs::metadata(&exe_path)
-                .map(|m| m.ino())
-                .unwrap_or(0);
+            let inode = fs::metadata(&exe_path).map(|m| m.ino()).unwrap_or(0);
 
             let Ok(mut file) = fs::File::open(&binary_path) else {
                 if !warned.contains_key(&binary_path_str) {

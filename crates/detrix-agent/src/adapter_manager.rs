@@ -78,7 +78,9 @@ impl AdapterManager {
             }
             _ => {
                 warn!(language = %language, "Unsupported language for agent connection");
-                Err(AgentError::Config(format!("Unsupported language: {language}")))
+                Err(AgentError::Config(format!(
+                    "Unsupported language: {language}"
+                )))
             }
         };
 

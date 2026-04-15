@@ -8,8 +8,7 @@
 //! - Event message construction
 
 use detrix_application::services::agent_connection_manager::{
-    AgentCapabilities, IncomingAgentMessage, OutgoingAgentMessage,
-    RegisterResult,
+    AgentCapabilities, IncomingAgentMessage, OutgoingAgentMessage, RegisterResult,
 };
 use detrix_application::services::circuit_breaker::CircuitBreaker;
 use detrix_core::ConnectionId;
@@ -174,7 +173,10 @@ fn test_incoming_agent_message_variants() {
         connection_id: ConnectionId("test".to_string()),
         events: vec![],
     };
-    assert!(matches!(event_batch, IncomingAgentMessage::EventBatch { .. }));
+    assert!(matches!(
+        event_batch,
+        IncomingAgentMessage::EventBatch { .. }
+    ));
 
     let drop_count = IncomingAgentMessage::DropCount {
         connection_id: ConnectionId("conn-1".to_string()),
@@ -301,9 +303,7 @@ fn test_event_batch_creation() {
 /// Test: DropCountUpdate message can be created.
 #[test]
 fn test_drop_count_update() {
-    use detrix_api::generated::detrix::v1::{
-        agent_message::Msg, AgentMessage, DropCountUpdate,
-    };
+    use detrix_api::generated::detrix::v1::{agent_message::Msg, AgentMessage, DropCountUpdate};
 
     let msg = AgentMessage {
         msg: Some(Msg::DropCount(DropCountUpdate {
