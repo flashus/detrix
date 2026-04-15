@@ -234,6 +234,7 @@ fn test_binary_info_equality() {
     let b1 = BinaryInfo {
         binary_path: "/app/server".to_string(),
         pid: 1234,
+        inode: 100_001,
         build_info: String::new(),
         has_dwarf: true,
         exported_functions: Vec::new(),
@@ -242,6 +243,7 @@ fn test_binary_info_equality() {
     let b2 = BinaryInfo {
         binary_path: "/app/server".to_string(),
         pid: 1234,
+        inode: 100_001,
         build_info: String::new(),
         has_dwarf: true,
         exported_functions: Vec::new(),
@@ -249,9 +251,11 @@ fn test_binary_info_equality() {
 
     assert_eq!(b1, b2);
 
+    // Different inode (PID reuse) → not equal
     let b3 = BinaryInfo {
         binary_path: "/app/server".to_string(),
-        pid: 5678,
+        pid: 1234,
+        inode: 200_002, // Different inode
         build_info: String::new(),
         has_dwarf: true,
         exported_functions: Vec::new(),

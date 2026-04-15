@@ -1,4 +1,8 @@
 //! /proc scanner for discovering Go binaries with DWARF debug info.
+//!
+//! Tracks binaries by `(pid, exe_inode)` to detect PID reuse — when a process
+//! exits and a new process gets the same PID, the inode of `/proc/<pid>/exe`
+//! will differ, so the scanner correctly reports the new process.
 
 use detrix_config::ScannerConfig;
 use detrix_logging::warn;
@@ -6,6 +10,7 @@ use glob::Pattern;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
+use std::os::unix::fs::MetadataExt;
 use std::time::Instant;
 
 /// Information about a discovered binary.
@@ -13,6 +18,9 @@ use std::time::Instant;
 pub struct BinaryInfo {
     pub binary_path: String,
     pub pid: u32,
+    /// Inode number of the binary file (`/proc/<pid>/exe` target).
+    /// Used with pid to detect PID reuse.
+    pub inode: u64,
     pub build_info: String,
     pub has_dwarf: bool,
     pub exported_functions: Vec<String>,
@@ -26,7 +34,8 @@ pub struct ProcScanner {
     exclude_patterns: Vec<Pattern>,
     #[allow(dead_code)]
     require_dwarf: bool,
-    known: HashMap<u32, BinaryInfo>,
+    /// Key is (pid, exe_inode). Same PID + new inode = PID was reused.
+    known: HashMap<(u32, u64), BinaryInfo>,
     last_registered_at: Option<Instant>,
     min_reregister_secs: u64,
 }
@@ -59,7 +68,7 @@ impl ProcScanner {
         let binaries = self.do_scan();
         self.known.clear();
         for binary in &binaries {
-            self.known.insert(binary.pid, binary.clone());
+            self.known.insert((binary.pid, binary.inode), binary.clone());
         }
         binaries
     }
@@ -68,15 +77,17 @@ impl ProcScanner {
     pub fn scan_delta(&mut self) -> Option<Vec<BinaryInfo>> {
         if let Some(last) = self.last_registered_at {
             if last.elapsed().as_secs() < self.min_reregister_secs {
-                // Cooldown active
+                // Cooldown active — scan anyway to update known, but don't report changes
                 let _ = self.do_scan();
                 return None;
             }
         }
 
         let new_binaries = self.do_scan();
-        let new_known: HashMap<u32, BinaryInfo> =
-            new_binaries.iter().map(|b| (b.pid, b.clone())).collect();
+        let new_known: HashMap<(u32, u64), BinaryInfo> = new_binaries
+            .iter()
+            .map(|b| ((b.pid, b.inode), b.clone()))
+            .collect();
 
         let changed = new_known.len() != self.known.len()
             || new_known.iter().any(|(k, v)| self.known.get(k) != Some(v));
@@ -128,6 +139,12 @@ impl ProcScanner {
                 continue;
             }
 
+            // Read inode from `/proc/<pid>/exe` metadata (follows symlink to binary).
+            // Used for PID-reuse detection — same PID + different inode = new process.
+            let inode = fs::metadata(&exe_path)
+                .map(|m| m.ino())
+                .unwrap_or(0);
+
             let Ok(mut file) = fs::File::open(&binary_path) else {
                 if !warned.contains_key(&binary_path_str) {
                     warn!(path = %binary_path_str, "Cannot read binary, skipping");
@@ -143,6 +160,7 @@ impl ProcScanner {
             binaries.push(BinaryInfo {
                 binary_path: binary_path_str,
                 pid,
+                inode,
                 build_info: String::new(),
                 has_dwarf: true,
                 exported_functions: Vec::new(),

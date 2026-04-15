@@ -25,11 +25,17 @@ use std::time::Duration;
 
 use detrix_core::ConnectionId;
 use detrix_logging::{error, info, warn};
+use detrix_ports::ConnectionRepositoryRef;
 
 use self::helpers::{extract_request_id, semver_compare, short_id, SemverCmp};
 use self::types::AgentInfo;
 
 impl AgentConnectionManager {
+    /// Get the connection repository reference (for testing and status queries).
+    pub fn connection_repo(&self) -> &ConnectionRepositoryRef {
+        &self.connection_repo
+    }
+
     /// Atomically register a connected agent, upsert its connections, and
     /// enqueue RegisterAck + CreateConnection messages.
     ///
