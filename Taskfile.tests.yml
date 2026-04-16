@@ -440,3 +440,15 @@ tasks:
       - defer: docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} down -v
       - cargo test -p detrix-testing --test docker_cloud_e2e -- --ignored --nocapture --test-threads=1
       - task: check-orphans
+
+  # Agent Mode E2E Tests
+  test-agent:
+    desc: "Run agent mode E2E tests (requires Linux + Docker + privileged)"
+    vars:
+      COMPOSE_FILE: fixtures/docker/docker-compose.agent-e2e.yml
+      PROJECT: detrix-agent-e2e-test
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --wait
+      - cargo test -p detrix-testing --test agent_e2e -- --ignored --nocapture --test-threads=1
+      - docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} down -v
+    requires: { vars: [LINUX_ONLY] }  # or add platform guard

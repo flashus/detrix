@@ -15,6 +15,7 @@ detrix-config = { path = "../detrix-config" }
 detrix-logging = { path = "../detrix-logging" }
 detrix-ebpf = { path = "../detrix-ebpf" }
 detrix-dap = { path = "../detrix-dap" }
+detrix-ports = { path = "../detrix-ports" }
 
 # gRPC client for connecting to server
 detrix-api = { path = "../detrix-api" }

@@ -756,6 +756,7 @@ mod tests {
             line: 10,
             expressions: vec![],
             enabled: true,
+            metric_id: 123,
         };
         assert_eq!(extract_request_id(&set_metric), Some("test-1"));
 

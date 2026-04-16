@@ -5137,6 +5137,8 @@ pub struct SetMetric {
     #[prost(bool, tag = "7")]
     #[serde(default)]
     pub enabled: bool,
+    #[prost(uint64, tag = "8")]
+    pub metric_id: u64,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

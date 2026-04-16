@@ -179,13 +179,14 @@ message AgentCreateConnection {
 message AgentCloseConnection { string connection_id = 1; }
 
 message SetMetric {
-  string          request_id    = 1;
-  string          connection_id = 2;
-  string          metric_name   = 3;
-  string          file          = 4;
-  uint32          line          = 5;
-  repeated string expressions   = 6;
-  bool            enabled       = 7;
+   string          request_id    = 1;
+   string          connection_id = 2;
+   string          metric_name   = 3;
+   string          file          = 4;
+   uint32          line          = 5;
+   repeated string expressions   = 6;
+   bool            enabled       = 7;
+   uint64          metric_id     = 8;
 }
 
 message RemoveMetric {

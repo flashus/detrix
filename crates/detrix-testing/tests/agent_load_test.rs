@@ -33,8 +33,8 @@ use detrix_testing::MockConnectionRepository;
 fn make_connections(agent_id: &str, hostname: &str, count: usize) -> Vec<Connection> {
     (0..count)
         .filter_map(|i| {
-            let binary_path = format!("/app/go_app_{i}");
-            let basename = format!("go_app_{i}");
+            let binary_path = format!("/app/go_app_{}", i);
+            let basename = format!("go_app_{}", i);
             let short_id = &agent_id[..8.min(agent_id.len())];
             let name = format!("agent/{short_id}/{basename}");
             let identity = ConnectionIdentity::new(&name, SourceLanguage::Go, "/", hostname);
@@ -68,10 +68,12 @@ async fn test_load_single_agent_many_binaries() {
         let count = save_connections(&repo, &connections).await.unwrap();
         let elapsed = start.elapsed();
 
-        assert_eq!(count, n, "N={n}: save_batch should return {n}");
+        assert_eq!(count, n, "N={}: save_batch should return {}", n, count);
         assert!(
             elapsed < Duration::from_secs(2),
-            "N={n}: registration took {elapsed:?} (limit: 2s)"
+            "N={}: registration took {:.3}s (limit: 2s)",
+            n,
+            elapsed.as_secs_f64()
         );
 
         // Verify connection count
@@ -79,20 +81,24 @@ async fn test_load_single_agent_many_binaries() {
         assert_eq!(
             all.len(),
             n,
-            "N={n}: expected {n} connections, got {}",
+            "N={}: expected {} connections (got {})",
+            n,
+            n,
             all.len()
         );
 
         // Re-register same binaries → idempotent (upsert), should still be N
         let connections2 = make_connections("agent-a1", "host1", n);
         let count2 = save_connections(&repo, &connections2).await.unwrap();
-        assert_eq!(count2, n, "N={n}: re-save_batch should return {n}");
+        assert_eq!(count2, n, "N={}: re-save_batch should return {}", n, count2);
 
         let all2 = repo.list_all().await.unwrap();
         assert_eq!(
             all2.len(),
             n,
-            "N={n}: after re-register, expected {n} connections, got {}",
+            "N={}: after re-register, expected {} connections (got {})",
+            n,
+            n,
             all2.len()
         );
     }
@@ -116,17 +122,18 @@ async fn test_load_concurrent_agents() {
     let handles: Vec<_> = (0..num_agents)
         .map(|i| {
             let repo = repo.clone();
-            let agent_id = format!("agent-b{i}");
-            let hostname = format!("host{i}");
+            let agent_id = format!("agent-b{}", i);
+            let hostname = format!("host{}", i);
             let connections = make_connections(&agent_id, &hostname, binaries_per_agent);
 
             tokio::spawn(async move {
                 let count = save_connections(&repo, &connections)
                     .await
-                    .expect(&format!("Agent {agent_id}: save_batch should succeed"));
+                    .expect(&format!("Agent {}: save_batch should succeed", agent_id));
                 assert_eq!(
                     count, binaries_per_agent,
-                    "Agent {agent_id}: expected {binaries_per_agent} connections saved"
+                    "Agent {}: expected {} connections saved",
+                    agent_id, binaries_per_agent
                 );
             })
         })
@@ -140,7 +147,9 @@ async fn test_load_concurrent_agents() {
     let elapsed = start.elapsed();
     assert!(
         elapsed < target_duration,
-        "Concurrent registration took {elapsed:?} (limit: {target_duration:?})"
+        "Concurrent registration took {} (limit: {})",
+        elapsed.as_secs_f64(),
+        target_duration.as_secs_f64()
     );
 
     // Verify total connection count

@@ -194,6 +194,7 @@ impl DapAdapter for RemoteAdapter {
                         line: metric.location.line,
                         expressions: metric.expressions.clone(),
                         enabled: metric.enabled,
+                        metric_id: metric.id.unwrap_or(detrix_core::MetricId(0)).0,
                     },
                     std::time::Duration::from_secs(30),
                 )

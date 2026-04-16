@@ -86,6 +86,7 @@ COPY crates/detrix-ports/Cargo.toml       crates/detrix-ports/
 COPY crates/detrix-storage/Cargo.toml     crates/detrix-storage/
 COPY crates/detrix-testing/Cargo.toml     crates/detrix-testing/
 COPY crates/detrix-tui/Cargo.toml         crates/detrix-tui/
+COPY crates/detrix-agent/Cargo.toml       crates/detrix-agent/
 COPY clients/rust/Cargo.toml              clients/rust/
 
 # Stub src files so `cargo fetch` can parse manifests without full source.

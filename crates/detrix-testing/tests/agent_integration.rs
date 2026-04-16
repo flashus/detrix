@@ -140,6 +140,7 @@ fn test_outgoing_set_metric() {
         line: 42,
         expressions: vec!["x".to_string()],
         enabled: true,
+        metric_id: 123,
     };
 
     match msg {

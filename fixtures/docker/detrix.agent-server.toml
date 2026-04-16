@@ -1,0 +1,40 @@
+# Detrix Agent E2E Test Server Configuration
+#
+# This config enables agent mode with token authentication
+# for running end-to-end tests.
+
+[server]
+# HTTP/REST API
+rest_host = "0.0.0.0"
+rest_port = 8090
+
+# gRPC API
+grpc_host = "0.0.0.0"
+grpc_port = 50061
+
+[agent]
+# Agent mode configuration
+enabled = true
+
+# Token authentication for agents
+# Map token file to agent IDs for testing
+# Format: "<token>:<agent_id>"
+
+# Test token - allows any agent ID for testing
+# File path: ./agent-test-token (mounted as /etc/detrix/agent-tokens/test-token)
+[[agent.tokens]]
+token_file = "/etc/detrix/agent-tokens/test-token"
+
+# For E2E tests, we accept any agent with the test token
+# The test-token file contains: "test-token-12345"
+[scanner]
+enabled = true
+scan_interval_secs = 10
+
+[connections]
+# Enable auto-creation of connections for discovered binaries
+auto_create = true
+
+[persistence]
+# In-memory storage for tests (no SQLite)
+type = "memory"

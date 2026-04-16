@@ -1036,6 +1036,7 @@ dependencies = [
  "detrix-dap",
  "detrix-ebpf",
  "detrix-logging",
+ "detrix-ports",
  "futures",
  "glob",
  "hostname",

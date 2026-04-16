@@ -117,11 +117,15 @@ impl ProcScanner {
                 continue;
             };
 
+            // Use binary_path directly — do NOT resolve symlink target.
+            // In Docker with pid:host, agent sees host PIDs but not host filesystem.
+            // The scanner records /proc/<pid>/exe which is always kernel-accessible.
+            // EbpfAdapter::new_with_config() opens the procfs file directly.
             let exe_path = path.join("exe");
-            let Ok(binary_path) = fs::read_link(&exe_path) else {
+            if !exe_path.exists() {
                 continue;
-            };
-            let binary_path_str = binary_path.to_string_lossy().to_string();
+            }
+            let binary_path_str = exe_path.to_string_lossy().to_string();
 
             if self
                 .exclude_patterns
@@ -140,11 +144,11 @@ impl ProcScanner {
                 continue;
             }
 
-            // Read inode from `/proc/<pid>/exe` metadata (follows symlink to binary).
+            // Read inode from `/proc/<pid>/exe` metadata directly (kernel-accessible).
             // Used for PID-reuse detection — same PID + different inode = new process.
             let inode = fs::metadata(&exe_path).map(|m| m.ino()).unwrap_or(0);
 
-            let Ok(mut file) = fs::File::open(&binary_path) else {
+            let Ok(mut file) = fs::File::open(&exe_path) else {
                 if !warned.contains_key(&binary_path_str) {
                     warn!(path = %binary_path_str, "Cannot read binary, skipping");
                     warned.insert(binary_path_str.clone(), true);
@@ -167,5 +171,16 @@ impl ProcScanner {
         }
 
         binaries
+    }
+}
+
+/// Convert agent BinaryInfo to proto BinaryInfo.
+pub fn binary_info_to_proto(info: &BinaryInfo) -> detrix_api::generated::detrix::v1::BinaryInfo {
+    detrix_api::generated::detrix::v1::BinaryInfo {
+        binary_path: info.binary_path.clone(),
+        pid: info.pid,
+        build_info: info.build_info.clone(),
+        has_dwarf: info.has_dwarf,
+        exported_functions: info.exported_functions.clone(),
     }
 }

@@ -133,6 +133,7 @@ pub enum OutgoingAgentMessage {
         line: u32,
         expressions: Vec<String>,
         enabled: bool,
+        metric_id: u64,
     },
     RemoveMetric {
         request_id: String,

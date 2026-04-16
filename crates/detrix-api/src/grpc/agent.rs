@@ -321,6 +321,7 @@ fn domain_to_proto(msg: OutgoingAgentMessage) -> ServerMessage {
                 line,
                 expressions,
                 enabled,
+                metric_id,
             } => Msg::SetMetric(SetMetric {
                 request_id,
                 connection_id,
@@ -329,6 +330,7 @@ fn domain_to_proto(msg: OutgoingAgentMessage) -> ServerMessage {
                 line,
                 expressions,
                 enabled,
+                metric_id,
             }),
             OutgoingAgentMessage::RemoveMetric {
                 request_id,
