@@ -800,6 +800,17 @@ impl ConnectionService {
             let conn_id = conn.id.clone();
             let addr = format!("{}:{}", conn.host, conn.port);
 
+            // Agent-owned connections must be re-established by the agent registration flow.
+            // Restoring them here races with startup and can attach the daemon to a stale
+            // /proc/<pid>/exe path before the agent has rebuilt the routing table.
+            if conn.is_agent_managed() {
+                debug!(
+                    "Skipping startup restore for agent-managed connection {} at {}",
+                    conn_id.0, addr
+                );
+                continue;
+            }
+
             // Skip connections that are already active — they were created during the current
             // session (race with this background task) and must not be interrupted.
             // This is the primary guard against the startup-restore race condition:

@@ -1,4 +1,4 @@
-FROM golang:1.24 AS builder
+FROM golang:1.24.13-bookworm AS builder
 WORKDIR /src
 COPY go.mod main.go ./
 RUN --mount=type=cache,target=/root/.cache/go-build \

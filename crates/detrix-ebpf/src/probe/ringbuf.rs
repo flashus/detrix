@@ -317,7 +317,11 @@ pub fn parse_ring_buffer_event(
                         0, // External entry point
                     )?
                 } else {
-                    CapturedValue::Scalar(val)
+                    match var.type_name.as_str() {
+                        "float64" => CapturedValue::Float(f64::from_bits(val)),
+                        "float32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
+                        _ => CapturedValue::Scalar(val),
+                    }
                 }
             }
         };
@@ -545,6 +549,33 @@ mod tests {
 
         assert_eq!(event.values.len(), 1);
         assert_eq!(event.values[0].as_u64(), Some(42));
+    }
+
+    #[test]
+    fn parse_top_level_float64_var() {
+        let amount = 1234.5_f64;
+        let data = build_event_bytes(1, 2, 100, &[amount.to_bits()]);
+        let vars = vec![ResolvedVariable {
+            name: "amount".to_string(),
+            location: VariableLocation::Register(Register::Rax),
+            size: VariableSize::QWord,
+            type_name: "float64".to_string(),
+            nested_type: None,
+        }];
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
+
+        assert_eq!(event.values.len(), 1);
+        match &event.values[0] {
+            CapturedValue::Float(v) => assert!((*v - amount).abs() < f64::EPSILON),
+            other => panic!("Expected Float, got {other:?}"),
+        }
     }
 
     #[test]

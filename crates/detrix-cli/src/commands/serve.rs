@@ -8,12 +8,12 @@ use crate::utils::init::{init_infrastructure, InitOptions};
 use crate::utils::pid::PidFile;
 use anyhow::{Context, Result};
 use detrix_api::generated::detrix::v1::{
-    connection_service_server::ConnectionServiceServer,
+    agent_service_server::AgentServiceServer, connection_service_server::ConnectionServiceServer,
     metrics_service_server::MetricsServiceServer, streaming_service_server::StreamingServiceServer,
 };
 use detrix_api::grpc::{
-    create_auth_interceptor, AuthInterceptorState, ConnectionServiceImpl, MetricsServiceImpl,
-    StreamingServiceImpl,
+    agent::AgentServiceImpl, create_auth_interceptor, AuthInterceptorState, ConnectionServiceImpl,
+    MetricsServiceImpl, StreamingServiceImpl,
 };
 use detrix_api::http::HttpServer;
 use detrix_api::tonic::transport::Server;
@@ -571,6 +571,11 @@ pub async fn run(
         let metrics_service = MetricsServiceImpl::new(Arc::clone(&api_state));
         let streaming_service = StreamingServiceImpl::new(Arc::clone(&api_state));
         let connection_service = ConnectionServiceImpl::new(Arc::clone(&api_state));
+        let agent_service = api_state
+            .context
+            .agent_connection_manager
+            .as_ref()
+            .map(|_| AgentServiceImpl::new(Arc::clone(&api_state)));
 
         // Create auth interceptor for gRPC (mirrors HTTP auth middleware)
         let grpc_auth_state = match jwt_validator {
@@ -585,6 +590,11 @@ pub async fn run(
             info!(mode = ?config.api.auth.mode, "✓ gRPC authentication enabled");
         } else {
             info!("✓ gRPC authentication disabled (all endpoints public)");
+        }
+        if config.agent.agent_tokens.is_empty() {
+            info!("✓ Agent gRPC authentication disabled (no agent tokens configured)");
+        } else {
+            info!("✓ Agent gRPC authentication enabled");
         }
 
         let grpc_addr: SocketAddr = format!("{}:{}", config.api.grpc.host, grpc_port)
@@ -609,7 +619,7 @@ pub async fn run(
         };
 
         let handle = tokio::spawn(async move {
-            if let Err(e) = Server::builder()
+            let server = Server::builder()
                 .add_service(MetricsServiceServer::with_interceptor(
                     metrics_service,
                     auth_interceptor.clone(),
@@ -621,10 +631,17 @@ pub async fn run(
                 .add_service(ConnectionServiceServer::with_interceptor(
                     connection_service,
                     auth_interceptor,
-                ))
-                .serve_with_shutdown(grpc_addr, shutdown_signal)
-                .await
-            {
+                ));
+
+            let server = if let Some(agent_service) = agent_service {
+                info!("Registering AgentService on gRPC server");
+                server.add_service(AgentServiceServer::new(agent_service))
+            } else {
+                info!("AgentService disabled on gRPC server (no agent manager)");
+                server
+            };
+
+            if let Err(e) = server.serve_with_shutdown(grpc_addr, shutdown_signal).await {
                 error!("gRPC server error: {}", e);
             }
         });

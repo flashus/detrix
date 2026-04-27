@@ -3,6 +3,7 @@ services:
     build:
       context: ../../..
       dockerfile: fixtures/docker/Dockerfile.server
+    restart: unless-stopped
     ports:
       - "8095:8090"
       - "50065:50061"
@@ -12,7 +13,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      DETRIX_TOKEN: demo-token
+      DETRIX_TOKEN: demo-token-123456
       DETRIX_ADVERTISE_URL: http://localhost:8095
     healthcheck:
       test: ["CMD", "/usr/local/bin/detrix", "status", "--config", "/data/detrix/detrix.toml", "-q"]
@@ -26,25 +27,55 @@ services:
     build:
       context: ../../..
       dockerfile: examples/docker-demo/client-app/Dockerfile
+    restart: unless-stopped
     ports:
       - "8091:8091"
+    volumes:
+      - ../../..:/src:ro
     depends_on:
       detrix:
         condition: service_healthy
     environment:
-      DETRIX_CLIENT_ENABLED: "1"
+      DETRIX_CLIENT_ENABLED: "${DETRIX_CLIENT_ENABLED:-1}"
       DETRIX_DAEMON_URL: http://detrix:8090
       DETRIX_CONTROL_HOST: "0.0.0.0"
       DETRIX_HOST: order-service
       DETRIX_CONTROL_PORT: "8091"
-      DETRIX_TOKEN: demo-token
+      DETRIX_TOKEN: demo-token-123456
       DETRIX_WORKSPACE_ROOT: /src/examples/docker-demo/client-app
       PRICING_API_URL: http://pricing-api:8080
     networks:
       - demo
 
+  detrix-agent:
+    profiles: ["agent"]
+    build:
+      context: ../../..
+      dockerfile: fixtures/docker/Dockerfile.agent
+    restart: unless-stopped
+    privileged: true
+    pid: "service:order-service"
+    depends_on:
+      detrix:
+        condition: service_healthy
+      order-service:
+        condition: service_started
+    entrypoint: ["/usr/local/bin/detrix"]
+    command: ["--config", "/etc/detrix/detrix.toml", "agent", "start"]
+    ports:
+      - "9091:9091"
+    volumes:
+      - ./detrix.toml:/etc/detrix/detrix.toml:ro
+      - ../../..:/src:ro
+      - detrix-agent-data:/var/lib/detrix
+    environment:
+      DETRIX_TOKEN: demo-token-123456
+    networks:
+      - demo
+
 volumes:
   detrix-data:
+  detrix-agent-data:
 
 networks:
   demo:

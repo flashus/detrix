@@ -573,11 +573,18 @@ impl McpBridge {
                 }
             };
 
-            // Route request: local tool → daemon forward (with wake fallback)
+            let is_notification = request.get("id").is_none();
+
+            // Route request: local tool -> daemon forward (with wake fallback)
             let mut response = match self.try_handle_local_tool(&request).await {
                 Some(local_response) => local_response,
                 None => self.forward_or_fallback(&request).await,
             };
+
+            if is_notification {
+                debug!("Notification handled without response");
+                continue;
+            }
 
             // Auto-switch daemon if wake response contains daemon_url
             self.maybe_auto_switch_daemon(&mut response).await;

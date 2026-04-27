@@ -13,11 +13,13 @@ use detrix_application::{
     AgentBinaryInfo, AgentCapabilities, AgentConnectionManagerRef, IncomingAgentMessage,
     OutgoingAgentMessage, RegisterResult, VariableInfo,
 };
+use detrix_core::ExpressionValue;
 use futures::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
+use tracing::warn;
 
 type AgentStream = Pin<Box<dyn Stream<Item = Result<ServerMessage, Status>> + Send>>;
 
@@ -92,6 +94,8 @@ impl AgentService for AgentServiceImpl {
                 build_info: b.build_info,
                 has_dwarf: b.has_dwarf,
                 exported_functions: b.exported_functions,
+                // Agent scanner currently only reports eBPF-observable Go ELF binaries.
+                language: detrix_core::SourceLanguage::Go,
             })
             .collect();
 
@@ -151,7 +155,14 @@ impl AgentService for AgentServiceImpl {
                 match incoming.message().await {
                     Ok(Some(msg)) => {
                         if let Some(domain_msg) = proto_to_domain(msg) {
-                            mgr_clone.dispatch(&agent_id_clone, domain_msg).await;
+                            // Dispatch on a separate task so handlers that await
+                            // request/response work over the same gRPC stream
+                            // do not block the read loop from receiving the ack.
+                            let mgr = mgr_clone.clone();
+                            let agent_id = agent_id_clone.clone();
+                            tokio::spawn(async move {
+                                mgr.dispatch(&agent_id, domain_msg).await;
+                            });
                         }
                     }
                     Ok(None) => {
@@ -203,8 +214,50 @@ fn proto_to_domain(msg: AgentMessage) -> Option<IncomingAgentMessage> {
             let events: Vec<detrix_core::MetricEvent> = e
                 .events
                 .into_iter()
-                .filter_map(|se| {
-                    serde_json::from_str::<detrix_core::MetricEvent>(&se.values_json).ok()
+                .map(|se| {
+                    let values = match serde_json::from_str::<Vec<ExpressionValue>>(&se.values_json)
+                    {
+                        Ok(values) => values,
+                        Err(err) => {
+                            warn!(
+                                metric_id = se.metric_id,
+                                metric_name = %se.metric_name,
+                                error = %err,
+                                "Failed to decode agent metric event values_json"
+                            );
+                            Vec::new()
+                        }
+                    };
+
+                    detrix_core::MetricEvent {
+                        id: None,
+                        metric_id: detrix_core::MetricId(se.metric_id),
+                        metric_name: se.metric_name,
+                        connection_id: detrix_core::ConnectionId(e.connection_id.clone()),
+                        timestamp: se.timestamp_ns / 1_000,
+                        thread_name: if se.thread_name.is_empty() {
+                            None
+                        } else {
+                            Some(se.thread_name)
+                        },
+                        thread_id: if se.thread_id == 0 {
+                            None
+                        } else {
+                            Some(se.thread_id)
+                        },
+                        values,
+                        is_error: se.is_error,
+                        error_type: None,
+                        error_message: if se.error_message.is_empty() {
+                            None
+                        } else {
+                            Some(se.error_message)
+                        },
+                        request_id: None,
+                        session_id: None,
+                        stack_trace: None,
+                        memory_snapshot: None,
+                    }
                 })
                 .collect();
             Some(IncomingAgentMessage::EventBatch {

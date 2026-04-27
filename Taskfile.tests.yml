@@ -234,8 +234,43 @@ tasks:
       # This image is stable: only rebuild when Cargo.lock or package versions change.
       - docker build --target rust-deps -f {{.DOCKERFILE}} -t {{.BUILDER}} .
 
+  build-ebpf-shared-bins:
+    desc: "Compile shared eBPF artifacts used by inject-style tests (daemon + primary Go fixture)"
+    vars:
+      BUILDER: detrix-ebpf-builder
+      GO_IMAGE: golang:1.24.13-bookworm
+      OUT: "{{.ROOT_DIR}}/out"
+    cmds:
+      - mkdir -p {{.OUT}}
+      - |
+        docker run --rm \
+          -v "{{.ROOT_DIR}}:/src" \
+          -v "ebpf-cargo-home:/usr/local/cargo" \
+          -v "ebpf-cargo-target:/build/target" \
+          -w /src \
+          {{.BUILDER}} \
+          sh -c "
+            CARGO_TARGET_DIR=/build/target cargo build --release --locked --bin detrix &&
+            cp -p /build/target/release/detrix /src/out/detrix.tmp &&
+            mv -f /src/out/detrix.tmp /src/out/detrix
+          "
+      - |
+        docker run --rm \
+          -v "{{.ROOT_DIR}}/fixtures/go/string_capture:/src/fixtures/go/string_capture:ro" \
+          -v "{{.ROOT_DIR}}/clients/go:/src/clients/go:ro" \
+          -v "{{.ROOT_DIR}}/out:/out" \
+          -v "ebpf-go-mod:/go/pkg/mod" \
+          -v "ebpf-go-build:/root/.cache/go-build" \
+          -w /src/fixtures/go/string_capture \
+          {{.GO_IMAGE}} \
+          go build \
+            -gcflags="all=-N -l" \
+            -ldflags="-compressdwarf=false" \
+            -o /out/detrix_example_app .
+
   build-ebpf-bins:
     desc: "Compile daemon + test binary + Go fixture for eBPF testing (output: ./out/)"
+    deps: [build-ebpf-shared-bins]
     vars:
       BUILDER: detrix-ebpf-builder
       GO_IMAGE: golang:1.24.13-bookworm
@@ -256,34 +291,15 @@ tasks:
           -w /src \
           {{.BUILDER}} \
           sh -c "
-            CARGO_TARGET_DIR=/build/target cargo build --release --locked --bin detrix &&
             CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
               --package detrix-testing --test ebpf_e2e &&
             CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
               --package detrix-testing --test ebpf_nested_types_e2e &&
-            cp -p /build/target/release/detrix /src/out/detrix &&
-            find /build/target/debug/deps -maxdepth 1 -name 'ebpf_e2e-*' ! -name '*.d' \
-              | head -1 | xargs -I{} cp -p {} /src/out/ebpf_e2e_test &&
-            find /build/target/debug/deps -maxdepth 1 -name 'ebpf_nested_types_e2e-*' ! -name '*.d' \
-              | head -1 | xargs -I{} cp -p {} /src/out/ebpf_nested_types_e2e_test
+            find /build/target/debug/deps -maxdepth 1 -type f -perm -111 -name 'ebpf_e2e-*' -printf '%T@ %p\n' \
+              | sort -nr | head -1 | cut -d' ' -f2- | xargs -I{} cp -p {} /src/out/ebpf_e2e_test &&
+            find /build/target/debug/deps -maxdepth 1 -type f -perm -111 -name 'ebpf_nested_types_e2e-*' -printf '%T@ %p\n' \
+              | sort -nr | head -1 | cut -d' ' -f2- | xargs -I{} cp -p {} /src/out/ebpf_nested_types_e2e_test
           "
-      # ── Go: fixture binary with DWARF (no cgo → cross-compiles cleanly) ────
-      # Named volumes keep downloaded modules and build cache between runs.
-      # -compressdwarf=false: our gimli EndianSlice parser needs uncompressed DWARF.
-      # Build string_capture fixture (primary test fixture)
-      - |
-        docker run --rm \
-          -v "{{.ROOT_DIR}}/fixtures/go/string_capture:/src/fixtures/go/string_capture:ro" \
-          -v "{{.ROOT_DIR}}/clients/go:/src/clients/go:ro" \
-          -v "{{.ROOT_DIR}}/out:/out" \
-          -v "ebpf-go-mod:/go/pkg/mod" \
-          -v "ebpf-go-build:/root/.cache/go-build" \
-          -w /src/fixtures/go/string_capture \
-          {{.GO_IMAGE}} \
-          go build \
-            -gcflags="all=-N -l" \
-            -ldflags="-compressdwarf=false" \
-            -o /out/detrix_example_app .
       # Build nested_types fixture (nested struct capture tests)
       - |
         docker run --rm \
@@ -326,8 +342,8 @@ tasks:
           sh -c "
             CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
               --package detrix-testing --test ebpf_classic_map_e2e &&
-            find /build/target/debug/deps -maxdepth 1 -name 'ebpf_classic_map_e2e-*' ! -name '*.d' \
-              | head -1 | xargs -I{} cp -p {} /src/out/ebpf_classic_map_e2e_test
+            find /build/target/debug/deps -maxdepth 1 -type f -perm -111 -name 'ebpf_classic_map_e2e-*' -printf '%T@ %p\n' \
+              | sort -nr | head -1 | cut -d' ' -f2- | xargs -I{} cp -p {} /src/out/ebpf_classic_map_e2e_test
           "
 
   test-ebpf-inject:
@@ -441,14 +457,46 @@ tasks:
       - cargo test -p detrix-testing --test docker_cloud_e2e -- --ignored --nocapture --test-threads=1
       - task: check-orphans
 
+  build-agent-bins:
+    desc: "Compile daemon + agent E2E test binary + Go fixture for agent testing (output: ./out/)"
+    deps: [build-ebpf-shared-bins]
+    vars:
+      BUILDER: detrix-ebpf-builder
+      OUT: "{{.ROOT_DIR}}/out"
+    cmds:
+      - mkdir -p {{.OUT}}
+      - |
+        docker run --rm \
+          -v "{{.ROOT_DIR}}:/src" \
+          -v "ebpf-cargo-home:/usr/local/cargo" \
+          -v "ebpf-cargo-target:/build/target" \
+          -w /src \
+          {{.BUILDER}} \
+          sh -c "
+            CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
+              --package detrix-testing --test agent_e2e &&
+            TEST_BIN=\$(find /build/target/debug/deps -maxdepth 1 -type f -perm -111 -name 'agent_e2e-*' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-) &&
+            rm -f /src/out/agent_e2e_test /src/out/agent_e2e_test.tmp &&
+            install -m 755 \"\$TEST_BIN\" /src/out/agent_e2e_test.tmp &&
+            mv -f /src/out/agent_e2e_test.tmp /src/out/agent_e2e_test
+          "
+
   # Agent Mode E2E Tests
   test-agent:
-    desc: "Run agent mode E2E tests (requires Linux + Docker + privileged)"
+    desc: "Run agent mode E2E tests in the shared eBPF playground runner"
     vars:
-      COMPOSE_FILE: fixtures/docker/docker-compose.agent-e2e.yml
-      PROJECT: detrix-agent-e2e-test
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.ROOT_DIR}}/out"
+    deps: [build-agent-bins]
     cmds:
-      - docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --wait
-      - cargo test -p detrix-testing --test agent_e2e -- --ignored --nocapture --test-threads=1
-      - docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} down -v
-    requires: { vars: [LINUX_ONLY] }  # or add platform guard
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/detrix_example_app:/usr/local/bin/detrix_example_app:ro" \
+          -v "{{.OUT}}/agent_e2e_test:/usr/local/bin/agent_e2e_test:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/go/string_capture:/src/fixtures/go/string_capture:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e AGENT_FIXTURE_BINARY=/usr/local/bin/detrix_example_app \
+          -e AGENT_FIXTURE_SOURCE=/src/fixtures/go/string_capture/main.go \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/agent_e2e_test --ignored --nocapture --test-threads=1

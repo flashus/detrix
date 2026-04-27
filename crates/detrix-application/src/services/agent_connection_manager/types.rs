@@ -6,9 +6,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::services::AdapterLifecycleManager;
 use dashmap::DashMap;
 use detrix_core::{ConnectionId, MetricEvent, SystemEvent};
-use detrix_ports::ConnectionRepositoryRef;
+use detrix_ports::{ConnectionRepositoryRef, MetricRepositoryRef};
 use tokio::sync::{mpsc, oneshot};
 
 // ============================================================================
@@ -33,6 +34,7 @@ pub struct AgentBinaryInfo {
     pub build_info: String,
     pub has_dwarf: bool,
     pub exported_functions: Vec<String>,
+    pub language: detrix_core::SourceLanguage,
 }
 
 /// Variable information from file inspection.
@@ -212,14 +214,18 @@ pub struct AgentConnectionManager {
     /// Independent DashMap — avoids holding AgentInfo write guard across await points.
     pub(super) connection_requests: Arc<DashMap<ConnectionId, HashSet<String>>>,
     pub(super) connection_repo: ConnectionRepositoryRef,
+    pub(super) metric_repo: MetricRepositoryRef,
     pub(super) agent_config: Option<detrix_config::AgentConfig>,
     pub(super) system_event_tx: Option<tokio::sync::broadcast::Sender<SystemEvent>>,
+    pub(super) adapter_lifecycle_manager:
+        Arc<std::sync::RwLock<Option<Arc<AdapterLifecycleManager>>>>,
 }
 
 impl AgentConnectionManager {
     /// Create a new AgentConnectionManager.
     pub fn new(
         connection_repo: ConnectionRepositoryRef,
+        metric_repo: MetricRepositoryRef,
         agent_config: Option<detrix_config::AgentConfig>,
         system_event_tx: Option<tokio::sync::broadcast::Sender<SystemEvent>>,
     ) -> Self {
@@ -231,8 +237,10 @@ impl AgentConnectionManager {
             event_receivers: Arc::new(DashMap::new()),
             connection_requests: Arc::new(DashMap::new()),
             connection_repo,
+            metric_repo,
             agent_config,
             system_event_tx,
+            adapter_lifecycle_manager: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 }

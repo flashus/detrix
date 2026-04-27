@@ -15,5 +15,16 @@ port = 50061
 path = "/data/detrix/data.db"
 
 [vfs]
-source_priority = ["bridge", "control_plane", "disk"]
+source_priority = ["agent", "bridge", "control_plane", "disk"]
 fetch_timeout_seconds = 10
+
+[agent]
+server_grpc_url = "http://detrix:50061"
+agent_id_file = "/var/lib/detrix/agent-id"
+metrics_port = 9091
+verify_tls = false
+
+[agent.scanner]
+scan_interval_secs = 2
+include_patterns = ["/usr/local/bin/order-service"]
+require_dwarf = true

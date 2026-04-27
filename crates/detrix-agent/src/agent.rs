@@ -6,18 +6,39 @@ use crate::metrics_server::MetricsState;
 use crate::scanner::{binary_info_to_proto, ProcScanner};
 use detrix_api::generated::detrix::v1::agent_service_client::AgentServiceClient;
 use detrix_api::generated::detrix::v1::{
-    agent_message, server_message, AgentCapabilities, AgentMessage, Heartbeat, Pong, RegisterAgent,
+    agent_message, server_message, AgentCapabilities, AgentMessage, FileResponse, Heartbeat,
+    InspectResponse, Pong, RegisterAgent,
 };
 use detrix_config::AgentConfig;
 use detrix_ebpf::CaptureConfig;
 use detrix_logging::{error, info, warn};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tonic::Request;
+
+/// gRPC interceptor that attaches a Bearer token to every outgoing request.
+struct AgentTokenInterceptor {
+    token: Option<String>,
+}
+
+impl tonic::service::Interceptor for AgentTokenInterceptor {
+    fn call(
+        &mut self,
+        mut req: tonic::Request<()>,
+    ) -> std::result::Result<tonic::Request<()>, tonic::Status> {
+        if let Some(ref token) = self.token {
+            let val = format!("Bearer {token}")
+                .parse()
+                .map_err(|_| tonic::Status::internal("invalid bearer token value"))?;
+            req.metadata_mut().insert("authorization", val);
+        }
+        Ok(req)
+    }
+}
 
 /// The Agent connects to the server and manages local adapters.
 pub struct Agent {
@@ -58,25 +79,15 @@ impl Agent {
             }
         });
 
-        // Create channels
-        let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel();
-        let (event_tx, mut event_rx) =
-            mpsc::channel::<detrix_api::generated::detrix::v1::AgentMessage>(1024);
-        let events_dropped = Arc::new(AtomicU64::new(0));
-
-        // Create adapter manager
-        let adapter_manager = Arc::new(AdapterManager::new(
-            ctrl_tx.clone(),
-            event_tx.clone(),
-            Arc::clone(&events_dropped),
-            self.capture_config.clone(),
-        ));
-
-        // Create scanner
-        let mut scanner = ProcScanner::new(&self.config.scanner);
+        // Create scanner — wrapped in Arc<Mutex> so its PID-tracking state
+        // (the `known` map) persists across reconnect cycles.
+        let scanner = Arc::new(Mutex::new(ProcScanner::new(&self.config.scanner)));
 
         // Initial scan
-        let binaries = scanner.scan_full();
+        let binaries = scanner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .scan_full();
         info!(
             count = binaries.len(),
             "Initial scan found {} binaries",
@@ -88,13 +99,25 @@ impl Agent {
         let max_reconnect_secs = self.config.reconnect_max_interval_secs;
 
         loop {
+            let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
+            let (event_tx, event_rx) =
+                mpsc::channel::<detrix_api::generated::detrix::v1::AgentMessage>(1024);
+            let events_dropped = Arc::new(AtomicU64::new(0));
+            let adapter_manager = Arc::new(AdapterManager::new(
+                ctrl_tx.clone(),
+                event_tx.clone(),
+                Arc::clone(&events_dropped),
+                self.capture_config.clone(),
+            ));
+
             match self
                 .connect_and_run(
                     &agent_id,
                     &hostname,
-                    &mut scanner,
+                    Arc::clone(&scanner),
+                    ctrl_rx,
                     &ctrl_tx,
-                    &event_tx,
+                    event_rx,
                     &events_dropped,
                     adapter_manager.clone(),
                     &metrics_state,
@@ -112,10 +135,6 @@ impl Agent {
             info!(reconnect_in_secs = reconnect_secs, "Reconnecting...");
             tokio::time::sleep(Duration::from_secs(reconnect_secs)).await;
             reconnect_secs = (reconnect_secs * 2).min(max_reconnect_secs);
-
-            // Drain any remaining messages
-            while ctrl_rx.try_recv().is_ok() {}
-            while event_rx.try_recv().is_ok() {}
         }
     }
 
@@ -125,9 +144,10 @@ impl Agent {
         &self,
         agent_id: &str,
         hostname: &str,
-        scanner: &mut ProcScanner,
+        scanner: Arc<Mutex<ProcScanner>>,
+        mut ctrl_rx: mpsc::UnboundedReceiver<AgentMessage>,
         ctrl_tx: &mpsc::UnboundedSender<AgentMessage>,
-        _event_tx: &mpsc::Sender<AgentMessage>,
+        mut event_rx: mpsc::Receiver<AgentMessage>,
         events_dropped: &Arc<AtomicU64>,
         adapter_manager: Arc<AdapterManager>,
         _metrics_state: &MetricsState,
@@ -139,42 +159,49 @@ impl Agent {
             .await
             .map_err(|e| AgentError::Connection(e.to_string()))?;
 
-        // 4d. Auth interceptor - TODO: Apply auth interceptor - needs proper interceptor trait usage
-        // For now, skip auth to focus on basic connectivity
-        let _token = if let Some(ref path) = self.config.token_file {
-            std::fs::read_to_string(path)
-                .map(|s| s.trim().to_string())
-                .map_err(|e| AgentError::Config(format!("token_file: {e}")))?
+        // 4d. Read auth token and attach it to every outgoing gRPC request.
+        let token = if let Some(ref path) = self.config.token_file {
+            Some(
+                std::fs::read_to_string(path)
+                    .map(|s| s.trim().to_string())
+                    .map_err(|e| AgentError::Config(format!("token_file: {e}")))?,
+            )
         } else {
-            String::new()
+            None
+        };
+        let binaries = scanner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .scan_full();
+        let register_msg = AgentMessage {
+            msg: Some(agent_message::Msg::Register(RegisterAgent {
+                agent_id: agent_id.to_string(),
+                hostname: hostname.to_string(),
+                agent_version: env!("CARGO_PKG_VERSION").to_string(),
+                capabilities: Some(AgentCapabilities {
+                    ebpf: cfg!(target_os = "linux"),
+                    ..Default::default()
+                }),
+                binaries: binaries.iter().map(binary_info_to_proto).collect(),
+            })),
         };
 
-        // 4e. Open bidi stream and send RegisterAgent
-        let mut client = AgentServiceClient::new(channel);
+        // Queue the mandatory RegisterAgent frame before opening the bidi stream.
+        // This avoids depending on transport/body scheduling to deliver the first
+        // client item after the RPC has already been established.
+        let mut client =
+            AgentServiceClient::with_interceptor(channel, AgentTokenInterceptor { token });
         let (stream_tx, stream_rx) = mpsc::channel::<AgentMessage>(256);
+        stream_tx
+            .send(register_msg)
+            .await
+            .map_err(|_| AgentError::Connection("stream closed".into()))?;
         let request = Request::new(ReceiverStream::new(stream_rx));
         let response = client
             .connect_agent(request)
             .await
             .map_err(|e| AgentError::Connection(e.to_string()))?;
         let mut incoming = response.into_inner();
-
-        let binaries = scanner.scan_full();
-        stream_tx
-            .send(AgentMessage {
-                msg: Some(agent_message::Msg::Register(RegisterAgent {
-                    agent_id: agent_id.to_string(),
-                    hostname: hostname.to_string(),
-                    agent_version: env!("CARGO_PKG_VERSION").to_string(),
-                    capabilities: Some(AgentCapabilities {
-                        ebpf: cfg!(target_os = "linux"),
-                        ..Default::default()
-                    }),
-                    binaries: binaries.iter().map(binary_info_to_proto).collect(),
-                })),
-            })
-            .await
-            .map_err(|_| AgentError::Connection("stream closed".into()))?;
 
         // 4f. Read RegisterAck + drain initial CreateConnections
         let first = incoming
@@ -239,6 +266,41 @@ impl Agent {
                         Some(server_message::Msg::RemoveMetric(rm)) => {
                             am.handle_remove_metric(rm).await;
                         }
+                        Some(server_message::Msg::ReadFile(rf)) => {
+                            let response = match am.read_file(&rf.path) {
+                                Ok(content) => FileResponse {
+                                    request_id: rf.request_id,
+                                    path: rf.path,
+                                    content,
+                                    error: String::new(),
+                                },
+                                Err(e) => FileResponse {
+                                    request_id: rf.request_id,
+                                    path: rf.path,
+                                    content: Vec::new(),
+                                    error: e.to_string(),
+                                },
+                            };
+                            if ctrl_tx_r
+                                .send(AgentMessage {
+                                    msg: Some(agent_message::Msg::FileResponse(response)),
+                                })
+                                .is_err()
+                            {
+                                tracing::debug!("ctrl channel closed, dropping FileResponse");
+                            }
+                        }
+                        Some(server_message::Msg::InspectFile(req)) => {
+                            let response: InspectResponse = am.inspect_file(req).await;
+                            if ctrl_tx_r
+                                .send(AgentMessage {
+                                    msg: Some(agent_message::Msg::InspectResponse(response)),
+                                })
+                                .is_err()
+                            {
+                                tracing::debug!("ctrl channel closed, dropping InspectResponse");
+                            }
+                        }
                         Some(server_message::Msg::Ping(_)) => {
                             let _ = ctrl_tx_r.send(AgentMessage {
                                 msg: Some(agent_message::Msg::Pong(Pong {})),
@@ -262,7 +324,8 @@ impl Agent {
                     ticker.tick().await;
                     let heartbeat = AgentMessage {
                         msg: Some(agent_message::Msg::Heartbeat(Heartbeat {
-                            events_dropped: dropped.load(Ordering::Relaxed) as u32,
+                            events_dropped: dropped.load(Ordering::Relaxed).min(u32::MAX as u64)
+                                as u32,
                             ..Default::default()
                         })),
                     };
@@ -272,20 +335,48 @@ impl Agent {
             }
         });
 
-        // 3. Scanner task
+        // 3. Forward adapter-control messages (ConnectionUpdate, SetMetricAck, etc.)
+        tasks.spawn({
+            let stream_tx_c = stream_tx.clone();
+            async move {
+                while let Some(msg) = ctrl_rx.recv().await {
+                    if stream_tx_c.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
+        // 4. Forward metric event batches onto the gRPC stream.
+        tasks.spawn({
+            let stream_tx_e = stream_tx.clone();
+            async move {
+                while let Some(msg) = event_rx.recv().await {
+                    if stream_tx_e.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
+        // 5. Scanner task — shares the Arc<Mutex<ProcScanner>> so the `known`
+        // PID-tracking state survives reconnect cycles in the outer run() loop.
         tasks.spawn({
             let ctrl_tx_s = ctrl_tx.clone();
             let stream_tx_s = stream_tx.clone();
             let agent_id_s = agent_id.to_string();
             let hostname_s = hostname.to_string();
-            let mut scanner_owned =
-                std::mem::replace(scanner, ProcScanner::new(&self.config.scanner));
+            let scanner_s = Arc::clone(&scanner);
             let interval = Duration::from_secs(self.config.scanner.scan_interval_secs);
             async move {
                 let mut ticker = tokio::time::interval(interval);
                 loop {
                     ticker.tick().await;
-                    if let Some(binaries) = scanner_owned.scan_delta() {
+                    let maybe_binaries = {
+                        let mut s = scanner_s.lock().unwrap_or_else(|p| p.into_inner());
+                        s.scan_delta()
+                    };
+                    if let Some(binaries) = maybe_binaries {
                         let register = AgentMessage {
                             msg: Some(agent_message::Msg::Register(RegisterAgent {
                                 agent_id: agent_id_s.clone(),
@@ -305,8 +396,14 @@ impl Agent {
             }
         });
 
-        // Wait for first task to finish
+        // Wait for first task to finish (typically the incoming-message reader
+        // when the gRPC stream closes), then give remaining tasks up to 500ms
+        // to flush any in-flight messages before aborting them.
         tasks.join_next().await;
+        let _ = tokio::time::timeout(Duration::from_millis(500), async {
+            while tasks.join_next().await.is_some() {}
+        })
+        .await;
         tasks.abort_all();
         adapter_manager.stop_all().await;
         Ok(())

@@ -382,7 +382,7 @@ trait DockerBridgeExt {
 #[async_trait::async_trait]
 impl DockerBridgeExt for McpBridgeProcess {
     async fn wake(&mut self, app_url: &str) -> Result<String, String> {
-        let result = self.call_tool("wake", json!({"app_url": app_url})).await?;
+        let result = self.call_tool("wake", json!({"appUrl": app_url})).await?;
         Ok(extract_text(&result))
     }
 
@@ -412,7 +412,7 @@ impl DockerBridgeExt for McpBridgeProcess {
     }
 
     async fn sleep_app(&mut self, app_url: &str) {
-        let _ = self.call_tool("sleep", json!({"app_url": app_url})).await;
+        let _ = self.call_tool("sleep", json!({"appUrl": app_url})).await;
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
@@ -429,7 +429,7 @@ impl DockerBridgeExt for McpBridgeProcess {
                 "name": name,
                 "location": location,
                 "expressions": expressions,
-                "connection_id": connection_id
+                "connectionId": connection_id
             }),
         )
         .await?;
@@ -690,9 +690,33 @@ async fn test_cloud_e2e() {
         }
     }
 
-    // Verify daemon is reachable via direct HTTP (fast sanity check)
-    let healthy = client.health().await.expect("health check failed");
-    assert!(healthy, "Daemon should be healthy before starting tests");
+    // Verify daemon is reachable via direct HTTP.
+    // `docker compose up --wait` passes its healthcheck via `detrix status`
+    // (internal port 8090), but OrbStack's host port mapping for 8095 may have
+    // a brief lag — poll with retries to avoid a false-negative on a cold start.
+    {
+        let http_client = reqwest::Client::new();
+        let start = Instant::now();
+        loop {
+            if let Ok(resp) = http_client
+                .get(format!("http://127.0.0.1:{}/health", DAEMON_HTTP_PORT))
+                .timeout(Duration::from_secs(3))
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    break;
+                }
+            }
+            if start.elapsed() > Duration::from_secs(30) {
+                panic!(
+                    "Daemon failed to become healthy on port {} within 30s",
+                    DAEMON_HTTP_PORT
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
     println!("Daemon healthy at port {}", DAEMON_HTTP_PORT);
 
     let daemon_url = format!("http://127.0.0.1:{}", DAEMON_HTTP_PORT);
@@ -865,7 +889,7 @@ async fn test_cloud_e2e() {
             "file": "trade_bot_forever.py",
             "expressions": ["order_id"],
             "name": "cloud-py-cp",
-            "connection_id": &py_conn
+            "connectionId": &py_conn
         }))
         .await
         .expect("observe python via control plane failed");
@@ -936,7 +960,7 @@ async fn test_cloud_e2e() {
             "file": GO_FILE,
             "expressions": ["symbol"],
             "name": "cloud-go-bridge",
-            "connection_id": &go_conn
+            "connectionId": &go_conn
         }))
         .await
         .expect("observe go via bridge failed");
@@ -1038,7 +1062,7 @@ async fn test_cloud_e2e() {
             "file": "trade_bot_forever.py",
             "expressions": ["order_id"],
             "name": "cloud-py-git",
-            "connection_id": &py_conn
+            "connectionId": &py_conn
         }))
         .await
         .expect("observe python via git-pinned bridge failed");
@@ -1270,7 +1294,7 @@ async fn test_cloud_e2e() {
                 "file": "trade_bot_forever.py",
                 "expressions": ["order_id"],
                 "name": "cloud-py-adv",
-                "connection_id": &py_conn
+                "connectionId": &py_conn
             }))
             .await
             .expect("observe python via control plane failed");
@@ -1327,7 +1351,7 @@ async fn test_cloud_e2e() {
                 "file": GO_FILE,
                 "expressions": ["symbol"],
                 "name": "cloud-go-adv",
-                "connection_id": &go_conn_6b
+                "connectionId": &go_conn_6b
             }))
             .await
             .expect("observe go via bridge failed");
@@ -1539,7 +1563,7 @@ async fn test_cloud_e2e() {
         "params": {
             "name": "wake",
             "arguments": {
-                "app_url": PYTHON_APP_URL
+                "appUrl": PYTHON_APP_URL
             }
         },
         "id": 2
@@ -1822,7 +1846,7 @@ async fn test_cloud_e2e() {
         "params": {
             "name": "wake",
             "arguments": {
-                "app_url": PYTHON_APP_URL
+                "appUrl": PYTHON_APP_URL
             }
         },
         "id": 2
@@ -1918,7 +1942,7 @@ async fn test_cloud_e2e() {
             "expressions": ["symbol"],
             "find_variable": "symbol",
             "name": "cloud-go-scope-aware",
-            "connection_id": &go_conn_9
+            "connectionId": &go_conn_9
         }))
         .await
         .expect("observe go scope-aware failed");

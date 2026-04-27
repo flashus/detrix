@@ -15,6 +15,7 @@ use tracing::{debug, instrument};
 
 /// Request to provide file content for caching
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProvideFileRequest {
     pub connection_id: String,
     pub path: String,
@@ -23,6 +24,7 @@ pub struct ProvideFileRequest {
 
 /// Response from providing file content
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProvideFileResponse {
     pub success: bool,
     pub path: String,
@@ -33,6 +35,7 @@ pub struct ProvideFileResponse {
 
 /// File hash entry for validation
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileHash {
     pub path: String,
     pub hash: String,
@@ -40,6 +43,7 @@ pub struct FileHash {
 
 /// Request to validate cache hashes
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ValidateCacheRequest {
     pub connection_id: String,
     pub files: Vec<FileHash>,
@@ -47,6 +51,7 @@ pub struct ValidateCacheRequest {
 
 /// Response from cache validation
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ValidateCacheResponse {
     pub evicted_paths: Vec<String>,
     pub cached: Vec<FileHash>,
@@ -54,6 +59,7 @@ pub struct ValidateCacheResponse {
 
 /// Response for getting cached hashes
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GetCachedHashesResponse {
     pub cached: Vec<FileHash>,
 }

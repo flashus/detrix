@@ -94,6 +94,7 @@ pub async fn get_metric_value(
 
 /// Query parameters for metric history
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MetricHistoryParams {
     #[serde(default = "default_history_limit")]
     pub limit: i64,

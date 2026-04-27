@@ -21,16 +21,37 @@ pub use types::{
     AgentOutgoingTx, IncomingAgentMessage, OutgoingAgentMessage, RegisterResult, VariableInfo,
 };
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use detrix_core::ConnectionId;
+use detrix_core::{Connection, ConnectionId};
 use detrix_logging::{error, info, warn};
 use detrix_ports::ConnectionRepositoryRef;
 
 use self::helpers::{extract_request_id, semver_compare, short_id, SemverCmp};
 use self::types::AgentInfo;
 
+fn stable_agent_identity_hostname(agent_id: &str) -> &str {
+    agent_id
+}
+
 impl AgentConnectionManager {
+    pub fn set_adapter_lifecycle_manager(
+        &self,
+        mgr: Arc<crate::services::AdapterLifecycleManager>,
+    ) {
+        if let Ok(mut guard) = self.adapter_lifecycle_manager.write() {
+            *guard = Some(mgr);
+        }
+    }
+
+    fn adapter_lifecycle_manager(&self) -> Option<Arc<crate::services::AdapterLifecycleManager>> {
+        self.adapter_lifecycle_manager
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
     /// Get the connection repository reference (for testing and status queries).
     pub fn connection_repo(&self) -> &ConnectionRepositoryRef {
         &self.connection_repo
@@ -87,20 +108,19 @@ impl AgentConnectionManager {
             let name = format!("agent/{}/{}", short_id(&agent_id), binary_basename);
             let identity = detrix_core::ConnectionIdentity::new(
                 &name,
-                detrix_core::SourceLanguage::Go,
+                binary.language,
                 "/",
-                &hostname,
+                stable_agent_identity_hostname(&agent_id),
             );
             identities.push((
                 identity,
                 binary.binary_path.clone(),
-                0u16,
                 true, // safe_mode
             ));
         }
 
         // Create event channels BEFORE enqueuing CreateConnection
-        for (identity, _host, _port, _safe) in &identities {
+        for (identity, _host, _safe) in &identities {
             let conn_id = ConnectionId(identity.to_uuid());
             let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
             self.event_channels.insert(conn_id.clone(), Some(event_tx));
@@ -126,14 +146,14 @@ impl AgentConnectionManager {
         });
 
         // Enqueue CreateConnection for each binary
-        for (identity, host, port, safe_mode) in &identities {
+        for (identity, binary_path, safe_mode) in &identities {
             let conn_id = ConnectionId(identity.to_uuid());
             let _ = outgoing_tx.send(OutgoingAgentMessage::CreateConnection {
                 connection_id: conn_id.0.clone(),
-                language: "go".to_string(),
-                binary_path: identity.name.clone(),
-                host: host.clone(),
-                port: *port as u32,
+                language: identity.language.as_str().to_string(),
+                binary_path: binary_path.clone(),
+                host: hostname.clone(), // actual agent hostname, not the binary path
+                port: 0,                // port not applicable for agent-managed (eBPF) connections
                 safe_mode: *safe_mode,
             });
         }
@@ -141,25 +161,32 @@ impl AgentConnectionManager {
         // Pre-compute connection IDs for post-batch routing
         let conn_ids: Vec<ConnectionId> = identities
             .iter()
-            .map(|(identity, _, _, _)| ConnectionId(identity.to_uuid()))
+            .map(|(identity, _, _)| ConnectionId(identity.to_uuid()))
             .collect();
 
         // ── Release write lock (drop guard) ──
 
         // ── No lock: SQLite batch ──
         let mut connections = Vec::with_capacity(conn_ids.len());
-        for (identity, host, port, safe) in &identities {
-            let mut conn =
-                detrix_core::Connection::new_with_identity(identity.clone(), host.clone(), *port)
-                    .map_err(|e| {
-                    detrix_core::Error::Adapter(format!("Invalid connection identity: {e}"))
-                })?;
+        for (identity, binary_path, safe) in &identities {
+            let mut conn = detrix_core::Connection::new_with_identity(
+                identity.clone(),
+                binary_path.clone(),
+                0,
+            )
+            .map_err(|e| {
+                detrix_core::Error::Adapter(format!("Invalid connection identity: {e}"))
+            })?;
             conn.safe_mode = *safe;
+            conn.hostname = hostname.clone();
             connections.push(conn);
         }
 
         match self.connection_repo.save_batch(&connections).await {
             Ok(_) => {
+                for conn in &connections {
+                    self.cleanup_stale_connections(conn).await;
+                }
                 // Populate routing table only after successful commit
                 for conn_id in conn_ids {
                     self.connection_to_agent
@@ -189,6 +216,77 @@ impl AgentConnectionManager {
                 status,
                 error: _,
             } => {
+                let was_connected = matches!(status, detrix_core::ConnectionStatus::Connected);
+                let was_disconnected = matches!(
+                    status,
+                    detrix_core::ConnectionStatus::Disconnected
+                        | detrix_core::ConnectionStatus::Failed(_)
+                );
+
+                if let Some(adapter_mgr) = self.adapter_lifecycle_manager() {
+                    if was_connected && !adapter_mgr.has_adapter(&connection_id).await {
+                        match self.connection_repo.find_by_id(&connection_id).await {
+                            Ok(Some(conn)) => {
+                                if let Err(e) = adapter_mgr
+                                    .start_adapter(
+                                        connection_id.clone(),
+                                        &conn.host,
+                                        conn.port,
+                                        conn.language,
+                                        None,
+                                        None,
+                                        conn.safe_mode,
+                                    )
+                                    .await
+                                {
+                                    warn!(
+                                        connection_id = %connection_id.0,
+                                        error = %e,
+                                        "Failed to start RemoteAdapter after agent reported connected"
+                                    );
+                                    if let Err(update_err) = self
+                                        .connection_repo
+                                        .update_status(
+                                            &connection_id,
+                                            detrix_core::ConnectionStatus::Failed(e.to_string()),
+                                        )
+                                        .await
+                                    {
+                                        warn!(
+                                            connection_id = %connection_id.0,
+                                            error = %update_err,
+                                            "Failed to mark connection as failed after RemoteAdapter start error"
+                                        );
+                                    }
+                                    return;
+                                }
+                            }
+                            Ok(None) => {
+                                warn!(
+                                    connection_id = %connection_id.0,
+                                    "Agent reported connected for unknown connection"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    connection_id = %connection_id.0,
+                                    error = %e,
+                                    "Failed to load connection after agent reported connected"
+                                );
+                                return;
+                            }
+                        }
+                    } else if was_disconnected && adapter_mgr.has_adapter(&connection_id).await {
+                        if let Err(e) = adapter_mgr.stop_adapter(&connection_id).await {
+                            warn!(
+                                connection_id = %connection_id.0,
+                                error = %e,
+                                "Failed to stop RemoteAdapter after agent disconnect"
+                            );
+                        }
+                    }
+                }
+
                 if let Err(e) = self
                     .connection_repo
                     .update_status(&connection_id, status.clone())
@@ -200,6 +298,7 @@ impl AgentConnectionManager {
                         "Failed to update connection status from agent"
                     );
                 }
+
                 if let Some(ref tx) = self.system_event_tx {
                     let event = match status {
                         detrix_core::ConnectionStatus::Disconnected => {
@@ -360,13 +459,14 @@ impl AgentConnectionManager {
 
         // Handle removed: cancel pending, cleanup, disconnect
         for removed_path in &removed_paths {
+            let removed_binary = current_paths[removed_path.as_str()];
             let binary_basename = removed_path.rsplit('/').next().unwrap_or(removed_path);
             let name = format!("agent/{}/{}", short_id(agent_id), binary_basename);
             let identity = detrix_core::ConnectionIdentity::new(
                 &name,
-                detrix_core::SourceLanguage::Go,
+                removed_binary.language,
                 "/",
-                &entry.hostname,
+                stable_agent_identity_hostname(agent_id),
             );
             let conn_id = ConnectionId(identity.to_uuid());
 
@@ -406,9 +506,9 @@ impl AgentConnectionManager {
             let name = format!("agent/{}/{}", short_id(agent_id), binary_basename);
             let identity = detrix_core::ConnectionIdentity::new(
                 &name,
-                detrix_core::SourceLanguage::Go,
+                binary.language,
                 "/",
-                &entry.hostname,
+                stable_agent_identity_hostname(agent_id),
             );
             let conn_id = ConnectionId(identity.to_uuid());
 
@@ -424,10 +524,10 @@ impl AgentConnectionManager {
                 .outgoing_tx
                 .send(OutgoingAgentMessage::CreateConnection {
                     connection_id: conn_id.0.clone(),
-                    language: "go".to_string(),
+                    language: identity.language.as_str().to_string(),
                     binary_path: binary.binary_path.clone(),
-                    host: binary.binary_path.clone(),
-                    port: 0,
+                    host: entry.hostname.clone(), // actual agent hostname
+                    port: 0, // port not applicable for agent-managed connections
                     safe_mode: true,
                 });
 
@@ -440,6 +540,7 @@ impl AgentConnectionManager {
                     });
             if let Ok(ref mut c) = conn {
                 c.safe_mode = true;
+                c.hostname = entry.hostname.clone();
                 if let Err(e) = self
                     .connection_repo
                     .save_batch(std::slice::from_ref(c))
@@ -448,6 +549,7 @@ impl AgentConnectionManager {
                     error!(connection_id = %conn_id.0, error = %e, "Failed to save added connection");
                     continue;
                 }
+                self.cleanup_stale_connections(c).await;
             } else {
                 continue;
             }
@@ -464,6 +566,73 @@ impl AgentConnectionManager {
     /// Used by AdapterLifecycleManager.start_adapter().
     pub fn is_agent_managed(&self, id: &ConnectionId) -> bool {
         self.connection_to_agent.contains_key(id)
+    }
+
+    async fn cleanup_stale_connections(&self, connection: &Connection) {
+        let stale_ids = match self
+            .connection_repo
+            .find_stale_same_project(
+                connection.name.as_deref().unwrap_or_default(),
+                connection.language.as_str(),
+                &connection.workspace_root,
+                &connection.id,
+            )
+            .await
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(
+                    connection_id = %connection.id.0,
+                    error = %e,
+                    "Failed to look up stale agent connections"
+                );
+                return;
+            }
+        };
+
+        for stale_id in stale_ids {
+            match self
+                .metric_repo
+                .migrate_connection_id(&stale_id, &connection.id)
+                .await
+            {
+                Ok(migrated) if migrated > 0 => {
+                    info!(
+                        from = %stale_id.0,
+                        to = %connection.id.0,
+                        migrated,
+                        "Migrated metrics from stale agent connection"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(
+                        stale_id = %stale_id.0,
+                        error = %e,
+                        "Failed to migrate metrics from stale agent connection"
+                    );
+                }
+            }
+
+            if let Err(e) = self.connection_repo.delete(&stale_id).await {
+                warn!(
+                    stale_id = %stale_id.0,
+                    error = %e,
+                    "Failed to delete stale agent connection"
+                );
+                continue;
+            }
+
+            self.cancel_pending_for_connection(&stale_id);
+            self.event_channels.remove(&stale_id);
+            self.event_receivers.remove(&stale_id);
+            self.connection_requests.remove(&stale_id);
+            self.connection_to_agent.remove(&stale_id);
+
+            if let Some(ref tx) = self.system_event_tx {
+                let _ = tx.send(detrix_core::SystemEvent::connection_closed(stale_id));
+            }
+        }
     }
 
     /// Route a OutgoingAgentMessage to the agent owning connection_id.
@@ -665,6 +834,42 @@ impl AgentConnectionManager {
             // e. Remove from routing table
             self.connection_to_agent.remove(&conn_id);
         }
+    }
+
+    /// Send a Ping to the named agent and await a Pong response.
+    ///
+    /// Inserts `"_ping_"` into `pending_requests` so the Pong dispatch handler
+    /// can resolve it. Only one in-flight ping per agent manager at a time —
+    /// a concurrent caller will overwrite the sender and the first caller's
+    /// oneshot will be dropped (it will see a channel-closed error).
+    pub async fn ping_agent(
+        &self,
+        agent_id: &str,
+        timeout: Duration,
+    ) -> Result<(), detrix_core::Error> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending_requests.insert("_ping_".to_string(), tx);
+
+        let sent = self
+            .agents
+            .get(agent_id)
+            .map(|a| a.outgoing_tx.send(OutgoingAgentMessage::Ping).is_ok())
+            .unwrap_or(false);
+
+        if !sent {
+            self.pending_requests.remove("_ping_");
+            return Err(detrix_core::Error::Adapter(
+                "agent not found or channel closed".to_string(),
+            ));
+        }
+
+        tokio::time::timeout(timeout, rx)
+            .await
+            .map_err(|_| detrix_core::Error::Adapter("ping timed out".to_string()))
+            .and_then(|r| {
+                r.map_err(|_| detrix_core::Error::Adapter("ping channel dropped".to_string()))
+            })
+            .map(|_| ())
     }
 
     /// Resolve a pending request with the given response.

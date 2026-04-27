@@ -80,6 +80,142 @@ fn pretty_print_event(event: &serde_json::Value) -> String {
     output
 }
 
+fn json_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    Some(current)
+}
+
+fn map_entries<'a>(
+    map_value: &'a serde_json::Value,
+    label: &str,
+) -> Result<&'a Vec<serde_json::Value>, String> {
+    if map_value
+        .get("__type")
+        .and_then(|value| value.as_str())
+        .map_or(true, |type_name| !type_name.starts_with("map["))
+    {
+        return Err(format!("{label} is not a captured Go map: {map_value}"));
+    }
+
+    map_value
+        .get("entries")
+        .and_then(|entries| entries.as_array())
+        .ok_or_else(|| format!("{label}.entries missing or not an array: {map_value}"))
+}
+
+fn validate_string_map(
+    mismatches: &mut Vec<String>,
+    label: &str,
+    root: &serde_json::Value,
+    path: &[&str],
+    expected: &[(&str, &str)],
+) {
+    let Some(map_value) = json_path(root, path) else {
+        mismatches.push(format!("{label} missing at path {}", path.join(".")));
+        return;
+    };
+
+    let entries = match map_entries(map_value, label) {
+        Ok(entries) => entries,
+        Err(err) => {
+            mismatches.push(err);
+            return;
+        }
+    };
+
+    for entry in entries {
+        let key = entry.get("key").and_then(|value| value.as_str());
+        let value = entry.get("value").and_then(|value| value.as_str());
+        if matches!(
+            key,
+            None | Some("") | Some("<error: string data read failed>")
+        ) || matches!(
+            value,
+            None | Some("") | Some("<error: string data read failed>")
+        ) {
+            mismatches.push(format!("{label} has malformed entry: {entry}"));
+        }
+    }
+
+    for (expected_key, expected_value) in expected {
+        let found = entries.iter().any(|entry| {
+            entry.get("key").and_then(|value| value.as_str()) == Some(*expected_key)
+                && entry.get("value").and_then(|value| value.as_str()) == Some(*expected_value)
+        });
+        if !found {
+            mismatches.push(format!(
+                "{label} missing {{\"key\":\"{expected_key}\",\"value\":\"{expected_value}\"}}; entries={entries:?}"
+            ));
+        }
+    }
+}
+
+fn validate_tag_map(
+    mismatches: &mut Vec<String>,
+    label: &str,
+    root: &serde_json::Value,
+    path: &[&str],
+) {
+    let Some(map_value) = json_path(root, path) else {
+        mismatches.push(format!("{label} missing at path {}", path.join(".")));
+        return;
+    };
+
+    let entries = match map_entries(map_value, label) {
+        Ok(entries) => entries,
+        Err(err) => {
+            mismatches.push(err);
+            return;
+        }
+    };
+
+    for entry in entries {
+        let key = entry.get("key").and_then(|value| value.as_str());
+        if matches!(
+            key,
+            None | Some("") | Some("<error: string data read failed>")
+        ) {
+            mismatches.push(format!("{label} has malformed key entry: {entry}"));
+        }
+        let Some(value) = entry.get("value") else {
+            mismatches.push(format!("{label} entry missing value: {entry}"));
+            continue;
+        };
+        if value.get("Key").and_then(|field| field.as_str()).is_none()
+            || value
+                .get("Value")
+                .and_then(|field| field.as_str())
+                .is_none()
+        {
+            mismatches.push(format!("{label} value should be Tag struct: {entry}"));
+        }
+    }
+
+    for (expected_key, expected_value) in [("tag0", "value0"), ("tag1", "value1")] {
+        let found = entries.iter().any(|entry| {
+            entry.get("key").and_then(|value| value.as_str()) == Some(expected_key)
+                && entry
+                    .get("value")
+                    .and_then(|value| value.get("Key"))
+                    .and_then(|value| value.as_str())
+                    == Some(expected_key)
+                && entry
+                    .get("value")
+                    .and_then(|value| value.get("Value"))
+                    .and_then(|value| value.as_str())
+                    == Some(expected_value)
+        });
+        if !found {
+            mismatches.push(format!(
+                "{label} missing tag {expected_key}->{expected_value}; entries={entries:?}"
+            ));
+        }
+    }
+}
+
 /// Recursively pretty-print a JSON value with smart formatting
 /// - Simple arrays (scalars only) are printed inline
 /// - Complex types (structs, nested arrays) are pretty-printed
@@ -572,6 +708,13 @@ async fn test_ebpf_captures_nested_types() {
             .expect("No values in Order event");
         if let Some(val) = values.first() {
             let value_json = val["valueJson"].as_str().unwrap_or("");
+            let parsed_value = match serde_json::from_str::<serde_json::Value>(value_json) {
+                Ok(value) => Some(value),
+                Err(err) => {
+                    mismatches.push(format!("Order[{idx}] valueJson is invalid JSON: {err}"));
+                    None
+                }
+            };
 
             // Check ID field - should be numeric
             if !value_json.contains("\"ID\":") {
@@ -683,6 +826,14 @@ async fn test_ebpf_captures_nested_types() {
                     idx
                 ));
             }
+            if let Some(order_value) = parsed_value.as_ref() {
+                validate_tag_map(
+                    &mut mismatches,
+                    &format!("Order[{idx}].Tags"),
+                    order_value,
+                    &["Tags"],
+                );
+            }
 
             // Check Extra map (map[string]string) — verify key-value pairs are correct,
             // not just keys with empty values. This catches the slot layout bug where
@@ -690,19 +841,14 @@ async fn test_ebpf_captures_nested_types() {
             if !value_json.contains("\"Extra\":") {
                 mismatches.push(format!("Order[{}] missing Extra", idx));
             }
-            // Known fixture values: Extra["source"]="api", Extra["version"]="1.0"
-            // The valueJson contains these as substrings (with various escaping)
-            if !value_json.contains("api") {
-                mismatches.push(format!(
-                    "Order[{}] Extra should contain source→\"api\" (slot layout may be wrong)",
-                    idx
-                ));
-            }
-            if !value_json.contains("1.0") {
-                mismatches.push(format!(
-                    "Order[{}] Extra should contain version→\"1.0\" (slot layout may be wrong)",
-                    idx
-                ));
+            if let Some(order_value) = parsed_value.as_ref() {
+                validate_string_map(
+                    &mut mismatches,
+                    &format!("Order[{idx}].Product.Category.Metadata.Extra"),
+                    order_value,
+                    &["Product", "Category", "Metadata", "Extra"],
+                    &[("source", "api"), ("version", "1.0")],
+                );
             }
 
             // Check Total (float) - should be a numeric value

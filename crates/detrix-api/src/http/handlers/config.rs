@@ -120,6 +120,7 @@ pub async fn validate_config(
 
 /// Query parameters for get_config
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GetConfigQuery {
     /// Optional path to specific config section
     pub path: Option<String>,

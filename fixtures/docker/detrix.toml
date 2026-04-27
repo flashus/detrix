@@ -15,7 +15,7 @@ port = 50061
 path = "/data/detrix/data.db"
 
 [vfs]
-source_priority = ["bridge", "control_plane", "disk"]
+source_priority = ["agent", "bridge", "control_plane", "disk"]
 fetch_timeout_seconds = 10
 
 [ebpf]

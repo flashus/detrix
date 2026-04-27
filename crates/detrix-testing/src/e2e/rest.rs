@@ -716,7 +716,7 @@ impl ApiClient for RestClient {
         let response = self
             .client
             .get(format!(
-                "{}/api/v1/events?metric_name={}&limit={}",
+                "{}/api/v1/events?metricName={}&limit={}",
                 self.base_url, metric_name, limit
             ))
             .send()

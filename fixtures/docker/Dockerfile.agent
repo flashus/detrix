@@ -7,16 +7,26 @@ ENV RUSTUP_TOOLCHAIN=1.94.1
 ENV CARGO_TARGET_DIR=/build/target
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
-COPY crates/detrix-agent/Cargo.toml    crates/detrix-agent/
-COPY crates/detrix-api/Cargo.toml       crates/detrix-api/
+COPY crates/detrix-api/Cargo.toml         crates/detrix-api/
+COPY crates/detrix-agent/Cargo.toml       crates/detrix-agent/
 COPY crates/detrix-application/Cargo.toml crates/detrix-application/
-COPY crates/detrix-config/Cargo.toml    crates/detrix-config/
-COPY crates/detrix-core/Cargo.toml      crates/detrix-core/
-COPY crates/detrix-ebpf/Cargo.toml      crates/detrix-ebpf/
-COPY crates/detrix-logging/Cargo.toml   crates/detrix-logging/
-COPY crates/detrix-ports/Cargo.toml     crates/detrix-ports/
-RUN for dir in crates/*/; do mkdir -p "${dir}src" && touch "${dir}src/lib.rs"; done && \
-    touch crates/detrix-cli/src/main.rs
+COPY crates/detrix-cli/Cargo.toml         crates/detrix-cli/
+COPY crates/detrix-config/Cargo.toml      crates/detrix-config/
+COPY crates/detrix-core/Cargo.toml        crates/detrix-core/
+COPY crates/detrix-dap/Cargo.toml         crates/detrix-dap/
+COPY crates/detrix-ebpf/Cargo.toml        crates/detrix-ebpf/
+COPY crates/detrix-logging/Cargo.toml     crates/detrix-logging/
+COPY crates/detrix-lsp/Cargo.toml         crates/detrix-lsp/
+COPY crates/detrix-output/Cargo.toml      crates/detrix-output/
+COPY crates/detrix-ports/Cargo.toml       crates/detrix-ports/
+COPY crates/detrix-storage/Cargo.toml     crates/detrix-storage/
+COPY crates/detrix-testing/Cargo.toml     crates/detrix-testing/
+COPY crates/detrix-tui/Cargo.toml         crates/detrix-tui/
+COPY clients/rust/Cargo.toml              clients/rust/
+RUN for dir in crates/*/; do \
+        mkdir -p "${dir}src" && touch "${dir}src/lib.rs" "${dir}src/main.rs"; \
+    done && \
+    mkdir -p clients/rust/src && touch clients/rust/src/lib.rs
 RUN cargo fetch --locked
 
 # ── Stage 2: Compile ──────────────────────────────────────────────
@@ -26,6 +36,7 @@ COPY clients/rust clients/rust
 COPY detrix.toml detrix.minimal.toml ./
 RUN find crates clients/rust -name "*.rs" -exec touch {} +
 RUN --mount=type=cache,target=/build/target \
+    mkdir -p /out && \
     cargo build --release --locked --bin detrix && \
     cp /build/target/release/detrix /out/detrix
 
@@ -37,9 +48,28 @@ RUN --mount=type=cache,target=/build/target \
 # "kernel headers not found for version X.Y.Z".
 # Workaround: mount host headers into the container:
 #   -v /usr/src/linux-headers-$(uname -r):/usr/src/linux-headers-$(uname -r):ro
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    clang linux-headers-amd64 libgcc-s1 libllvm14 ca-certificates && \
+# Reuse the same Debian/Go base as the eBPF Go fixtures/demo to avoid pulling
+# another runtime base image in local Docker workflows.
+FROM golang:1.24.13-bookworm
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    headers_pkg="linux-headers-${arch}"; \
+    case "${arch}" in \
+        amd64) multiarch="x86_64-linux-gnu" ;; \
+        arm64) multiarch="aarch64-linux-gnu" ;; \
+        *) echo "Unsupported architecture: ${arch}" >&2; exit 1 ;; \
+    esac; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        clang \
+        llvm \
+        "${headers_pkg}" \
+        linux-libc-dev \
+        libbpf-dev \
+        libgcc-s1 \
+        libllvm14 \
+        ca-certificates; \
+    ln -sf "/usr/include/${multiarch}/asm" /usr/include/asm; \
     rm -rf /var/lib/apt/lists/*
 COPY --from=builder /out/detrix /usr/local/bin/detrix
 ENTRYPOINT ["detrix", "agent", "start"]

@@ -817,7 +817,7 @@ source_host = "detrix-local"
 # - bridge: fetch from the MCP bridge's local file server (Docker/remote mode)
 # - disk: read directly from the daemon's local filesystem
 # Default: ["control_plane", "bridge", "disk"]
-# source_priority = ["control_plane", "bridge", "disk"]
+# source_priority = ["agent", "control_plane", "bridge", "disk"]
 
 # Timeout for fetching files from control_plane or bridge sources (seconds).
 # Default: 30

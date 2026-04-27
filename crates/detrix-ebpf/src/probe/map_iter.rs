@@ -106,6 +106,17 @@ pub fn read_go_map(
     }
 
     // Try to detect Swiss Table by checking dirLen (bytes 24-32)
+    let map_count = match le_bytes_to_u64(&header[0..8]) {
+        Ok(v) => v,
+        Err(e) => {
+            return CapturedValue::Map {
+                key_type: key_type_name,
+                value_type: val_type_name,
+                entries: vec![],
+                reason: e,
+            }
+        }
+    };
     let dir_len = match le_bytes_to_i64(&header[24..32]) {
         Ok(v) => v,
         Err(e) => {
@@ -154,36 +165,12 @@ pub fn read_go_map(
     // If bytes[8] < 16 (only 4 bits used in classic flags) AND bytes[9] < 32 (B is log2,
     // rarely exceeds ~30), treat as classic. P(Swiss misidentified) ≈ 6.25% × 12.5% < 1%.
     //
-    // KNOWN LIMITATION: Swiss Table detection during GC map evacuation (C-5)
-    //
-    // Classic maps with 1-64 buckets (B=0..6) that are currently undergoing GC evacuation
-    // may be misidentified as Swiss Table maps. During evacuation, the `oldbuckets` field
-    // is non-zero (a valid heap pointer), which causes `dir_ptr` to be non-zero. Combined
-    // with a `dir_len` value that happens to fall in the 1..64 range (interpreting random
-    // header bytes as dirLen), the bucket-count-threshold heuristic incorrectly classifies
-    // the map as Swiss Table.
-    //
-    // Impact: The Swiss Table iterator reads garbage memory and produces wrong entries with
-    // no error signal. The fallback to classic iterator only triggers on explicit failure,
-    // not on silently wrong results.
-    //
-    // Future fix: Read the B field directly from the hmap header (byte 9) before applying
-    // the Swiss Table heuristic. If B <= 6 (1-64 buckets), force classic map iteration
-    // regardless of the dirLen/dirPtr values, since Swiss Table maps always have at least
-    // 8 slots per group and a different structural layout.
-    //
-    // FIX APPLIED: Read B from byte 9 before the heuristic. Classic maps with B <= 6
-    // have at most 64 buckets (2^6). Swiss Table maps always have dirLen as a power of 2
-    // >= 8 (or 0 for small maps). So if the header looks like a small classic map, force
-    // classic iteration to avoid GC evacuation misidentification.
+    // A Swiss seed can occasionally look like classic flags/B. If that happens,
+    // the classic reader sees Swiss interleaved key/value slots as extra keys.
+    // After a classic parse, we compare collected entries to header count and
+    // retry Swiss when the result is impossible for a valid classic map.
     let b_field = header[9];
-    let is_swiss = if b_field <= 6 && b_field > 0 {
-        // Classic map with 1-64 buckets (B=1..6). Force classic iteration.
-        // This prevents GC evacuation misidentification (C-5): during evacuation,
-        // oldbuckets is a heap pointer, making dir_len/dir_ptr look Swiss-like.
-        // Swiss Table maps never have B in 1..6 — they use groups of 8+ slots.
-        false
-    } else if dir_len > 0 && dir_len <= 64 {
+    let is_swiss = if dir_len > 0 && dir_len <= 64 {
         // Large-directory mode — only Swiss Table has small positive dirLen.
         // Classic oldbuckets during growth is a heap pointer (>> 64).
         true
@@ -251,7 +238,28 @@ pub fn read_go_map(
             mem_reader,
             pid,
         ) {
-            Ok(e) => e,
+            Ok(e) => {
+                if map_count > 0 && e.len() as u64 > map_count {
+                    detrix_logging::debug!(
+                        "[map_iter] Classic produced {} entries but header count is {}; retrying Swiss Table",
+                        e.len(),
+                        map_count
+                    );
+                    read_swiss_map_inner(
+                        map_ptr,
+                        key_nested,
+                        val_nested,
+                        &key_type_name,
+                        &val_type_name,
+                        config,
+                        mem_reader,
+                        pid,
+                    )
+                    .unwrap_or(e)
+                } else {
+                    e
+                }
+            }
             Err(reason) => {
                 detrix_logging::debug!(
                     "[map_iter] Classic failed ({reason}), falling back to Swiss Table"
@@ -1121,6 +1129,24 @@ mod tests {
         }
     }
 
+    fn string_nested_type() -> NestedType {
+        NestedType::Scalar(TypeInfo {
+            name: "string".to_string(),
+            size: VariableSize::QWord,
+            byte_size: 0,
+            is_string: true,
+            is_slice: false,
+            is_array: false,
+            is_struct: false,
+            is_pointer: false,
+            is_map: false,
+            array_element_count: 0,
+            element_byte_size: 0,
+            array_element_type: String::new(),
+            slice_element_type: String::new(),
+        })
+    }
+
     #[test]
     fn classic_map_nil_map_returns_empty() {
         let reader = MockMemReader::new();
@@ -1198,6 +1224,61 @@ mod tests {
         // and attempt classic iteration (won't find entries without bucket data, but won't panic)
         let _result = read_go_map(0x7000, None, None, &CaptureConfig::default(), &reader, 1234);
         // Key assertion: it should not panic and should not attempt Swiss Table group parsing
+    }
+
+    #[test]
+    fn swiss_small_map_with_classic_looking_seed_falls_back_from_bad_classic_parse() {
+        // Swiss small maps have dirLen=0, which overlaps with classic hmap oldbuckets=0.
+        // If the random seed bytes happen to look like classic flags/B, the heuristic may
+        // try the classic iterator first. A classic parse of Swiss group memory reads the
+        // interleaved values as more keys, so it produces more entries than the map's used
+        // count. That must trigger a Swiss retry.
+        let mut reader = MockMemReader::new();
+        let mut header = vec![0u8; 48];
+        header[0..8].copy_from_slice(&2u64.to_le_bytes()); // used
+        header[8] = 0; // seed byte that looks like classic flags
+        header[9] = 1; // seed byte that looks like classic B
+        header[16..24].copy_from_slice(&0x9000u64.to_le_bytes()); // dirPtr -> group
+        header[24..32].copy_from_slice(&0i64.to_le_bytes()); // small-map mode
+        reader.put(0x8000, header);
+
+        let mut group = vec![0u8; 8 + 8 * 32];
+        group[0] = 1; // full
+        group[1] = 2; // full
+        for ctrl in &mut group[2..8] {
+            *ctrl = CTRL_EMPTY;
+        }
+
+        let write_string_slot = |group: &mut [u8], offset: usize, ptr: u64, len: u64| {
+            group[offset..offset + 8].copy_from_slice(&ptr.to_le_bytes());
+            group[offset + 8..offset + 16].copy_from_slice(&len.to_le_bytes());
+        };
+        write_string_slot(&mut group, 8, 0x10000, 6); // key slot 0
+        write_string_slot(&mut group, 24, 0x10010, 3); // value slot 0
+        write_string_slot(&mut group, 40, 0x10020, 7); // key slot 1
+        write_string_slot(&mut group, 56, 0x10030, 3); // value slot 1
+        reader.put(0x9000, group);
+
+        let string_nested = string_nested_type();
+        let result = read_go_map(
+            0x8000,
+            Some(&string_nested),
+            Some(&string_nested),
+            &CaptureConfig::default(),
+            &reader,
+            1234,
+        );
+
+        match result {
+            CapturedValue::Map { entries, .. } => {
+                assert_eq!(
+                    entries.len(),
+                    2,
+                    "Swiss retry should return only the two full slots"
+                );
+            }
+            other => panic!("Expected Map, got {other:?}"),
+        }
     }
 
     #[test]

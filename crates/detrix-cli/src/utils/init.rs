@@ -103,19 +103,16 @@ impl InfrastructureComponents {
             timeout, max_size,
         ));
 
-        // Create AgentConnectionManager if agent mode is configured
-        let agent_manager: Option<AgentConnectionManagerRef> = agent_config
-            .as_ref()
-            .filter(|cfg| {
-                !cfg.agent_tokens.is_empty() || cfg.min_compatible_agent_version.is_some()
-            })
-            .map(|cfg| {
-                Arc::new(AgentConnectionManager::new(
-                    Arc::clone(&self.storage) as ConnectionRepositoryRef,
-                    Some(cfg.clone()),
-                    None, // system_event_tx — not available yet; events still flow via dispatch
-                ))
-            });
+        // Create AgentConnectionManager whenever agent support is available on the server.
+        // Authentication remains optional: an empty token list means dev mode / allow-all.
+        let agent_manager: Option<AgentConnectionManagerRef> = agent_config.as_ref().map(|cfg| {
+            Arc::new(AgentConnectionManager::new(
+                Arc::clone(&self.storage) as ConnectionRepositoryRef,
+                Arc::clone(&self.storage) as detrix_application::MetricRepositoryRef,
+                Some(cfg.clone()),
+                None, // system_event_tx — not available yet; events still flow via dispatch
+            ))
+        });
 
         // Build available sources, adding AgentFileSource if agent mode is active
         let mut available_sources: Vec<FileSourceRef> = vec![
@@ -176,7 +173,8 @@ impl InfrastructureComponents {
             }
         }
 
-        let app_context = AppContext::new(
+        let agent_manager_for_context = agent_manager.clone();
+        let mut app_context = AppContext::new(
             Arc::clone(&self.storage) as MetricRepositoryRef,
             Arc::clone(&self.storage) as EventRepositoryRef,
             Arc::clone(&self.storage) as ConnectionRepositoryRef,
@@ -198,6 +196,10 @@ impl InfrastructureComponents {
             purity_analyzers,
             agent_manager,
         );
+        if let Some(mgr) = agent_manager_for_context {
+            mgr.set_adapter_lifecycle_manager(app_context.adapter_lifecycle_manager.clone());
+            app_context = app_context.with_agent_connection_manager(mgr);
+        }
         AppContextWithStorage {
             app_context,
             storage: self.storage,

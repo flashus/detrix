@@ -209,6 +209,16 @@ fn default_auto_reconnect() -> bool {
 }
 
 impl Connection {
+    /// Returns true when this connection is owned by a Detrix agent rather than a local adapter.
+    ///
+    /// Agent-managed connections use a stable persisted name prefix (`agent/<id>/...`) so the
+    /// daemon can recognize them before the in-memory routing table is rebuilt on startup.
+    pub fn is_agent_managed(&self) -> bool {
+        self.name
+            .as_deref()
+            .is_some_and(|name| name.starts_with("agent/"))
+    }
+
     /// Returns the workspace root if it's a valid, usable path.
     ///
     /// Filters out placeholder values ("/unknown") and empty strings.

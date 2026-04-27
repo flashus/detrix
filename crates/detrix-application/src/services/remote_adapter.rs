@@ -104,26 +104,17 @@ impl RemoteAdapter {
 
 #[async_trait]
 impl DapAdapter for RemoteAdapter {
-    /// Start the adapter — wait for ConnectionUpdate(Connected) with 10s timeout.
-    /// If already connected (registered before start_adapter was called), return immediately.
+    /// Start the adapter.
+    /// For agent-managed connections the server already received ConnectionUpdate(Connected),
+    /// so startup only needs to confirm the routing entry still exists.
     async fn start(&self) -> Result<()> {
-        // For agent connections, the adapter is "started" when the agent registers
-        // and creates connections. We just need to verify the agent is responsive.
-        // A quick Ping confirms liveness.
-        match self
-            .send_and_await_raw(
-                OutgoingAgentMessage::Ping,
-                std::time::Duration::from_secs(10),
-            )
-            .await
-        {
-            Ok(IncomingAgentMessage::Pong) => Ok(()),
-            Ok(other) => Err(Error::Adapter(format!(
-                "Unexpected response to Ping: {other:?}"
-            ))),
-            Err(e) => Err(Error::Adapter(format!(
-                "Failed to start agent adapter: {e}"
-            ))),
+        if self.agent_manager.is_agent_managed(&self.connection_id) {
+            self.confirm_alive();
+            Ok(())
+        } else {
+            Err(Error::Adapter(
+                "Agent connection is no longer routed".to_string(),
+            ))
         }
     }
 
@@ -141,40 +132,39 @@ impl DapAdapter for RemoteAdapter {
         Ok(())
     }
 
-    /// Ensure connected — skip Ping if confirmed within 30s; else Ping with 5s timeout.
+    /// Ensure connected — verify the connection is still routed AND recently active.
+    ///
+    /// A stale connection (no liveness proof for > 60 s, i.e. 2× the default
+    /// 30 s heartbeat interval) is treated as unhealthy even if still in the
+    /// routing table, because the agent may be dead but not yet unregistered.
     async fn ensure_connected(&self) -> Result<()> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let last = self.last_confirmed_at.load(Ordering::Relaxed);
-
-        if now.saturating_sub(last) < 30_000 {
-            // Recently confirmed alive
-            return Ok(());
-        }
-
         if self.circuit.is_open() {
             return Err(Error::Adapter("agent circuit open".to_string()));
         }
 
-        // Send Ping, await Pong within 5s
-        match self
-            .circuit
-            .call(|| {
-                self.send_and_await_raw(
-                    OutgoingAgentMessage::Ping,
-                    std::time::Duration::from_secs(5),
-                )
-            })
-            .await
-        {
-            Ok(IncomingAgentMessage::Pong) => Ok(()),
-            Ok(other) => Err(Error::Adapter(format!(
-                "Unexpected response to Ping: {other:?}"
-            ))),
-            Err(e) => Err(Error::Adapter(format!("ensure_connected failed: {e}"))),
+        if !self.agent_manager.is_agent_managed(&self.connection_id) {
+            return Err(Error::Adapter("agent connection is not routed".to_string()));
         }
+
+        // Reject connections whose last liveness proof is older than 60 s.
+        // last_confirmed_at == 0 means start() hasn't been called yet (new connection),
+        // so we skip the staleness check in that case.
+        const STALE_THRESHOLD_MS: u64 = 60_000;
+        let last = self.last_confirmed_at.load(Ordering::Relaxed);
+        if last > 0 {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            if now_ms.saturating_sub(last) > STALE_THRESHOLD_MS {
+                return Err(Error::Adapter(
+                    "agent connection is stale (no liveness proof)".to_string(),
+                ));
+            }
+        }
+
+        self.confirm_alive();
+        Ok(())
     }
 
     fn is_connected(&self) -> bool {

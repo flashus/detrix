@@ -299,6 +299,62 @@ impl McpClient {
     /// 1. TOON format (default from server)
     /// 2. JSON format (fallback)
     fn parse_events(&self, json: &Value) -> Vec<EventInfo> {
+        if let Some(content_items) = json
+            .get("result")
+            .and_then(|result| result.get("content"))
+            .and_then(|content| content.as_array())
+        {
+            for item in content_items {
+                let Some(text) = item.get("text").and_then(|text| text.as_str()) else {
+                    continue;
+                };
+                let trimmed = text.trim();
+
+                if !trimmed.starts_with('[') && !trimmed.starts_with('{') {
+                    continue;
+                }
+
+                if let Ok(parsed_events) = serde_json::from_str::<Vec<EventInfo>>(trimmed) {
+                    return parsed_events;
+                }
+
+                match serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
+                    Ok(json_array) => {
+                        let parsed_events: Vec<_> = json_array
+                            .iter()
+                            .filter_map(|value| self.parse_event_info_value(value))
+                            .collect();
+                        if !parsed_events.is_empty() {
+                            return parsed_events;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[DEBUG parse_events] direct JSON array parse failed: {e}; prefix={}",
+                            &trimmed.chars().take(120).collect::<String>()
+                        );
+                    }
+                }
+
+                if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    if let Ok(parsed_events) =
+                        serde_json::from_value::<Vec<EventInfo>>(json_value.clone())
+                    {
+                        return parsed_events;
+                    }
+                    if let Some(array) = json_value.as_array() {
+                        let parsed_events: Vec<_> = array
+                            .iter()
+                            .filter_map(|value| self.parse_event_info_value(value))
+                            .collect();
+                        if !parsed_events.is_empty() {
+                            return parsed_events;
+                        }
+                    }
+                }
+            }
+        }
+
         let text = match self.extract_text(json) {
             Some(t) => t,
             None => return vec![],
@@ -342,6 +398,16 @@ impl McpClient {
         // Try parsing as JSON array (server may have fallen back to JSON)
         if let Ok(parsed_events) = serde_json::from_str::<Vec<EventInfo>>(&content) {
             return parsed_events;
+        }
+
+        if let Ok(json_array) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+            let parsed_events: Vec<_> = json_array
+                .iter()
+                .filter_map(|value| self.parse_event_info_value(value))
+                .collect();
+            if !parsed_events.is_empty() {
+                return parsed_events;
+            }
         }
 
         // Try JSON from full text
@@ -399,6 +465,102 @@ impl McpClient {
             }
         }
         0
+    }
+
+    fn parse_event_info_value(&self, value: &Value) -> Option<EventInfo> {
+        let obj = value.as_object()?;
+        let metric_name = obj
+            .get("metricName")
+            .or_else(|| obj.get("metric_name"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        let value_text = obj
+            .get("value")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let timestamp_iso = obj
+            .get("timestampIso")
+            .or_else(|| obj.get("timestamp_iso"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let age_seconds = obj
+            .get("ageSeconds")
+            .or_else(|| obj.get("age_seconds"))
+            .and_then(|value| {
+                value
+                    .as_i64()
+                    .or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok()))
+            })
+            .unwrap_or_default();
+        let is_error = obj
+            .get("isError")
+            .or_else(|| obj.get("is_error"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let stack_trace = obj
+            .get("stackTrace")
+            .or_else(|| obj.get("stack_trace"))
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
+        let memory_snapshot = obj
+            .get("memorySnapshot")
+            .or_else(|| obj.get("memory_snapshot"))
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
+        let values = obj
+            .get("values")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut extra = std::collections::HashMap::new();
+        for (key, value) in obj {
+            if matches!(
+                key.as_str(),
+                "metricName"
+                    | "metric_name"
+                    | "value"
+                    | "timestampIso"
+                    | "timestamp_iso"
+                    | "ageSeconds"
+                    | "age_seconds"
+                    | "isError"
+                    | "is_error"
+                    | "stackTrace"
+                    | "stack_trace"
+                    | "memorySnapshot"
+                    | "memory_snapshot"
+                    | "values"
+            ) {
+                continue;
+            }
+            extra.insert(key.clone(), value.clone());
+        }
+
+        let event = EventInfo {
+            metric_name,
+            value: value_text,
+            timestamp_iso,
+            age_seconds,
+            is_error,
+            stack_trace,
+            memory_snapshot,
+            values,
+            extra,
+        };
+
+        if event.metric_name.is_empty() && event.values.is_empty() {
+            eprintln!(
+                "[DEBUG parse_events] parsed MCP event object without metricName/values: {}",
+                value
+            );
+        }
+
+        Some(event)
     }
 
     /// Parse system events from MCP response
@@ -904,9 +1066,9 @@ impl ApiClient for McpClient {
     }
 
     async fn wake(&self, app_url: &str, daemon_url: Option<&str>) -> ApiResult<String> {
-        let mut args = json!({ "app_url": app_url });
+        let mut args = json!({ "appUrl": app_url });
         if let Some(url) = daemon_url {
-            args["daemon_url"] = json!(url);
+            args["daemonUrl"] = json!(url);
         }
         let json = self.call("wake", args).await?;
         let text = self.extract_text(&json).unwrap_or_default();
@@ -914,7 +1076,7 @@ impl ApiClient for McpClient {
     }
 
     async fn sleep(&self, app_url: &str) -> ApiResult<String> {
-        let json = self.call("sleep", json!({ "app_url": app_url })).await?;
+        let json = self.call("sleep", json!({ "appUrl": app_url })).await?;
         let text = self.extract_text(&json).unwrap_or_default();
         Ok(ApiResponse::new(text).with_raw(json.to_string()))
     }
@@ -1037,17 +1199,14 @@ impl ApiClient for McpClient {
     }
 
     async fn close_connection(&self, connection_id: &str) -> ApiResult<()> {
-        self.call(
-            "close_connection",
-            json!({ "connection_id": connection_id }),
-        )
-        .await?;
+        self.call("close_connection", json!({ "connectionId": connection_id }))
+            .await?;
         Ok(ApiResponse::new(()))
     }
 
     async fn get_connection(&self, connection_id: &str) -> ApiResult<ConnectionInfo> {
         let json = self
-            .call("get_connection", json!({ "connection_id": connection_id }))
+            .call("get_connection", json!({ "connectionId": connection_id }))
             .await?;
 
         // Parse connection from response (simplified)
@@ -1077,7 +1236,7 @@ impl ApiClient for McpClient {
             "name": request.name,
             "location": request.location,
             "expressions": request.expressions,
-            "connection_id": request.connection_id
+            "connectionId": request.connection_id
         });
 
         if let Some(group) = &request.group {
@@ -1091,28 +1250,28 @@ impl ApiClient for McpClient {
         }
         // Introspection options
         if let Some(capture_stack_trace) = request.capture_stack_trace {
-            args["capture_stack_trace"] = json!(capture_stack_trace);
+            args["captureStackTrace"] = json!(capture_stack_trace);
         }
         if let Some(stack_trace_ttl) = request.stack_trace_ttl {
-            args["stack_trace_ttl"] = json!(stack_trace_ttl);
+            args["stackTraceTtl"] = json!(stack_trace_ttl);
         }
         if let Some(stack_trace_full) = request.stack_trace_full {
-            args["stack_trace_full"] = json!(stack_trace_full);
+            args["stackTraceFull"] = json!(stack_trace_full);
         }
         if let Some(stack_trace_head) = request.stack_trace_head {
-            args["stack_trace_head"] = json!(stack_trace_head);
+            args["stackTraceHead"] = json!(stack_trace_head);
         }
         if let Some(stack_trace_tail) = request.stack_trace_tail {
-            args["stack_trace_tail"] = json!(stack_trace_tail);
+            args["stackTraceTail"] = json!(stack_trace_tail);
         }
         if let Some(capture_memory_snapshot) = request.capture_memory_snapshot {
-            args["capture_memory_snapshot"] = json!(capture_memory_snapshot);
+            args["captureMemorySnapshot"] = json!(capture_memory_snapshot);
         }
         if let Some(snapshot_scope) = &request.snapshot_scope {
-            args["snapshot_scope"] = json!(snapshot_scope);
+            args["snapshotScope"] = json!(snapshot_scope);
         }
         if let Some(snapshot_ttl) = request.snapshot_ttl {
-            args["snapshot_ttl"] = json!(snapshot_ttl);
+            args["snapshotTtl"] = json!(snapshot_ttl);
         }
 
         let json = self.call("add_metric", args).await?;
@@ -1245,12 +1404,12 @@ impl ApiClient for McpClient {
         line: Option<u32>,
         find_variable: Option<&str>,
     ) -> ApiResult<String> {
-        let mut args = json!({ "file_path": file_path });
+        let mut args = json!({ "filePath": file_path });
         if let Some(l) = line {
             args["line"] = json!(l);
         }
         if let Some(v) = find_variable {
-            args["find_variable"] = json!(v);
+            args["findVariable"] = json!(v);
         }
 
         let json = self.call("inspect_file", args).await?;
@@ -1272,7 +1431,7 @@ impl ApiClient for McpClient {
         self.call(
             "update_config",
             json!({
-                "config_toml": config_toml,
+                "configToml": config_toml,
                 "persist": persist
             }),
         )
@@ -1282,7 +1441,7 @@ impl ApiClient for McpClient {
 
     async fn validate_config(&self, config_toml: &str) -> ApiResult<bool> {
         let json = self
-            .call("validate_config", json!({ "config_toml": config_toml }))
+            .call("validate_config", json!({ "configToml": config_toml }))
             .await?;
 
         let text = self.extract_text(&json).unwrap_or_default();
@@ -1376,25 +1535,25 @@ impl ApiClient for McpClient {
             args["line"] = json!(line);
         }
         if let Some(conn_id) = &request.connection_id {
-            args["connection_id"] = json!(conn_id);
+            args["connectionId"] = json!(conn_id);
         }
         if let Some(name) = &request.name {
             args["name"] = json!(name);
         }
         if let Some(find_var) = &request.find_variable {
-            args["find_variable"] = json!(find_var);
+            args["findVariable"] = json!(find_var);
         }
         if let Some(group) = &request.group {
             args["group"] = json!(group);
         }
         if let Some(capture_stack) = request.capture_stack_trace {
-            args["capture_stack_trace"] = json!(capture_stack);
+            args["captureStackTrace"] = json!(capture_stack);
         }
         if let Some(capture_mem) = request.capture_memory_snapshot {
-            args["capture_memory_snapshot"] = json!(capture_mem);
+            args["captureMemorySnapshot"] = json!(capture_mem);
         }
         if let Some(ttl) = request.ttl_seconds {
-            args["ttl_seconds"] = json!(ttl);
+            args["ttlSeconds"] = json!(ttl);
         }
 
         let json = self.call("observe", args).await?;
@@ -1415,13 +1574,13 @@ impl ApiClient for McpClient {
         });
 
         if let Some(conn_id) = &request.connection_id {
-            args["connection_id"] = json!(conn_id);
+            args["connectionId"] = json!(conn_id);
         }
         if let Some(group) = &request.group {
             args["group"] = json!(group);
         }
         if let Some(ttl) = request.ttl_seconds {
-            args["ttl_seconds"] = json!(ttl);
+            args["ttlSeconds"] = json!(ttl);
         }
 
         let json = self.call("enable_from_diff", args).await?;

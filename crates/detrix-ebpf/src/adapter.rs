@@ -524,6 +524,28 @@ mod tests {
     }
 
     #[test]
+    fn probe_event_to_metric_event_float() {
+        let metric = test_metric();
+        let variables = vec![ResolvedVariable {
+            name: "amount".to_string(),
+            location: VariableLocation::Register(Register::Rax),
+            size: VariableSize::QWord,
+            type_name: "float64".to_string(),
+            nested_type: None,
+        }];
+        let values = vec![CapturedValue::Float(1234.5)];
+
+        let event = EbpfAdapter::probe_event_to_metric_event(&values, &variables, &metric, None);
+
+        assert_eq!(event.values[0].expression, "amount");
+        assert_eq!(event.values[0].value_json, "1234.5");
+        assert_eq!(
+            event.values[0].typed_value,
+            Some(TypedValue::Numeric(1234.5))
+        );
+    }
+
+    #[test]
     fn probe_event_to_metric_event_slice() {
         let metric = test_metric();
         let variables = vec![ResolvedVariable {

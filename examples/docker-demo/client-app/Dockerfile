@@ -1,4 +1,4 @@
-FROM golang:1.24 AS builder
+FROM golang:1.24.13-bookworm AS builder
 
 WORKDIR /src
 
@@ -18,7 +18,10 @@ WORKDIR /src/examples/docker-demo/client-app
 # Build with debug symbols (required for Delve), static binary
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 go build -gcflags="all=-N -l" -o /build/order-service .
+    CGO_ENABLED=0 go build \
+        -gcflags="all=-N -l" \
+        -ldflags="-compressdwarf=false" \
+        -o /build/order-service .
 
 FROM scratch
 

@@ -117,29 +117,26 @@ impl ProcScanner {
                 continue;
             };
 
-            // Use binary_path directly — do NOT resolve symlink target.
-            // In Docker with pid:host, agent sees host PIDs but not host filesystem.
-            // The scanner records /proc/<pid>/exe which is always kernel-accessible.
-            // EbpfAdapter::new_with_config() opens the procfs file directly.
+            // Store the procfs path directly — do NOT resolve symlink target for the
+            // adapter input. In Docker with pid:host, agent sees host PIDs but not the
+            // host filesystem. `/proc/<pid>/exe` stays kernel-accessible.
             let exe_path = path.join("exe");
             if !exe_path.exists() {
                 continue;
             }
             let binary_path_str = exe_path.to_string_lossy().to_string();
+            // Pattern matching still benefits from the resolved target path because
+            // `/proc/<pid>/exe` is not descriptive enough to distinguish binaries.
+            let match_path = fs::read_link(&exe_path)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| binary_path_str.clone());
 
-            if self
-                .exclude_patterns
-                .iter()
-                .any(|p| p.matches(&binary_path_str))
-            {
+            if self.exclude_patterns.iter().any(|p| p.matches(&match_path)) {
                 continue;
             }
 
             if !self.include_patterns.is_empty()
-                && !self
-                    .include_patterns
-                    .iter()
-                    .any(|p| p.matches(&binary_path_str))
+                && !self.include_patterns.iter().any(|p| p.matches(&match_path))
             {
                 continue;
             }
