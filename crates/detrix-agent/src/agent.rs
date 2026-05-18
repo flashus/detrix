@@ -108,6 +108,7 @@ impl Agent {
                 event_tx.clone(),
                 Arc::clone(&events_dropped),
                 self.capture_config.clone(),
+                Arc::clone(&metrics_state.events_forwarded),
             ));
 
             match self
@@ -127,7 +128,11 @@ impl Agent {
                 Ok(()) => {
                     info!("Agent disconnected cleanly");
                 }
-                Err(ref e) => {
+                Err(e) => {
+                    if e.is_fatal() {
+                        error!(error = %e, "Fatal agent error — not retrying");
+                        return Err(e);
+                    }
                     warn!(error = %e, "Agent connection lost");
                 }
             }
@@ -150,7 +155,7 @@ impl Agent {
         mut event_rx: mpsc::Receiver<AgentMessage>,
         events_dropped: &Arc<AtomicU64>,
         adapter_manager: Arc<AdapterManager>,
-        _metrics_state: &MetricsState,
+        metrics_state: &MetricsState,
     ) -> Result<()> {
         // 4c. gRPC channel setup (TLS support deferred)
         let channel = Channel::from_shared(self.config.server_grpc_url.clone())
@@ -318,10 +323,12 @@ impl Agent {
             let stream_tx_h = stream_tx.clone();
             let interval = Duration::from_secs(self.config.heartbeat_interval_secs);
             let dropped = Arc::clone(events_dropped);
+            let uptime = Arc::clone(&metrics_state.uptime_secs);
             async move {
                 let mut ticker = tokio::time::interval(interval);
                 loop {
                     ticker.tick().await;
+                    uptime.fetch_add(interval.as_secs(), Ordering::Relaxed);
                     let heartbeat = AgentMessage {
                         msg: Some(agent_message::Msg::Heartbeat(Heartbeat {
                             events_dropped: dropped.load(Ordering::Relaxed).min(u32::MAX as u64)

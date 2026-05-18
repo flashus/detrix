@@ -1040,6 +1040,7 @@ dependencies = [
  "futures",
  "glob",
  "hostname",
+ "object 0.39.0",
  "prost",
  "serde",
  "serde_json",

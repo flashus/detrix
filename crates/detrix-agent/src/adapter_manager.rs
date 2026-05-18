@@ -14,7 +14,7 @@ use detrix_api::generated::detrix::v1::{
     DropCountUpdate, InspectFile, InspectResponse, MetricEventBatch, RemoveMetric, RemoveMetricAck,
     SerializedMetricEvent, SetMetric, SetMetricAck,
 };
-use detrix_core::{ConnectionId, Location, Metric, MetricEvent, SourceLanguage};
+use detrix_core::{ConnectionId, Location, Metric, MetricEvent, ParseLanguageExt, SourceLanguage};
 use detrix_dap::{PythonAdapter, RustAdapter};
 use detrix_ebpf::{CaptureConfig, EbpfAdapter};
 use detrix_logging::{info, warn};
@@ -24,14 +24,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 /// Manages local adapter instances for each connection.
 pub struct AdapterManager {
     adapters: Arc<DashMap<String, DapAdapterRef>>,
     ctrl_tx: mpsc::UnboundedSender<AgentMessage>,
     event_tx: mpsc::Sender<AgentMessage>,
+    /// Global counter — used for heartbeat events_dropped field.
     events_dropped: Arc<AtomicU64>,
     capture_config: CaptureConfig,
+    /// Per-connection drop counters — used for accurate DropCountUpdate messages.
+    connection_drop_counts: DashMap<String, Arc<AtomicU64>>,
+    /// Language string per connection, populated from AgentCreateConnection.language.
+    connection_languages: DashMap<String, String>,
+    /// Forwarder task handles — tracked so they can be aborted on close_connection.
+    forwarder_handles: DashMap<String, JoinHandle<()>>,
+    /// Forwarded-events counter — incremented by forward_batch on success.
+    pub events_forwarded: Arc<AtomicU64>,
 }
 
 impl AdapterManager {
@@ -40,6 +50,7 @@ impl AdapterManager {
         event_tx: mpsc::Sender<AgentMessage>,
         events_dropped: Arc<AtomicU64>,
         capture_config: CaptureConfig,
+        events_forwarded: Arc<AtomicU64>,
     ) -> Self {
         Self {
             adapters: Arc::new(DashMap::new()),
@@ -47,6 +58,10 @@ impl AdapterManager {
             event_tx,
             events_dropped,
             capture_config,
+            connection_drop_counts: DashMap::new(),
+            connection_languages: DashMap::new(),
+            forwarder_handles: DashMap::new(),
+            events_forwarded,
         }
     }
 
@@ -63,6 +78,13 @@ impl AdapterManager {
             language = %language,
             "Creating connection"
         );
+
+        // Record language for later use in handle_set_metric / handle_remove_metric.
+        self.connection_languages
+            .insert(connection_id.clone(), language.clone());
+        // Initialise per-connection drop counter.
+        self.connection_drop_counts
+            .insert(connection_id.clone(), Arc::new(AtomicU64::new(0)));
 
         match language.as_str() {
             "go" => {
@@ -197,12 +219,21 @@ impl AdapterManager {
         }
     }
 
+    /// Resolve the SourceLanguage for a connection (defaults to Go for eBPF connections).
+    fn connection_language(&self, connection_id: &str) -> SourceLanguage {
+        self.connection_languages
+            .get(connection_id)
+            .map(|v| v.value().parse_language_lossy())
+            .unwrap_or(SourceLanguage::Go)
+    }
+
     /// Handle SetMetric.
     pub async fn handle_set_metric(&self, msg: SetMetric) {
         let connection_id = msg.connection_id.clone();
         let request_id = msg.request_id.clone();
+        let language = self.connection_language(&connection_id);
 
-        let metric = match proto_set_metric_to_metric(&msg) {
+        let metric = match proto_set_metric_to_metric(&msg, language) {
             Ok(m) => m,
             Err(e) => {
                 warn!("Failed to parse SetMetric: {e}");
@@ -258,6 +289,7 @@ impl AdapterManager {
     pub async fn handle_remove_metric(&self, msg: RemoveMetric) {
         let connection_id = msg.connection_id.clone();
         let request_id = msg.request_id.clone();
+        let language = self.connection_language(&connection_id);
 
         let Some(adapter) = self.adapters.get(&connection_id).map(|e| e.clone()) else {
             warn!(connection_id = %connection_id, "Connection not found");
@@ -281,7 +313,7 @@ impl AdapterManager {
                 line: 0,
             },
             expressions: Vec::new(),
-            language: SourceLanguage::Go,
+            language,
             enabled: false,
             mode: detrix_core::MetricMode::default(),
             condition: None,
@@ -316,22 +348,42 @@ impl AdapterManager {
         });
     }
 
-    /// Close a connection.
+    /// Close a connection — aborts the event forwarder task and stops the adapter.
     pub async fn close_connection(&self, connection_id: &str) {
         info!(connection_id, "Closing connection");
+        // Abort the forwarder task first so it stops producing events.
+        if let Some((_, handle)) = self.forwarder_handles.remove(connection_id) {
+            handle.abort();
+        }
         if let Some((_, adapter)) = self.adapters.remove(connection_id) {
             let _ = adapter.stop().await;
         }
+        self.connection_languages.remove(connection_id);
+        self.connection_drop_counts.remove(connection_id);
     }
 
-    /// Stop all adapters.
+    /// Stop all adapters and abort all forwarder tasks.
     pub async fn stop_all(&self) {
+        // Abort all forwarder tasks first.
+        let keys: Vec<String> = self
+            .forwarder_handles
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+        for key in &keys {
+            if let Some((_, handle)) = self.forwarder_handles.remove(key) {
+                handle.abort();
+            }
+        }
+        // Stop all adapters.
         let keys: Vec<String> = self.adapters.iter().map(|e| e.key().clone()).collect();
         for key in keys {
             if let Some((_, adapter)) = self.adapters.remove(&key) {
                 let _ = adapter.stop().await;
             }
         }
+        self.connection_languages.clear();
+        self.connection_drop_counts.clear();
     }
 
     /// Read a file from the local filesystem.
@@ -348,7 +400,7 @@ impl AdapterManager {
         }
     }
 
-    /// Forward a batch of metric events to the server.
+    /// Forward a batch of metric events to the server (direct / legacy path).
     pub async fn forward_events(&self, connection_id: &str, events: Vec<MetricEvent>) {
         let proto_events: Vec<SerializedMetricEvent> = events
             .iter()
@@ -366,10 +418,22 @@ impl AdapterManager {
             })),
         };
 
+        let event_count = events.len() as u64;
         match self.event_tx.try_send(batch_msg) {
-            Ok(()) => {}
+            Ok(()) => {
+                self.events_forwarded
+                    .fetch_add(event_count, Ordering::Relaxed);
+            }
             Err(_) => {
-                let count = self.events_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                // Increment global counter (used by heartbeat).
+                self.events_dropped.fetch_add(1, Ordering::Relaxed);
+                // Increment per-connection counter (used by DropCountUpdate).
+                let count = self
+                    .connection_drop_counts
+                    .entry(connection_id.to_string())
+                    .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1;
                 warn!(
                     connection_id = %connection_id,
                     dropped = count,
@@ -392,9 +456,17 @@ impl AdapterManager {
     ) {
         let event_tx = self.event_tx.clone();
         let ctrl_tx = self.ctrl_tx.clone();
-        let dropped = Arc::clone(&self.events_dropped);
+        // Per-connection drop counter for DropCountUpdate accuracy.
+        let drop_counter = self
+            .connection_drop_counts
+            .entry(connection_id.clone())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone();
+        // Global dropped counter — still incremented for heartbeat consistency.
+        let global_dropped = Arc::clone(&self.events_dropped);
+        let events_forwarded = Arc::clone(&self.events_forwarded);
         let connection_id_clone = connection_id.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut batch = Vec::with_capacity(64);
             loop {
                 let deadline = tokio::time::sleep(Duration::from_millis(100));
@@ -427,7 +499,9 @@ impl AdapterManager {
                     Self::forward_batch(
                         &event_tx,
                         &ctrl_tx,
-                        &dropped,
+                        &drop_counter,
+                        &global_dropped,
+                        &events_forwarded,
                         &connection_id_clone,
                         events,
                     )
@@ -439,12 +513,16 @@ impl AdapterManager {
                 }
             }
         });
+        self.forwarder_handles.insert(connection_id, handle);
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn forward_batch(
         event_tx: &mpsc::Sender<AgentMessage>,
         ctrl_tx: &mpsc::UnboundedSender<AgentMessage>,
-        dropped: &Arc<AtomicU64>,
+        drop_counter: &Arc<AtomicU64>,
+        global_dropped: &Arc<AtomicU64>,
+        events_forwarded: &Arc<AtomicU64>,
         connection_id: &str,
         events: Vec<MetricEvent>,
     ) {
@@ -464,13 +542,18 @@ impl AdapterManager {
             })),
         };
 
-        if event_tx.try_send(batch_msg).is_err() {
-            let count =
-                dropped.fetch_add(events.len() as u64, Ordering::Relaxed) + events.len() as u64;
+        let event_count = events.len() as u64;
+        if event_tx.try_send(batch_msg).is_ok() {
+            events_forwarded.fetch_add(event_count, Ordering::Relaxed);
+        } else {
+            // Increment global counter for heartbeat.
+            global_dropped.fetch_add(event_count, Ordering::Relaxed);
+            // Increment per-connection counter for accurate DropCountUpdate.
+            let count = drop_counter.fetch_add(event_count, Ordering::Relaxed) + event_count;
             warn!(
                 connection_id = %connection_id,
                 dropped = count,
-                batch_size = events.len(),
+                batch_size = event_count,
                 "Event channel full, dropping batch"
             );
             let _ = ctrl_tx.send(AgentMessage {

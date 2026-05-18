@@ -31,10 +31,16 @@ pub fn truncate_values_json(values_json: &str) -> String {
 
 /// Convert a proto SetMetric to a domain Metric.
 ///
+/// `language` is not carried in the SetMetric proto; the caller supplies it from
+/// the per-connection language map populated at AgentCreateConnection time.
+///
 /// Metric does NOT implement Default (confirmed via crates/detrix-core/src/entities/metric.rs).
 /// MetricId and ConnectionId also have no Default. expressions is Vec<String> (not Vec<Expression>).
 /// id is Option<MetricId>. All 21 fields must be listed explicitly:
-pub fn proto_set_metric_to_metric(msg: &SetMetric) -> detrix_core::Result<Metric> {
+pub fn proto_set_metric_to_metric(
+    msg: &SetMetric,
+    language: detrix_core::SourceLanguage,
+) -> detrix_core::Result<Metric> {
     Ok(detrix_core::Metric {
         id: Some(detrix_core::MetricId(msg.metric_id)),
         name: msg.metric_name.clone(),
@@ -45,7 +51,7 @@ pub fn proto_set_metric_to_metric(msg: &SetMetric) -> detrix_core::Result<Metric
             line: msg.line,
         },
         expressions: msg.expressions.clone(), // Vec<String> directly
-        language: detrix_core::SourceLanguage::Go,
+        language,
         enabled: msg.enabled,
         mode: detrix_core::MetricMode::default(),
         condition: None,

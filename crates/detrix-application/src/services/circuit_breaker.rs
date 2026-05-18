@@ -88,7 +88,11 @@ impl CircuitBreaker {
 
         match &result {
             Ok(_) => self.on_success(),
-            Err(_) => self.on_failure(),
+            // Only transport/timeout errors should trip the circuit.
+            // Business errors (metric not found, invalid expression, etc.) are
+            // terminal by definition and must not penalise the circuit.
+            Err(e) if e.is_retryable() => self.on_failure(),
+            Err(_) => {}
         }
 
         result
@@ -234,6 +238,19 @@ mod tests {
 
         // Circuit should still be Closed (only 2 failures after reset)
         assert!(!cb.is_open());
+    }
+
+    #[tokio::test]
+    async fn test_terminal_error_does_not_open_circuit() {
+        let cb = CircuitBreaker::new();
+        // MetricNotFound is Terminal (not retryable) — 3× should NOT open the circuit
+        let terminal = || Error::MetricNotFound("x".to_string());
+        for _ in 0..3 {
+            cb.call(|| async { Err::<(), _>(terminal()) })
+                .await
+                .unwrap_err();
+        }
+        assert!(!cb.is_open(), "terminal errors must not open the circuit");
     }
 
     #[tokio::test]

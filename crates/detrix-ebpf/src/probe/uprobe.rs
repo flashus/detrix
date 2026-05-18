@@ -127,6 +127,15 @@ impl UprobeManager {
         }
     }
 
+    /// Replace the raw-event sender.
+    ///
+    /// Called by `EbpfAdapter::start()` on each restart to supply a fresh channel.
+    /// Previously attached probes that still send on the old sender will have their
+    /// events dropped; this is acceptable since probes are detached on `stop()`.
+    pub fn set_raw_tx(&mut self, tx: mpsc::UnboundedSender<(String, Vec<u8>)>) {
+        self.raw_event_tx = Some(tx);
+    }
+
     /// Number of active probes.
     pub fn active_count(&self) -> usize {
         self.active_probes.len()

@@ -41,9 +41,6 @@ use tokio::sync::{mpsc, RwLock};
 #[cfg(target_os = "linux")]
 use tokio::task::JoinHandle;
 
-/// Type alias for raw ring buffer event channel receiver.
-type RawEventReceiver = mpsc::UnboundedReceiver<(String, Vec<u8>)>;
-
 /// eBPF-based adapter for Go logpoints on Linux.
 ///
 /// Implements the same `DapAdapter` trait as DAP-based adapters,
@@ -65,9 +62,6 @@ pub struct EbpfAdapter {
     event_tx: mpsc::Sender<MetricEvent>,
     /// Event receiver — handed out exactly once via subscribe_events().
     event_rx: RwLock<Option<mpsc::Receiver<MetricEvent>>>,
-    /// Raw ring buffer events from UprobeManager polling tasks (Linux only).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    raw_event_rx: RwLock<Option<RawEventReceiver>>,
     /// Whether the adapter is Started.
     started: RwLock<bool>,
     /// Handle to the event correlator task (Linux only). Stored for graceful shutdown.
@@ -112,7 +106,6 @@ impl EbpfAdapter {
     ) -> Result<Self> {
         let path = binary_path.as_ref().to_path_buf();
         let (event_tx, event_rx) = mpsc::channel(1024);
-        let (raw_tx, raw_rx) = mpsc::unbounded_channel();
 
         #[cfg(target_os = "linux")]
         let path_str = path.to_str().ok_or_else(|| {
@@ -126,18 +119,20 @@ impl EbpfAdapter {
             ))
         })?;
 
+        // UprobeManager is created without a raw_tx; a fresh channel is created in
+        // start() on each call so the adapter can be stopped and restarted cleanly.
         Ok(Self {
             binary_path: path.clone(),
             dwarf: RwLock::new(None),
             uprobe_manager: RwLock::new(UprobeManager::new_with_config(
                 &path,
-                raw_tx,
+                // Placeholder sender — replaced with a fresh one in start().
+                mpsc::unbounded_channel().0,
                 capture_config.clone(),
             )),
             active_metrics: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             event_rx: RwLock::new(Some(event_rx)),
-            raw_event_rx: RwLock::new(Some(raw_rx)),
             started: RwLock::new(false),
             capture_config,
             #[cfg(target_os = "linux")]
@@ -215,10 +210,13 @@ impl DapAdapter for EbpfAdapter {
         let dwarf = DwarfInfo::parse(&self.binary_path)?;
         *self.dwarf.write().await = Some(dwarf);
 
-        // On Linux: spawn the event correlator task that reads raw ring buffer
-        // events from UprobeManager pollers, parses them, and forwards to event_tx.
+        // On Linux: create a fresh raw-event channel on each start() so the adapter
+        // is restartable after stop(). set_raw_tx() replaces the sender in
+        // UprobeManager; newly attached probes will use the new sender.
         #[cfg(target_os = "linux")]
-        if let Some(raw_rx) = self.raw_event_rx.write().await.take() {
+        {
+            let (raw_tx, raw_rx) = mpsc::unbounded_channel();
+            self.uprobe_manager.write().await.set_raw_tx(raw_tx);
             let active_metrics = Arc::clone(&self.active_metrics);
             let event_tx = self.event_tx.clone();
             let capture_config = self.capture_config.clone();
@@ -623,14 +621,6 @@ mod tests {
 
         let rx2 = adapter.subscribe_events().await;
         assert!(rx2.is_err());
-    }
-
-    #[tokio::test]
-    async fn new_has_raw_event_channel() {
-        let adapter = EbpfAdapter::new("/tmp/test-binary").unwrap();
-        // raw_event_rx should be Some before start() is called
-        let guard = adapter.raw_event_rx.read().await;
-        assert!(guard.is_some());
     }
 
     #[tokio::test]

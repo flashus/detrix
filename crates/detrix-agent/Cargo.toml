@@ -53,5 +53,8 @@ hostname = "0.4"
 # Glob pattern matching
 glob = "0.3"
 
+# ELF / DWARF detection for scanner
+object = { workspace = true }
+
 [lints]
 workspace = true

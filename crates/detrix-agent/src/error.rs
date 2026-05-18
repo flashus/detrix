@@ -33,4 +33,16 @@ pub enum AgentError {
     Config(String),
 }
 
+impl AgentError {
+    /// Returns true for permanent failures that must not be retried.
+    pub fn is_fatal(&self) -> bool {
+        matches!(
+            self,
+            AgentError::RegistrationRejected { .. }
+                | AgentError::Config(_)
+                | AgentError::AgentId(_)
+        )
+    }
+}
+
 pub type Result<T> = std::result::Result<T, AgentError>;

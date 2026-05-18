@@ -32,7 +32,6 @@ pub struct ProcScanner {
     include_patterns: Vec<Pattern>,
     #[allow(dead_code)]
     exclude_patterns: Vec<Pattern>,
-    #[allow(dead_code)]
     require_dwarf: bool,
     /// Key is (pid, exe_inode). Same PID + new inode = PID was reused.
     known: HashMap<(u32, u64), BinaryInfo>,
@@ -157,17 +156,39 @@ impl ProcScanner {
                 continue;
             }
 
+            let has_dwarf = if self.require_dwarf {
+                has_dwarf_sections(&binary_path_str)
+            } else {
+                true
+            };
             binaries.push(BinaryInfo {
                 binary_path: binary_path_str,
                 pid,
                 inode,
                 build_info: String::new(),
-                has_dwarf: true,
+                has_dwarf,
                 exported_functions: Vec::new(),
             });
         }
 
         binaries
+    }
+}
+
+/// Returns true if the ELF binary at `path` contains a `.debug_info` DWARF section.
+///
+/// Used to honour `ScannerConfig.require_dwarf`: binaries without DWARF cannot be
+/// instrumented by the eBPF adapter and must not be reported as observable.
+fn has_dwarf_sections(path: &str) -> bool {
+    let Ok(data) = std::fs::read(path) else {
+        return false;
+    };
+    match object::File::parse(data.as_slice()) {
+        Ok(obj) => {
+            use object::Object;
+            obj.section_by_name(".debug_info").is_some()
+        }
+        Err(_) => false,
     }
 }
 
