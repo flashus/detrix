@@ -41,6 +41,9 @@ use tokio::sync::{mpsc, RwLock};
 #[cfg(target_os = "linux")]
 use tokio::task::JoinHandle;
 
+/// Raw event channel receiver type — used for the placeholder channel.
+type RawEventRx = mpsc::UnboundedReceiver<(String, Vec<u8>)>;
+
 /// eBPF-based adapter for Go logpoints on Linux.
 ///
 /// Implements the same `DapAdapter` trait as DAP-based adapters,
@@ -64,6 +67,10 @@ pub struct EbpfAdapter {
     event_rx: RwLock<Option<mpsc::Receiver<MetricEvent>>>,
     /// Whether the adapter is Started.
     started: RwLock<bool>,
+    /// Placeholder raw event receiver — keeps the pre-start channel open so ring
+    /// buffer pollers don't see a broken channel if set_metric() is called before start().
+    /// Dropped (set to None) in start() when the real correlator channel is created.
+    _placeholder_raw_rx: RwLock<Option<RawEventRx>>,
     /// Handle to the event correlator task (Linux only). Stored for graceful shutdown.
     #[cfg(target_os = "linux")]
     correlator_handle: RwLock<Option<JoinHandle<()>>>,
@@ -119,21 +126,23 @@ impl EbpfAdapter {
             ))
         })?;
 
-        // UprobeManager is created without a raw_tx; a fresh channel is created in
-        // start() on each call so the adapter can be stopped and restarted cleanly.
+        // Create a placeholder raw-event channel so ring buffer pollers don't see a
+        // broken sender if set_metric() is called before start(). start() replaces
+        // this with a fresh channel and drops the placeholder receiver.
+        let (placeholder_tx, placeholder_rx) = mpsc::unbounded_channel();
         Ok(Self {
             binary_path: path.clone(),
             dwarf: RwLock::new(None),
             uprobe_manager: RwLock::new(UprobeManager::new_with_config(
                 &path,
-                // Placeholder sender — replaced with a fresh one in start().
-                mpsc::unbounded_channel().0,
+                placeholder_tx,
                 capture_config.clone(),
             )),
             active_metrics: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             event_rx: RwLock::new(Some(event_rx)),
             started: RwLock::new(false),
+            _placeholder_raw_rx: RwLock::new(Some(placeholder_rx)),
             capture_config,
             #[cfg(target_os = "linux")]
             mem_reader: Arc::new(crate::mem_reader::LinuxProcessMemoryReader::new(path_str)),
@@ -217,6 +226,8 @@ impl DapAdapter for EbpfAdapter {
         {
             let (raw_tx, raw_rx) = mpsc::unbounded_channel();
             self.uprobe_manager.write().await.set_raw_tx(raw_tx);
+            // Drop the placeholder receiver now that the real channel is active.
+            *self._placeholder_raw_rx.write().await = None;
             let active_metrics = Arc::clone(&self.active_metrics);
             let event_tx = self.event_tx.clone();
             let capture_config = self.capture_config.clone();

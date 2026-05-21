@@ -12,8 +12,8 @@ use detrix_api::generated::detrix::v1::{
     metrics_service_server::MetricsServiceServer, streaming_service_server::StreamingServiceServer,
 };
 use detrix_api::grpc::{
-    agent::AgentServiceImpl, create_auth_interceptor, AuthInterceptorState, ConnectionServiceImpl,
-    MetricsServiceImpl, StreamingServiceImpl,
+    agent::AgentServiceImpl, create_agent_auth_interceptor, create_auth_interceptor,
+    AuthInterceptorState, ConnectionServiceImpl, MetricsServiceImpl, StreamingServiceImpl,
 };
 use detrix_api::http::HttpServer;
 use detrix_api::tonic::transport::Server;
@@ -328,18 +328,20 @@ pub async fn run(
     let infra = init_infrastructure(&config, config_dir, InitOptions::from_config(&config)).await?;
 
     // Create application context from infrastructure components
-    let ctx = infra.into_app_context(
-        &config.api,
-        &config.safety,
-        &config.storage,
-        &config.daemon,
-        &config.adapter,
-        &config.anchor,
-        &config.limits,
-        &config.vfs,
-        gelf_output.clone(),
-        Some(config.agent.clone()),
-    );
+    let ctx = infra
+        .into_app_context(
+            &config.api,
+            &config.safety,
+            &config.storage,
+            &config.daemon,
+            &config.adapter,
+            &config.anchor,
+            &config.limits,
+            &config.vfs,
+            gelf_output.clone(),
+            Some(config.agent.clone()),
+        )
+        .await;
     let app_context = ctx.app_context;
     let storage = ctx.storage;
     let bridge_file_source = ctx.bridge_file_source;
@@ -480,6 +482,16 @@ pub async fn run(
         info!("🔑 Creating JWT validator for external auth mode...");
         match JwksValidator::new(&config.api.auth.jwt) {
             Ok(validator) => {
+                // Pre-fetch JWKS keys so the synchronous gRPC interceptor can validate
+                // tokens without a nested Tokio runtime (#2 fix).
+                if let Err(e) = validator.force_refresh().await {
+                    warn!(error = %e, "JWKS preload failed — JWT auth may reject on first gRPC request");
+                } else {
+                    info!(
+                        key_count = validator.cached_key_count(),
+                        "JWKS keys pre-fetched"
+                    );
+                }
                 info!(
                     jwks_url = ?config.api.auth.jwt.jwks_url,
                     "✓ JWT validator created"
@@ -585,6 +597,8 @@ pub async fn run(
             None => AuthInterceptorState::new(config.api.auth.clone()),
         };
         let auth_interceptor = create_auth_interceptor(grpc_auth_state);
+        let agent_auth_interceptor =
+            create_agent_auth_interceptor(config.agent.agent_tokens.clone());
 
         if config.api.auth.is_enabled() {
             info!(mode = ?config.api.auth.mode, "✓ gRPC authentication enabled");
@@ -635,7 +649,10 @@ pub async fn run(
 
             let server = if let Some(agent_service) = agent_service {
                 info!("Registering AgentService on gRPC server");
-                server.add_service(AgentServiceServer::new(agent_service))
+                server.add_service(AgentServiceServer::with_interceptor(
+                    agent_service,
+                    agent_auth_interceptor,
+                ))
             } else {
                 info!("AgentService disabled on gRPC server (no agent manager)");
                 server

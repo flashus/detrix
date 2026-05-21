@@ -151,6 +151,9 @@ impl AgentService for AgentServiceImpl {
         let mgr_clone = agent_manager.clone();
         let agent_id_clone = agent_id.clone();
         tokio::spawn(async move {
+            // Limit concurrent dispatch tasks per stream to prevent unbounded
+            // task spawning from a misbehaving or flooding agent.
+            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(64));
             loop {
                 match incoming.message().await {
                     Ok(Some(msg)) => {
@@ -158,9 +161,11 @@ impl AgentService for AgentServiceImpl {
                             // Dispatch on a separate task so handlers that await
                             // request/response work over the same gRPC stream
                             // do not block the read loop from receiving the ack.
+                            let permit = semaphore.clone().acquire_owned().await.ok();
                             let mgr = mgr_clone.clone();
                             let agent_id = agent_id_clone.clone();
                             tokio::spawn(async move {
+                                let _permit = permit; // released when task drops
                                 mgr.dispatch(&agent_id, domain_msg).await;
                             });
                         }

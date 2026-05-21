@@ -62,7 +62,7 @@ impl InfrastructureComponents {
     /// * `limits_config` - Limits configuration (max metrics, expression length)
     /// * `output` - Optional event output (GELF, etc.)
     #[allow(clippy::too_many_arguments)]
-    pub fn into_app_context(
+    pub async fn into_app_context(
         self,
         api_config: &ApiConfig,
         safety_config: &SafetyConfig,
@@ -197,7 +197,8 @@ impl InfrastructureComponents {
             agent_manager,
         );
         if let Some(mgr) = agent_manager_for_context {
-            mgr.set_adapter_lifecycle_manager(app_context.adapter_lifecycle_manager.clone());
+            mgr.set_adapter_lifecycle_manager(app_context.adapter_lifecycle_manager.clone())
+                .await;
             app_context = app_context.with_agent_connection_manager(mgr);
         }
         AppContextWithStorage {
@@ -209,7 +210,7 @@ impl InfrastructureComponents {
 
     /// Create AppContext with default configs
     #[allow(dead_code)]
-    pub fn into_app_context_default(self) -> AppContextWithStorage {
+    pub async fn into_app_context_default(self) -> AppContextWithStorage {
         self.into_app_context(
             &ApiConfig::default(),
             &SafetyConfig::default(),
@@ -222,6 +223,7 @@ impl InfrastructureComponents {
             None,
             None, // No agent config
         )
+        .await
     }
 }
 

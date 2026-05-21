@@ -89,25 +89,10 @@ pub fn create_auth_interceptor(
                     Status::unauthenticated("Authorization header must use Bearer scheme")
                 })?;
 
-                // Delegate to shared authenticate_token via a scoped thread
-                // (tonic interceptors are sync; authenticate_token is async).
-                let state_clone = state.clone();
-                let token_owned = token.to_string();
-                #[allow(clippy::expect_used)]
-                let auth_result = std::thread::scope(|s| {
-                    s.spawn(|| {
-                        tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .expect("tokio runtime construction cannot fail")
-                            .block_on(crate::common::authenticate_token(
-                                &token_owned,
-                                &state_clone,
-                            ))
-                    })
-                    .join()
-                    .expect("Auth thread panicked")
-                });
+                // Synchronous validation — no nested runtime required.
+                // JWT keys are pre-fetched at daemon startup (force_refresh),
+                // so validation is pure CPU (cache read + signature verify).
+                let auth_result = crate::common::authenticate_token_sync(token, &state);
 
                 match auth_result {
                     Ok(authenticated) => {

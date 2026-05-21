@@ -36,20 +36,17 @@ fn stable_agent_identity_hostname(agent_id: &str) -> &str {
 }
 
 impl AgentConnectionManager {
-    pub fn set_adapter_lifecycle_manager(
+    pub async fn set_adapter_lifecycle_manager(
         &self,
         mgr: Arc<crate::services::AdapterLifecycleManager>,
     ) {
-        if let Ok(mut guard) = self.adapter_lifecycle_manager.write() {
-            *guard = Some(mgr);
-        }
+        *self.adapter_lifecycle_manager.write().await = Some(mgr);
     }
 
-    fn adapter_lifecycle_manager(&self) -> Option<Arc<crate::services::AdapterLifecycleManager>> {
-        self.adapter_lifecycle_manager
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone())
+    async fn adapter_lifecycle_manager(
+        &self,
+    ) -> Option<Arc<crate::services::AdapterLifecycleManager>> {
+        self.adapter_lifecycle_manager.read().await.clone()
     }
 
     /// Get the connection repository reference (for testing and status queries).
@@ -223,7 +220,7 @@ impl AgentConnectionManager {
                         | detrix_core::ConnectionStatus::Failed(_)
                 );
 
-                if let Some(adapter_mgr) = self.adapter_lifecycle_manager() {
+                if let Some(adapter_mgr) = self.adapter_lifecycle_manager().await {
                     if was_connected && !adapter_mgr.has_adapter(&connection_id).await {
                         match self.connection_repo.find_by_id(&connection_id).await {
                             Ok(Some(conn)) => {
@@ -419,7 +416,13 @@ impl AgentConnectionManager {
                 self.handle_register_update(agent_id, binaries).await;
             }
             IncomingAgentMessage::Pong => {
-                self.resolve_pending("_ping_", IncomingAgentMessage::Pong);
+                // Drain all pending pings for this agent — any Pong satisfies all
+                // concurrent waiters (#11 fix: removes the hardcoded "_ping_" key).
+                if let Some((_, waiters)) = self.pending_pings.remove(agent_id) {
+                    for tx in waiters {
+                        let _ = tx.send(());
+                    }
+                }
             }
             IncomingAgentMessage::Error { code, message } => {
                 warn!(agent_id = %agent_id, code = %code, message = %message, "Agent error");
@@ -673,10 +676,12 @@ impl AgentConnectionManager {
 
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        // Track request for cancel_pending_for_connection
+        // Track request for cancel_pending_for_connection (#4 fix: cleanup on ALL exit paths).
         if let Some(mut set) = self.connection_requests.get_mut(connection_id) {
             set.insert(request_id.clone());
         }
+        self.request_to_connection
+            .insert(request_id.clone(), connection_id.clone());
         self.pending_requests.insert(request_id.clone(), tx);
 
         // Send to agent
@@ -689,12 +694,17 @@ impl AgentConnectionManager {
                 if let Some(mut set) = self.connection_requests.get_mut(connection_id) {
                     set.remove(&request_id);
                 }
+                self.request_to_connection.remove(&request_id);
                 self.pending_requests.remove(&request_id);
                 T::try_from(response)
             }
             Ok(Err(_)) => {
-                // Channel dropped (agent disconnected)
+                // Channel dropped (agent disconnected) — clean up ALL tracking maps (#4).
                 self.pending_requests.remove(&request_id);
+                self.request_to_connection.remove(&request_id);
+                if let Some(mut set) = self.connection_requests.get_mut(connection_id) {
+                    set.remove(&request_id);
+                }
                 Err(detrix_core::Error::Adapter(
                     "Agent disconnected while waiting for response".to_string(),
                 ))
@@ -702,6 +712,7 @@ impl AgentConnectionManager {
             Err(_) => {
                 // Timeout
                 self.pending_requests.remove(&request_id);
+                self.request_to_connection.remove(&request_id);
                 if let Some(mut set) = self.connection_requests.get_mut(connection_id) {
                     set.remove(&request_id);
                 }
@@ -731,6 +742,8 @@ impl AgentConnectionManager {
         if let Some(mut set) = self.connection_requests.get_mut(connection_id) {
             set.insert(request_id.clone());
         }
+        self.request_to_connection
+            .insert(request_id.clone(), connection_id.clone());
         self.pending_requests.insert(request_id.clone(), tx);
 
         self.send_to_agent(connection_id, msg).await?;
@@ -740,17 +753,24 @@ impl AgentConnectionManager {
                 if let Some(mut set) = self.connection_requests.get_mut(connection_id) {
                     set.remove(&request_id);
                 }
+                self.request_to_connection.remove(&request_id);
                 self.pending_requests.remove(&request_id);
                 Ok(response)
             }
             Ok(Err(_)) => {
+                // Channel dropped (agent disconnected) — clean up ALL tracking maps (#4).
                 self.pending_requests.remove(&request_id);
+                self.request_to_connection.remove(&request_id);
+                if let Some(mut set) = self.connection_requests.get_mut(connection_id) {
+                    set.remove(&request_id);
+                }
                 Err(detrix_core::Error::Adapter(
                     "Agent disconnected while waiting for response".to_string(),
                 ))
             }
             Err(_) => {
                 self.pending_requests.remove(&request_id);
+                self.request_to_connection.remove(&request_id);
                 if let Some(mut set) = self.connection_requests.get_mut(connection_id) {
                     set.remove(&request_id);
                 }
@@ -834,21 +854,30 @@ impl AgentConnectionManager {
             // e. Remove from routing table
             self.connection_to_agent.remove(&conn_id);
         }
+
+        // f. Drop any pending ping waiters — they'll see channel-closed error.
+        self.pending_pings.remove(agent_id);
     }
 
     /// Send a Ping to the named agent and await a Pong response.
     ///
-    /// Inserts `"_ping_"` into `pending_requests` so the Pong dispatch handler
-    /// can resolve it. Only one in-flight ping per agent manager at a time —
-    /// a concurrent caller will overwrite the sender and the first caller's
-    /// oneshot will be dropped (it will see a channel-closed error).
+    /// Multiple concurrent callers are supported — each pushes a sender into
+    /// `pending_pings[agent_id]`; any single Pong from that agent resolves ALL
+    /// of them. This replaces the former hardcoded `"_ping_"` key that caused
+    /// concurrent pings to clobber each other (#11 fix).
     pub async fn ping_agent(
         &self,
         agent_id: &str,
         timeout: Duration,
     ) -> Result<(), detrix_core::Error> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending_requests.insert("_ping_".to_string(), tx);
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+        // Register waiter before sending Ping to avoid a race where Pong arrives
+        // before we insert.
+        self.pending_pings
+            .entry(agent_id.to_string())
+            .or_default()
+            .push(tx);
 
         let sent = self
             .agents
@@ -857,7 +886,10 @@ impl AgentConnectionManager {
             .unwrap_or(false);
 
         if !sent {
-            self.pending_requests.remove("_ping_");
+            // Remove the just-inserted sender; don't leave a zombie waiter.
+            if let Some(mut waiters) = self.pending_pings.get_mut(agent_id) {
+                waiters.pop();
+            }
             return Err(detrix_core::Error::Adapter(
                 "agent not found or channel closed".to_string(),
             ));
@@ -869,26 +901,24 @@ impl AgentConnectionManager {
             .and_then(|r| {
                 r.map_err(|_| detrix_core::Error::Adapter("ping channel dropped".to_string()))
             })
-            .map(|_| ())
     }
 
     /// Resolve a pending request with the given response.
+    ///
+    /// Uses the `request_to_connection` reverse index for O(1) connection lookup (#10),
+    /// eliminating the former O(N) scan over all `connection_requests` entries.
     fn resolve_pending(&self, request_id: &str, response: IncomingAgentMessage) {
-        // Find the connection_id for this request to clean up tracking
-        let mut found_conn: Option<ConnectionId> = None;
-        for entry in self.connection_requests.iter() {
-            if entry.value().contains(request_id) {
-                found_conn = Some(entry.key().clone());
-                break;
-            }
-        }
+        // O(1) reverse lookup — was O(N) scan before adding request_to_connection.
+        let conn_id = self
+            .request_to_connection
+            .remove(request_id)
+            .map(|(_, c)| c);
 
         if let Some((_, tx)) = self.pending_requests.remove(request_id) {
             let _ = tx.send(response);
         }
 
-        // Clean up tracking
-        if let Some(conn_id) = found_conn {
+        if let Some(conn_id) = conn_id {
             if let Some(mut set) = self.connection_requests.get_mut(&conn_id) {
                 set.remove(request_id);
             }

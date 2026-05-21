@@ -101,6 +101,61 @@ pub async fn authenticate_token(
     }
 }
 
+/// Authenticate a bearer token synchronously, using only cached state.
+///
+/// This is the synchronous counterpart to `authenticate_token`. It performs
+/// no network I/O — JWT keys must already be in cache (pre-loaded at startup
+/// via `JwksValidator::force_refresh()`).
+///
+/// Safe to call from synchronous tonic interceptors.
+pub fn authenticate_token_sync(
+    token: &str,
+    state: &AuthState,
+) -> Result<AuthenticatedUser, AuthError> {
+    let config = &state.config;
+
+    match config.effective_mode() {
+        AuthMode::Simple => {
+            if let Some(user) = config.find_user_by_token(token) {
+                debug!(user_id = %user.user_id, "Bearer token authentication successful (sync)");
+                Ok(AuthenticatedUser {
+                    user_id: user.user_id.clone(),
+                    role: user.role.clone(),
+                })
+            } else {
+                warn!("Invalid Bearer token");
+                Err(AuthError::Unauthenticated("Invalid token".into()))
+            }
+        }
+        AuthMode::External => {
+            let validator = state.jwt_validator.as_ref().ok_or_else(|| {
+                error!("JWT validator not configured for external mode");
+                AuthError::Internal("Authentication not configured".into())
+            })?;
+
+            match validator.validate_token_sync(token) {
+                Ok(claims) => {
+                    let user_id = claims.sub.clone().ok_or_else(|| {
+                        warn!("JWT missing 'sub' claim — rejecting");
+                        AuthError::Unauthenticated("JWT missing 'sub' claim".into())
+                    })?;
+
+                    debug!(sub = %user_id, email = ?claims.email, "JWT authentication successful (sync)");
+
+                    let role = resolve_jwt_role(&claims, &config.jwt);
+
+                    Ok(AuthenticatedUser { user_id, role })
+                }
+                Err(e) => {
+                    warn!(error = %e, "JWT validation failed");
+                    Err(AuthError::Unauthenticated("JWT validation failed".into()))
+                }
+            }
+        }
+        AuthMode::Disabled => Ok(AuthenticatedUser::default_admin()),
+    }
+}
+
 /// Traverse a dot-separated path in a JSON value (e.g. `"realm_access.roles"`).
 fn get_claim_value<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     path.split('.').try_fold(root, |node, key| node.get(key))

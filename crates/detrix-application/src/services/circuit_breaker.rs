@@ -46,20 +46,25 @@ impl CircuitBreaker {
     }
 
     /// Check if the circuit is open (failing fast).
+    ///
+    /// If the circuit is `Open` and the 30s cooldown has elapsed, this
+    /// **transitions it to `HalfOpen`** as a side effect — one probe request
+    /// will then be allowed through. Use only at call sites that intend to
+    /// attempt a real operation. For pure status queries use `peek_open`.
     pub fn is_open(&self) -> bool {
-        let state = self.inner.state.load(Ordering::Relaxed);
+        let state = self.inner.state.load(Ordering::Acquire);
         if state == STATE_OPEN {
             // Check if we should transition to HalfOpen (30s cooldown)
             let elapsed =
-                now_ms().saturating_sub(self.inner.last_transition_ms.load(Ordering::Relaxed));
+                now_ms().saturating_sub(self.inner.last_transition_ms.load(Ordering::Acquire));
             if elapsed >= 30_000 {
                 self.inner
                     .state
                     .compare_exchange(
                         STATE_OPEN,
                         STATE_HALF_OPEN,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
                     )
                     .is_ok()
             } else {
@@ -68,6 +73,12 @@ impl CircuitBreaker {
         } else {
             false
         }
+    }
+
+    /// Return `true` if the circuit is currently `Open` — **without** triggering
+    /// the `Open → HalfOpen` transition. Safe to call from status/logging code.
+    pub fn peek_open(&self) -> bool {
+        self.inner.state.load(Ordering::Acquire) == STATE_OPEN
     }
 
     /// Execute a closure through the circuit breaker.
@@ -104,12 +115,12 @@ impl CircuitBreaker {
             timestamps.clear();
         }
 
-        let state = self.inner.state.load(Ordering::Relaxed);
+        let state = self.inner.state.load(Ordering::Acquire);
         if state == STATE_HALF_OPEN {
-            self.inner.state.store(STATE_CLOSED, Ordering::Relaxed);
+            self.inner.state.store(STATE_CLOSED, Ordering::Release);
             self.inner
                 .last_transition_ms
-                .store(now_ms(), Ordering::Relaxed);
+                .store(now_ms(), Ordering::Release);
         }
     }
 
@@ -127,8 +138,8 @@ impl CircuitBreaker {
                 let window = ts.saturating_sub(timestamps[0]);
                 if window <= 60_000 {
                     // Transition to Open
-                    self.inner.state.store(STATE_OPEN, Ordering::Relaxed);
-                    self.inner.last_transition_ms.store(ts, Ordering::Relaxed);
+                    self.inner.state.store(STATE_OPEN, Ordering::Release);
+                    self.inner.last_transition_ms.store(ts, Ordering::Release);
                     timestamps.clear();
                 }
             }

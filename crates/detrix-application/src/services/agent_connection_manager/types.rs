@@ -213,12 +213,22 @@ pub struct AgentConnectionManager {
     /// connection_id → set of active request_ids (for cancel_pending_for_connection).
     /// Independent DashMap — avoids holding AgentInfo write guard across await points.
     pub(super) connection_requests: Arc<DashMap<ConnectionId, HashSet<String>>>,
+    /// request_id → connection_id reverse index — O(1) lookup in resolve_pending,
+    /// replacing the former O(N) scan over connection_requests.
+    pub(super) request_to_connection: Arc<DashMap<String, ConnectionId>>,
+    /// agent_id → pending ping waiters (one entry per in-flight ping_agent call).
+    /// Any Pong from that agent satisfies all waiters — using per-agent Vec avoids
+    /// the hardcoded `"_ping_"` key that clobbered concurrent callers.
+    pub(super) pending_pings: Arc<DashMap<String, Vec<tokio::sync::oneshot::Sender<()>>>>,
     pub(super) connection_repo: ConnectionRepositoryRef,
     pub(super) metric_repo: MetricRepositoryRef,
     pub(super) agent_config: Option<detrix_config::AgentConfig>,
     pub(super) system_event_tx: Option<tokio::sync::broadcast::Sender<SystemEvent>>,
+    /// Lifecycle manager wired after construction.
+    /// Uses tokio::sync::RwLock so .write().await is safe from async callers
+    /// and poison errors are not silently swallowed.
     pub(super) adapter_lifecycle_manager:
-        Arc<std::sync::RwLock<Option<Arc<AdapterLifecycleManager>>>>,
+        Arc<tokio::sync::RwLock<Option<Arc<AdapterLifecycleManager>>>>,
 }
 
 impl AgentConnectionManager {
@@ -236,11 +246,13 @@ impl AgentConnectionManager {
             event_channels: Arc::new(DashMap::new()),
             event_receivers: Arc::new(DashMap::new()),
             connection_requests: Arc::new(DashMap::new()),
+            request_to_connection: Arc::new(DashMap::new()),
+            pending_pings: Arc::new(DashMap::new()),
             connection_repo,
             metric_repo,
             agent_config,
             system_event_tx,
-            adapter_lifecycle_manager: Arc::new(std::sync::RwLock::new(None)),
+            adapter_lifecycle_manager: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 }

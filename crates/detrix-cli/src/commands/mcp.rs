@@ -252,18 +252,20 @@ async fn run_direct(config_path: &str, config: &Config) -> Result<()> {
     info!("Adapter factory initialized with reconnection middleware");
 
     // Create application context from infrastructure components
-    let ctx = infra.into_app_context(
-        &config.api,
-        &config.safety,
-        &config.storage,
-        &config.daemon,
-        &config.adapter,
-        &config.anchor,
-        &config.limits,
-        &config.vfs,
-        gelf_output.clone(),
-        Some(config.agent.clone()),
-    );
+    let ctx = infra
+        .into_app_context(
+            &config.api,
+            &config.safety,
+            &config.storage,
+            &config.daemon,
+            &config.adapter,
+            &config.anchor,
+            &config.limits,
+            &config.vfs,
+            gelf_output.clone(),
+            Some(config.agent.clone()),
+        )
+        .await;
 
     // Create API state from the pre-configured AppContext
     let api_state = Arc::new(

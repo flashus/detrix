@@ -136,7 +136,20 @@ impl AdapterManager {
                 }
             }
             "python" => {
-                let config = PythonAdapter::default_config(msg.port as u16).with_host(&msg.host);
+                let port = match u16::try_from(msg.port) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!(port = msg.port, "Invalid port: out of u16 range");
+                        self.send_connection_update(
+                            &connection_id,
+                            ConnectionStatus::Failed,
+                            Some(&format!("port {} out of valid range", msg.port)),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let config = PythonAdapter::default_config(port).with_host(&msg.host);
                 let adapter = PythonAdapter::new(config, PathBuf::from("/"));
                 let adapter: DapAdapterRef = Arc::new(adapter);
                 if let Err(e) = adapter.start().await {
@@ -172,7 +185,20 @@ impl AdapterManager {
                 }
             }
             "rust" => {
-                let config = RustAdapter::default_config(msg.port as u16).with_host(&msg.host);
+                let port = match u16::try_from(msg.port) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!(port = msg.port, "Invalid port: out of u16 range");
+                        self.send_connection_update(
+                            &connection_id,
+                            ConnectionStatus::Failed,
+                            Some(&format!("port {} out of valid range", msg.port)),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let config = RustAdapter::default_config(port).with_host(&msg.host);
                 let adapter = RustAdapter::new(config, PathBuf::from("/"));
                 let adapter: DapAdapterRef = Arc::new(adapter);
                 if let Err(e) = adapter.start().await {

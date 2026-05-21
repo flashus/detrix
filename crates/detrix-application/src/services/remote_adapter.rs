@@ -4,8 +4,9 @@
 //! `AgentConnectionManager` and awaiting responses. The existing
 //! `AdapterLifecycleManager` is unaware that this adapter is remote.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use detrix_core::{ConnectionId, Error, Metric, MetricEvent, Result};
@@ -26,8 +27,10 @@ pub struct RemoteAdapter {
     event_rx: Mutex<Option<tokio::sync::mpsc::Receiver<MetricEvent>>>,
     circuit: CircuitBreaker,
     drop_counts: Mutex<std::collections::HashMap<String, u64>>,
-    /// Unix timestamp ms; updated on any liveness proof (Pong, SetMetricAck, RemoveMetricAck).
-    last_confirmed_at: AtomicU64,
+    /// Monotonic liveness timestamp; updated on any liveness proof (Pong, SetMetricAck, etc.).
+    /// Stored as `Mutex<Option<Instant>>` to use the monotonic clock and avoid SystemTime
+    /// jump-backward / jump-forward hazards from NTP or manual clock changes.
+    last_confirmed_at: Mutex<Option<Instant>>,
     /// Monotonic counter for generating unique request_ids.
     request_counter: AtomicUsize,
 }
@@ -48,18 +51,16 @@ impl RemoteAdapter {
             event_rx: Mutex::new(event_rx),
             circuit: CircuitBreaker::new(),
             drop_counts: Mutex::new(std::collections::HashMap::new()),
-            last_confirmed_at: AtomicU64::new(0),
+            last_confirmed_at: Mutex::new(None),
             request_counter: AtomicUsize::new(0),
         }
     }
 
-    /// Record a liveness proof timestamp.
+    /// Record a liveness proof timestamp using the monotonic clock.
     fn confirm_alive(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        self.last_confirmed_at.store(now, Ordering::Relaxed);
+        if let Ok(mut guard) = self.last_confirmed_at.lock() {
+            *guard = Some(Instant::now());
+        }
     }
 
     /// Send a command and await the response, updating liveness on success.
@@ -147,20 +148,19 @@ impl DapAdapter for RemoteAdapter {
         }
 
         // Reject connections whose last liveness proof is older than 60 s.
-        // last_confirmed_at == 0 means start() hasn't been called yet (new connection),
-        // so we skip the staleness check in that case.
-        const STALE_THRESHOLD_MS: u64 = 60_000;
-        let last = self.last_confirmed_at.load(Ordering::Relaxed);
-        if last > 0 {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            if now_ms.saturating_sub(last) > STALE_THRESHOLD_MS {
-                return Err(Error::Adapter(
-                    "agent connection is stale (no liveness proof)".to_string(),
-                ));
-            }
+        // `None` means start() hasn't confirmed yet (new connection) — skip check.
+        const STALE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(60);
+        let is_stale = self
+            .last_confirmed_at
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .map(|t| t.elapsed() > STALE_THRESHOLD)
+            .unwrap_or(false);
+        if is_stale {
+            return Err(Error::Adapter(
+                "agent connection is stale (no liveness proof)".to_string(),
+            ));
         }
 
         self.confirm_alive();
@@ -168,7 +168,9 @@ impl DapAdapter for RemoteAdapter {
     }
 
     fn is_connected(&self) -> bool {
-        !self.circuit.is_open() && self.agent_manager.is_agent_managed(&self.connection_id)
+        // Use peek_open (no side effects) — is_connected is a status query only.
+        // The Open → HalfOpen transition is intentionally deferred to ensure_connected.
+        !self.circuit.peek_open() && self.agent_manager.is_agent_managed(&self.connection_id)
     }
 
     /// Set a metric — routed through circuit breaker with 30s timeout.
