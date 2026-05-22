@@ -411,6 +411,14 @@ impl AgentConnectionManager {
                     dropped = events_dropped,
                     "Agent heartbeat"
                 );
+                // Update liveness for every connection this agent manages so that
+                // RemoteAdapter::ensure_connected() does not mark idle (but live)
+                // connections as stale.
+                for entry in self.connection_to_agent.iter() {
+                    if entry.value() == agent_id {
+                        self.record_liveness(entry.key());
+                    }
+                }
             }
             IncomingAgentMessage::RegisterUpdate { binaries } => {
                 self.handle_register_update(agent_id, binaries).await;
@@ -794,6 +802,37 @@ impl AgentConnectionManager {
         } else {
             None
         }
+    }
+
+    /// Re-create the event channel for a connection, replacing any stale entries.
+    ///
+    /// Must be called before constructing a new `RemoteAdapter` for a connection
+    /// that may have had a previous adapter (i.e. on adapter restart). This ensures
+    /// `subscribe_events()` always finds a fresh receiver, even though the previous
+    /// call consumed the old one via `.remove()`.
+    pub fn refresh_event_channel(&self, connection_id: &ConnectionId) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<detrix_core::MetricEvent>(1024);
+        self.event_channels.insert(connection_id.clone(), Some(tx));
+        self.event_receivers.insert(connection_id.clone(), Some(rx));
+    }
+
+    /// Record a liveness proof for a connection (heartbeat or successful round-trip).
+    ///
+    /// Called from the heartbeat handler (for all connections of an agent) and from
+    /// `RemoteAdapter::confirm_alive()` (after successful request/response).
+    pub fn record_liveness(&self, connection_id: &ConnectionId) {
+        self.liveness_timestamps
+            .insert(connection_id.clone(), std::time::Instant::now());
+    }
+
+    /// Return how long ago the last liveness proof was recorded for a connection.
+    ///
+    /// Returns `None` if no liveness proof has been recorded yet (new connection).
+    /// `RemoteAdapter::ensure_connected()` uses this to detect stale connections.
+    pub fn liveness_age(&self, connection_id: &ConnectionId) -> Option<std::time::Duration> {
+        self.liveness_timestamps
+            .get(connection_id)
+            .map(|t| t.elapsed())
     }
 
     /// Resolve all in-flight pending_requests for a connection with an immediate error.

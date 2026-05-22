@@ -336,7 +336,22 @@ fn proto_to_domain(msg: AgentMessage) -> Option<IncomingAgentMessage> {
             code: e.code,
             message: e.message,
         }),
-        agent_message::Msg::Register(_) => None, // Should not happen after initial registration
+        agent_message::Msg::Register(reg) => {
+            // Mid-session re-registration: scanner detected binary changes.
+            let binaries = reg
+                .binaries
+                .into_iter()
+                .map(|b| AgentBinaryInfo {
+                    binary_path: b.binary_path,
+                    pid: b.pid,
+                    build_info: b.build_info,
+                    has_dwarf: b.has_dwarf,
+                    exported_functions: b.exported_functions,
+                    language: detrix_core::SourceLanguage::Go,
+                })
+                .collect();
+            Some(IncomingAgentMessage::RegisterUpdate { binaries })
+        }
     }
 }
 

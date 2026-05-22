@@ -70,6 +70,7 @@ impl ProcScanner {
             self.known
                 .insert((binary.pid, binary.inode), binary.clone());
         }
+        self.last_registered_at = Some(Instant::now());
         binaries
     }
 
@@ -175,21 +176,90 @@ impl ProcScanner {
     }
 }
 
-/// Returns true if the ELF binary at `path` contains a `.debug_info` DWARF section.
+/// Returns true if the ELF64 binary at `path` contains a `.debug_info` DWARF section.
+///
+/// Uses a manual ELF64 section header parser — reads only the header (64B), section
+/// header table, and section name string table. Avoids loading the full binary into
+/// memory (important for large Go/Rust binaries in production).
 ///
 /// Used to honour `ScannerConfig.require_dwarf`: binaries without DWARF cannot be
 /// instrumented by the eBPF adapter and must not be reported as observable.
 fn has_dwarf_sections(path: &str) -> bool {
-    let Ok(data) = std::fs::read(path) else {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(mut f) = std::fs::File::open(path) else {
         return false;
     };
-    match object::File::parse(data.as_slice()) {
-        Ok(obj) => {
-            use object::Object;
-            obj.section_by_name(".debug_info").is_some()
-        }
-        Err(_) => false,
+
+    // Read 64-byte ELF64 header.
+    let mut hdr = [0u8; 64];
+    if f.read_exact(&mut hdr).is_err() {
+        return false;
     }
+    // Magic + ELF64 class check.
+    if &hdr[0..4] != b"\x7fELF" || hdr[4] != 2 {
+        return false;
+    }
+
+    // Fixed-size slice conversions: slice lengths are compile-time-known from the
+    // 64-byte header buffer; `.unwrap_or_default()` satisfies clippy::unwrap_used
+    // while being unreachable in practice.
+    let e_shoff = u64::from_le_bytes(hdr[40..48].try_into().unwrap_or_default());
+    let e_shentsize = u16::from_le_bytes(hdr[58..60].try_into().unwrap_or_default()) as u64;
+    let e_shnum = u16::from_le_bytes(hdr[60..62].try_into().unwrap_or_default()) as u64;
+    let e_shstrndx = u16::from_le_bytes(hdr[62..64].try_into().unwrap_or_default()) as u64;
+
+    if e_shoff == 0 || e_shentsize < 64 || e_shnum == 0 || e_shstrndx >= e_shnum {
+        return false;
+    }
+
+    // Read section header table.
+    let table_size = (e_shnum * e_shentsize) as usize;
+    if f.seek(SeekFrom::Start(e_shoff)).is_err() {
+        return false;
+    }
+    let mut table = vec![0u8; table_size];
+    if f.read_exact(&mut table).is_err() {
+        return false;
+    }
+
+    // Locate the section name string table using e_shstrndx.
+    let shstr_base = (e_shstrndx * e_shentsize) as usize;
+    let sh_offset = u64::from_le_bytes(
+        table[shstr_base + 24..shstr_base + 32]
+            .try_into()
+            .unwrap_or_default(),
+    );
+    let sh_size = u64::from_le_bytes(
+        table[shstr_base + 32..shstr_base + 40]
+            .try_into()
+            .unwrap_or_default(),
+    );
+
+    // Sanity cap: string table larger than 1 MB is suspect.
+    if sh_offset == 0 || sh_size > 1_000_000 {
+        return false;
+    }
+    if f.seek(SeekFrom::Start(sh_offset)).is_err() {
+        return false;
+    }
+    let mut strtab = vec![0u8; sh_size as usize];
+    if f.read_exact(&mut strtab).is_err() {
+        return false;
+    }
+
+    // Walk section headers looking for ".debug_info".
+    for i in 0..e_shnum as usize {
+        let sh = &table[i * e_shentsize as usize..][..e_shentsize as usize];
+        let name_idx = u32::from_le_bytes(sh[0..4].try_into().unwrap_or_default()) as usize;
+        if name_idx < strtab.len() {
+            let name = strtab[name_idx..].split(|&b| b == 0).next().unwrap_or(&[]);
+            if name == b".debug_info" {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Convert agent BinaryInfo to proto BinaryInfo.

@@ -42,6 +42,9 @@ pub struct AdapterManager {
     forwarder_handles: DashMap<String, JoinHandle<()>>,
     /// Forwarded-events counter — incremented by forward_batch on success.
     pub events_forwarded: Arc<AtomicU64>,
+    /// Allowed directory prefixes for server-requested file reads.
+    /// Empty = allow any readable path (with a warning).
+    allowed_read_prefixes: Vec<PathBuf>,
 }
 
 impl AdapterManager {
@@ -51,6 +54,7 @@ impl AdapterManager {
         events_dropped: Arc<AtomicU64>,
         capture_config: CaptureConfig,
         events_forwarded: Arc<AtomicU64>,
+        allowed_read_prefixes: Vec<PathBuf>,
     ) -> Self {
         Self {
             adapters: Arc::new(DashMap::new()),
@@ -62,6 +66,7 @@ impl AdapterManager {
             connection_languages: DashMap::new(),
             forwarder_handles: DashMap::new(),
             events_forwarded,
+            allowed_read_prefixes,
         }
     }
 
@@ -413,8 +418,34 @@ impl AdapterManager {
     }
 
     /// Read a file from the local filesystem.
+    ///
+    /// If `allowed_read_prefixes` is configured, the requested path is canonicalised and
+    /// must start with one of the allowed prefixes. This prevents a compromised server from
+    /// requesting arbitrary files (e.g. SSH keys, /etc/shadow) from the agent host.
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>> {
-        std::fs::read(path).map_err(|e| AgentError::Scanner(format!("Cannot read {path}: {e}")))
+        let canonical = std::fs::canonicalize(path)
+            .map_err(|e| AgentError::Scanner(format!("Cannot canonicalize {path}: {e}")))?;
+
+        if !self.allowed_read_prefixes.is_empty() {
+            let allowed = self
+                .allowed_read_prefixes
+                .iter()
+                .any(|prefix| canonical.starts_with(prefix));
+            if !allowed {
+                return Err(AgentError::Scanner(format!(
+                    "Path {path:?} is outside allowed read prefixes"
+                )));
+            }
+        } else {
+            warn!(
+                path = %path,
+                "read_file: no allowed_read_prefixes configured; \
+                 set scanner.allowed_read_prefixes in detrix.toml to restrict access"
+            );
+        }
+
+        std::fs::read(&canonical)
+            .map_err(|e| AgentError::Scanner(format!("Cannot read {path}: {e}")))
     }
 
     /// Inspect a binary for variable information.

@@ -56,8 +56,12 @@ impl RemoteAdapter {
         }
     }
 
-    /// Record a liveness proof timestamp using the monotonic clock.
+    /// Record a liveness proof timestamp.
+    ///
+    /// Updates both the manager's shared `liveness_timestamps` (queried by
+    /// `ensure_connected()`) and the local `last_confirmed_at` field.
     fn confirm_alive(&self) {
+        self.agent_manager.record_liveness(&self.connection_id);
         if let Ok(mut guard) = self.last_confirmed_at.lock() {
             *guard = Some(Instant::now());
         }
@@ -138,6 +142,11 @@ impl DapAdapter for RemoteAdapter {
     /// A stale connection (no liveness proof for > 60 s, i.e. 2× the default
     /// 30 s heartbeat interval) is treated as unhealthy even if still in the
     /// routing table, because the agent may be dead but not yet unregistered.
+    ///
+    /// Liveness is tracked in the shared `AgentConnectionManager::liveness_timestamps`
+    /// map — updated by heartbeats and by `confirm_alive()` after successful round-trips.
+    /// This method intentionally does NOT call `confirm_alive()` so that it cannot
+    /// reset the stale timer on its own.
     async fn ensure_connected(&self) -> Result<()> {
         if self.circuit.is_open() {
             return Err(Error::Adapter("agent circuit open".to_string()));
@@ -148,14 +157,12 @@ impl DapAdapter for RemoteAdapter {
         }
 
         // Reject connections whose last liveness proof is older than 60 s.
-        // `None` means start() hasn't confirmed yet (new connection) — skip check.
+        // `None` means no proof recorded yet (new connection) — skip the check.
         const STALE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(60);
         let is_stale = self
-            .last_confirmed_at
-            .lock()
-            .ok()
-            .and_then(|g| *g)
-            .map(|t| t.elapsed() > STALE_THRESHOLD)
+            .agent_manager
+            .liveness_age(&self.connection_id)
+            .map(|age| age > STALE_THRESHOLD)
             .unwrap_or(false);
         if is_stale {
             return Err(Error::Adapter(
@@ -163,7 +170,6 @@ impl DapAdapter for RemoteAdapter {
             ));
         }
 
-        self.confirm_alive();
         Ok(())
     }
 

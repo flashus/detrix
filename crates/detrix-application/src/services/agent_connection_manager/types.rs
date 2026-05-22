@@ -229,6 +229,15 @@ pub struct AgentConnectionManager {
     /// and poison errors are not silently swallowed.
     pub(super) adapter_lifecycle_manager:
         Arc<tokio::sync::RwLock<Option<Arc<AdapterLifecycleManager>>>>,
+    /// connection_id → last liveness proof timestamp.
+    ///
+    /// Updated by `record_liveness()` which is called from:
+    /// - The heartbeat dispatch handler (for every connection the agent manages).
+    /// - `RemoteAdapter::confirm_alive()` (after successful request/response round-trips).
+    ///
+    /// Read by `liveness_age()` which `RemoteAdapter::ensure_connected()` uses to detect
+    /// stale connections without resetting the timer on each call.
+    pub(super) liveness_timestamps: Arc<DashMap<ConnectionId, std::time::Instant>>,
 }
 
 impl AgentConnectionManager {
@@ -253,6 +262,7 @@ impl AgentConnectionManager {
             agent_config,
             system_event_tx,
             adapter_lifecycle_manager: Arc::new(tokio::sync::RwLock::new(None)),
+            liveness_timestamps: Arc::new(DashMap::new()),
         }
     }
 }

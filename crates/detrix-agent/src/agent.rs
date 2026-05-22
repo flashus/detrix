@@ -109,6 +109,7 @@ impl Agent {
                 Arc::clone(&events_dropped),
                 self.capture_config.clone(),
                 Arc::clone(&metrics_state.events_forwarded),
+                self.config.scanner.allowed_read_prefixes.clone(),
             ));
 
             match self
@@ -127,6 +128,7 @@ impl Agent {
             {
                 Ok(()) => {
                     info!("Agent disconnected cleanly");
+                    reconnect_secs = self.config.reconnect_interval_secs;
                 }
                 Err(e) => {
                     if e.is_fatal() {
@@ -320,7 +322,6 @@ impl Agent {
         // 2. Heartbeat task
         tasks.spawn({
             let ctrl_tx_h = ctrl_tx.clone();
-            let stream_tx_h = stream_tx.clone();
             let interval = Duration::from_secs(self.config.heartbeat_interval_secs);
             let dropped = Arc::clone(events_dropped);
             let uptime = Arc::clone(&metrics_state.uptime_secs);
@@ -336,8 +337,7 @@ impl Agent {
                             ..Default::default()
                         })),
                     };
-                    let _ = ctrl_tx_h.send(heartbeat.clone());
-                    let _ = stream_tx_h.send(heartbeat).await;
+                    let _ = ctrl_tx_h.send(heartbeat);
                 }
             }
         });
@@ -370,7 +370,6 @@ impl Agent {
         // PID-tracking state survives reconnect cycles in the outer run() loop.
         tasks.spawn({
             let ctrl_tx_s = ctrl_tx.clone();
-            let stream_tx_s = stream_tx.clone();
             let agent_id_s = agent_id.to_string();
             let hostname_s = hostname.to_string();
             let scanner_s = Arc::clone(&scanner);
@@ -396,8 +395,7 @@ impl Agent {
                                 binaries: binaries.iter().map(binary_info_to_proto).collect(),
                             })),
                         };
-                        let _ = ctrl_tx_s.send(register.clone());
-                        let _ = stream_tx_s.send(register).await;
+                        let _ = ctrl_tx_s.send(register);
                     }
                 }
             }

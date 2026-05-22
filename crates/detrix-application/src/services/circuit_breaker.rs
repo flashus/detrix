@@ -66,7 +66,7 @@ impl CircuitBreaker {
                         Ordering::AcqRel,
                         Ordering::Acquire,
                     )
-                    .is_ok()
+                    .is_err()
             } else {
                 true
             }

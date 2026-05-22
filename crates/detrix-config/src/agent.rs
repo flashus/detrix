@@ -87,6 +87,15 @@ pub struct ScannerConfig {
     /// binaries without DWARF cannot be observed and would create unusable connections.
     #[serde(default = "default_require_dwarf")]
     pub require_dwarf: bool,
+
+    /// Restrict server-requested file reads to these directory prefixes.
+    /// The agent canonicalises the requested path and rejects anything outside
+    /// these directories, preventing a compromised server from reading arbitrary files.
+    ///
+    /// Empty = allow any path the agent process can read (legacy behaviour;
+    /// a warning is logged on each unrestricted read). Configure this in production.
+    #[serde(default)]
+    pub allowed_read_prefixes: Vec<PathBuf>,
 }
 
 impl Default for ScannerConfig {
@@ -96,6 +105,7 @@ impl Default for ScannerConfig {
             include_patterns: Vec::new(),
             exclude_patterns: Vec::new(),
             require_dwarf: default_require_dwarf(),
+            allowed_read_prefixes: Vec::new(),
         }
     }
 }
@@ -245,6 +255,7 @@ mod tests {
                 include_patterns: vec!["/app/*".to_string()],
                 exclude_patterns: vec![],
                 require_dwarf: true,
+                allowed_read_prefixes: vec![],
             },
             agent_tokens: vec!["abc123".to_string()],
             min_compatible_agent_version: Some("1.3.0".to_string()),

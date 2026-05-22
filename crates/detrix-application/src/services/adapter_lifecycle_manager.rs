@@ -722,6 +722,10 @@ impl AdapterLifecycleManager {
         // If this connection is managed by an agent, construct RemoteAdapter instead.
         let adapter: DapAdapterRef = if let Some(ref mgr) = self.agent_manager {
             if mgr.is_agent_managed(&connection_id) {
+                // Refresh the event channel so that adapter restarts always find a
+                // fresh receiver in subscribe_events() — the previous call consumed
+                // the old one via .remove().
+                mgr.refresh_event_channel(&connection_id);
                 Arc::new(RemoteAdapter::new(connection_id.clone(), mgr.clone()))
             } else {
                 match language {
