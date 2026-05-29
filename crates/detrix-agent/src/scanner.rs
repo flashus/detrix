@@ -270,5 +270,6 @@ pub fn binary_info_to_proto(info: &BinaryInfo) -> detrix_api::generated::detrix:
         build_info: info.build_info.clone(),
         has_dwarf: info.has_dwarf,
         exported_functions: info.exported_functions.clone(),
+        inode: info.inode,
     }
 }

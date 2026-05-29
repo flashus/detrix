@@ -163,6 +163,17 @@ pub fn parse_ring_buffer_event(
                             data: vec![],
                             len: 0,
                         }
+                    } else if val >= 0x8000_0000_0000 {
+                        // Kernel-space address — the BPF program cannot safely read it from
+                        // user-space and attempting to do so would fault or return garbage.
+                        detrix_logging::warn!(
+                            "[ringbuf] ptr={:#x} for '{}' is in kernel space (ns_pid={}), rejecting",
+                            val, var.name, ns_pid
+                        );
+                        CapturedValue::String {
+                            data: vec![],
+                            len: 0,
+                        }
                     } else {
                         detrix_logging::debug!(
                             "[ringbuf] Reading Go string via user-space: ns_pid={} ptr={:#x} len={}",

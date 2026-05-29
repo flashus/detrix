@@ -64,6 +64,7 @@ regex.workspace = true
 paste.workspace = true
 hostname = "0.4"  # Get machine hostname for connection identity
 sha2.workspace = true  # For VFS file content hashing
+subtle.workspace = true  # Constant-time comparisons
 
 # Unix-specific for process info
 [target.'cfg(unix)'.dependencies]

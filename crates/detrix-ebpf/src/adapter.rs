@@ -36,6 +36,7 @@ use detrix_core::{ExpressionValue, Metric, MetricEvent, MetricId, TypedValue};
 use detrix_ports::{DapAdapter, RemoveMetricResult, SetMetricResult};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 #[cfg(target_os = "linux")]
@@ -65,8 +66,8 @@ pub struct EbpfAdapter {
     event_tx: mpsc::Sender<MetricEvent>,
     /// Event receiver — handed out exactly once via subscribe_events().
     event_rx: RwLock<Option<mpsc::Receiver<MetricEvent>>>,
-    /// Whether the adapter is Started.
-    started: RwLock<bool>,
+    /// Whether the adapter is started. AtomicBool for lock-free check-and-set in start().
+    started: AtomicBool,
     /// Placeholder raw event receiver — keeps the pre-start channel open so ring
     /// buffer pollers don't see a broken channel if set_metric() is called before start().
     /// Dropped (set to None) in start() when the real correlator channel is created.
@@ -141,7 +142,7 @@ impl EbpfAdapter {
             active_metrics: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             event_rx: RwLock::new(Some(event_rx)),
-            started: RwLock::new(false),
+            started: AtomicBool::new(false),
             _placeholder_raw_rx: RwLock::new(Some(placeholder_rx)),
             capture_config,
             #[cfg(target_os = "linux")]
@@ -216,34 +217,50 @@ impl EbpfAdapter {
 #[async_trait]
 impl DapAdapter for EbpfAdapter {
     async fn start(&self) -> detrix_core::Result<()> {
-        let dwarf = DwarfInfo::parse(&self.binary_path)?;
-        *self.dwarf.write().await = Some(dwarf);
-
-        // On Linux: create a fresh raw-event channel on each start() so the adapter
-        // is restartable after stop(). set_raw_tx() replaces the sender in
-        // UprobeManager; newly attached probes will use the new sender.
-        #[cfg(target_os = "linux")]
+        // Atomic check-and-set: only one concurrent caller proceeds.
+        if self
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
         {
-            let (raw_tx, raw_rx) = mpsc::unbounded_channel();
-            self.uprobe_manager.write().await.set_raw_tx(raw_tx);
-            // Drop the placeholder receiver now that the real channel is active.
-            *self._placeholder_raw_rx.write().await = None;
-            let active_metrics = Arc::clone(&self.active_metrics);
-            let event_tx = self.event_tx.clone();
-            let capture_config = self.capture_config.clone();
-            let mem_reader = Arc::clone(&self.mem_reader);
-            let handle = tokio::spawn(run_event_correlator(
-                raw_rx,
-                active_metrics,
-                event_tx,
-                capture_config,
-                mem_reader,
-            ));
-            *self.correlator_handle.write().await = Some(handle);
+            return Ok(());
         }
 
-        *self.started.write().await = true;
-        Ok(())
+        let result: detrix_core::Result<()> = async {
+            let dwarf = DwarfInfo::parse(&self.binary_path)?;
+            *self.dwarf.write().await = Some(dwarf);
+
+            // On Linux: create a fresh raw-event channel on each start() so the adapter
+            // is restartable after stop(). set_raw_tx() replaces the sender in
+            // UprobeManager; newly attached probes will use the new sender.
+            #[cfg(target_os = "linux")]
+            {
+                let (raw_tx, raw_rx) = mpsc::unbounded_channel();
+                self.uprobe_manager.write().await.set_raw_tx(raw_tx);
+                // Drop the placeholder receiver now that the real channel is active.
+                *self._placeholder_raw_rx.write().await = None;
+                let active_metrics = Arc::clone(&self.active_metrics);
+                let event_tx = self.event_tx.clone();
+                let capture_config = self.capture_config.clone();
+                let mem_reader = Arc::clone(&self.mem_reader);
+                let handle = tokio::spawn(run_event_correlator(
+                    raw_rx,
+                    active_metrics,
+                    event_tx,
+                    capture_config,
+                    mem_reader,
+                ));
+                *self.correlator_handle.write().await = Some(handle);
+            }
+            Ok(())
+        }
+        .await;
+
+        if result.is_err() {
+            // Reset so a future start() attempt can retry.
+            self.started.store(false, Ordering::Release);
+        }
+        result
     }
 
     async fn stop(&self) -> detrix_core::Result<()> {
@@ -265,12 +282,12 @@ impl DapAdapter for EbpfAdapter {
             }
         }
 
-        *self.started.write().await = false;
+        self.started.store(false, Ordering::Release);
         Ok(())
     }
 
     async fn ensure_connected(&self) -> detrix_core::Result<()> {
-        if *self.started.read().await {
+        if self.started.load(Ordering::Acquire) {
             Ok(())
         } else {
             self.start().await
@@ -278,7 +295,7 @@ impl DapAdapter for EbpfAdapter {
     }
 
     fn is_connected(&self) -> bool {
-        self.started.try_read().map(|guard| *guard).unwrap_or(false)
+        self.started.load(Ordering::Acquire)
     }
 
     async fn set_metric(&self, metric: &Metric) -> detrix_core::Result<SetMetricResult> {
@@ -402,6 +419,26 @@ impl DapAdapter for EbpfAdapter {
             .map(|guard| guard.get_drop_count(metric_name))
             .unwrap_or(0);
         Ok(count)
+    }
+}
+
+impl Drop for EbpfAdapter {
+    fn drop(&mut self) {
+        // Abort the correlator task so it doesn't outlive the adapter.
+        #[cfg(target_os = "linux")]
+        if let Ok(mut handle) = self.correlator_handle.try_write() {
+            if let Some(h) = handle.take() {
+                h.abort();
+            }
+        }
+        // Detach eBPF probes from the kernel so they don't outlive the adapter.
+        if let Ok(mut mgr) = self.uprobe_manager.try_write() {
+            mgr.detach_all();
+        } else {
+            detrix_logging::warn!(
+                "[EbpfAdapter] drop: uprobe_manager lock contended — probes may remain attached"
+            );
+        }
     }
 }
 

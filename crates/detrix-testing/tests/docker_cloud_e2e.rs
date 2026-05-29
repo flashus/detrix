@@ -761,8 +761,15 @@ async fn test_cloud_e2e() {
     println!("  Python events captured: {}", py_event_count);
 
     // ── Phase 1b: Go ──
+    // Use wake_with_retry: test-app-go has no healthcheck so docker compose --wait
+    // returns as soon as the container starts, but detrix.Init() takes ~2s to bind
+    // port 8091 (FetchAdvertiseURL has a 2s timeout). Retry handles both the
+    // startup race and transient container restarts.
     println!("\n--- Phase 1b: Go ---");
-    bridge.wake(GO_APP_URL).await.expect("wake go failed");
+    bridge
+        .wake_with_retry(GO_APP_URL, 3)
+        .await
+        .expect("wake go failed");
 
     let go_conn = poll_for_connection_bridge(&mut bridge, "go", Duration::from_secs(15))
         .await

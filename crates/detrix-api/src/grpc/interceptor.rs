@@ -22,15 +22,26 @@ pub type AuthInterceptorState = crate::common::auth::AuthState;
 /// Unlike the main gRPC auth interceptor, this one validates agent bearer tokens
 /// by checking SHA-256(token) against the configured agent token hashes.
 /// This allows agents to authenticate independently of user/JWT tokens.
+///
+/// When `dev_mode` is true and `agent_token_hashes` is empty, all connections are
+/// accepted (development only). When `dev_mode` is false and no tokens are configured,
+/// all connections are rejected.
 pub fn create_agent_auth_interceptor(
     agent_token_hashes: Vec<String>,
+    dev_mode: bool,
 ) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone + Send + Sync + 'static {
     use sha2::{Digest, Sha256};
+    use subtle::ConstantTimeEq;
 
     move |request: Request<()>| {
-        // When no agent tokens configured, allow all connections (dev mode).
         if agent_token_hashes.is_empty() {
-            return Ok(request);
+            if dev_mode {
+                warn!("Agent auth is DISABLED (agent.dev_mode=true) — all connections accepted");
+                return Ok(request);
+            }
+            return Err(Status::unauthenticated(
+                "Agent tokens not configured; set agent.agent_tokens or enable agent.dev_mode",
+            ));
         }
 
         let auth_value = request
@@ -45,9 +56,12 @@ pub fn create_agent_auth_interceptor(
             None => return Err(Status::unauthenticated("Missing authorization")),
         };
 
-        // Check SHA-256(token) against configured agent token hashes
+        // Constant-time comparison to prevent timing side-channel attacks.
         let hash = format!("{:x}", Sha256::digest(token.as_bytes()));
-        if agent_token_hashes.contains(&hash) {
+        let found = agent_token_hashes
+            .iter()
+            .any(|h| h.as_bytes().ct_eq(hash.as_bytes()).into());
+        if found {
             Ok(request)
         } else {
             Err(Status::unauthenticated("Invalid agent token"))

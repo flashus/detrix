@@ -16,7 +16,6 @@ const STATE_HALF_OPEN: u8 = 2;
 
 struct CircuitBreakerInner {
     state: AtomicU8,
-    consecutive_failures: AtomicU64,
     last_transition_ms: AtomicU64,
     failure_timestamps: Mutex<Vec<u64>>,
 }
@@ -24,7 +23,7 @@ struct CircuitBreakerInner {
 /// Circuit breaker protecting `set_metric` / `remove_metric` calls.
 ///
 /// State transitions:
-/// - Closed → Open: 3 consecutive timeouts within 60s window
+/// - Closed → Open: 3 failures within a 60 s sliding window
 /// - Open → HalfOpen: after 30s cooldown
 /// - HalfOpen → Closed: on first success
 /// - HalfOpen → Open: on timeout
@@ -38,7 +37,6 @@ impl CircuitBreaker {
         Self {
             inner: Arc::new(CircuitBreakerInner {
                 state: AtomicU8::new(STATE_CLOSED),
-                consecutive_failures: AtomicU64::new(0),
                 last_transition_ms: AtomicU64::new(now_ms()),
                 failure_timestamps: Mutex::new(Vec::with_capacity(3)),
             }),
@@ -110,7 +108,6 @@ impl CircuitBreaker {
     }
 
     fn on_success(&self) {
-        self.inner.consecutive_failures.store(0, Ordering::Relaxed);
         if let Ok(mut timestamps) = self.inner.failure_timestamps.lock() {
             timestamps.clear();
         }
@@ -274,9 +271,9 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(
-            cb.inner.consecutive_failures.load(Ordering::Relaxed),
-            cb2.inner.consecutive_failures.load(Ordering::Relaxed)
-        );
+        // Both views see the same failure timestamps (shared Arc)
+        let ts1 = cb.inner.failure_timestamps.lock().unwrap().len();
+        let ts2 = cb2.inner.failure_timestamps.lock().unwrap().len();
+        assert_eq!(ts1, ts2);
     }
 }

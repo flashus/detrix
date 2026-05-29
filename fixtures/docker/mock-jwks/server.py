@@ -9,6 +9,7 @@ Serves the pre-generated JWKS JSON at:
 import json
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 
 JWKS_PATH = os.path.join(os.path.dirname(__file__), "jwks.json")
 
@@ -32,8 +33,13 @@ class JwksHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Handle each request in a separate thread so healthchecks and real requests don't serialize."""
+    daemon_threads = True
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
-    server = HTTPServer(("0.0.0.0", port), JwksHandler)
+    server = ThreadedHTTPServer(("0.0.0.0", port), JwksHandler)
     print(f"Mock JWKS server listening on :{port}", flush=True)
     server.serve_forever()

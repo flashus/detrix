@@ -4894,6 +4894,8 @@ pub struct BinaryInfo {
     pub has_dwarf: bool,
     #[prost(string, repeated, tag = "5")]
     pub exported_functions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint64, tag = "6")]
+    pub inode: u64,
 }
 /// Reuses ConnectionStatus from connections.proto
 #[derive(serde::Serialize, serde::Deserialize)]

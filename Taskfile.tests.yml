@@ -156,8 +156,13 @@ tasks:
       COMPOSE_FILE: fixtures/docker/docker-compose.yml
       PROJECT: detrix-cloud-test
     cmds:
-      - docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --wait mock-jwks detrix-jwt
-      - defer: docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} stop mock-jwks detrix-jwt
+      - |
+        for i in 1 2 3; do
+          docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --force-recreate --wait mock-jwks detrix-jwt && break
+          echo "docker compose up --build failed (attempt $i/3), retrying in 5s..."
+          sleep 5
+        done
+      - defer: docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} down mock-jwks detrix-jwt
       - cargo test -p detrix-testing --test jwks_cloud_e2e -- --ignored --nocapture --test-threads=1
       - task: check-orphans
 
@@ -168,7 +173,12 @@ tasks:
       COMPOSE_FILE: fixtures/docker/docker-compose.keycloak.yml
       PROJECT: detrix-keycloak-test
     cmds:
-      - docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --wait
+      - |
+        for i in 1 2 3; do
+          docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --wait && break
+          echo "docker compose up --build failed (attempt $i/3), retrying in 5s..."
+          sleep 5
+        done
       - defer: docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} down -v
       - cargo test -p detrix-testing --test 'keycloak_*_e2e' -- --ignored --nocapture --test-threads=1
       - task: check-orphans
@@ -452,7 +462,12 @@ tasks:
       COMPOSE_FILE: fixtures/docker/docker-compose.yml
       PROJECT: detrix-cloud-test
     cmds:
-      - docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --wait
+      - |
+        for i in 1 2 3; do
+          docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --wait && break
+          echo "docker compose up --build failed (attempt $i/3), retrying in 5s..."
+          sleep 5
+        done
       - defer: docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} down -v
       - cargo test -p detrix-testing --test docker_cloud_e2e -- --ignored --nocapture --test-threads=1
       - task: check-orphans
@@ -500,3 +515,10 @@ tasks:
           -e AGENT_FIXTURE_SOURCE=/src/fixtures/go/string_capture/main.go \
           {{.PLAYGROUND}} \
           /usr/local/bin/agent_e2e_test --ignored --nocapture --test-threads=1
+
+  # ── Cache cleanup ──────────────────────────────────────────────────────────────
+
+  docker-clean:
+    desc: Delete Docker volumes that cache Cargo/Go build artefacts for agent-mode tests (forces a full rebuild next run)
+    cmds:
+      - docker volume rm -f ebpf-cargo-home ebpf-cargo-target ebpf-go-mod ebpf-go-build

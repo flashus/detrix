@@ -26,7 +26,6 @@ pub struct RemoteAdapter {
     agent_manager: AgentConnectionManagerRef,
     event_rx: Mutex<Option<tokio::sync::mpsc::Receiver<MetricEvent>>>,
     circuit: CircuitBreaker,
-    drop_counts: Mutex<std::collections::HashMap<String, u64>>,
     /// Monotonic liveness timestamp; updated on any liveness proof (Pong, SetMetricAck, etc.).
     /// Stored as `Mutex<Option<Instant>>` to use the monotonic clock and avoid SystemTime
     /// jump-backward / jump-forward hazards from NTP or manual clock changes.
@@ -50,7 +49,6 @@ impl RemoteAdapter {
             agent_manager,
             event_rx: Mutex::new(event_rx),
             circuit: CircuitBreaker::new(),
-            drop_counts: Mutex::new(std::collections::HashMap::new()),
             last_confirmed_at: Mutex::new(None),
             request_counter: AtomicUsize::new(0),
         }
@@ -93,13 +91,6 @@ impl RemoteAdapter {
             .await?;
         self.confirm_alive();
         Ok(result)
-    }
-
-    /// Update cached drop count from agent's DropCount message.
-    pub fn update_drop_count(&self, metric_name: &str, count: u64) {
-        if let Ok(mut map) = self.drop_counts.lock() {
-            map.insert(metric_name.to_string(), count);
-        }
     }
 }
 
@@ -268,11 +259,7 @@ impl DapAdapter for RemoteAdapter {
         Ok(true)
     }
 
-    /// Get cached drop count for a metric.
-    fn get_drop_count(&self, metric_name: &str) -> Result<u64> {
-        self.drop_counts
-            .lock()
-            .map_err(|e| Error::Adapter(format!("Drop count lock poisoned: {e}")))
-            .map(|map| map.get(metric_name).copied().unwrap_or(0))
+    fn get_drop_count(&self, _metric_name: &str) -> Result<u64> {
+        Ok(0)
     }
 }

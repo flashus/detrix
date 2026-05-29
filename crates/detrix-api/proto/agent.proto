@@ -57,6 +57,7 @@ message BinaryInfo {
   string build_info                  = 3;   // Go build version string
   bool   has_dwarf                   = 4;
   repeated string exported_functions = 5;
+  uint64 inode                       = 6;
 }
 
 // Reuses ConnectionStatus from connections.proto

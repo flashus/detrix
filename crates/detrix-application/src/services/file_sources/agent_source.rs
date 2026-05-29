@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use detrix_core::{Connection, Result};
 use detrix_logging::warn;
 use std::time::Duration;
+use uuid::Uuid;
 
 use crate::services::agent_connection_manager::{
     AgentConnectionManagerRef, IncomingAgentMessage, OutgoingAgentMessage,
@@ -39,7 +40,7 @@ impl FileSource for AgentFileSource {
         }
 
         let msg = OutgoingAgentMessage::ReadFile {
-            request_id: format!("readfile-{}", connection.id.0),
+            request_id: format!("readfile-{}-{}", connection.id.0, Uuid::new_v4()),
             connection_id: connection.id.0.clone(),
             path: file_path.to_string(),
         };

@@ -17,6 +17,7 @@ use detrix_ports::{
     ConnectionReferenceRepository, ConnectionRepository, DlqEntry, DlqEntryStatus, DlqRepository,
     EventRepository, MetricRepository, SystemEventRepository,
 };
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
@@ -420,7 +421,7 @@ impl EventRepository for MockEventRepository {
             .cloned()
             .collect();
         // Sort by timestamp descending to match real DB behavior
-        filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        filtered.sort_by_key(|e| Reverse(e.timestamp));
         Ok(filtered.into_iter().take(limit as usize).collect())
     }
 
@@ -437,7 +438,7 @@ impl EventRepository for MockEventRepository {
             .cloned()
             .collect();
         // Sort by timestamp descending to match real DB behavior
-        filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        filtered.sort_by_key(|e| Reverse(e.timestamp));
         Ok(filtered.into_iter().take(limit as usize).collect())
     }
 
@@ -453,7 +454,7 @@ impl EventRepository for MockEventRepository {
             .cloned()
             .collect();
         // Sort by timestamp descending to match real DB behavior
-        filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        filtered.sort_by_key(|e| Reverse(e.timestamp));
         Ok(filtered.into_iter().take(limit as usize).collect())
     }
 
@@ -473,7 +474,7 @@ impl EventRepository for MockEventRepository {
             .cloned()
             .collect();
         // Sort by timestamp descending to match real DB behavior
-        filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        filtered.sort_by_key(|e| Reverse(e.timestamp));
         Ok(filtered.into_iter().take(limit as usize).collect())
     }
 
@@ -505,7 +506,7 @@ impl EventRepository for MockEventRepository {
     async fn find_recent(&self, limit: i64) -> Result<Vec<MetricEvent>> {
         let events = self.events.read().unwrap();
         let mut sorted: Vec<_> = events.iter().cloned().collect();
-        sorted.sort_by(|a, b| b.timestamp.cmp(&a.timestamp)); // desc by timestamp
+        sorted.sort_by_key(|e| Reverse(e.timestamp));
         Ok(sorted.into_iter().take(limit as usize).collect())
     }
 
@@ -527,7 +528,7 @@ impl EventRepository for MockEventRepository {
             .filter(|(_, e)| e.metric_id == metric_id)
             .map(|(i, e)| (i, e.timestamp))
             .collect();
-        metric_events.sort_by(|a, b| b.1.cmp(&a.1)); // desc by timestamp
+        metric_events.sort_by_key(|&(_, ts)| Reverse(ts));
 
         // Mark indices to remove (beyond keep_count)
         let to_remove: std::collections::HashSet<_> = metric_events
@@ -657,7 +658,7 @@ impl SystemEventRepository for MockSystemEventRepository {
     async fn find_recent(&self, limit: i64) -> Result<Vec<SystemEvent>> {
         let events = self.events.read().unwrap();
         let mut sorted: Vec<_> = events.iter().cloned().collect();
-        sorted.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        sorted.sort_by_key(|e| Reverse(e.timestamp));
         Ok(sorted.into_iter().take(limit as usize).collect())
     }
 
@@ -679,7 +680,7 @@ impl SystemEventRepository for MockSystemEventRepository {
         }
 
         // Sort by timestamp descending, keep only most recent
-        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.sort_by_key(|e| Reverse(e.timestamp));
         let to_delete = events.len() - max_events;
         events.truncate(max_events);
         Ok(to_delete as u64)

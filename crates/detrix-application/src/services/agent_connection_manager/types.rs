@@ -4,10 +4,11 @@
 //! Proto conversion happens at the gRPC boundary in `detrix-api`.
 
 use std::collections::HashSet;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use crate::services::AdapterLifecycleManager;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use detrix_core::{ConnectionId, MetricEvent, SystemEvent};
 use detrix_ports::{ConnectionRepositoryRef, MetricRepositoryRef};
 use tokio::sync::{mpsc, oneshot};
@@ -216,10 +217,11 @@ pub struct AgentConnectionManager {
     /// request_id → connection_id reverse index — O(1) lookup in resolve_pending,
     /// replacing the former O(N) scan over connection_requests.
     pub(super) request_to_connection: Arc<DashMap<String, ConnectionId>>,
-    /// agent_id → pending ping waiters (one entry per in-flight ping_agent call).
-    /// Any Pong from that agent satisfies all waiters — using per-agent Vec avoids
-    /// the hardcoded `"_ping_"` key that clobbered concurrent callers.
-    pub(super) pending_pings: Arc<DashMap<String, Vec<tokio::sync::oneshot::Sender<()>>>>,
+    /// agent_id → {ping_id → waiter} — indexed by unique ping_id to allow safe
+    /// per-waiter removal without fragile Vec::pop() under concurrent callers.
+    pub(super) pending_pings: Arc<DashMap<String, DashMap<u64, tokio::sync::oneshot::Sender<()>>>>,
+    /// Monotonic counter for generating unique ping IDs.
+    pub(super) ping_counter: Arc<AtomicU64>,
     pub(super) connection_repo: ConnectionRepositoryRef,
     pub(super) metric_repo: MetricRepositoryRef,
     pub(super) agent_config: Option<detrix_config::AgentConfig>,
@@ -238,6 +240,9 @@ pub struct AgentConnectionManager {
     /// Read by `liveness_age()` which `RemoteAdapter::ensure_connected()` uses to detect
     /// stale connections without resetting the timer on each call.
     pub(super) liveness_timestamps: Arc<DashMap<ConnectionId, std::time::Instant>>,
+    /// Connections currently being started by dispatch — prevents duplicate start_adapter
+    /// calls when concurrent ConnectionUpdate(Connected) events arrive.
+    pub(super) starting_adapters: Arc<DashSet<ConnectionId>>,
 }
 
 impl AgentConnectionManager {
@@ -257,12 +262,14 @@ impl AgentConnectionManager {
             connection_requests: Arc::new(DashMap::new()),
             request_to_connection: Arc::new(DashMap::new()),
             pending_pings: Arc::new(DashMap::new()),
+            ping_counter: Arc::new(AtomicU64::new(0)),
             connection_repo,
             metric_repo,
             agent_config,
             system_event_tx,
             adapter_lifecycle_manager: Arc::new(tokio::sync::RwLock::new(None)),
             liveness_timestamps: Arc::new(DashMap::new()),
+            starting_adapters: Arc::new(DashSet::new()),
         }
     }
 }

@@ -98,7 +98,7 @@ pub async fn query_system_events_impl(
             }
         }
         // Sort by timestamp descending and limit
-        all_events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        all_events.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
         all_events.truncate(limit as usize);
         all_events
     } else {

@@ -16,6 +16,11 @@ services:
       DETRIX_TOKEN: docker-test-token
       DETRIX_ADVERTISE_URL: ${TEST_ADVERTISE_URL:-}
       DETRIX_CONFIG: ${DETRIX_CONFIG:-}
+      # Bypass host-injected proxy (e.g. OrbStack) for intra-container and host calls:
+      # - test-app-*: wake/sleep control-plane calls
+      # - host.docker.internal: bridge file server (runs on host, reachable via host-gateway)
+      NO_PROXY: "test-app-python,test-app-go,test-app-rust,host.docker.internal,localhost,127.0.0.1"
+      no_proxy: "test-app-python,test-app-go,test-app-rust,host.docker.internal,localhost,127.0.0.1"
     healthcheck:
       test: ["CMD", "/usr/local/bin/detrix", "status", "--config", "/data/detrix/detrix.toml", "-q"]
       interval: 5s
@@ -47,6 +52,13 @@ services:
     depends_on:
       mock-jwks:
         condition: service_healthy
+    environment:
+      # Bypass any host-injected HTTP proxy (e.g. OrbStack) for intra-container DNS names.
+      # Without this, reqwest routes requests to mock-jwks through the host proxy, which
+      # cannot resolve Docker-internal hostnames → 502 Bad Gateway on JWKS fetch.
+      # host.docker.internal: bridge file server runs on host, must bypass proxy too.
+      NO_PROXY: "mock-jwks,host.docker.internal,localhost,127.0.0.1"
+      no_proxy: "mock-jwks,host.docker.internal,localhost,127.0.0.1"
     healthcheck:
       test: ["CMD", "/usr/local/bin/detrix", "status", "--config", "/data/detrix/detrix.toml", "-q"]
       interval: 3s
@@ -70,6 +82,8 @@ services:
       DETRIX_CONTROL_PORT: "8091"
       DETRIX_TOKEN: docker-test-token
       GIT_COMMIT: ${TEST_GIT_COMMIT:-}
+      NO_PROXY: "detrix,localhost,127.0.0.1"
+      no_proxy: "detrix,localhost,127.0.0.1"
 
   test-app-go:
     build:
@@ -78,6 +92,8 @@ services:
     depends_on:
       detrix:
         condition: service_healthy
+    # Restart on crash so wake_with_retry can succeed after a container failure.
+    restart: on-failure
     environment:
       DETRIX_CLIENT_ENABLED: "1"
       DETRIX_DAEMON_URL: http://detrix:8090
@@ -89,6 +105,8 @@ services:
       # (dlv attach + DAP handshake) can take several seconds in Docker with
       # multiple services running, exceeding the default 5s timeout.
       DETRIX_REGISTER_TIMEOUT: "30"
+      NO_PROXY: "detrix,localhost,127.0.0.1"
+      no_proxy: "detrix,localhost,127.0.0.1"
 
   test-app-rust:
     build:
@@ -101,6 +119,8 @@ services:
       - SYS_PTRACE
     security_opt:
       - seccomp:unconfined
+    # Restart on crash so wake retries can succeed after a container failure.
+    restart: on-failure
     environment:
       DETRIX_CLIENT_ENABLED: "1"
       DETRIX_DAEMON_URL: http://detrix:8090
@@ -112,6 +132,8 @@ services:
       # adapter setup uses ptrace (via lldb-dap) to attach to this process,
       # which freezes all threads while the monotonic timeout clock keeps ticking.
       DETRIX_REGISTER_TIMEOUT: "30"
+      NO_PROXY: "detrix,localhost,127.0.0.1"
+      no_proxy: "detrix,localhost,127.0.0.1"
 
 volumes:
   detrix-data:

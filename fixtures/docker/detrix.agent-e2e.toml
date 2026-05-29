@@ -16,6 +16,11 @@ server_grpc_url = "http://detrix-agent-server:50061"
 # Token authentication
 token_file = "/var/lib/detrix/agent-token"
 
+# Prometheus /metrics and /health bind address and port.
+# 0.0.0.0 so the Prometheus scraper container can reach it.
+metrics_host = "0.0.0.0"
+metrics_port = 9095
+
 [scanner]
 enabled = true
 scan_interval_secs = 10
@@ -28,11 +33,6 @@ exclude_patterns = []
 
 # Require DWARF debug info for Go binaries
 require_dwarf = true
-
-[metrics]
-# Metrics HTTP server (for Prometheus scraping)
-enabled = true
-port = 9095
 
 [reconnect]
 # Reconnection settings

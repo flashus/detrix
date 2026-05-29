@@ -482,16 +482,35 @@ pub async fn run(
         info!("🔑 Creating JWT validator for external auth mode...");
         match JwksValidator::new(&config.api.auth.jwt) {
             Ok(validator) => {
-                // Pre-fetch JWKS keys so the synchronous gRPC interceptor can validate
-                // tokens without a nested Tokio runtime (#2 fix).
-                if let Err(e) = validator.force_refresh().await {
-                    warn!(error = %e, "JWKS preload failed — JWT auth may reject on first gRPC request");
-                } else {
-                    info!(
-                        key_count = validator.cached_key_count(),
-                        "JWKS keys pre-fetched"
-                    );
+                // Pre-fetch JWKS keys with retry — transient 502/network errors at container
+                // startup (common in Docker Desktop on macOS) must not leave the cache empty.
+                let mut preload_ok = false;
+                for attempt in 1u32..=5 {
+                    match validator.force_refresh().await {
+                        Ok(()) => {
+                            info!(
+                                key_count = validator.cached_key_count(),
+                                "JWKS keys pre-fetched"
+                            );
+                            preload_ok = true;
+                            break;
+                        }
+                        Err(e) if attempt < 5 => {
+                            let delay_ms = 200 * (1u64 << (attempt - 1)); // 200, 400, 800, 1600
+                            warn!(
+                                error = %e,
+                                attempt,
+                                retry_ms = delay_ms,
+                                "JWKS preload failed, retrying"
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "JWKS preload failed after 5 attempts — JWT auth may reject until keys are refreshed");
+                        }
+                    }
                 }
+                let _ = preload_ok;
                 info!(
                     jwks_url = ?config.api.auth.jwt.jwks_url,
                     "✓ JWT validator created"
@@ -598,7 +617,7 @@ pub async fn run(
         };
         let auth_interceptor = create_auth_interceptor(grpc_auth_state);
         let agent_auth_interceptor =
-            create_agent_auth_interceptor(config.agent.agent_tokens.clone());
+            create_agent_auth_interceptor(config.agent.agent_tokens.clone(), config.agent.dev_mode);
 
         if config.api.auth.is_enabled() {
             info!(mode = ?config.api.auth.mode, "✓ gRPC authentication enabled");
@@ -606,7 +625,11 @@ pub async fn run(
             info!("✓ gRPC authentication disabled (all endpoints public)");
         }
         if config.agent.agent_tokens.is_empty() {
-            info!("✓ Agent gRPC authentication disabled (no agent tokens configured)");
+            if config.agent.dev_mode {
+                warn!("Agent gRPC authentication DISABLED via dev_mode — not safe for production");
+            } else {
+                info!("✓ Agent gRPC authentication enabled (tokens configured)");
+            }
         } else {
             info!("✓ Agent gRPC authentication enabled");
         }

@@ -17,7 +17,7 @@ use detrix_api::generated::detrix::v1::{
 use detrix_core::{ConnectionId, Location, Metric, MetricEvent, ParseLanguageExt, SourceLanguage};
 use detrix_dap::{PythonAdapter, RustAdapter};
 use detrix_ebpf::{CaptureConfig, EbpfAdapter};
-use detrix_logging::{info, warn};
+use detrix_logging::{debug, info, warn};
 use detrix_ports::DapAdapterRef;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -250,19 +250,38 @@ impl AdapterManager {
         }
     }
 
-    /// Resolve the SourceLanguage for a connection (defaults to Go for eBPF connections).
-    fn connection_language(&self, connection_id: &str) -> SourceLanguage {
+    /// Resolve the SourceLanguage for a connection.
+    fn connection_language(&self, connection_id: &str) -> crate::error::Result<SourceLanguage> {
         self.connection_languages
             .get(connection_id)
-            .map(|v| v.value().parse_language_lossy())
-            .unwrap_or(SourceLanguage::Go)
+            .map(|v| Ok(v.value().parse_language_lossy()))
+            .unwrap_or_else(|| {
+                Err(AgentError::Scanner(format!(
+                    "no language record for connection {connection_id}"
+                )))
+            })
     }
 
     /// Handle SetMetric.
     pub async fn handle_set_metric(&self, msg: SetMetric) {
         let connection_id = msg.connection_id.clone();
         let request_id = msg.request_id.clone();
-        let language = self.connection_language(&connection_id);
+        let language = match self.connection_language(&connection_id) {
+            Ok(l) => l,
+            Err(e) => {
+                warn!(connection_id = %connection_id, "SetMetric: {e}");
+                let _ = self.ctrl_tx.send(AgentMessage {
+                    msg: Some(agent_message::Msg::SetMetricAck(SetMetricAck {
+                        request_id,
+                        verified: false,
+                        actual_line: 0,
+                        message: String::new(),
+                        error: e.to_string(),
+                    })),
+                });
+                return;
+            }
+        };
 
         let metric = match proto_set_metric_to_metric(&msg, language) {
             Ok(m) => m,
@@ -320,7 +339,20 @@ impl AdapterManager {
     pub async fn handle_remove_metric(&self, msg: RemoveMetric) {
         let connection_id = msg.connection_id.clone();
         let request_id = msg.request_id.clone();
-        let language = self.connection_language(&connection_id);
+        let language = match self.connection_language(&connection_id) {
+            Ok(l) => l,
+            Err(e) => {
+                warn!(connection_id = %connection_id, "RemoveMetric: {e}");
+                let _ = self.ctrl_tx.send(AgentMessage {
+                    msg: Some(agent_message::Msg::RemoveMetricAck(RemoveMetricAck {
+                        request_id,
+                        confirmed: false,
+                        error: e.to_string(),
+                    })),
+                });
+                return;
+            }
+        };
 
         let Some(adapter) = self.adapters.get(&connection_id).map(|e| e.clone()) else {
             warn!(connection_id = %connection_id, "Connection not found");
@@ -437,15 +469,14 @@ impl AdapterManager {
                 )));
             }
         } else {
-            warn!(
+            debug!(
                 path = %path,
-                "read_file: no allowed_read_prefixes configured; \
-                 set scanner.allowed_read_prefixes in detrix.toml to restrict access"
+                "read_file: allowed_read_prefixes not configured, no prefix check applied"
             );
         }
 
         std::fs::read(&canonical)
-            .map_err(|e| AgentError::Scanner(format!("Cannot read {path}: {e}")))
+            .map_err(|e| AgentError::Scanner(format!("Cannot read {}: {e}", canonical.display())))
     }
 
     /// Inspect a binary for variable information.
@@ -483,14 +514,15 @@ impl AdapterManager {
             }
             Err(_) => {
                 // Increment global counter (used by heartbeat).
-                self.events_dropped.fetch_add(1, Ordering::Relaxed);
+                self.events_dropped
+                    .fetch_add(event_count, Ordering::Relaxed);
                 // Increment per-connection counter (used by DropCountUpdate).
                 let count = self
                     .connection_drop_counts
                     .entry(connection_id.to_string())
                     .or_insert_with(|| Arc::new(AtomicU64::new(0)))
-                    .fetch_add(1, Ordering::Relaxed)
-                    + 1;
+                    .fetch_add(event_count, Ordering::Relaxed)
+                    + event_count;
                 warn!(
                     connection_id = %connection_id,
                     dropped = count,

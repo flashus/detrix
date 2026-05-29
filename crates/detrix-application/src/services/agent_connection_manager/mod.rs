@@ -21,6 +21,7 @@ pub use types::{
     AgentOutgoingTx, IncomingAgentMessage, OutgoingAgentMessage, RegisterResult, VariableInfo,
 };
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -116,12 +117,16 @@ impl AgentConnectionManager {
             ));
         }
 
-        // Create event channels BEFORE enqueuing CreateConnection
+        // Create event channels BEFORE enqueuing CreateConnection.
+        // Use entry().or_insert() so reconnects with the same identity preserve
+        // the live channel rather than orphaning the existing receiver.
         for (identity, _host, _safe) in &identities {
             let conn_id = ConnectionId(identity.to_uuid());
-            let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
-            self.event_channels.insert(conn_id.clone(), Some(event_tx));
-            self.event_receivers.insert(conn_id, Some(event_rx));
+            if !self.event_channels.contains_key(&conn_id) {
+                let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
+                self.event_channels.insert(conn_id.clone(), Some(event_tx));
+                self.event_receivers.insert(conn_id, Some(event_rx));
+            }
         }
 
         let agent_info = AgentInfo {
@@ -221,10 +226,15 @@ impl AgentConnectionManager {
                 );
 
                 if let Some(adapter_mgr) = self.adapter_lifecycle_manager().await {
-                    if was_connected && !adapter_mgr.has_adapter(&connection_id).await {
+                    // Atomic claim: `starting_adapters.insert` returns true only for the first
+                    // concurrent caller, preventing duplicate start_adapter() races.
+                    if was_connected
+                        && !adapter_mgr.has_adapter(&connection_id).await
+                        && self.starting_adapters.insert(connection_id.clone())
+                    {
                         match self.connection_repo.find_by_id(&connection_id).await {
                             Ok(Some(conn)) => {
-                                if let Err(e) = adapter_mgr
+                                let result = adapter_mgr
                                     .start_adapter(
                                         connection_id.clone(),
                                         &conn.host,
@@ -234,8 +244,9 @@ impl AgentConnectionManager {
                                         None,
                                         conn.safe_mode,
                                     )
-                                    .await
-                                {
+                                    .await;
+                                self.starting_adapters.remove(&connection_id);
+                                if let Err(e) = result {
                                     warn!(
                                         connection_id = %connection_id.0,
                                         error = %e,
@@ -259,12 +270,14 @@ impl AgentConnectionManager {
                                 }
                             }
                             Ok(None) => {
+                                self.starting_adapters.remove(&connection_id);
                                 warn!(
                                     connection_id = %connection_id.0,
                                     "Agent reported connected for unknown connection"
                                 );
                             }
                             Err(e) => {
+                                self.starting_adapters.remove(&connection_id);
                                 warn!(
                                     connection_id = %connection_id.0,
                                     error = %e,
@@ -424,10 +437,9 @@ impl AgentConnectionManager {
                 self.handle_register_update(agent_id, binaries).await;
             }
             IncomingAgentMessage::Pong => {
-                // Drain all pending pings for this agent — any Pong satisfies all
-                // concurrent waiters (#11 fix: removes the hardcoded "_ping_" key).
+                // Drain all pending pings for this agent — any Pong satisfies all waiters.
                 if let Some((_, waiters)) = self.pending_pings.remove(agent_id) {
-                    for tx in waiters {
+                    for (_, tx) in waiters {
                         let _ = tx.send(());
                     }
                 }
@@ -503,8 +515,9 @@ impl AgentConnectionManager {
                 let _ = tx.send(detrix_core::SystemEvent::connection_closed(conn_id.clone()));
             }
 
-            // e. Remove from routing table
+            // e. Remove from routing table and liveness tracking
             self.connection_to_agent.remove(&conn_id);
+            self.liveness_timestamps.remove(&conn_id);
         }
 
         // Handle added: register new connections
@@ -754,7 +767,15 @@ impl AgentConnectionManager {
             .insert(request_id.clone(), connection_id.clone());
         self.pending_requests.insert(request_id.clone(), tx);
 
-        self.send_to_agent(connection_id, msg).await?;
+        if let Err(e) = self.send_to_agent(connection_id, msg).await {
+            // Send failed before the agent received the message — clean up all tracking maps.
+            self.pending_requests.remove(&request_id);
+            self.request_to_connection.remove(&request_id);
+            if let Some(mut set) = self.connection_requests.get_mut(connection_id) {
+                set.remove(&request_id);
+            }
+            return Err(e);
+        }
 
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(response)) => {
@@ -890,8 +911,9 @@ impl AgentConnectionManager {
                 let _ = tx.send(detrix_core::SystemEvent::connection_closed(conn_id.clone()));
             }
 
-            // e. Remove from routing table
+            // e. Remove from routing table and liveness tracking
             self.connection_to_agent.remove(&conn_id);
+            self.liveness_timestamps.remove(&conn_id);
         }
 
         // f. Drop any pending ping waiters — they'll see channel-closed error.
@@ -911,12 +933,16 @@ impl AgentConnectionManager {
     ) -> Result<(), detrix_core::Error> {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
+        // Unique ID lets us remove exactly our waiter without relying on Vec::pop()
+        // which is unsafe under concurrent callers.
+        let ping_id = self.ping_counter.fetch_add(1, Ordering::Relaxed);
+
         // Register waiter before sending Ping to avoid a race where Pong arrives
         // before we insert.
         self.pending_pings
             .entry(agent_id.to_string())
             .or_default()
-            .push(tx);
+            .insert(ping_id, tx);
 
         let sent = self
             .agents
@@ -925,9 +951,9 @@ impl AgentConnectionManager {
             .unwrap_or(false);
 
         if !sent {
-            // Remove the just-inserted sender; don't leave a zombie waiter.
-            if let Some(mut waiters) = self.pending_pings.get_mut(agent_id) {
-                waiters.pop();
+            // Remove exactly our waiter by ID — safe under concurrent callers.
+            if let Some(waiters) = self.pending_pings.get(agent_id) {
+                waiters.remove(&ping_id);
             }
             return Err(detrix_core::Error::Adapter(
                 "agent not found or channel closed".to_string(),

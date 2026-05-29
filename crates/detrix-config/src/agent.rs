@@ -38,6 +38,12 @@ pub struct AgentConfig {
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval_secs: u64,
 
+    /// Bind host for the Prometheus /metrics and /health endpoints.
+    /// Defaults to "127.0.0.1" (loopback only). Set to "0.0.0.0" when
+    /// a Prometheus scraper runs in a separate container or host.
+    #[serde(default = "default_metrics_host")]
+    pub metrics_host: String,
+
     /// HTTP port for the Prometheus /metrics and /health endpoints.
     #[serde(default = "default_metrics_port")]
     pub metrics_port: u16,
@@ -65,6 +71,12 @@ pub struct AgentConfig {
     /// Agents with a lower minor version receive RegisterAck { accepted: false }.
     #[serde(default)]
     pub min_compatible_agent_version: Option<String>,
+
+    /// Allow agent connections without authentication.
+    /// DANGEROUS: only set true in isolated development environments.
+    /// When false (the default) and agent_tokens is empty, all agent connections are rejected.
+    #[serde(default)]
+    pub dev_mode: bool,
 }
 
 /// /proc binary scanner configuration.
@@ -122,6 +134,9 @@ fn default_reconnect_max_interval() -> u64 {
 fn default_heartbeat_interval() -> u64 {
     30
 }
+fn default_metrics_host() -> String {
+    "127.0.0.1".to_string()
+}
 fn default_metrics_port() -> u16 {
     9091
 }
@@ -144,12 +159,14 @@ impl Default for AgentConfig {
             reconnect_interval_secs: default_reconnect_interval(),
             reconnect_max_interval_secs: default_reconnect_max_interval(),
             heartbeat_interval_secs: default_heartbeat_interval(),
+            metrics_host: default_metrics_host(),
             metrics_port: default_metrics_port(),
             verify_tls: default_verify_tls(),
             ca_cert_file: None,
             scanner: ScannerConfig::default(),
             agent_tokens: Vec::new(),
             min_compatible_agent_version: None,
+            dev_mode: false,
         }
     }
 }

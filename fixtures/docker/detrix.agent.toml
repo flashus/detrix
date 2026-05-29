@@ -19,6 +19,11 @@ verify_tls = true
 # Uncomment for self-signed server certificate:
 # ca_cert_file = "/etc/detrix/server-ca.pem"
 
+# Prometheus /metrics and /health bind address and port.
+# Use "0.0.0.0" when a Prometheus scraper runs in a separate container.
+metrics_host = "127.0.0.1"
+metrics_port = 9091
+
 # ── Scanner configuration ──────────────────────────────────────────
 [agent.scanner]
 scan_interval_secs = 30

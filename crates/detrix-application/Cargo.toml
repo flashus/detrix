@@ -56,6 +56,9 @@ notify-debouncer-mini = "0.7"
 # Random number generation (jitter in reconnect backoff)
 rand.workspace = true
 
+# Unique request IDs
+uuid.workspace = true
+
 # JWT validation for external auth mode (SEC-02)
 jsonwebtoken = "9"
 

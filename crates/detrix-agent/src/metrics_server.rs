@@ -33,13 +33,17 @@ impl Default for MetricsState {
 }
 
 /// Start the metrics HTTP server.
-pub async fn start(port: u16, state: MetricsState) -> crate::error::Result<()> {
+pub async fn start(host: &str, port: u16, state: MetricsState) -> crate::error::Result<()> {
     let app = Router::new()
         .route("/metrics", get(metrics_handler))
         .route("/health", get(health_handler))
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let addr: SocketAddr = format!("{host}:{port}").parse().map_err(|e| {
+        crate::error::AgentError::MetricsServer(format!(
+            "Invalid bind address '{host}:{port}': {e}"
+        ))
+    })?;
     info!("Metrics server listening on http://{addr}");
 
     axum::serve(

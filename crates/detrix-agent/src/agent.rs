@@ -71,10 +71,13 @@ impl Agent {
 
         // Create metrics server
         let metrics_state = MetricsState::new();
+        let metrics_host = self.config.metrics_host.clone();
         let metrics_port = self.config.metrics_port;
         let metrics_state_clone = metrics_state.clone();
         tokio::spawn(async move {
-            if let Err(e) = crate::metrics_server::start(metrics_port, metrics_state_clone).await {
+            if let Err(e) =
+                crate::metrics_server::start(&metrics_host, metrics_port, metrics_state_clone).await
+            {
                 error!("Metrics server error: {e}");
             }
         });
@@ -93,6 +96,14 @@ impl Agent {
             "Initial scan found {} binaries",
             binaries.len()
         );
+
+        if self.config.scanner.allowed_read_prefixes.is_empty() {
+            warn!(
+                "scanner.allowed_read_prefixes is not configured — \
+                 the agent will read any accessible file path. \
+                 Set allowed_read_prefixes in detrix.toml for production deployments."
+            );
+        }
 
         // Main reconnect loop
         let mut reconnect_secs = self.config.reconnect_interval_secs;
@@ -159,9 +170,28 @@ impl Agent {
         adapter_manager: Arc<AdapterManager>,
         metrics_state: &MetricsState,
     ) -> Result<()> {
-        // 4c. gRPC channel setup (TLS support deferred)
-        let channel = Channel::from_shared(self.config.server_grpc_url.clone())
-            .map_err(|e| AgentError::Connection(e.to_string()))?
+        // 4c. gRPC channel setup — wire TLS from AgentConfig
+        let mut endpoint = Channel::from_shared(self.config.server_grpc_url.clone())
+            .map_err(|e| AgentError::Connection(e.to_string()))?;
+        if self.config.server_grpc_url.starts_with("https://") {
+            let mut tls = tonic::transport::ClientTlsConfig::new();
+            if let Some(ca_path) = &self.config.ca_cert_file {
+                let pem = tokio::fs::read(ca_path).await.map_err(|e| {
+                    AgentError::Connection(format!(
+                        "Cannot read CA cert {}: {e}",
+                        ca_path.display()
+                    ))
+                })?;
+                tls = tls.ca_certificate(tonic::transport::Certificate::from_pem(pem));
+            }
+            if !self.config.verify_tls {
+                warn!("verify_tls=false: TLS certificate verification disabled (development only)");
+            }
+            endpoint = endpoint
+                .tls_config(tls)
+                .map_err(|e| AgentError::Connection(format!("TLS config error: {e}")))?;
+        }
+        let channel = endpoint
             .connect()
             .await
             .map_err(|e| AgentError::Connection(e.to_string()))?;
