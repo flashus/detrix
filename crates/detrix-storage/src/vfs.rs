@@ -108,7 +108,7 @@ impl VirtualFileSystem for CachedFileSystem {
         // Check cache
         {
             let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
-            for ((_, p), _) in cache.iter() {
+            for (_, p) in cache.keys() {
                 if p == path {
                     return Ok(true);
                 }

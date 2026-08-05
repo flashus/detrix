@@ -64,8 +64,9 @@ pub struct AgentConfig {
     // ── Server-side (in the server's detrix.toml) ────────────────────────
     /// SHA-256 hashes of valid agent bearer tokens.
     /// Generate: echo -n "my-secret-token" | sha256sum
-    #[serde(default)]
-    pub agent_tokens: Vec<String>,
+    /// TOML key is `agent_tokens` (legacy); `agent_token_hashes` is also accepted.
+    #[serde(default, rename = "agent_tokens", alias = "agent_token_hashes")]
+    pub agent_token_hashes: Vec<String>,
 
     /// Minimum agent semver this server accepts (e.g. "1.3.0").
     /// Agents with a lower minor version receive RegisterAck { accepted: false }.
@@ -164,7 +165,7 @@ impl Default for AgentConfig {
             verify_tls: default_verify_tls(),
             ca_cert_file: None,
             scanner: ScannerConfig::default(),
-            agent_tokens: Vec::new(),
+            agent_token_hashes: Vec::new(),
             min_compatible_agent_version: None,
             dev_mode: false,
         }
@@ -177,15 +178,38 @@ impl AgentConfig {
         if self.server_grpc_url.is_empty() {
             return Err("agent.server_grpc_url must be set".to_string());
         }
+        let url = &self.server_grpc_url;
+        if !url.starts_with("http://")
+            && !url.starts_with("https://")
+            && !url.starts_with("grpc://")
+            && !url.starts_with("grpcs://")
+        {
+            return Err(format!(
+                "agent.server_grpc_url has unrecognized scheme (expected http://, https://, grpc://, or grpcs://): {url}"
+            ));
+        }
         if let Some(ref path) = self.token_file {
-            std::fs::metadata(path).map_err(|_| {
+            std::fs::metadata(path).map_err(|e| {
                 format!(
-                    "agent.token_file '{}' not found or not readable",
+                    "agent.token_file '{}' not found or not readable: {e}",
                     path.display()
                 )
             })?;
         }
         Ok(())
+    }
+
+    /// Validate server-side agent configuration constraints.
+    /// Called during config load alongside other section validators.
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.reconnect_interval_secs > self.reconnect_max_interval_secs {
+            errors.push(format!(
+                "agent.reconnect_interval_secs ({}) must be ≤ reconnect_max_interval_secs ({})",
+                self.reconnect_interval_secs, self.reconnect_max_interval_secs
+            ));
+        }
+        errors
     }
 }
 
@@ -200,7 +224,7 @@ mod tests {
     #[test]
     fn test_agent_config_default_is_valid_for_server() {
         let config = AgentConfig::default();
-        assert!(config.agent_tokens.is_empty());
+        assert!(config.agent_token_hashes.is_empty());
         assert!(config.min_compatible_agent_version.is_none());
         assert!(config.server_grpc_url.is_empty());
     }
@@ -253,6 +277,46 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_for_agent_accepts_grpcs_scheme() {
+        let config = AgentConfig {
+            server_grpc_url: "grpcs://server:50061".to_string(),
+            ..Default::default()
+        };
+        assert!(config.validate_for_agent().is_ok());
+    }
+
+    #[test]
+    fn test_validate_for_agent_accepts_grpc_scheme() {
+        let config = AgentConfig {
+            server_grpc_url: "grpc://server:50061".to_string(),
+            ..Default::default()
+        };
+        assert!(config.validate_for_agent().is_ok());
+    }
+
+    #[test]
+    fn test_validate_for_agent_rejects_unknown_scheme() {
+        let config = AgentConfig {
+            server_grpc_url: "ftp://server:50061".to_string(),
+            ..Default::default()
+        };
+        let result = config.validate_for_agent();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unrecognized scheme"));
+    }
+
+    #[test]
+    fn test_validate_for_agent_rejects_bare_hostname() {
+        let config = AgentConfig {
+            server_grpc_url: "server:50061".to_string(),
+            ..Default::default()
+        };
+        let result = config.validate_for_agent();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unrecognized scheme"));
+    }
+
+    #[test]
     fn test_scanner_config_defaults() {
         let scanner = ScannerConfig::default();
         assert_eq!(scanner.scan_interval_secs, 30);
@@ -274,7 +338,7 @@ mod tests {
                 require_dwarf: true,
                 allowed_read_prefixes: vec![],
             },
-            agent_tokens: vec!["abc123".to_string()],
+            agent_token_hashes: vec!["abc123".to_string()],
             min_compatible_agent_version: Some("1.3.0".to_string()),
             ..Default::default()
         };
@@ -289,7 +353,7 @@ mod tests {
             parsed.scanner.include_patterns,
             config.scanner.include_patterns
         );
-        assert_eq!(parsed.agent_tokens, config.agent_tokens);
+        assert_eq!(parsed.agent_token_hashes, config.agent_token_hashes);
         assert_eq!(
             parsed.min_compatible_agent_version,
             config.min_compatible_agent_version

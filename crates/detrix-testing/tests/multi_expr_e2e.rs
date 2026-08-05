@@ -281,7 +281,7 @@ async fn run_multi_expr_test(config: MultiExprTestConfig) {
     let expressions = ["symbol", "quantity", "price"];
     let step = reporter.step_start(
         "Add Metric",
-        &format!("expressions: {:?} at line {}", &expressions, config.line),
+        &format!("expressions: {:?} at line {}", expressions, config.line),
     );
 
     let session_start = chrono::Utc::now().timestamp_micros();

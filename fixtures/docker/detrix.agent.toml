@@ -24,6 +24,10 @@ verify_tls = true
 metrics_host = "127.0.0.1"
 metrics_port = 9091
 
+# Restrict server-requested file reads to these directory prefixes.
+# Prevents a compromised server from reading arbitrary files on the agent host.
+# allowed_read_prefixes = ["/app", "/usr/local/bin"]
+
 # ── Scanner configuration ──────────────────────────────────────────
 [agent.scanner]
 scan_interval_secs = 30

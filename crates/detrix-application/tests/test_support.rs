@@ -1,6 +1,6 @@
 use detrix_application::{
-    DapAdapter, DapAdapterFactory, DapAdapterRef, EventRepository, RemoveMetricResult,
-    SetMetricResult,
+    DapAdapter, DapAdapterFactory, DapAdapterRef, EventRepository, MetricEventSummary,
+    RemoveMetricResult, SetMetricResult,
 };
 use detrix_core::{Metric, MetricEvent, MetricId, Result};
 use std::collections::HashMap;
@@ -124,6 +124,12 @@ impl DapAdapter for StatefulMockDapAdapter {
 #[derive(Debug)]
 pub struct StatefulMockAdapterFactory {
     adapters: RwLock<HashMap<String, Arc<StatefulMockDapAdapter>>>,
+}
+
+impl Default for StatefulMockAdapterFactory {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StatefulMockAdapterFactory {
@@ -373,14 +379,20 @@ impl EventRepository for MockEventRepository {
     async fn count_by_metric_ids(
         &self,
         metric_ids: &[MetricId],
-    ) -> Result<std::collections::HashMap<MetricId, (u64, Option<i64>)>> {
+    ) -> Result<std::collections::HashMap<MetricId, MetricEventSummary>> {
         let events = self.events.read().await;
         let mut result = std::collections::HashMap::new();
         for &id in metric_ids {
             let matching: Vec<_> = events.iter().filter(|e| e.metric_id == id).collect();
             if !matching.is_empty() {
                 let last_ts = matching.iter().map(|e| e.timestamp).max();
-                result.insert(id, (matching.len() as u64, last_ts));
+                result.insert(
+                    id,
+                    MetricEventSummary {
+                        count: matching.len() as u64,
+                        last_timestamp_micros: last_ts,
+                    },
+                );
             }
         }
         Ok(result)

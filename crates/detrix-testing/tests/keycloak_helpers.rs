@@ -75,6 +75,12 @@ pub struct KeycloakTokenClient {
     token_url: String,
 }
 
+impl Default for KeycloakTokenClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KeycloakTokenClient {
     pub fn new() -> Self {
         let token_url = format!(

@@ -258,6 +258,7 @@ async fn test_touch_connections_batch() {
 
     // Kill debugpy2 cleanup handle (will be cleaned up by e2e process tracker)
     let _ = debugpy2.kill();
+    let _ = debugpy2.wait();
 
     // Touch both connections at once
     let touch_payload = json!({

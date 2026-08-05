@@ -204,23 +204,27 @@ impl SystemEventRepository for SqliteStorage {
             return Ok(0);
         }
 
-        // Build IN clause with placeholders
-        let placeholders: String = event_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let query = format!(
-            "UPDATE system_events SET acknowledged = 1 WHERE id IN ({})",
-            placeholders
-        );
+        // Chunk to stay within SQLite variable limit (999).
+        const CHUNK_SIZE: usize = SQLITE_MAX_VARIABLES;
+        let mut total_rows_affected: u64 = 0;
 
-        let mut query_builder = sqlx::query(&query);
-        for id in event_ids {
-            query_builder = query_builder.bind(id);
+        for chunk in event_ids.chunks(CHUNK_SIZE) {
+            let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let query = format!(
+                "UPDATE system_events SET acknowledged = 1 WHERE id IN ({})",
+                placeholders
+            );
+
+            let mut q = sqlx::query(&query);
+            for id in chunk {
+                q = q.bind(id);
+            }
+
+            total_rows_affected += q.execute(self.pool()).await?.rows_affected();
         }
 
-        let result = query_builder.execute(self.pool()).await?;
-        let count = result.rows_affected();
-
-        debug!(count = count, "Acknowledged system events");
-        Ok(count)
+        debug!(count = total_rows_affected, "Acknowledged system events");
+        Ok(total_rows_affected)
     }
 
     async fn find_recent(&self, limit: i64) -> Result<Vec<SystemEvent>> {
@@ -306,14 +310,14 @@ impl SystemEventRepository for SqliteStorage {
 
 /// Helper to convert a database row to a SystemEvent
 fn row_to_system_event(row: &sqlx::sqlite::SqliteRow) -> Result<SystemEvent> {
-    let id: i64 = row.get("id");
-    let event_type_str: String = row.get("event_type");
-    let connection_id_str: Option<String> = row.get("connection_id");
-    let metric_id: Option<i64> = row.get("metric_id");
-    let metric_name: Option<String> = row.get("metric_name");
-    let timestamp: i64 = row.get("timestamp");
-    let details_json: Option<String> = row.get("details_json");
-    let acknowledged: i64 = row.get("acknowledged");
+    let id: i64 = row.try_get("id")?;
+    let event_type_str: String = row.try_get("event_type")?;
+    let connection_id_str: Option<String> = row.try_get("connection_id")?;
+    let metric_id: Option<i64> = row.try_get("metric_id")?;
+    let metric_name: Option<String> = row.try_get("metric_name")?;
+    let timestamp: i64 = row.try_get("timestamp")?;
+    let details_json: Option<String> = row.try_get("details_json")?;
+    let acknowledged: i64 = row.try_get("acknowledged")?;
 
     // Audit columns (nullable, may not exist in old databases before migration)
     let actor: Option<String> = row.try_get("actor").unwrap_or(None);

@@ -42,6 +42,10 @@ fn find_symbol_address(data: &[u8], name: &[u8]) -> Option<u64> {
 
     // Scan all sections for symbol tables
     for i in 0..shnum {
+        // SAFETY: shoff + i * 64 + 64 ≤ data.len() verified below.
+        if shoff.saturating_add(i * 64).saturating_add(64) > data.len() {
+            break; // malformed ELF — section header table walks past data
+        }
         let shdr = unsafe {
             &*((data.as_ptr().add(shoff + i * 64))
                 as *const object::elf::SectionHeader64<object::Endianness>)
@@ -64,6 +68,10 @@ fn find_symbol_address(data: &[u8], name: &[u8]) -> Option<u64> {
         if link >= shnum {
             continue;
         }
+        // SAFETY: shoff + link * 64 + 64 ≤ data.len() verified below.
+        if shoff.saturating_add(link * 64).saturating_add(64) > data.len() {
+            continue; // malformed ELF — string table section header out of range
+        }
         let strhdr = unsafe {
             &*((data.as_ptr().add(shoff + link * 64))
                 as *const object::elf::SectionHeader64<object::Endianness>)
@@ -78,6 +86,8 @@ fn find_symbol_address(data: &[u8], name: &[u8]) -> Option<u64> {
         // Scan symbols
         let nsyms = size / entsize;
         for j in 0..nsyms {
+            // SAFETY: offset + j * entsize + entsize ≤ offset + size ≤ data.len()
+            // because j < nsyms = size/entsize, so j * entsize < size.
             let sym: &Sym64<object::Endianness> = unsafe {
                 &*((data.as_ptr().add(offset + j * entsize)) as *const Sym64<object::Endianness>)
             };

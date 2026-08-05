@@ -38,12 +38,6 @@ const FLUSH_WAIT_MS: u64 = (DEFAULT_EVENT_FLUSH_INTERVAL_MS as f64 * 1.2) as u64
 // Mock Implementations (same pattern as connection_service_tests.rs)
 // ============================================================================
 
-/// Mock ConnectionRepository for testing
-
-/// Mock EventRepository that stores events for verification
-
-/// Mock MetricRepository that returns empty (no pre-existing metrics)
-
 // ============================================================================
 // Helpers
 // ============================================================================

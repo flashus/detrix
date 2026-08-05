@@ -25,7 +25,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use detrix_core::{Connection, ConnectionId};
+use detrix_core::{connection::AGENT_NAME_PREFIX, Connection, ConnectionId};
 use detrix_logging::{error, info, warn};
 use detrix_ports::ConnectionRepositoryRef;
 
@@ -103,7 +103,12 @@ impl AgentConnectionManager {
                 .rsplit('/')
                 .next()
                 .unwrap_or(&binary.binary_path);
-            let name = format!("agent/{}/{}", short_id(&agent_id), binary_basename);
+            let name = format!(
+                "{}{}/{}",
+                AGENT_NAME_PREFIX,
+                short_id(&agent_id),
+                binary_basename
+            );
             let identity = detrix_core::ConnectionIdentity::new(
                 &name,
                 binary.language,
@@ -118,13 +123,14 @@ impl AgentConnectionManager {
         }
 
         // Create event channels BEFORE enqueuing CreateConnection.
-        // Use entry().or_insert() so reconnects with the same identity preserve
-        // the live channel rather than orphaning the existing receiver.
+        // Use entry() Vacant arm so the check+insert is atomic within the shard,
+        // eliminating the TOCTOU window of contains_key→insert.
         for (identity, _host, _safe) in &identities {
             let conn_id = ConnectionId(identity.to_uuid());
-            if !self.event_channels.contains_key(&conn_id) {
+            use dashmap::mapref::entry::Entry;
+            if let Entry::Vacant(e) = self.event_channels.entry(conn_id.clone()) {
                 let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
-                self.event_channels.insert(conn_id.clone(), Some(event_tx));
+                e.insert(Some(event_tx)); // consumes e, releasing shard lock
                 self.event_receivers.insert(conn_id, Some(event_rx));
             }
         }
@@ -452,13 +458,20 @@ impl AgentConnectionManager {
 
     /// Handle mid-session re-registration (scanner detected changes).
     async fn handle_register_update(&self, agent_id: &str, binaries: Vec<AgentBinaryInfo>) {
-        let Some(mut entry) = self.agents.get_mut(agent_id) else {
-            warn!(agent_id = %agent_id, "RegisterUpdate for unknown agent");
-            return;
-        };
+        // Clone fields needed across await points, then drop the shard lock before any await.
+        let (current_binaries, hostname, outgoing_tx) = {
+            let Some(entry) = self.agents.get(agent_id) else {
+                warn!(agent_id = %agent_id, "RegisterUpdate for unknown agent");
+                return;
+            };
+            (
+                entry.binaries.clone(),
+                entry.hostname.clone(),
+                entry.outgoing_tx.clone(),
+            )
+        }; // DashMap shard lock released here — no guard held across awaits below
 
-        let current_paths: std::collections::HashMap<&str, &AgentBinaryInfo> = entry
-            .binaries
+        let current_paths: std::collections::HashMap<&str, &AgentBinaryInfo> = current_binaries
             .iter()
             .map(|b| (b.binary_path.as_str(), b))
             .collect();
@@ -484,7 +497,12 @@ impl AgentConnectionManager {
         for removed_path in &removed_paths {
             let removed_binary = current_paths[removed_path.as_str()];
             let binary_basename = removed_path.rsplit('/').next().unwrap_or(removed_path);
-            let name = format!("agent/{}/{}", short_id(agent_id), binary_basename);
+            let name = format!(
+                "{}{}/{}",
+                AGENT_NAME_PREFIX,
+                short_id(agent_id),
+                binary_basename
+            );
             let identity = detrix_core::ConnectionIdentity::new(
                 &name,
                 removed_binary.language,
@@ -527,7 +545,12 @@ impl AgentConnectionManager {
                 .rsplit('/')
                 .next()
                 .unwrap_or(&binary.binary_path);
-            let name = format!("agent/{}/{}", short_id(agent_id), binary_basename);
+            let name = format!(
+                "{}{}/{}",
+                AGENT_NAME_PREFIX,
+                short_id(agent_id),
+                binary_basename
+            );
             let identity = detrix_core::ConnectionIdentity::new(
                 &name,
                 binary.language,
@@ -544,16 +567,14 @@ impl AgentConnectionManager {
                 .insert(conn_id.clone(), std::collections::HashSet::new());
 
             // Enqueue CreateConnection
-            let _ = entry
-                .outgoing_tx
-                .send(OutgoingAgentMessage::CreateConnection {
-                    connection_id: conn_id.0.clone(),
-                    language: identity.language.as_str().to_string(),
-                    binary_path: binary.binary_path.clone(),
-                    host: entry.hostname.clone(), // actual agent hostname
-                    port: 0, // port not applicable for agent-managed connections
-                    safe_mode: true,
-                });
+            let _ = outgoing_tx.send(OutgoingAgentMessage::CreateConnection {
+                connection_id: conn_id.0.clone(),
+                language: identity.language.as_str().to_string(),
+                binary_path: binary.binary_path.clone(),
+                host: hostname.clone(),
+                port: 0,
+                safe_mode: true,
+            });
 
             // Save to DB
             let mut conn =
@@ -564,7 +585,7 @@ impl AgentConnectionManager {
                     });
             if let Ok(ref mut c) = conn {
                 c.safe_mode = true;
-                c.hostname = entry.hostname.clone();
+                c.hostname = hostname.clone();
                 if let Err(e) = self
                     .connection_repo
                     .save_batch(std::slice::from_ref(c))
@@ -582,8 +603,10 @@ impl AgentConnectionManager {
                 .insert(conn_id, agent_id.to_string());
         }
 
-        // Update agent's binary list
-        entry.binaries = binaries;
+        // Re-acquire briefly to update binaries — all awaits are complete.
+        if let Some(mut e) = self.agents.get_mut(agent_id) {
+            e.binaries = binaries;
+        }
     }
 
     /// Returns true if this connection_id was created by an agent.
@@ -652,6 +675,7 @@ impl AgentConnectionManager {
             self.event_receivers.remove(&stale_id);
             self.connection_requests.remove(&stale_id);
             self.connection_to_agent.remove(&stale_id);
+            self.liveness_timestamps.remove(&stale_id);
 
             if let Some(ref tx) = self.system_event_tx {
                 let _ = tx.send(detrix_core::SystemEvent::connection_closed(stale_id));
@@ -705,8 +729,15 @@ impl AgentConnectionManager {
             .insert(request_id.clone(), connection_id.clone());
         self.pending_requests.insert(request_id.clone(), tx);
 
-        // Send to agent
-        self.send_to_agent(connection_id, msg).await?;
+        if let Err(e) = self.send_to_agent(connection_id, msg).await {
+            // Send failed — clean up all tracking maps to prevent leaks.
+            self.pending_requests.remove(&request_id);
+            self.request_to_connection.remove(&request_id);
+            if let Some(mut set) = self.connection_requests.get_mut(connection_id) {
+                set.remove(&request_id);
+            }
+            return Err(e);
+        }
 
         // Await response
         match tokio::time::timeout(timeout, rx).await {
@@ -962,9 +993,19 @@ impl AgentConnectionManager {
 
         tokio::time::timeout(timeout, rx)
             .await
-            .map_err(|_| detrix_core::Error::Adapter("ping timed out".to_string()))
+            .map_err(|_| {
+                if let Some(waiters) = self.pending_pings.get(agent_id) {
+                    waiters.remove(&ping_id);
+                }
+                detrix_core::Error::Adapter("ping timed out".to_string())
+            })
             .and_then(|r| {
-                r.map_err(|_| detrix_core::Error::Adapter("ping channel dropped".to_string()))
+                r.map_err(|_| {
+                    if let Some(waiters) = self.pending_pings.get(agent_id) {
+                        waiters.remove(&ping_id);
+                    }
+                    detrix_core::Error::Adapter("ping channel dropped".to_string())
+                })
             })
     }
 

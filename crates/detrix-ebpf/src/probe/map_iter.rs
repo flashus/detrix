@@ -205,6 +205,31 @@ pub fn read_go_map(
             mem_reader,
             pid,
         ) {
+            Ok(e) if e.is_empty() && dir_len > 0 && dir_len <= 64 => {
+                // Swiss Table succeeded but returned 0 entries. This can happen when
+                // the runtime is Go <1.24 but the header pattern matched the Swiss
+                // heuristic. Retry with classic — if classic also returns empty,
+                // we're confident the map is truly empty.
+                detrix_logging::debug!(
+                    "[map_iter] Swiss Table returned 0 entries (dir_len={dir_len}), retrying with classic"
+                );
+                read_classic_map_inner(
+                    map_ptr,
+                    key_nested,
+                    val_nested,
+                    &key_type_name,
+                    &val_type_name,
+                    config,
+                    mem_reader,
+                    pid,
+                )
+                .unwrap_or_else(|e| {
+                    detrix_logging::debug!(
+                        "[map_iter] Classic retry also returned no entries: {e}"
+                    );
+                    vec![]
+                })
+            }
             Ok(e) => e,
             Err(reason) => {
                 detrix_logging::debug!(

@@ -78,8 +78,10 @@ impl ProcScanner {
     pub fn scan_delta(&mut self) -> Option<Vec<BinaryInfo>> {
         if let Some(last) = self.last_registered_at {
             if last.elapsed().as_secs() < self.min_reregister_secs {
-                // Cooldown active — scan anyway to update known, but don't report changes
-                let _ = self.do_scan();
+                // Cooldown active — scan to keep known map fresh so the first
+                // post-cooldown delta is incremental, not a full diff.
+                let current = self.do_scan();
+                self.known = current.into_iter().map(|b| ((b.pid, b.inode), b)).collect();
                 return None;
             }
         }

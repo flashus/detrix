@@ -15,7 +15,7 @@ use detrix_core::{
 };
 use detrix_ports::{
     ConnectionReferenceRepository, ConnectionRepository, DlqEntry, DlqEntryStatus, DlqRepository,
-    EventRepository, MetricRepository, SystemEventRepository,
+    EventRepository, MetricEventSummary, MetricRepository, SystemEventRepository,
 };
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -486,15 +486,21 @@ impl EventRepository for MockEventRepository {
     async fn count_by_metric_ids(
         &self,
         metric_ids: &[MetricId],
-    ) -> Result<std::collections::HashMap<MetricId, (u64, Option<i64>)>> {
+    ) -> Result<std::collections::HashMap<MetricId, MetricEventSummary>> {
         let events = self.events.read().unwrap();
         let mut result = std::collections::HashMap::new();
+        // Always include every requested ID — matching the real SQLite behavior which
+        // returns (0, None) for IDs with no events rather than omitting them.
         for &id in metric_ids {
             let matching: Vec<_> = events.iter().filter(|e| e.metric_id == id).collect();
-            if !matching.is_empty() {
-                let last_ts = matching.iter().map(|e| e.timestamp).max();
-                result.insert(id, (matching.len() as u64, last_ts));
-            }
+            let last_ts = matching.iter().map(|e| e.timestamp).max();
+            result.insert(
+                id,
+                MetricEventSummary {
+                    count: matching.len() as u64,
+                    last_timestamp_micros: last_ts,
+                },
+            );
         }
         Ok(result)
     }

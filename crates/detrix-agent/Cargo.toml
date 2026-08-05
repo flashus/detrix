@@ -56,5 +56,9 @@ glob = "0.3"
 # ELF / DWARF detection for scanner
 object = { workspace = true }
 
+# Custom TLS verifier (needed for verify_tls=false in dev environments).
+# rustls is already a transitive dep via tonic; listed directly for explicit version control.
+rustls = { version = "0.23", features = ["ring"] }
+
 [lints]
 workspace = true

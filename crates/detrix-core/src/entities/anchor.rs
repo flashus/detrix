@@ -81,10 +81,15 @@ impl MetricAnchor {
             return None;
         }
 
+        // Length-prefixed encoding prevents hash collisions when field boundaries shift.
+        // e.g. ("abc", "", "def") must differ from ("", "abc", "def").
+        // Same technique as Metric::expression_hash().
         let mut hasher = Sha256::new();
-        hasher.update(before.as_bytes());
-        hasher.update(source.as_bytes());
-        hasher.update(after.as_bytes());
+        for field in [before, source, after] {
+            hasher.update(field.len().to_string().as_bytes());
+            hasher.update(b":");
+            hasher.update(field.as_bytes());
+        }
         Some(format!("{:x}", hasher.finalize()))
     }
 
@@ -162,5 +167,58 @@ impl RelocationResult {
             RelocationResult::RelocatedByContext { new_line, .. } => Some(*new_line),
             RelocationResult::Orphaned { .. } => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn anchor_with_context(before: &str, source: &str, after: &str) -> MetricAnchor {
+        MetricAnchor {
+            context_before: if before.is_empty() {
+                None
+            } else {
+                Some(before.into())
+            },
+            source_line: if source.is_empty() {
+                None
+            } else {
+                Some(source.into())
+            },
+            context_after: if after.is_empty() {
+                None
+            } else {
+                Some(after.into())
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn fingerprint_no_collision_on_shifted_boundary() {
+        let a = anchor_with_context("abc", "", "def").compute_fingerprint();
+        let b = anchor_with_context("", "abc", "def").compute_fingerprint();
+        let c = anchor_with_context("ab", "cd", "ef").compute_fingerprint();
+        assert_ne!(
+            a, b,
+            "empty middle field must not collide with shifted boundary"
+        );
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn fingerprint_stable_for_same_input() {
+        let a = anchor_with_context("foo", "bar", "baz").compute_fingerprint();
+        let b = anchor_with_context("foo", "bar", "baz").compute_fingerprint();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn fingerprint_none_for_all_empty() {
+        assert!(anchor_with_context("", "", "")
+            .compute_fingerprint()
+            .is_none());
     }
 }

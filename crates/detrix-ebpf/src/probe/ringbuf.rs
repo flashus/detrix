@@ -404,6 +404,7 @@ fn read_u64_or_error(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::dwarf::types::{Register, ResolvedVariable, VariableLocation, VariableSize};
@@ -416,7 +417,7 @@ mod tests {
             match ptr {
                 0xDEADBEEF => Ok("hello".to_string()),
                 0xCAFEBABE => Ok("BTCUSD".to_string()),
-                _ => Ok(std::iter::repeat('x').take(len).collect()),
+                _ => Ok("x".repeat(len)),
             }
         }
 
@@ -665,7 +666,7 @@ mod tests {
         // String length
         data.extend_from_slice(&5_u64.to_le_bytes());
         // Skip buffer - memory reader provides content now
-        data.extend_from_slice(&vec![0u8; MAX_STRING_CAPTURE]);
+        data.extend_from_slice(&[0u8; MAX_STRING_CAPTURE]);
 
         let vars = vec![ResolvedVariable {
             name: "name".to_string(),
@@ -703,7 +704,7 @@ mod tests {
         data.extend_from_slice(&0xCAFEBABE_u64.to_le_bytes()); // ptr - stub returns "BTCUSD"
         data.extend_from_slice(&(symbol.len() as u64).to_le_bytes()); // len
                                                                       // Skip buffer - memory reader provides content now
-        data.extend_from_slice(&vec![0u8; MAX_STRING_CAPTURE]);
+        data.extend_from_slice(&[0u8; MAX_STRING_CAPTURE]);
 
         let vars = vec![ResolvedVariable {
             name: "symbol".to_string(),
@@ -859,7 +860,7 @@ mod tests {
         let mut data = build_event_bytes(1234, 5678, 100, &[]);
         data.extend_from_slice(&0xDEADBEEF_u64.to_le_bytes()); // string ptr
         data.extend_from_slice(&5_u64.to_le_bytes()); // string len
-        data.extend_from_slice(&vec![0u8; MAX_STRING_CAPTURE]); // skip buffer
+        data.extend_from_slice(&[0u8; MAX_STRING_CAPTURE]); // skip buffer
 
         let vars = vec![ResolvedVariable {
             name: "name".to_string(),
@@ -888,7 +889,7 @@ mod tests {
         let mut data = build_event_bytes(1234, 5678, 100, &[]);
         data.extend_from_slice(&0xDEADBEEF_u64.to_le_bytes());
         data.extend_from_slice(&5_u64.to_le_bytes());
-        data.extend_from_slice(&vec![0u8; MAX_STRING_CAPTURE]);
+        data.extend_from_slice(&[0u8; MAX_STRING_CAPTURE]);
 
         let vars = vec![ResolvedVariable {
             name: "name".to_string(),
@@ -951,7 +952,7 @@ mod tests {
         data.extend_from_slice(&0xDEADBEEF_u64.to_le_bytes()); // ptr
                                                                // len = 200, which is > max_string_capture (64) but < 64*16=1024
         data.extend_from_slice(&200_u64.to_le_bytes());
-        data.extend_from_slice(&vec![0u8; MAX_STRING_CAPTURE]);
+        data.extend_from_slice(&[0u8; MAX_STRING_CAPTURE]);
 
         let vars = vec![ResolvedVariable {
             name: "name".to_string(),
@@ -1304,7 +1305,7 @@ mod tests {
         // var0 ptr=0 (null), var0_len=10, skip buffer
         let mut data = build_event_bytes(1, 2, 100, &[0]); // ptr=0
         data.extend_from_slice(&10_u64.to_le_bytes()); // len=10
-        data.extend_from_slice(&vec![0u8; MAX_STRING_CAPTURE]); // skip buffer
+        data.extend_from_slice(&[0u8; MAX_STRING_CAPTURE]); // skip buffer
 
         let event = parse_ring_buffer_event(
             &data,
@@ -1343,7 +1344,7 @@ mod tests {
         // ptr=0x500 (below 4 KB guard page), len=5
         let mut data = build_event_bytes(1, 2, 100, &[0x500]);
         data.extend_from_slice(&5_u64.to_le_bytes());
-        data.extend_from_slice(&vec![0u8; MAX_STRING_CAPTURE]);
+        data.extend_from_slice(&[0u8; MAX_STRING_CAPTURE]);
 
         let event = parse_ring_buffer_event(
             &data,
@@ -1607,7 +1608,7 @@ fn parse_slice_element(
                 Ok(CapturedValue::Scalar(val))
             }
         }
-        NestedType::Pointer { pointee: _, .. } => {
+        NestedType::Pointer { .. } => {
             // Element is a pointer - read the address
             let ptr_val = mem_reader.read_u64(pid, elem_addr).map_err(|e| {
                 crate::error::Error::RingBuffer(format!(

@@ -311,7 +311,7 @@ async fn wait_for_daemon_healthy_with_pid(
         let mut checks = 0u32;
         loop {
             if let Ok(resp) = client
-                .get(&format!("http://127.0.0.1:{}/health", port))
+                .get(format!("http://127.0.0.1:{}/health", port))
                 .send()
                 .await
             {
@@ -346,7 +346,7 @@ async fn wait_for_daemon_healthy_with_pid(
             checks += 1;
 
             // Every 2 seconds, check if the daemon process is still alive
-            if checks % 8 == 0 {
+            if checks.is_multiple_of(8) {
                 if let Some(pid) = daemon_pid {
                     #[cfg(unix)]
                     {
@@ -871,7 +871,7 @@ async fn test_mcp_bridge_daemon_restart_on_failure() {
         loop {
             poll_count += 1;
             // Periodically log PID file state for debugging
-            if poll_count % 4 == 0 {
+            if poll_count.is_multiple_of(4) {
                 if let Ok(content) = std::fs::read_to_string(&pid_path_clone) {
                     reporter_clone.info(&format!(
                         "  [poll {}] PID file: {}",
@@ -1305,7 +1305,7 @@ async fn test_mcp_bridge_daemon_restart_with_port_conflict() {
                         }
                         dead_pid_count += 1;
 
-                        if dead_pid_count <= 3 || dead_pid_count % 10 == 0 {
+                        if dead_pid_count <= 3 || dead_pid_count.is_multiple_of(10) {
                             reporter.info(&format!(
                                 "Attempt {}: PID {} on port {} not healthy ({}x)",
                                 attempt + 1,
@@ -1507,9 +1507,9 @@ async fn test_mcp_bridge_stale_pid_reused_by_other_process() {
     {
         let mut file = std::fs::File::create(&pid_path).expect("Failed to create PID file");
         // PID 1 is always init/launchd, never detrix
-        write!(
+        writeln!(
             file,
-            "{{\"pid\":1,\"ports\":{{\"http\":{}}}}}\n",
+            "{{\"pid\":1,\"ports\":{{\"http\":{}}}}}",
             initial_port
         )
         .expect("Failed to write PID file");
@@ -2275,7 +2275,7 @@ shutdown_grace_period_secs = 30
         .unwrap();
 
     match client
-        .get(&format!("http://{}:{}/health", daemon_host, daemon_port))
+        .get(format!("http://{}:{}/health", daemon_host, daemon_port))
         .send()
         .await
     {
@@ -2301,7 +2301,7 @@ shutdown_grace_period_secs = 30
     // Daemon should still be running
     let step = reporter.step_start("Verify daemon alive", "Daemon should still run");
     match client
-        .get(&format!("http://{}:{}/health", daemon_host, daemon_port))
+        .get(format!("http://{}:{}/health", daemon_host, daemon_port))
         .send()
         .await
     {
@@ -2443,7 +2443,7 @@ async fn test_mcp_bridge_auth_token_not_racy() {
     let step = reporter.step_start("Auth request", "Make authenticated API request");
     if let Some(ref t) = token {
         match client
-            .get(&format!(
+            .get(format!(
                 "http://{}:{}/api/v1/metrics",
                 daemon_host, daemon_port
             ))
@@ -2925,7 +2925,7 @@ async fn test_mcp_bridge_no_spawn_race_with_multiple_bridges() {
     let daemon_host = daemon_info.host();
     let daemon_port = daemon_info.http_port();
     match client
-        .get(&format!("http://{}:{}/health", daemon_host, daemon_port))
+        .get(format!("http://{}:{}/health", daemon_host, daemon_port))
         .send()
         .await
     {
@@ -3050,7 +3050,6 @@ shutdown_grace_period_secs = 60
     // Get daemon info
     let daemon_pid: u64;
     let daemon_port: u16;
-    let token: Option<String>;
 
     if let Ok(content) = std::fs::read_to_string(&pid_path) {
         if let Ok(info) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -3074,7 +3073,7 @@ shutdown_grace_period_secs = 60
         return;
     }
 
-    token = std::fs::read_to_string(&token_path)
+    let token: Option<String> = std::fs::read_to_string(&token_path)
         .ok()
         .map(|t| t.trim().to_string());
     reporter.info(&format!(
@@ -3093,7 +3092,7 @@ shutdown_grace_period_secs = 60
         .build()
         .unwrap();
 
-    let mut req = client.get(&format!("http://127.0.0.1:{}/mcp/clients", daemon_port));
+    let mut req = client.get(format!("http://127.0.0.1:{}/mcp/clients", daemon_port));
     if let Some(ref t) = token {
         req = req.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, t));
     }
@@ -3132,7 +3131,7 @@ shutdown_grace_period_secs = 60
     reporter.step_success(step, Some("Wait complete"));
 
     let step = reporter.step_start("Check client removed", "Query MCP clients endpoint again");
-    let mut req = client.get(&format!("http://127.0.0.1:{}/mcp/clients", daemon_port));
+    let mut req = client.get(format!("http://127.0.0.1:{}/mcp/clients", daemon_port));
     if let Some(ref t) = token {
         req = req.header(AUTHORIZATION_HEADER, format!("{}{}", BEARER_PREFIX, t));
     }
@@ -3358,7 +3357,7 @@ cleanup_interval_secs = 2
     });
 
     let mut req = client
-        .post(&format!(
+        .post(format!(
             "http://127.0.0.1:{}/api/v1/connections",
             daemon_port
         ))
@@ -3425,7 +3424,7 @@ cleanup_interval_secs = 2
 
     let step = reporter.step_start("Health check", "Daemon should still be responding");
     match client
-        .get(&format!("http://127.0.0.1:{}/health", daemon_port))
+        .get(format!("http://127.0.0.1:{}/health", daemon_port))
         .send()
         .await
     {
@@ -3449,7 +3448,7 @@ cleanup_interval_secs = 2
         "Check connections",
         "Verify debugger connection still active",
     );
-    let mut req = client.get(&format!(
+    let mut req = client.get(format!(
         "http://127.0.0.1:{}/api/v1/connections",
         daemon_port
     ));
@@ -3472,7 +3471,7 @@ cleanup_interval_secs = 2
 
     // Close the connection first
     if let Some(ref conn_id) = connection_id {
-        let mut req = client.delete(&format!(
+        let mut req = client.delete(format!(
             "http://127.0.0.1:{}/api/v1/connections/{}",
             daemon_port, conn_id
         ));

@@ -462,7 +462,7 @@ mod tests {
         // Watch the temp directory
         watcher.watch(temp_dir.path().to_path_buf()).await.unwrap();
 
-        assert!(watcher.is_watching(&temp_dir.path().to_path_buf()));
+        assert!(watcher.is_watching(temp_dir.path()));
         assert_eq!(watcher.watched_paths().len(), 1);
     }
 
@@ -472,13 +472,13 @@ mod tests {
         let (watcher, _rx) = NotifyFileWatcher::new().unwrap();
 
         watcher.watch(temp_dir.path().to_path_buf()).await.unwrap();
-        assert!(watcher.is_watching(&temp_dir.path().to_path_buf()));
+        assert!(watcher.is_watching(temp_dir.path()));
 
         watcher
             .unwatch(temp_dir.path().to_path_buf())
             .await
             .unwrap();
-        assert!(!watcher.is_watching(&temp_dir.path().to_path_buf()));
+        assert!(!watcher.is_watching(temp_dir.path()));
     }
 
     #[tokio::test]

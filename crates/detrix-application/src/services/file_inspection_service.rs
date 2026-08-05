@@ -1046,7 +1046,7 @@ mod tests {
         let mut file = NamedTempFile::with_suffix(".py").unwrap();
         writeln!(file, "def process():").unwrap();
         writeln!(file, "    raw = json.loads(resp)").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "    # comment line").unwrap();
         writeln!(file, "    return normalize(data)").unwrap();
 
@@ -1199,11 +1199,11 @@ mod tests {
         // The struct field is NOT in scope — it's a type definition, not a variable.
         let mut file = NamedTempFile::with_suffix(".go").unwrap();
         writeln!(file, "package main").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "type Transaction struct {{").unwrap();
         writeln!(file, "	Amount float64").unwrap();
         writeln!(file, "}}").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "func process(txn Transaction) {{").unwrap();
         writeln!(file, "	fmt.Println(txn.Amount)").unwrap();
         writeln!(file, "}}").unwrap();
@@ -1238,7 +1238,7 @@ mod tests {
         writeln!(file, "struct Transaction {{").unwrap();
         writeln!(file, "    amount: f64,").unwrap();
         writeln!(file, "}}").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "fn process(txn: Transaction) {{").unwrap();
         writeln!(file, "    println!(\"{{:?}}\", txn.amount);").unwrap();
         writeln!(file, "}}").unwrap();

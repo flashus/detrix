@@ -32,6 +32,8 @@ pub struct AgentCapabilities {
 pub struct AgentBinaryInfo {
     pub binary_path: String,
     pub pid: u32,
+    /// Inode of `/proc/<pid>/exe` — used with pid to detect PID reuse.
+    pub inode: u64,
     pub build_info: String,
     pub has_dwarf: bool,
     pub exported_functions: Vec<String>,

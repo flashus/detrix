@@ -11,7 +11,7 @@ use detrix_application::services::agent_connection_manager::{
     AgentCapabilities, IncomingAgentMessage, OutgoingAgentMessage, RegisterResult,
 };
 use detrix_application::services::circuit_breaker::CircuitBreaker;
-use detrix_core::ConnectionId;
+use detrix_core::{connection::AGENT_NAME_PREFIX, ConnectionId};
 
 // ============================================================================
 // Connection ID Determinism Tests
@@ -22,7 +22,7 @@ fn agent_connection_id(agent_id: &str, binary_path: &str, hostname: &str) -> Con
     use detrix_core::ConnectionIdentity;
     let basename = binary_path.rsplit('/').next().unwrap_or(binary_path);
     let short_id = &agent_id[..8.min(agent_id.len())];
-    let name = format!("agent/{short_id}/{basename}");
+    let name = format!("{AGENT_NAME_PREFIX}{short_id}/{basename}");
     let identity = ConnectionIdentity::new(&name, detrix_core::SourceLanguage::Go, "/", hostname);
     ConnectionId(identity.to_uuid())
 }
@@ -51,16 +51,14 @@ fn test_connection_id_differs_binary_path() {
     assert_ne!(id1, id2);
 }
 
-/// Test that reinstallation with different agent_id produces same ConnectionId.
+/// ConnectionId incorporates the agent_id short prefix, so two distinct agents
+/// running the same binary on the same host produce distinct ConnectionIds.
 #[test]
-fn test_connection_id_independent_of_agent_id() {
+fn test_connection_id_includes_agent_id_prefix() {
     let id1 = agent_connection_id("agent-OLD_ID_123", "/app/server", "host1");
     let id2 = agent_connection_id("agent-NEW_ID_456", "/app/server", "host1");
-    // ConnectionId is based on hostname + binary_path, not agent_id
-    // (agent_id is only used for display name prefix)
-    // But since we include agent_id in the name, they WILL differ.
-    // This is intentional — the name includes agent_id short prefix.
-    // For migration, the server should key on (hostname, binary_path), not agent_id.
+    // The name embeds the agent_id short prefix, so IDs intentionally differ.
+    // Server migration logic should key on (hostname, binary_path) separately.
     assert_ne!(id1, id2);
 }
 

@@ -40,5 +40,10 @@ enable_ast_analysis = true
 # run: detrix init --full
 # ════════════════════════════════════════════════════════════════════════════
 
+# Agent mode — uncomment to enable remote agent connections
+# [agent]
+# server_grpc_url = "https://detrix-server:50061"
+# token_file = "/etc/detrix/agent-token"
+
 [ebpf]
   max_capture_depth = 3

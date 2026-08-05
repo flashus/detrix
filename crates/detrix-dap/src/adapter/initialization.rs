@@ -325,8 +325,10 @@ mod tests {
 
     #[test]
     fn test_resolve_attach_timeout_custom_override() {
-        let mut config = detrix_config::AdapterConnectionConfig::default();
-        config.attach_config_done_timeout_secs = Some(42);
+        let config = detrix_config::AdapterConnectionConfig {
+            attach_config_done_timeout_secs: Some(42),
+            ..Default::default()
+        };
         let timeout = resolve_attach_timeout(&config);
         assert_eq!(timeout, Duration::from_secs(42));
     }

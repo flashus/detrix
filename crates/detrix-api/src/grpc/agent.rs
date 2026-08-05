@@ -33,13 +33,12 @@ impl AgentServiceImpl {
         Self { state }
     }
 
-    fn agent_manager(&self) -> &AgentConnectionManagerRef {
-        #[allow(clippy::expect_used)]
+    fn agent_manager(&self) -> Result<&AgentConnectionManagerRef, tonic::Status> {
         self.state
             .context
             .agent_connection_manager
             .as_ref()
-            .expect("AgentConnectionManager not configured")
+            .ok_or_else(|| tonic::Status::unimplemented("Agent service not configured"))
     }
 }
 
@@ -51,7 +50,7 @@ impl AgentService for AgentServiceImpl {
         &self,
         request: Request<Streaming<AgentMessage>>,
     ) -> Result<Response<Self::ConnectAgentStream>, Status> {
-        let agent_manager = self.agent_manager().clone();
+        let agent_manager = self.agent_manager()?.clone();
         let mut incoming = request.into_inner();
 
         // Create unbounded outgoing channel for server→agent messages.
@@ -91,6 +90,7 @@ impl AgentService for AgentServiceImpl {
             .map(|b| AgentBinaryInfo {
                 binary_path: b.binary_path,
                 pid: b.pid,
+                inode: b.inode,
                 build_info: b.build_info,
                 has_dwarf: b.has_dwarf,
                 exported_functions: b.exported_functions,
@@ -344,6 +344,7 @@ fn proto_to_domain(msg: AgentMessage) -> Option<IncomingAgentMessage> {
                 .map(|b| AgentBinaryInfo {
                     binary_path: b.binary_path,
                     pid: b.pid,
+                    inode: b.inode,
                     build_info: b.build_info,
                     has_dwarf: b.has_dwarf,
                     exported_functions: b.exported_functions,

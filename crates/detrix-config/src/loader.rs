@@ -282,6 +282,12 @@ fn validate_config(config: &Config) -> Result<(), ConfigError> {
         all_errors.push(e);
     }
 
+    // Validate eBPF capture config
+    all_errors.extend(config.ebpf.validate());
+
+    // Validate agent config constraints
+    all_errors.extend(config.agent.validate());
+
     if all_errors.is_empty() {
         Ok(())
     } else {

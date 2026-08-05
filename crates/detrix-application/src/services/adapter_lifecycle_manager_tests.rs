@@ -5,8 +5,8 @@
 use super::adapter_lifecycle_manager::{AdapterLifecycleManager, ManagedAdapterStatus};
 use crate::ports::{
     ConnectionRepository, ConnectionRepositoryRef, DapAdapter, DapAdapterFactory,
-    DapAdapterFactoryRef, DapAdapterRef, EventRepository, MetricRepositoryRef, RemoveMetricResult,
-    SetMetricResult, VfsRef,
+    DapAdapterFactoryRef, DapAdapterRef, EventRepository, MetricEventSummary, MetricRepositoryRef,
+    RemoveMetricResult, SetMetricResult, VfsRef,
 };
 use crate::services::EventCaptureService;
 use async_trait::async_trait;
@@ -289,14 +289,20 @@ impl EventRepository for MockEventRepository {
     async fn count_by_metric_ids(
         &self,
         metric_ids: &[MetricId],
-    ) -> Result<std::collections::HashMap<MetricId, (u64, Option<i64>)>> {
+    ) -> Result<std::collections::HashMap<MetricId, MetricEventSummary>> {
         let events = self.events.read().await;
         let mut result = std::collections::HashMap::new();
         for &id in metric_ids {
             let matching: Vec<_> = events.iter().filter(|e| e.metric_id == id).collect();
             if !matching.is_empty() {
                 let last_ts = matching.iter().map(|e| e.timestamp).max();
-                result.insert(id, (matching.len() as u64, last_ts));
+                result.insert(
+                    id,
+                    MetricEventSummary {
+                        count: matching.len() as u64,
+                        last_timestamp_micros: last_ts,
+                    },
+                );
             }
         }
         Ok(result)

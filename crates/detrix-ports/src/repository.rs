@@ -10,6 +10,15 @@ use detrix_core::error::Result;
 use detrix_core::system_event::{SystemEvent, SystemEventType};
 use std::collections::HashMap;
 
+/// Per-metric event summary returned by `count_by_metric_ids`.
+#[derive(Debug, Clone)]
+pub struct MetricEventSummary {
+    /// Number of events captured for this metric.
+    pub count: u64,
+    /// Timestamp (microseconds) of the most recent event, if any.
+    pub last_timestamp_micros: Option<i64>,
+}
+
 /// Summary of a metric group (for GROUP BY queries)
 #[derive(Debug, Clone)]
 pub struct GroupSummary {
@@ -59,7 +68,7 @@ pub trait MetricRepository: Send + Sync {
     ///
     /// Note: Uniqueness is based on (location, connection_id, user_id).
     /// Each user can have their own metric at the same location; `NULL` user_ids are
-    /// each treated as distinct in the SQLite UNIQUE index.
+    /// each treated as distinct by the uniqueness constraint.
     async fn save(&self, metric: &Metric) -> Result<MetricId> {
         self.save_with_options(metric, false).await
     }
@@ -233,12 +242,12 @@ pub trait EventRepository: Send + Sync {
     /// Count events for metric
     async fn count_by_metric_id(&self, metric_id: MetricId) -> Result<i64>;
 
-    /// Batch count events per metric. Returns map of metric_id → (count, last_timestamp_micros).
+    /// Batch count events per metric. Returns map of metric_id → summary.
     /// Only metrics with at least one event are included in the result.
     async fn count_by_metric_ids(
         &self,
         metric_ids: &[MetricId],
-    ) -> Result<HashMap<MetricId, (u64, Option<i64>)>>;
+    ) -> Result<HashMap<MetricId, MetricEventSummary>>;
 
     /// Count all events across all metrics
     async fn count_all(&self) -> Result<i64>;
@@ -334,10 +343,9 @@ pub trait ConnectionRepository: Send + Sync {
         exclude_id: &ConnectionId,
     ) -> Result<Vec<ConnectionId>>;
 
-    /// Save multiple connections in a single SQLite transaction.
+    /// Atomically saves multiple connections, upserting on conflict.
     ///
-    /// All connections are upserted atomically (INSERT OR REPLACE).
-    /// If any insert fails, the entire transaction is rolled back.
+    /// If any save fails, none of the connections are persisted.
     ///
     /// Returns the number of connections saved on success.
     async fn save_batch(&self, connections: &[Connection]) -> Result<usize>;

@@ -69,6 +69,17 @@ pub(super) fn semver_compare(agent_version: &str, min_version: &str) -> SemverCm
     SemverCmp::Compatible
 }
 
+/// Extract request_id from an OutgoingAgentMessage variant.
+pub fn extract_request_id(msg: &OutgoingAgentMessage) -> Option<&str> {
+    match msg {
+        OutgoingAgentMessage::SetMetric { request_id, .. } => Some(request_id),
+        OutgoingAgentMessage::RemoveMetric { request_id, .. } => Some(request_id),
+        OutgoingAgentMessage::ReadFile { request_id, .. } => Some(request_id),
+        OutgoingAgentMessage::InspectFile { request_id, .. } => Some(request_id),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,16 +130,5 @@ mod tests {
         // "1.2" = 1.2.0 — compatible with min 1.2.0, not with 1.2.1
         assert!(is_compatible("1.2", "1.2.0"));
         assert!(!is_compatible("1.2", "1.2.1"));
-    }
-}
-
-/// Extract request_id from an OutgoingAgentMessage variant.
-pub fn extract_request_id(msg: &OutgoingAgentMessage) -> Option<&str> {
-    match msg {
-        OutgoingAgentMessage::SetMetric { request_id, .. } => Some(request_id),
-        OutgoingAgentMessage::RemoveMetric { request_id, .. } => Some(request_id),
-        OutgoingAgentMessage::ReadFile { request_id, .. } => Some(request_id),
-        OutgoingAgentMessage::InspectFile { request_id, .. } => Some(request_id),
-        _ => None,
     }
 }

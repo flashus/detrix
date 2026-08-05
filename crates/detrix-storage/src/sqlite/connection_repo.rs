@@ -15,29 +15,34 @@ const CONNECTION_COLUMNS: &str =
 /// One `?` placeholder per column in [`CONNECTION_COLUMNS`] (17 columns).
 const CONNECTION_PLACEHOLDERS: &str = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
 
+/// Shared INSERT … ON CONFLICT upsert SQL for both `save` and `save_batch`.
+fn connection_upsert_sql() -> String {
+    format!(
+        "INSERT INTO connections ({}) VALUES ({})
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            workspace_root = excluded.workspace_root,
+            hostname = excluded.hostname,
+            host = excluded.host,
+            port = excluded.port,
+            language = excluded.language,
+            status = excluded.status,
+            auto_reconnect = excluded.auto_reconnect,
+            safe_mode = excluded.safe_mode,
+            last_connected_at = excluded.last_connected_at,
+            last_active = excluded.last_active,
+            control_plane_url = excluded.control_plane_url,
+            build_commit = excluded.build_commit,
+            build_tag = excluded.build_tag,
+            user_id = COALESCE(excluded.user_id, connections.user_id)",
+        CONNECTION_COLUMNS, CONNECTION_PLACEHOLDERS
+    )
+}
+
 #[async_trait]
 impl ConnectionRepository for SqliteStorage {
     async fn save(&self, connection: &Connection) -> Result<ConnectionId> {
-        let insert_sql = format!(
-            "INSERT INTO connections ({}) VALUES ({})
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                workspace_root = excluded.workspace_root,
-                hostname = excluded.hostname,
-                host = excluded.host,
-                port = excluded.port,
-                language = excluded.language,
-                status = excluded.status,
-                auto_reconnect = excluded.auto_reconnect,
-                safe_mode = excluded.safe_mode,
-                last_connected_at = excluded.last_connected_at,
-                last_active = excluded.last_active,
-                control_plane_url = excluded.control_plane_url,
-                build_commit = excluded.build_commit,
-                build_tag = excluded.build_tag,
-                user_id = COALESCE(excluded.user_id, connections.user_id)",
-            CONNECTION_COLUMNS, CONNECTION_PLACEHOLDERS
-        );
+        let insert_sql = connection_upsert_sql();
         sqlx::query(&insert_sql)
             .bind(&connection.id.0)
             .bind(&connection.name)
@@ -69,27 +74,7 @@ impl ConnectionRepository for SqliteStorage {
             return Ok(0);
         }
 
-        let insert_sql = format!(
-            "INSERT INTO connections ({}) VALUES ({})
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                workspace_root = excluded.workspace_root,
-                hostname = excluded.hostname,
-                host = excluded.host,
-                port = excluded.port,
-                language = excluded.language,
-                status = excluded.status,
-                auto_reconnect = excluded.auto_reconnect,
-                safe_mode = excluded.safe_mode,
-                last_connected_at = excluded.last_connected_at,
-                last_active = excluded.last_active,
-                control_plane_url = excluded.control_plane_url,
-                build_commit = excluded.build_commit,
-                build_tag = excluded.build_tag,
-                user_id = COALESCE(excluded.user_id, connections.user_id)",
-            CONNECTION_COLUMNS, CONNECTION_PLACEHOLDERS
-        );
-
+        let insert_sql = connection_upsert_sql();
         let mut tx = self.pool().begin().await?;
         for connection in connections {
             sqlx::query(&insert_sql)

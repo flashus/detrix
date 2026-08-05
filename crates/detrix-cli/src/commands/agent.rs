@@ -1,14 +1,8 @@
 //! Agent mode — start agent, scan for binaries, check status.
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::Subcommand;
 use std::path::PathBuf;
-
-#[derive(Parser)]
-pub struct AgentArgs {
-    #[command(subcommand)]
-    pub action: AgentAction,
-}
 
 #[derive(Subcommand)]
 pub enum AgentAction {
@@ -141,7 +135,7 @@ async fn run_scan(verbose: bool, config_path: &str) -> Result<()> {
         let skipped = total.saturating_sub(binaries.len());
         if skipped > 0 {
             println!("\nWarning: {} of {} /proc entries skipped.", skipped, total);
-            if !cfg!(target_os = "linux") {
+            if cfg!(target_os = "linux") {
                 println!("  Running as non-root may limit visibility.");
             }
         }

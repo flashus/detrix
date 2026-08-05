@@ -20,6 +20,50 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tonic::Request;
 
+/// TLS verifier that accepts any server certificate — for development only.
+///
+/// Used when `agent.verify_tls = false` via `Endpoint::tls_config_with_verifier`.
+/// Never configure this in production.
+#[derive(Debug)]
+struct NoVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
 /// gRPC interceptor that attaches a Bearer token to every outgoing request.
 struct AgentTokenInterceptor {
     token: Option<String>,
@@ -173,7 +217,9 @@ impl Agent {
         // 4c. gRPC channel setup — wire TLS from AgentConfig
         let mut endpoint = Channel::from_shared(self.config.server_grpc_url.clone())
             .map_err(|e| AgentError::Connection(e.to_string()))?;
-        if self.config.server_grpc_url.starts_with("https://") {
+        let use_tls = self.config.server_grpc_url.starts_with("https://")
+            || self.config.server_grpc_url.starts_with("grpcs://");
+        if use_tls {
             let mut tls = tonic::transport::ClientTlsConfig::new();
             if let Some(ca_path) = &self.config.ca_cert_file {
                 let pem = tokio::fs::read(ca_path).await.map_err(|e| {
@@ -186,10 +232,14 @@ impl Agent {
             }
             if !self.config.verify_tls {
                 warn!("verify_tls=false: TLS certificate verification disabled (development only)");
+                endpoint = endpoint
+                    .tls_config_with_verifier(tls, std::sync::Arc::new(NoVerifier))
+                    .map_err(|e| AgentError::Connection(format!("TLS config error: {e}")))?;
+            } else {
+                endpoint = endpoint
+                    .tls_config(tls)
+                    .map_err(|e| AgentError::Connection(format!("TLS config error: {e}")))?;
             }
-            endpoint = endpoint
-                .tls_config(tls)
-                .map_err(|e| AgentError::Connection(format!("TLS config error: {e}")))?;
         }
         let channel = endpoint
             .connect()

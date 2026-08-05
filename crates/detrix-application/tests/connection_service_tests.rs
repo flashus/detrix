@@ -28,12 +28,6 @@ use test_support::{
 // Mock Implementations for Testing
 // ============================================================================
 
-/// Mock ConnectionRepository for testing
-
-/// Mock EventRepository for testing
-
-/// Mock MetricRepository that returns empty (no pre-existing metrics)
-
 // ============================================================================
 // Helper to create test fixtures
 // ============================================================================
@@ -1158,7 +1152,7 @@ async fn test_container_restart_skips_conflicting_metric_locations() {
     // the migration runs (e.g., added by a concurrent tool call).
     let new_identity =
         ConnectionIdentity::new("my-app", SourceLanguage::Python, "/workspace", "host-new");
-    let new_id = ConnectionId::new(&new_identity.to_uuid());
+    let new_id = ConnectionId::new(new_identity.to_uuid());
     let mut conflict_metric = sample_metric_with_connection("new-metric", &new_id.0);
     conflict_metric.location = Location {
         file: "/workspace/app.py".to_string(),

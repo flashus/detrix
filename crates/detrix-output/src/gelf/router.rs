@@ -415,7 +415,7 @@ mod tests {
             metric_id: MetricId(42),
             metric_name: name.to_string(),
             connection_id: ConnectionId::new(connection),
-            timestamp: 1733590800_123456,
+            timestamp: 1_733_590_800_123_456,
             thread_name: Some("MainThread".to_string()),
             thread_id: Some(12345),
             values: vec![detrix_core::ExpressionValue::with_numeric(

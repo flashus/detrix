@@ -616,22 +616,25 @@ pub async fn run(
             None => AuthInterceptorState::new(config.api.auth.clone()),
         };
         let auth_interceptor = create_auth_interceptor(grpc_auth_state);
-        let agent_auth_interceptor =
-            create_agent_auth_interceptor(config.agent.agent_tokens.clone(), config.agent.dev_mode);
+        let agent_auth_interceptor = create_agent_auth_interceptor(
+            config.agent.agent_token_hashes.clone(),
+            config.agent.dev_mode,
+        );
 
         if config.api.auth.is_enabled() {
             info!(mode = ?config.api.auth.mode, "✓ gRPC authentication enabled");
         } else {
             info!("✓ gRPC authentication disabled (all endpoints public)");
         }
-        if config.agent.agent_tokens.is_empty() {
-            if config.agent.dev_mode {
-                warn!("Agent gRPC authentication DISABLED via dev_mode — not safe for production");
-            } else {
-                info!("✓ Agent gRPC authentication enabled (tokens configured)");
-            }
+        if !config.agent.agent_token_hashes.is_empty() {
+            info!(
+                count = config.agent.agent_token_hashes.len(),
+                "✓ Agent gRPC auth: token hash(es) configured"
+            );
+        } else if config.agent.dev_mode {
+            warn!("Agent gRPC auth DISABLED (dev_mode=true) — not safe for production");
         } else {
-            info!("✓ Agent gRPC authentication enabled");
+            warn!("Agent gRPC endpoint active but no token hashes configured and dev_mode=false — all agent connections will be rejected");
         }
 
         let grpc_addr: SocketAddr = format!("{}:{}", config.api.grpc.host, grpc_port)

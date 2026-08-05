@@ -14,6 +14,7 @@ use detrix_config::constants::{AUTHORIZATION_METADATA_KEY, BEARER_PREFIX};
 use detrix_testing::e2e::client::{AddMetricRequest, ApiClient, EventInfo};
 use detrix_testing::e2e::dap_scenarios::go_lines;
 use detrix_testing::e2e::executor::{get_grpc_port, get_http_port, wait_for_port};
+use detrix_testing::e2e::mcp::parse_event_info_value;
 use detrix_testing::e2e::rest::RestClient;
 use detrix_testing::e2e::{
     cleanup_orphaned_e2e_processes, find_detrix_binary, get_workspace_root, register_e2e_process,
@@ -163,54 +164,6 @@ fn print_received_events(metric_name: &str, events: &[EventInfo]) {
     }
 }
 
-fn parse_mcp_event(value: &Value) -> Option<EventInfo> {
-    let obj = value.as_object()?;
-    Some(EventInfo {
-        metric_name: obj
-            .get("metricName")
-            .or_else(|| obj.get("metric_name"))
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        value: obj
-            .get("value")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        timestamp_iso: obj
-            .get("timestampIso")
-            .or_else(|| obj.get("timestamp_iso"))
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        age_seconds: obj
-            .get("ageSeconds")
-            .or_else(|| obj.get("age_seconds"))
-            .and_then(|value| {
-                value
-                    .as_i64()
-                    .or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok()))
-            })
-            .unwrap_or_default(),
-        is_error: obj
-            .get("isError")
-            .or_else(|| obj.get("is_error"))
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false),
-        stack_trace: None,
-        memory_snapshot: None,
-        values: obj
-            .get("values")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default(),
-        extra: obj
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
-    })
-}
-
 async fn mcp_call(http_port: u16, tool_name: &str, arguments: Value) -> Value {
     let response = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{http_port}/mcp"))
@@ -276,7 +229,7 @@ async fn poll_mcp_events(http_port: u16, metric_name: &str, timeout: Duration) -
             .find_map(|text| serde_json::from_str::<Vec<Value>>(text).ok())
             .unwrap_or_default()
             .iter()
-            .filter_map(parse_mcp_event)
+            .filter_map(parse_event_info_value)
             .collect();
 
         if !events.is_empty() {
@@ -831,6 +784,7 @@ async fn test_agent_mcp_roundtrip() {
 }
 
 #[tokio::test]
+#[ignore = "requires Linux + Docker privileged runner; use `task test-agent`"]
 #[serial(agent_e2e)]
 async fn test_agent_wrong_token() {
     let mut harness = AgentE2eHarness::new();

@@ -607,13 +607,9 @@ mod tests {
 
         // Use timeout to avoid hanging
         let timeout = tokio::time::Duration::from_millis(100);
-        loop {
-            match tokio::time::timeout(timeout, server.recv_from(&mut buf)).await {
-                Ok(Ok((len, _))) => {
-                    chunks_received.push(buf[..len].to_vec());
-                }
-                _ => break,
-            }
+        while let Ok(Ok((len, _))) = tokio::time::timeout(timeout, server.recv_from(&mut buf)).await
+        {
+            chunks_received.push(buf[..len].to_vec());
         }
 
         // Should have received multiple chunks

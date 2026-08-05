@@ -16,6 +16,13 @@ use std::fmt;
 /// Minimum unreserved port number (ports 0-1023 are reserved for system services)
 pub const MIN_UNRESERVED_PORT: u16 = 1024;
 
+/// Name prefix for all agent-managed connections.
+///
+/// Agent connections use `"agent/<short_agent_id>/<binary_basename>"` as their name.
+/// This prefix is the cross-crate contract between `detrix-core`, `detrix-application`,
+/// and test helpers — never hardcode `"agent/"` elsewhere.
+pub const AGENT_NAME_PREFIX: &str = "agent/";
+
 /// Placeholder workspace root used when the actual workspace is unknown.
 ///
 /// Clients send this value when they cannot determine their working directory.
@@ -216,7 +223,7 @@ impl Connection {
     pub fn is_agent_managed(&self) -> bool {
         self.name
             .as_deref()
-            .is_some_and(|name| name.starts_with("agent/"))
+            .is_some_and(|name| name.starts_with(AGENT_NAME_PREFIX))
     }
 
     /// Returns the workspace root if it's a valid, usable path.

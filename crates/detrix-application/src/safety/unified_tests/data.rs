@@ -151,21 +151,21 @@ mod tests {
     #[test]
     fn test_python_test_data() {
         assert_eq!(PythonTestData::LANGUAGE, SourceLanguage::Python);
-        assert!(PythonTestData::HAS_EVAL);
-        assert!(PythonTestData::PROHIBITED_EVAL.is_some());
+        const { assert!(PythonTestData::HAS_EVAL) };
+        const { assert!(PythonTestData::PROHIBITED_EVAL.is_some()) };
     }
 
     #[test]
     fn test_go_test_data() {
         assert_eq!(GoTestData::LANGUAGE, SourceLanguage::Go);
-        assert!(!GoTestData::HAS_EVAL);
-        assert!(GoTestData::PROHIBITED_EVAL.is_none());
+        const { assert!(!GoTestData::HAS_EVAL) };
+        const { assert!(GoTestData::PROHIBITED_EVAL.is_none()) };
     }
 
     #[test]
     fn test_rust_test_data() {
         assert_eq!(RustTestData::LANGUAGE, SourceLanguage::Rust);
-        assert!(!RustTestData::HAS_EVAL);
+        const { assert!(!RustTestData::HAS_EVAL) };
     }
 
     // =========================================================================
@@ -175,31 +175,31 @@ mod tests {
     #[test]
     fn test_python_has_full_implementation() {
         // Python has full implementation
-        assert!(PythonTestData::HAS_SAFETY_VALIDATOR);
-        assert!(PythonTestData::HAS_LSP_PURITY);
-        assert!(PythonTestData::HAS_SCOPE_ANALYSIS);
-        assert!(PythonTestData::HAS_DAP_ADAPTER);
-        assert!(PythonTestData::HAS_INTROSPECTION);
+        const { assert!(PythonTestData::HAS_SAFETY_VALIDATOR) };
+        const { assert!(PythonTestData::HAS_LSP_PURITY) };
+        const { assert!(PythonTestData::HAS_SCOPE_ANALYSIS) };
+        const { assert!(PythonTestData::HAS_DAP_ADAPTER) };
+        const { assert!(PythonTestData::HAS_INTROSPECTION) };
     }
 
     #[test]
     fn test_go_has_full_implementation() {
         // Go has full implementation
-        assert!(GoTestData::HAS_SAFETY_VALIDATOR);
-        assert!(GoTestData::HAS_LSP_PURITY);
-        assert!(GoTestData::HAS_SCOPE_ANALYSIS);
-        assert!(GoTestData::HAS_DAP_ADAPTER);
-        assert!(GoTestData::HAS_INTROSPECTION);
+        const { assert!(GoTestData::HAS_SAFETY_VALIDATOR) };
+        const { assert!(GoTestData::HAS_LSP_PURITY) };
+        const { assert!(GoTestData::HAS_SCOPE_ANALYSIS) };
+        const { assert!(GoTestData::HAS_DAP_ADAPTER) };
+        const { assert!(GoTestData::HAS_INTROSPECTION) };
     }
 
     #[test]
     fn test_rust_has_full_implementation() {
         // Rust has full implementation
-        assert!(RustTestData::HAS_SAFETY_VALIDATOR);
-        assert!(RustTestData::HAS_LSP_PURITY);
-        assert!(RustTestData::HAS_SCOPE_ANALYSIS);
-        assert!(RustTestData::HAS_DAP_ADAPTER);
-        assert!(RustTestData::HAS_INTROSPECTION);
+        const { assert!(RustTestData::HAS_SAFETY_VALIDATOR) };
+        const { assert!(RustTestData::HAS_LSP_PURITY) };
+        const { assert!(RustTestData::HAS_SCOPE_ANALYSIS) };
+        const { assert!(RustTestData::HAS_DAP_ADAPTER) };
+        const { assert!(RustTestData::HAS_INTROSPECTION) };
     }
 
     /// Helper to check if a language supports safety tests

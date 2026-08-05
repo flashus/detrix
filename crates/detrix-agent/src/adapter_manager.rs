@@ -56,6 +56,22 @@ impl AdapterManager {
         events_forwarded: Arc<AtomicU64>,
         allowed_read_prefixes: Vec<PathBuf>,
     ) -> Self {
+        // Canonicalize at construction so path comparisons in read_file are reliable.
+        // Prefixes that don't exist yet are skipped with a warning rather than panicking,
+        // since the target directory may be mounted after agent start.
+        let allowed_read_prefixes: Vec<PathBuf> = allowed_read_prefixes
+            .into_iter()
+            .filter_map(|p| {
+                std::fs::canonicalize(&p).ok().or_else(|| {
+                    tracing::warn!(
+                        path = %p.display(),
+                        "Cannot canonicalize allowed_read_prefix — skipping"
+                    );
+                    None
+                })
+            })
+            .collect();
+
         Self {
             adapters: Arc::new(DashMap::new()),
             ctrl_tx,
@@ -485,56 +501,6 @@ impl AdapterManager {
             request_id: msg.request_id,
             variables: Vec::new(),
             error: "Not yet implemented".to_string(),
-        }
-    }
-
-    /// Forward a batch of metric events to the server (direct / legacy path).
-    pub async fn forward_events(&self, connection_id: &str, events: Vec<MetricEvent>) {
-        let proto_events: Vec<SerializedMetricEvent> = events
-            .iter()
-            .map(|e| {
-                let mut proto = metric_event_to_proto(e);
-                proto.values_json = truncate_values_json(&proto.values_json);
-                proto
-            })
-            .collect();
-
-        let batch_msg = AgentMessage {
-            msg: Some(agent_message::Msg::Events(MetricEventBatch {
-                connection_id: connection_id.to_string(),
-                events: proto_events,
-            })),
-        };
-
-        let event_count = events.len() as u64;
-        match self.event_tx.try_send(batch_msg) {
-            Ok(()) => {
-                self.events_forwarded
-                    .fetch_add(event_count, Ordering::Relaxed);
-            }
-            Err(_) => {
-                // Increment global counter (used by heartbeat).
-                self.events_dropped
-                    .fetch_add(event_count, Ordering::Relaxed);
-                // Increment per-connection counter (used by DropCountUpdate).
-                let count = self
-                    .connection_drop_counts
-                    .entry(connection_id.to_string())
-                    .or_insert_with(|| Arc::new(AtomicU64::new(0)))
-                    .fetch_add(event_count, Ordering::Relaxed)
-                    + event_count;
-                warn!(
-                    connection_id = %connection_id,
-                    dropped = count,
-                    "Event channel full, dropping batch"
-                );
-                let _ = self.ctrl_tx.send(AgentMessage {
-                    msg: Some(agent_message::Msg::DropCount(DropCountUpdate {
-                        connection_id: connection_id.to_string(),
-                        total_events_dropped: count,
-                    })),
-                });
-            }
         }
     }
 

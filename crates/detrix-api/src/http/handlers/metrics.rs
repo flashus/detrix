@@ -207,7 +207,8 @@ pub async fn list_metrics(
         .iter()
         .filter_map(|m| {
             let (hit_count, last_hit_at) =
-                m.id.and_then(|id| hit_counts.get(&id).copied())
+                m.id.and_then(|id| hit_counts.get(&id))
+                    .map(|s| (s.count, s.last_timestamp_micros))
                     .unwrap_or((0, None));
             metric_to_info_with_stats(m, hit_count, last_hit_at)
                 .inspect_err(|e| warn!(metric_name = %m.name, "Skipping metric: {}", e))

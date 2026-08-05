@@ -22,7 +22,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use detrix_core::{Connection, ConnectionId, ConnectionIdentity, SourceLanguage};
+use detrix_core::{
+    connection::AGENT_NAME_PREFIX, Connection, ConnectionId, ConnectionIdentity, SourceLanguage,
+};
 use detrix_ports::ConnectionRepository;
 use detrix_testing::MockConnectionRepository;
 
@@ -36,7 +38,7 @@ fn make_connections(agent_id: &str, hostname: &str, count: usize) -> Vec<Connect
             let binary_path = format!("/app/go_app_{}", i);
             let basename = format!("go_app_{}", i);
             let short_id = &agent_id[..8.min(agent_id.len())];
-            let name = format!("agent/{short_id}/{basename}");
+            let name = format!("{AGENT_NAME_PREFIX}{short_id}/{basename}");
             let identity = ConnectionIdentity::new(&name, SourceLanguage::Go, "/", hostname);
             Connection::new_with_identity(identity, binary_path, 1024 + i as u16).ok()
         })
@@ -129,7 +131,7 @@ async fn test_load_concurrent_agents() {
             tokio::spawn(async move {
                 let count = save_connections(&repo, &connections)
                     .await
-                    .expect(&format!("Agent {}: save_batch should succeed", agent_id));
+                    .unwrap_or_else(|_| panic!("Agent {}: save_batch should succeed", agent_id));
                 assert_eq!(
                     count, binaries_per_agent,
                     "Agent {}: expected {} connections saved",

@@ -12,6 +12,105 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::time::Duration;
 
+/// Parse a single MCP event JSON object into an `EventInfo`.
+///
+/// Shared between `McpClient` internals and standalone test helpers.
+pub fn parse_event_info_value(value: &Value) -> Option<EventInfo> {
+    let obj = value.as_object()?;
+    let metric_name = obj
+        .get("metricName")
+        .or_else(|| obj.get("metric_name"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let value_text = obj
+        .get("value")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let timestamp_iso = obj
+        .get("timestampIso")
+        .or_else(|| obj.get("timestamp_iso"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let age_seconds = obj
+        .get("ageSeconds")
+        .or_else(|| obj.get("age_seconds"))
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok()))
+        })
+        .unwrap_or_default();
+    let is_error = obj
+        .get("isError")
+        .or_else(|| obj.get("is_error"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let stack_trace = obj
+        .get("stackTrace")
+        .or_else(|| obj.get("stack_trace"))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    let memory_snapshot = obj
+        .get("memorySnapshot")
+        .or_else(|| obj.get("memory_snapshot"))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    let values = obj
+        .get("values")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut extra = std::collections::HashMap::new();
+    for (key, value) in obj {
+        if matches!(
+            key.as_str(),
+            "metricName"
+                | "metric_name"
+                | "value"
+                | "timestampIso"
+                | "timestamp_iso"
+                | "ageSeconds"
+                | "age_seconds"
+                | "isError"
+                | "is_error"
+                | "stackTrace"
+                | "stack_trace"
+                | "memorySnapshot"
+                | "memory_snapshot"
+                | "values"
+        ) {
+            continue;
+        }
+        extra.insert(key.clone(), value.clone());
+    }
+
+    let event = EventInfo {
+        metric_name,
+        value: value_text,
+        timestamp_iso,
+        age_seconds,
+        is_error,
+        stack_trace,
+        memory_snapshot,
+        values,
+        extra,
+    };
+
+    if event.metric_name.is_empty() && event.values.is_empty() {
+        eprintln!(
+            "[DEBUG parse_events] parsed MCP event object without metricName/values: {}",
+            value
+        );
+    }
+
+    Some(event)
+}
+
 /// MCP API client (JSON-RPC over HTTP)
 pub struct McpClient {
     base_url: String,
@@ -331,7 +430,7 @@ impl McpClient {
                     Err(e) => {
                         eprintln!(
                             "[DEBUG parse_events] direct JSON array parse failed: {e}; prefix={}",
-                            &trimmed.chars().take(120).collect::<String>()
+                            trimmed.chars().take(120).collect::<String>()
                         );
                     }
                 }
@@ -468,99 +567,7 @@ impl McpClient {
     }
 
     fn parse_event_info_value(&self, value: &Value) -> Option<EventInfo> {
-        let obj = value.as_object()?;
-        let metric_name = obj
-            .get("metricName")
-            .or_else(|| obj.get("metric_name"))
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_string();
-
-        let value_text = obj
-            .get("value")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let timestamp_iso = obj
-            .get("timestampIso")
-            .or_else(|| obj.get("timestamp_iso"))
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let age_seconds = obj
-            .get("ageSeconds")
-            .or_else(|| obj.get("age_seconds"))
-            .and_then(|value| {
-                value
-                    .as_i64()
-                    .or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok()))
-            })
-            .unwrap_or_default();
-        let is_error = obj
-            .get("isError")
-            .or_else(|| obj.get("is_error"))
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        let stack_trace = obj
-            .get("stackTrace")
-            .or_else(|| obj.get("stack_trace"))
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok());
-        let memory_snapshot = obj
-            .get("memorySnapshot")
-            .or_else(|| obj.get("memory_snapshot"))
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok());
-        let values = obj
-            .get("values")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let mut extra = std::collections::HashMap::new();
-        for (key, value) in obj {
-            if matches!(
-                key.as_str(),
-                "metricName"
-                    | "metric_name"
-                    | "value"
-                    | "timestampIso"
-                    | "timestamp_iso"
-                    | "ageSeconds"
-                    | "age_seconds"
-                    | "isError"
-                    | "is_error"
-                    | "stackTrace"
-                    | "stack_trace"
-                    | "memorySnapshot"
-                    | "memory_snapshot"
-                    | "values"
-            ) {
-                continue;
-            }
-            extra.insert(key.clone(), value.clone());
-        }
-
-        let event = EventInfo {
-            metric_name,
-            value: value_text,
-            timestamp_iso,
-            age_seconds,
-            is_error,
-            stack_trace,
-            memory_snapshot,
-            values,
-            extra,
-        };
-
-        if event.metric_name.is_empty() && event.values.is_empty() {
-            eprintln!(
-                "[DEBUG parse_events] parsed MCP event object without metricName/values: {}",
-                value
-            );
-        }
-
-        Some(event)
+        parse_event_info_value(value)
     }
 
     /// Parse system events from MCP response

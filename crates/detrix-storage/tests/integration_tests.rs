@@ -3,7 +3,7 @@
 //! These tests verify end-to-end workflows across the storage layer,
 //! testing the interaction between repositories, error handling, and data persistence.
 
-use detrix_application::{EventRepository, MetricRepository};
+use detrix_application::{EventRepository, MetricEventSummary, MetricRepository};
 use detrix_core::entities::{Location, Metric, MetricEvent, MetricId, MetricMode, SafetyLevel};
 use detrix_core::error::Error;
 use detrix_core::{ConnectionId, SourceLanguage};
@@ -1414,7 +1414,7 @@ impl detrix_application::EventRepository for FailingEventRepository {
     async fn count_by_metric_ids(
         &self,
         _metric_ids: &[MetricId],
-    ) -> detrix_core::error::Result<std::collections::HashMap<MetricId, (u64, Option<i64>)>> {
+    ) -> detrix_core::error::Result<std::collections::HashMap<MetricId, MetricEventSummary>> {
         Err(Error::Database("Simulated count failure".to_string()))
     }
 

@@ -534,8 +534,7 @@ mod tests {
         service
             .add_metric(metric.clone(), false, None)
             .await
-            .unwrap()
-            .value;
+            .unwrap();
 
         let retrieved = service.get_metric_by_name("unique_metric").await.unwrap();
         assert!(retrieved.is_some());
@@ -590,21 +589,9 @@ mod tests {
         let mut metric3 = create_test_metric_at_line("metric3", 30);
         metric3.group = Some("group_a".to_string());
 
-        service
-            .add_metric(metric1, false, None)
-            .await
-            .unwrap()
-            .value;
-        service
-            .add_metric(metric2, false, None)
-            .await
-            .unwrap()
-            .value;
-        service
-            .add_metric(metric3, false, None)
-            .await
-            .unwrap()
-            .value;
+        service.add_metric(metric1, false, None).await.unwrap();
+        service.add_metric(metric2, false, None).await.unwrap();
+        service.add_metric(metric3, false, None).await.unwrap();
 
         let group_a_metrics = service.list_metrics_by_group("group_a").await.unwrap();
         assert_eq!(group_a_metrics.len(), 2);
@@ -701,16 +688,8 @@ mod tests {
         metric2.group = Some("test_group".to_string());
         metric2.enabled = false;
 
-        service
-            .add_metric(metric1, false, None)
-            .await
-            .unwrap()
-            .value;
-        service
-            .add_metric(metric2, false, None)
-            .await
-            .unwrap()
-            .value;
+        service.add_metric(metric1, false, None).await.unwrap();
+        service.add_metric(metric2, false, None).await.unwrap();
 
         let result = service
             .enable_group("test_group", &MetricScope::Admin)
@@ -737,16 +716,8 @@ mod tests {
         metric2.group = Some("test_group".to_string());
         metric2.enabled = true;
 
-        service
-            .add_metric(metric1, false, None)
-            .await
-            .unwrap()
-            .value;
-        service
-            .add_metric(metric2, false, None)
-            .await
-            .unwrap()
-            .value;
+        service.add_metric(metric1, false, None).await.unwrap();
+        service.add_metric(metric2, false, None).await.unwrap();
 
         let result = service
             .disable_group("test_group", &MetricScope::Admin)
@@ -788,21 +759,9 @@ mod tests {
         metric3.enabled = false;
 
         // Add metrics (disabled, so adapter won't be called yet)
-        service
-            .add_metric(metric1, false, None)
-            .await
-            .unwrap()
-            .value;
-        service
-            .add_metric(metric2, false, None)
-            .await
-            .unwrap()
-            .value;
-        service
-            .add_metric(metric3, false, None)
-            .await
-            .unwrap()
-            .value;
+        service.add_metric(metric1, false, None).await.unwrap();
+        service.add_metric(metric2, false, None).await.unwrap();
+        service.add_metric(metric3, false, None).await.unwrap();
 
         // Configure adapter to fail on "metric_fail"
         adapter.fail_on_set_metric("metric_fail").await;
@@ -855,21 +814,9 @@ mod tests {
         metric3.enabled = true;
 
         // Add metrics (enabled, adapter will be called)
-        service
-            .add_metric(metric1, false, None)
-            .await
-            .unwrap()
-            .value;
-        service
-            .add_metric(metric2, false, None)
-            .await
-            .unwrap()
-            .value;
-        service
-            .add_metric(metric3, false, None)
-            .await
-            .unwrap()
-            .value;
+        service.add_metric(metric1, false, None).await.unwrap();
+        service.add_metric(metric2, false, None).await.unwrap();
+        service.add_metric(metric3, false, None).await.unwrap();
 
         // Configure adapter to fail on remove for "metric_fail"
         adapter.fail_on_remove_metric("metric_fail").await;
@@ -915,16 +862,8 @@ mod tests {
         metric2.group = Some("test".to_string());
         metric2.enabled = false;
 
-        service
-            .add_metric(metric1, false, None)
-            .await
-            .unwrap()
-            .value;
-        service
-            .add_metric(metric2, false, None)
-            .await
-            .unwrap()
-            .value;
+        service.add_metric(metric1, false, None).await.unwrap();
+        service.add_metric(metric2, false, None).await.unwrap();
 
         adapter.fail_on_set_metric("fail_metric").await;
 
@@ -1022,16 +961,8 @@ mod tests {
         metric2.group = Some("test".to_string());
         metric2.enabled = false;
 
-        service
-            .add_metric(metric1, false, None)
-            .await
-            .unwrap()
-            .value;
-        service
-            .add_metric(metric2, false, None)
-            .await
-            .unwrap()
-            .value;
+        service.add_metric(metric1, false, None).await.unwrap();
+        service.add_metric(metric2, false, None).await.unwrap();
 
         // Disconnect adapter
         adapter.set_disconnected(true).await;

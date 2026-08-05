@@ -1568,7 +1568,7 @@ impl DapWorkflowScenarios {
                                                 fi,
                                                 frame.file.as_deref().unwrap_or("<unknown>"),
                                                 frame.line.unwrap_or(0),
-                                                &frame.name
+                                                frame.name
                                             ));
                                         }
                                         if st.frames.len() > 5 {

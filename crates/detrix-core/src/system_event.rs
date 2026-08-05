@@ -228,9 +228,8 @@ impl SystemEvent {
 
     /// Set additional details (will be serialized to JSON)
     pub fn with_details<T: Serialize>(mut self, details: &T) -> Self {
-        match serde_json::to_string(details) {
-            Ok(json) => self.details_json = Some(json),
-            Err(e) => eprintln!("[detrix-core] Failed to serialize system event details: {e}"),
+        if let Ok(json) = serde_json::to_string(details) {
+            self.details_json = Some(json);
         }
         self
     }
@@ -267,12 +266,6 @@ impl SystemEvent {
         self.old_value = Some(old_value.into());
         self.new_value = Some(new_value.into());
         self
-    }
-
-    /// Check if this event should be persisted
-    pub fn should_persist(&self) -> bool {
-        // All system events are persisted
-        true
     }
 
     /// Check if this is a critical event

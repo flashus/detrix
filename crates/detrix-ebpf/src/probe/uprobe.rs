@@ -76,7 +76,9 @@ struct AyaHandles {
     /// Ring buffer polling task — aborted on drop.
     _poller: tokio::task::JoinHandle<()>,
     /// Drop counter map — per-CPU counters for ring buffer overflows.
-    _drop_cnt: aya::maps::PerCpuArray<aya::maps::MapData, u64>,
+    /// Wrapped in Arc<Mutex> so the ring buffer poller thread can read it
+    /// periodically to detect ring buffer overflow events.
+    _drop_cnt: std::sync::Arc<std::sync::Mutex<aya::maps::PerCpuArray<aya::maps::MapData, u64>>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -219,16 +221,19 @@ impl UprobeManager {
                 Some(probe) => {
                     // Per-CPU array: sum across all CPUs
                     let key: u32 = 0;
-                    match probe._handles._drop_cnt.get(&key, 0) {
-                        Ok(values) => values.iter().copied().sum::<u64>(),
-                        Err(e) => {
-                            detrix_logging::debug!(
-                                "[uprobe] get_drop_count: failed to read drop counter for '{}': {}",
-                                metric_name,
-                                e
-                            );
-                            0
-                        }
+                    match probe._handles._drop_cnt.lock() {
+                        Ok(map) => match map.get(&key, 0) {
+                            Ok(values) => values.iter().copied().sum::<u64>(),
+                            Err(e) => {
+                                detrix_logging::debug!(
+                                    "[uprobe] get_drop_count: failed to read drop counter for '{}': {}",
+                                    metric_name,
+                                    e
+                                );
+                                0
+                            }
+                        },
+                        Err(_) => 0, // Mutex poisoned — shouldn't happen
                     }
                 }
                 None => {
@@ -335,6 +340,21 @@ impl UprobeManager {
         // file-descriptor based), so AsyncFd cannot be used directly. A proper
         // async interface would require changes to aya itself.
         //
+        // Step 7b: Extract drop counter map before spawning the ring buffer poller.
+        //
+        // Each probe has its own DETRIX_DROP_CNT per-CPU array map for drop counting.
+        // This map is incremented by the BPF program when bpf_ringbuf_reserve() fails.
+        // Wrapping in Arc<Mutex<...>> lets the poller thread read it periodically to
+        // detect ring buffer overflow without a separate async task.
+        let drop_cnt_map = ebpf
+            .take_map("DETRIX_DROP_CNT")
+            .ok_or_else(|| Error::Ebpf("DETRIX_DROP_CNT map not found".to_string()))?;
+
+        let drop_cnt = aya::maps::PerCpuArray::<_, u64>::try_from(drop_cnt_map)
+            .context("Drop counter map init failed")?;
+
+        let drop_cnt = std::sync::Arc::new(std::sync::Mutex::new(drop_cnt));
+
         // IMPROVEMENT: Adaptive polling with exponential backoff.
         // - Starts at 1ms poll interval for low latency during active periods
         // - Backs off to 10ms after 10 consecutive idle polls
@@ -351,10 +371,15 @@ impl UprobeManager {
 
             let tx = tx.clone();
             let name = metric_name.to_string();
+            let drop_cnt_poller = drop_cnt.clone();
 
             tokio::task::spawn_blocking(move || {
                 let mut idle_polls = 0u32;
+                let mut drop_check_polls = 0u32;
+                let mut last_drop_total: u64 = 0;
                 const IDLE_THRESHOLD: u32 = 10; // Back off after 10 idle polls
+                                                // Check drop counter approximately every 100 slow polls (~1 second)
+                const DROP_CHECK_INTERVAL: u32 = 100;
                 const FAST_POLL: std::time::Duration = std::time::Duration::from_millis(1);
                 const SLOW_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
@@ -367,6 +392,25 @@ impl UprobeManager {
                     }
                     // Adaptive sleep: fast when active, slow when idle
                     let sleep_duration = if idle_polls >= IDLE_THRESHOLD {
+                        drop_check_polls += 1;
+                        if drop_check_polls >= DROP_CHECK_INTERVAL {
+                            drop_check_polls = 0;
+                            // Periodically read drop counter and warn on increase
+                            if let Ok(map) = drop_cnt_poller.lock() {
+                                let total: u64 = (0u32..aya::util::nr_cpus().unwrap_or(1) as u32)
+                                    .filter_map(|cpu| map.get(&0u32, cpu as usize).ok())
+                                    .sum();
+                                if total > last_drop_total {
+                                    let new_drops = total - last_drop_total;
+                                    detrix_logging::warn!(
+                                        dropped = new_drops,
+                                        metric = %name,
+                                        "eBPF ring buffer overflow — events dropped"
+                                    );
+                                    last_drop_total = total;
+                                }
+                            }
+                        }
                         SLOW_POLL
                     } else {
                         idle_polls += 1;
@@ -379,17 +423,6 @@ impl UprobeManager {
             // No event channel configured — idle task so _poller is always valid.
             tokio::spawn(std::future::pending())
         };
-
-        // Step 8: Extract drop counter map for monitoring ring buffer overflows.
-        //
-        // Each probe has its own DETRIX_DROP_CNT per-CPU array map for drop counting.
-        // This map is incremented by the BPF program when bpf_ringbuf_reserve() fails.
-        let drop_cnt_map = ebpf
-            .take_map("DETRIX_DROP_CNT")
-            .ok_or_else(|| Error::Ebpf("DETRIX_DROP_CNT map not found".to_string()))?;
-
-        let drop_cnt = aya::maps::PerCpuArray::try_from(drop_cnt_map)
-            .context("Drop counter map init failed")?;
 
         Ok(AyaHandles {
             _ebpf: Box::new(ebpf),
