@@ -29,6 +29,7 @@ pub mod system_event;
 
 pub use connection::{
     Connection, ConnectionId, ConnectionStatus, MIN_UNRESERVED_PORT, UNKNOWN_WORKSPACE_ROOT,
+    AGENT_NAME_PREFIX,
 };
 pub use connection_identity::ConnectionIdentity;
 pub use connection_reference::{

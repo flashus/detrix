@@ -507,9 +507,9 @@ require_dwarf = true
     }
 
     async fn start_stack(&mut self) {
-        self.start_server_with_auth(false).await;
+        self.start_server_with_auth(true).await;
         self.start_fixture().await;
-        self.start_agent(None).await;
+        self.start_agent(Some(AGENT_TEST_TOKEN)).await;
     }
 
     fn stop_named_process(name: &str, process: &mut Option<Child>) {
@@ -523,7 +523,7 @@ require_dwarf = true
 
     async fn restart_agent(&mut self) {
         Self::stop_named_process("agent_runner", &mut self.agent_process);
-        self.start_agent(None).await;
+        self.start_agent(Some(AGENT_TEST_TOKEN)).await;
     }
 
     async fn restart_fixture(&mut self) {

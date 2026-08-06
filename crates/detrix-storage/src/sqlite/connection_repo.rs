@@ -949,4 +949,35 @@ mod tests {
         let all = ConnectionRepository::list_all(&storage).await.unwrap();
         assert_eq!(all.len(), 1);
     }
+
+    #[tokio::test]
+    async fn test_connection_save_agent_managed_port_zero() {
+        // Agent-managed (eBPF) connections have no network port — port 0 is a sentinel.
+        // The DB CHECK(port = 0 OR port >= 1024) must allow this round-trip.
+        use detrix_core::{ConnectionIdentity, AGENT_NAME_PREFIX};
+
+        let storage = create_test_storage().await;
+
+        let identity = ConnectionIdentity::new(
+            format!("{AGENT_NAME_PREFIX}{}/detrix_example_app", "abc12345"),
+            SourceLanguage::Go,
+            "/",
+            "host1",
+        );
+        let conn =
+            Connection::new_with_identity(identity, "/proc/22/exe".to_string(), 0).unwrap();
+        assert_eq!(conn.port, 0);
+
+        ConnectionRepository::save_batch(&storage, &[conn.clone()])
+            .await
+            .expect("agent-managed connection with port 0 should persist");
+
+        let found = ConnectionRepository::find_by_id(&storage, &conn.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.port, 0);
+        assert_eq!(found.host, "/proc/22/exe");
+        assert!(found.is_agent_managed());
+    }
 }

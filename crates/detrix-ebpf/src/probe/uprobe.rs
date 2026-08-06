@@ -397,9 +397,11 @@ impl UprobeManager {
                             drop_check_polls = 0;
                             // Periodically read drop counter and warn on increase
                             if let Ok(map) = drop_cnt_poller.lock() {
-                                let total: u64 = (0u32..aya::util::nr_cpus().unwrap_or(1) as u32)
-                                    .filter_map(|cpu| map.get(&0u32, cpu as usize).ok())
-                                    .sum();
+                                let total: u64 = map
+                                    .get(&0u32, 0)
+                                    .ok()
+                                    .map(|pcu| pcu.iter().sum::<u64>())
+                                    .unwrap_or(0);
                                 if total > last_drop_total {
                                     let new_drops = total - last_drop_total;
                                     detrix_logging::warn!(

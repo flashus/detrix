@@ -636,11 +636,19 @@ fn find_function_at_pc<R: Reader>(dwarf: &gimli::Dwarf<R>, pc: ProgramCounter) -
                 continue;
             }
 
-            if let Some(ranges) = entry_pc_range(entry) {
-                if pc >= ranges.0 && pc < ranges.1 {
-                    if let Some(name) = read_die_name(entry, dwarf)? {
-                        return Ok(name);
-                    }
+            // gimli's die_ranges resolves low_pc/high_pc AND DW_AT_ranges (rnglists),
+            // including DW_FORM_addrx indirection through .debug_addr (Go 1.26+).
+            let mut ranges = dwarf.die_ranges(&unit, entry).context("function ranges")?;
+            let mut matches = false;
+            while let Some(range) = ranges.next().context("function range")? {
+                if range.begin <= pc && pc < range.end {
+                    matches = true;
+                    break;
+                }
+            }
+            if matches {
+                if let Some(name) = read_die_name(entry, dwarf)? {
+                    return Ok(name);
                 }
             }
         }
@@ -853,20 +861,6 @@ fn read_die_name<R: Reader>(
         }
         _ => Ok(None),
     }
-}
-
-/// Extract the PC range (low_pc, high_pc) from a DWARF entry.
-fn entry_pc_range<R: Reader>(entry: &DebuggingInformationEntry<R>) -> Option<(u64, u64)> {
-    let low = match entry.attr_value(DwAt(gimli::constants::DW_AT_low_pc.0)) {
-        Some(AttributeValue::Addr(addr)) => addr,
-        _ => return None,
-    };
-    let high = match entry.attr_value(DwAt(gimli::constants::DW_AT_high_pc.0)) {
-        Some(AttributeValue::Addr(addr)) => addr,
-        Some(AttributeValue::Udata(len)) => low + len,
-        _ => return None,
-    };
-    Some((low, high))
 }
 
 /// Resolve a DWARF location attribute to a list of piece locations.
@@ -1430,5 +1424,27 @@ mod tests {
             variables: vec![],
         };
         assert_eq!(point.symbol_offset, 0x100);
+    }
+
+    /// Regression test for Go 1.26 DWARF5 (DW_FORM_addrx / DW_AT_ranges):
+    /// resolves a real Go fixture binary built with -N -l and verifies the
+    /// probe point lands in the expected function.
+    #[test]
+    #[ignore = "requires out/detrix_example_app built with golang:1.26"]
+    fn resolve_probe_point_go126_dwarf5() {
+        let info =
+            DwarfInfo::parse("/Users/ilyadyachenko/Documents/Yandex.Disk/_src/detrix/detrix-docs/out/detrix_example_app")
+                .expect("parse binary");
+        let point = info
+            .resolve_probe_point(
+                "/src/fixtures/go/string_capture/main.go",
+                110,
+                &["symbol".to_string(), "quantity".to_string()],
+                2,
+            )
+            .expect("resolve probe point");
+        assert_eq!(point.function_name, "main.tradeTick");
+        assert!(!point.variables.is_empty());
+        assert!(point.symbol_offset > 0);
     }
 }

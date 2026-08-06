@@ -215,6 +215,14 @@ fn default_auto_reconnect() -> bool {
     true
 }
 
+/// Returns true when the identity names an agent-managed connection.
+///
+/// Agent-managed connections use the `agent/` name prefix and carry no
+/// network port (eBPF-backed), so port validation is skipped for them.
+fn is_agent_managed_identity(identity: &ConnectionIdentity) -> bool {
+    identity.name.starts_with(AGENT_NAME_PREFIX)
+}
+
 impl Connection {
     /// Returns true when this connection is owned by a Detrix agent rather than a local adapter.
     ///
@@ -249,8 +257,10 @@ impl Connection {
         // Validate identity
         identity.validate()?;
 
-        // Validate port range (MIN_UNRESERVED_PORT-65535)
-        if port < MIN_UNRESERVED_PORT {
+        // Validate port range (MIN_UNRESERVED_PORT-65535).
+        // Agent-managed connections (eBPF) have no network port — they use
+        // port 0 as a sentinel, so exempt them from this check.
+        if port < MIN_UNRESERVED_PORT && !is_agent_managed_identity(&identity) {
             return Err(Error::InvalidConfig(
                 format!(
                     "Port {} is below {} (reserved range)",
@@ -898,5 +908,32 @@ mod tests {
 
         // With ttl_days = 0, anything older than today should be inactive
         assert!(conn.inactive_for_days(0, now));
+    }
+
+    #[test]
+    fn test_agent_managed_connection_allows_port_zero() {
+        // Agent-managed (eBPF) connections have no network port — port 0 is a sentinel.
+        let identity = ConnectionIdentity::new(
+            format!("{AGENT_NAME_PREFIX}{}/detrix_example_app", "abc12345"),
+            SourceLanguage::Go,
+            "/",
+            "host1",
+        );
+        let conn = Connection::new_with_identity(identity, "/proc/22/exe".to_string(), 0)
+            .expect("agent-managed connection with port 0 should be allowed");
+        assert_eq!(conn.port, 0);
+        assert!(conn.is_agent_managed());
+    }
+
+    #[test]
+    fn test_non_agent_connection_rejects_port_zero() {
+        // Non-agent connections must still enforce the reserved port range.
+        let identity = ConnectionIdentity::new("trade-bot", SourceLanguage::Python, "/ws", "host");
+        let result = Connection::new_with_identity(identity, "127.0.0.1".to_string(), 0);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Port 0 is below 1024 (reserved range)"));
     }
 }
