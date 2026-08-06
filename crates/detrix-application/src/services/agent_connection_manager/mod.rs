@@ -36,6 +36,25 @@ fn stable_agent_identity_hostname(agent_id: &str) -> &str {
     agent_id
 }
 
+fn incoming_connection_id(msg: &IncomingAgentMessage) -> Option<&ConnectionId> {
+    match msg {
+        IncomingAgentMessage::ConnectionUpdate { connection_id, .. }
+        | IncomingAgentMessage::EventBatch { connection_id, .. }
+        | IncomingAgentMessage::DropCount { connection_id, .. } => Some(connection_id),
+        _ => None,
+    }
+}
+
+fn incoming_request_id(msg: &IncomingAgentMessage) -> Option<&str> {
+    match msg {
+        IncomingAgentMessage::SetMetricAck { request_id, .. }
+        | IncomingAgentMessage::RemoveMetricAck { request_id, .. }
+        | IncomingAgentMessage::FileResponse { request_id, .. }
+        | IncomingAgentMessage::InspectResponse { request_id, .. } => Some(request_id),
+        _ => None,
+    }
+}
+
 impl AgentConnectionManager {
     pub async fn set_adapter_lifecycle_manager(
         &self,
@@ -122,50 +141,6 @@ impl AgentConnectionManager {
             ));
         }
 
-        // Create event channels BEFORE enqueuing CreateConnection.
-        // Use entry() Vacant arm so the check+insert is atomic within the shard,
-        // eliminating the TOCTOU window of contains_key→insert.
-        for (identity, _host, _safe) in &identities {
-            let conn_id = ConnectionId(identity.to_uuid());
-            use dashmap::mapref::entry::Entry;
-            if let Entry::Vacant(e) = self.event_channels.entry(conn_id.clone()) {
-                let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
-                e.insert(Some(event_tx)); // consumes e, releasing shard lock
-                self.event_receivers.insert(conn_id, Some(event_rx));
-            }
-        }
-
-        let agent_info = AgentInfo {
-            agent_id: agent_id.clone(),
-            hostname: hostname.clone(),
-            capabilities,
-            binaries: binaries.clone(),
-            outgoing_tx: outgoing_tx.clone(),
-            connected_at: std::time::Instant::now(),
-        };
-
-        self.agents.insert(agent_id.clone(), agent_info);
-
-        // Enqueue RegisterAck
-        let _ = outgoing_tx.send(OutgoingAgentMessage::RegisterAck {
-            accepted: true,
-            rejection_reason: String::new(),
-            min_compatible_version: min_version.cloned().unwrap_or_default(),
-        });
-
-        // Enqueue CreateConnection for each binary
-        for (identity, binary_path, safe_mode) in &identities {
-            let conn_id = ConnectionId(identity.to_uuid());
-            let _ = outgoing_tx.send(OutgoingAgentMessage::CreateConnection {
-                connection_id: conn_id.0.clone(),
-                language: identity.language.as_str().to_string(),
-                binary_path: binary_path.clone(),
-                host: hostname.clone(), // actual agent hostname, not the binary path
-                port: 0,                // port not applicable for agent-managed (eBPF) connections
-                safe_mode: *safe_mode,
-            });
-        }
-
         // Pre-compute connection IDs for post-batch routing
         let conn_ids: Vec<ConnectionId> = identities
             .iter()
@@ -190,34 +165,125 @@ impl AgentConnectionManager {
             connections.push(conn);
         }
 
-        match self.connection_repo.save_batch(&connections).await {
-            Ok(_) => {
-                for conn in &connections {
-                    self.cleanup_stale_connections(conn).await;
-                }
-                // Populate routing table only after successful commit
-                for conn_id in conn_ids {
-                    self.connection_to_agent
-                        .insert(conn_id.clone(), agent_id.clone());
-                    self.connection_requests
-                        .insert(conn_id, std::collections::HashSet::new());
-                }
+        if let Err(e) = self.connection_repo.save_batch(&connections).await {
+            error!(
+                agent_id = %agent_id,
+                error = %e,
+                "Agent registration: SQLite batch save failed"
+            );
+            // Do not advertise success or install in-memory indexes when the
+            // durable registration did not commit. Otherwise the stream can
+            // receive RegisterAck{accepted:true} while status/events have no
+            // durable connection and a reconnect can inherit stale channels.
+            return Err(e);
+        }
+
+        for conn in &connections {
+            self.cleanup_stale_connections(conn).await;
+        }
+
+        // Install all in-memory state only after the durable batch succeeds.
+        // Use entry()'s Vacant arm so reconnects preserve existing event
+        // channels while failed first registrations cannot leave orphans.
+        for conn_id in &conn_ids {
+            use dashmap::mapref::entry::Entry;
+            if let Entry::Vacant(e) = self.event_channels.entry(conn_id.clone()) {
+                let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
+                e.insert(Some(event_tx));
+                self.event_receivers.insert(conn_id.clone(), Some(event_rx));
             }
-            Err(e) => {
-                error!(
-                    agent_id = %agent_id,
-                    error = %e,
-                    "Agent registration: SQLite batch save failed (in-memory state valid, will retry on reconnect)"
-                );
-            }
+            self.connection_to_agent
+                .insert(conn_id.clone(), agent_id.clone());
+            self.connection_requests
+                .insert(conn_id.clone(), std::collections::HashSet::new());
+        }
+
+        self.agents.insert(
+            agent_id.clone(),
+            AgentInfo {
+                agent_id: agent_id.clone(),
+                hostname: hostname.clone(),
+                capabilities,
+                binaries: binaries.clone(),
+                outgoing_tx: outgoing_tx.clone(),
+                connected_at: std::time::Instant::now(),
+            },
+        );
+
+        let _ = outgoing_tx.send(OutgoingAgentMessage::RegisterAck {
+            accepted: true,
+            rejection_reason: String::new(),
+            min_compatible_version: min_version.cloned().unwrap_or_default(),
+        });
+
+        // Only publish CreateConnection after the database commit and
+        // routing-table update. The agent can report Connected as soon as it
+        // receives this frame.
+        for (identity, binary_path, safe_mode) in &identities {
+            let conn_id = ConnectionId(identity.to_uuid());
+            let _ = outgoing_tx.send(OutgoingAgentMessage::CreateConnection {
+                connection_id: conn_id.0.clone(),
+                language: identity.language.as_str().to_string(),
+                binary_path: binary_path.clone(),
+                host: hostname.clone(),
+                port: 0,
+                safe_mode: *safe_mode,
+            });
         }
 
         Ok(RegisterResult::Accepted)
     }
 
-    /// Dispatch a decoded IncomingAgentMessage.
-    /// Called from the gRPC read loop after registration.
-    pub async fn dispatch(&self, agent_id: &str, msg: IncomingAgentMessage) {
+    /// Dispatch a decoded IncomingAgentMessage from the current gRPC session.
+    ///
+    /// The session channel is part of the authorization context. Stable agent
+    /// IDs survive reconnects, so an old stream must not continue dispatching
+    /// after a replacement stream has registered under the same ID.
+    pub async fn dispatch(
+        &self,
+        agent_id: &str,
+        session_tx: &AgentOutgoingTx,
+        msg: IncomingAgentMessage,
+    ) {
+        let current = self
+            .agents
+            .get(agent_id)
+            .is_some_and(|info| info.outgoing_tx.same_channel(session_tx));
+        if !current {
+            warn!(agent_id = %agent_id, "Ignoring message from stale agent stream");
+            return;
+        }
+
+        // A bearer token authenticates an agent, but does not by itself prove
+        // that the agent owns an arbitrary connection or request ID. Enforce
+        // ownership at this boundary before any state, event, or pending
+        // request can be mutated.
+        if let Some(connection_id) = incoming_connection_id(&msg) {
+            if !self.owns_connection(agent_id, connection_id) {
+                warn!(
+                    agent_id = %agent_id,
+                    connection_id = %connection_id.0,
+                    "Ignoring agent message for a connection owned by another agent"
+                );
+                return;
+            }
+        }
+        if let Some(request_id) = incoming_request_id(&msg) {
+            let owns_request = self
+                .request_to_connection
+                .get(request_id)
+                .map(|connection_id| self.owns_connection(agent_id, connection_id.value()))
+                .unwrap_or(false);
+            if !owns_request {
+                warn!(
+                    agent_id = %agent_id,
+                    request_id = %request_id,
+                    "Ignoring agent response for an unknown or foreign request"
+                );
+                return;
+            }
+        }
+
         match msg {
             IncomingAgentMessage::ConnectionUpdate {
                 connection_id,
@@ -334,12 +400,17 @@ impl AgentConnectionManager {
                 connection_id,
                 events,
             } => {
-                if let Some(entry) = self.event_channels.get(&connection_id) {
-                    if let Some(tx) = entry.value() {
-                        for event in events {
-                            if tx.send(event).await.is_err() {
-                                break;
-                            }
+                // Clone the sender before awaiting. Holding a DashMap guard
+                // while a bounded channel is full can block unrelated state
+                // operations on the same shard indefinitely.
+                let tx = self
+                    .event_channels
+                    .get(&connection_id)
+                    .and_then(|entry| entry.value().as_ref().cloned());
+                if let Some(tx) = tx {
+                    for event in events {
+                        if tx.send(event).await.is_err() {
+                            break;
                         }
                     }
                 }
@@ -456,6 +527,12 @@ impl AgentConnectionManager {
         }
     }
 
+    fn owns_connection(&self, agent_id: &str, connection_id: &ConnectionId) -> bool {
+        self.connection_to_agent
+            .get(connection_id)
+            .is_some_and(|owner| owner.value() == agent_id)
+    }
+
     /// Handle mid-session re-registration (scanner detected changes).
     async fn handle_register_update(&self, agent_id: &str, binaries: Vec<AgentBinaryInfo>) {
         // Clone fields needed across await points, then drop the shard lock before any await.
@@ -558,23 +635,7 @@ impl AgentConnectionManager {
                 stable_agent_identity_hostname(agent_id),
             );
             let conn_id = ConnectionId(identity.to_uuid());
-
-            // Create event channel
-            let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
-            self.event_channels.insert(conn_id.clone(), Some(event_tx));
-            self.event_receivers.insert(conn_id.clone(), Some(event_rx));
-            self.connection_requests
-                .insert(conn_id.clone(), std::collections::HashSet::new());
-
-            // Enqueue CreateConnection
-            let _ = outgoing_tx.send(OutgoingAgentMessage::CreateConnection {
-                connection_id: conn_id.0.clone(),
-                language: identity.language.as_str().to_string(),
-                binary_path: binary.binary_path.clone(),
-                host: hostname.clone(),
-                port: 0,
-                safe_mode: true,
-            });
+            let language = identity.language.as_str().to_string();
 
             // Save to DB
             let mut conn =
@@ -599,8 +660,26 @@ impl AgentConnectionManager {
                 continue;
             }
 
+            // Install routing and event state only after persistence succeeds;
+            // a failed scanner update must not leave an unreachable channel.
+            let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
+            self.event_channels.insert(conn_id.clone(), Some(event_tx));
+            self.event_receivers.insert(conn_id.clone(), Some(event_rx));
+            self.connection_requests
+                .insert(conn_id.clone(), std::collections::HashSet::new());
             self.connection_to_agent
-                .insert(conn_id, agent_id.to_string());
+                .insert(conn_id.clone(), agent_id.to_string());
+
+            // Publish only after persistence and ownership registration. The
+            // agent may report Connected immediately after receiving this.
+            let _ = outgoing_tx.send(OutgoingAgentMessage::CreateConnection {
+                connection_id: conn_id.0,
+                language,
+                binary_path: binary.binary_path.clone(),
+                host: hostname.clone(),
+                port: 0,
+                safe_mode: true,
+            });
         }
 
         // Re-acquire briefly to update binaries — all awaits are complete.
@@ -905,7 +984,31 @@ impl AgentConnectionManager {
 
     /// Called on gRPC stream close. Marks all owned connections Disconnected.
     pub async fn unregister_agent(&self, agent_id: &str) {
-        let Some(_agent_info) = self.agents.remove(agent_id).map(|(_, v)| v) else {
+        self.unregister_agent_matching(agent_id, None).await;
+    }
+
+    /// Unregister only the stream that currently owns `agent_id`.
+    ///
+    /// Agent IDs are intentionally stable across reconnects. Without matching
+    /// the stream channel, an old read task can finish after a reconnect and
+    /// tear down the replacement agent's connections.
+    pub async fn unregister_agent_if_current(&self, agent_id: &str, session_tx: &AgentOutgoingTx) {
+        self.unregister_agent_matching(agent_id, Some(session_tx))
+            .await;
+    }
+
+    async fn unregister_agent_matching(
+        &self,
+        agent_id: &str,
+        session_tx: Option<&AgentOutgoingTx>,
+    ) {
+        let removed = match session_tx {
+            Some(session_tx) => self.agents.remove_if(agent_id, |_, info| {
+                info.outgoing_tx.same_channel(session_tx)
+            }),
+            None => self.agents.remove(agent_id),
+        };
+        let Some((_agent_id, _agent_info)) = removed else {
             return;
         };
 
@@ -1039,7 +1142,20 @@ impl AgentConnectionManager {
 #[cfg(test)]
 mod tests {
     use super::helpers::*;
-    use super::types::OutgoingAgentMessage;
+    use super::types::{AgentInfo, OutgoingAgentMessage};
+    use super::*;
+    use detrix_testing::{MockConnectionRepository, MockMetricRepository};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    fn test_manager() -> AgentConnectionManager {
+        AgentConnectionManager::new(
+            Arc::new(MockConnectionRepository::new()),
+            Arc::new(MockMetricRepository::new()),
+            None,
+            None,
+        )
+    }
 
     #[test]
     fn test_semver_compare_compatible() {
@@ -1103,5 +1219,91 @@ mod tests {
 
         let ping = OutgoingAgentMessage::Ping;
         assert_eq!(extract_request_id(&ping), None);
+    }
+
+    #[test]
+    fn connection_ownership_is_scoped_to_the_registered_agent() {
+        let manager = test_manager();
+        let connection_id = ConnectionId("connection-1".to_string());
+        manager
+            .connection_to_agent
+            .insert(connection_id.clone(), "agent-a".to_string());
+
+        assert!(manager.owns_connection("agent-a", &connection_id));
+        assert!(!manager.owns_connection("agent-b", &connection_id));
+        assert!(!manager.owns_connection("agent-a", &ConnectionId("missing".to_string())));
+    }
+
+    #[tokio::test]
+    async fn stale_agent_stream_cannot_unregister_replacement_stream() {
+        let manager = test_manager();
+        let (old_tx, _old_rx) = mpsc::unbounded_channel();
+        let (new_tx, _new_rx) = mpsc::unbounded_channel();
+        manager.agents.insert(
+            "agent-a".to_string(),
+            AgentInfo {
+                agent_id: "agent-a".to_string(),
+                hostname: "host".to_string(),
+                capabilities: AgentCapabilities::default(),
+                binaries: Vec::new(),
+                outgoing_tx: new_tx.clone(),
+                connected_at: std::time::Instant::now(),
+            },
+        );
+
+        manager
+            .unregister_agent_if_current("agent-a", &old_tx)
+            .await;
+        assert!(manager.agents.contains_key("agent-a"));
+
+        manager
+            .unregister_agent_if_current("agent-a", &new_tx)
+            .await;
+        assert!(!manager.agents.contains_key("agent-a"));
+    }
+
+    #[tokio::test]
+    async fn stale_agent_stream_cannot_replace_current_registration_state() {
+        let manager = test_manager();
+        let (old_tx, _old_rx) = mpsc::unbounded_channel();
+        let (new_tx, _new_rx) = mpsc::unbounded_channel();
+        let binary = AgentBinaryInfo {
+            binary_path: "/proc/10/exe".to_string(),
+            pid: 10,
+            inode: 10,
+            build_info: String::new(),
+            has_dwarf: true,
+            exported_functions: Vec::new(),
+            language: detrix_core::SourceLanguage::Go,
+        };
+        manager.agents.insert(
+            "agent-a".to_string(),
+            AgentInfo {
+                agent_id: "agent-a".to_string(),
+                hostname: "host".to_string(),
+                capabilities: AgentCapabilities::default(),
+                binaries: vec![binary],
+                outgoing_tx: new_tx.clone(),
+                connected_at: std::time::Instant::now(),
+            },
+        );
+
+        manager
+            .dispatch(
+                "agent-a",
+                &old_tx,
+                IncomingAgentMessage::RegisterUpdate { binaries: vec![] },
+            )
+            .await;
+        assert_eq!(manager.agents.get("agent-a").unwrap().binaries.len(), 1);
+
+        manager
+            .dispatch(
+                "agent-a",
+                &new_tx,
+                IncomingAgentMessage::RegisterUpdate { binaries: vec![] },
+            )
+            .await;
+        assert!(manager.agents.get("agent-a").unwrap().binaries.is_empty());
     }
 }

@@ -76,17 +76,25 @@ impl ProcScanner {
 
     /// Delta scan — returns full list only if changes detected.
     pub fn scan_delta(&mut self) -> Option<Vec<BinaryInfo>> {
+        let new_binaries = self.do_scan();
+        self.scan_delta_from(new_binaries)
+    }
+
+    /// Apply a scan result to the tracked snapshot.
+    ///
+    /// Keeping this separate from `/proc` discovery makes the cooldown semantics
+    /// explicit and testable. While the cooldown is active, retain the previous
+    /// snapshot so changes are reported by the first scan after the cooldown.
+    fn scan_delta_from(&mut self, new_binaries: Vec<BinaryInfo>) -> Option<Vec<BinaryInfo>> {
         if let Some(last) = self.last_registered_at {
             if last.elapsed().as_secs() < self.min_reregister_secs {
-                // Cooldown active — scan to keep known map fresh so the first
-                // post-cooldown delta is incremental, not a full diff.
-                let current = self.do_scan();
-                self.known = current.into_iter().map(|b| ((b.pid, b.inode), b)).collect();
+                // Cooldown active — do not advance `known`. Advancing it here
+                // would permanently hide processes that appear during the
+                // cooldown from the first eligible re-registration.
                 return None;
             }
         }
 
-        let new_binaries = self.do_scan();
         let new_known: HashMap<(u32, u64), BinaryInfo> = new_binaries
             .iter()
             .map(|b| ((b.pid, b.inode), b.clone()))
@@ -175,6 +183,46 @@ impl ProcScanner {
         }
 
         binaries
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binary(pid: u32, inode: u64) -> BinaryInfo {
+        BinaryInfo {
+            binary_path: format!("/proc/{pid}/exe"),
+            pid,
+            inode,
+            build_info: String::new(),
+            has_dwarf: true,
+            exported_functions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn scan_delta_does_not_forget_changes_seen_during_cooldown() {
+        let mut scanner = ProcScanner::new(&ScannerConfig::default());
+        let existing = binary(10, 100);
+        let discovered_during_cooldown = binary(11, 200);
+
+        scanner
+            .known
+            .insert((existing.pid, existing.inode), existing.clone());
+        scanner.last_registered_at = Some(Instant::now());
+
+        assert!(scanner
+            .scan_delta_from(vec![existing.clone(), discovered_during_cooldown.clone()])
+            .is_none());
+        assert_eq!(scanner.known.len(), 1);
+        assert!(scanner.known.contains_key(&(existing.pid, existing.inode)));
+
+        scanner.last_registered_at = Some(Instant::now() - std::time::Duration::from_secs(301));
+        let delta = scanner
+            .scan_delta_from(vec![existing, discovered_during_cooldown.clone()])
+            .expect("the post-cooldown scan must report the new process");
+        assert_eq!(delta, vec![binary(10, 100), discovered_during_cooldown]);
     }
 }
 

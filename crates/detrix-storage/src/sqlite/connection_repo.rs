@@ -964,8 +964,7 @@ mod tests {
             "/",
             "host1",
         );
-        let conn =
-            Connection::new_with_identity(identity, "/proc/22/exe".to_string(), 0).unwrap();
+        let conn = Connection::new_with_identity(identity, "/proc/22/exe".to_string(), 0).unwrap();
         assert_eq!(conn.port, 0);
 
         ConnectionRepository::save_batch(&storage, &[conn.clone()])

@@ -56,21 +56,9 @@ impl AdapterManager {
         events_forwarded: Arc<AtomicU64>,
         allowed_read_prefixes: Vec<PathBuf>,
     ) -> Self {
-        // Canonicalize at construction so path comparisons in read_file are reliable.
-        // Prefixes that don't exist yet are skipped with a warning rather than panicking,
-        // since the target directory may be mounted after agent start.
-        let allowed_read_prefixes: Vec<PathBuf> = allowed_read_prefixes
-            .into_iter()
-            .filter_map(|p| {
-                std::fs::canonicalize(&p).ok().or_else(|| {
-                    tracing::warn!(
-                        path = %p.display(),
-                        "Cannot canonicalize allowed_read_prefix — skipping"
-                    );
-                    None
-                })
-            })
-            .collect();
+        // Retain configured prefixes even when they do not exist yet. A target
+        // directory may be mounted after the agent starts; canonicalization is
+        // therefore performed at each read boundary.
 
         Self {
             adapters: Arc::new(DashMap::new()),
@@ -99,6 +87,17 @@ impl AdapterManager {
             language = %language,
             "Creating connection"
         );
+
+        // CreateConnection is normally serialized by the stream reader, but a
+        // duplicate command can still arrive after a reconnect or retry. Stop
+        // the previous local instance before replacing it so its probe and
+        // forwarder do not leak events/resources under the same ID.
+        if let Some((_, handle)) = self.forwarder_handles.remove(&connection_id) {
+            handle.abort();
+        }
+        if let Some((_, adapter)) = self.adapters.remove(&connection_id) {
+            let _ = adapter.stop().await;
+        }
 
         // Record language for later use in handle_set_metric / handle_remove_metric.
         self.connection_languages
@@ -475,10 +474,11 @@ impl AdapterManager {
             .map_err(|e| AgentError::Scanner(format!("Cannot canonicalize {path}: {e}")))?;
 
         if !self.allowed_read_prefixes.is_empty() {
-            let allowed = self
-                .allowed_read_prefixes
-                .iter()
-                .any(|prefix| canonical.starts_with(prefix));
+            let allowed = self.allowed_read_prefixes.iter().any(|prefix| {
+                std::fs::canonicalize(prefix)
+                    .ok()
+                    .is_some_and(|canonical_prefix| canonical.starts_with(canonical_prefix))
+            });
             if !allowed {
                 return Err(AgentError::Scanner(format!(
                     "Path {path:?} is outside allowed read prefixes"
@@ -635,5 +635,42 @@ impl AdapterManager {
                 },
             )),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn read_file_accepts_prefix_that_appears_after_manager_creation() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("detrix-agent-prefix-{suffix}"));
+        let prefix = root.join("mounted");
+        let file = prefix.join("source.go");
+        let (ctrl_tx, _ctrl_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let manager = AdapterManager::new(
+            ctrl_tx,
+            event_tx,
+            Arc::new(AtomicU64::new(0)),
+            CaptureConfig::default(),
+            Arc::new(AtomicU64::new(0)),
+            vec![prefix],
+        );
+
+        std::fs::create_dir_all(&file.parent().unwrap()).expect("create simulated mount");
+        std::fs::write(&file, b"package main\n").expect("create source");
+        assert_eq!(
+            manager.read_file(file.to_str().unwrap()).unwrap(),
+            b"package main\n"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove simulated mount");
     }
 }

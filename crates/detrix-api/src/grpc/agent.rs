@@ -121,6 +121,9 @@ impl AgentService for AgentServiceImpl {
         });
 
         // Register the agent (sends RegisterAck + CreateConnection via out_tx)
+        // Retain this sender as the stream identity. If the same agent_id
+        // reconnects, the old stream must not unregister the replacement.
+        let session_tx = out_tx.clone();
         match agent_manager
             .register_atomic(
                 agent_id.clone(),
@@ -164,21 +167,26 @@ impl AgentService for AgentServiceImpl {
                             let permit = semaphore.clone().acquire_owned().await.ok();
                             let mgr = mgr_clone.clone();
                             let agent_id = agent_id_clone.clone();
+                            let session_tx = session_tx.clone();
                             tokio::spawn(async move {
                                 let _permit = permit; // released when task drops
-                                mgr.dispatch(&agent_id, domain_msg).await;
+                                mgr.dispatch(&agent_id, &session_tx, domain_msg).await;
                             });
                         }
                     }
                     Ok(None) => {
                         // Stream closed
                         tracing::info!(agent_id = %agent_id_clone, "agent stream closed");
-                        mgr_clone.unregister_agent(&agent_id_clone).await;
+                        mgr_clone
+                            .unregister_agent_if_current(&agent_id_clone, &session_tx)
+                            .await;
                         break;
                     }
                     Err(e) => {
                         tracing::warn!(agent_id = %agent_id_clone, error = %e, "agent stream error");
-                        mgr_clone.unregister_agent(&agent_id_clone).await;
+                        mgr_clone
+                            .unregister_agent_if_current(&agent_id_clone, &session_tx)
+                            .await;
                         break;
                     }
                 }

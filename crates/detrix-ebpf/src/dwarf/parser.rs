@@ -20,13 +20,8 @@ use std::path::{Path, PathBuf};
 fn find_symbol_address(data: &[u8], name: &[u8]) -> Option<u64> {
     use object::elf::{Sym64, ELFDATA2LSB, SHN_UNDEF, SHT_DYNSYM, SHT_SYMTAB};
 
-    if data.len() < 64 {
-        return None;
-    }
-
     // Parse ELF header
-    let ehdr: &object::elf::FileHeader64<object::Endianness> =
-        unsafe { &*(data.as_ptr() as *const _) };
+    let ehdr: object::elf::FileHeader64<object::Endianness> = read_unaligned(data, 0)?;
     let endian = if ehdr.e_ident.data == ELFDATA2LSB {
         object::Endianness::Little
     } else {
@@ -42,13 +37,15 @@ fn find_symbol_address(data: &[u8], name: &[u8]) -> Option<u64> {
 
     // Scan all sections for symbol tables
     for i in 0..shnum {
-        // SAFETY: shoff + i * 64 + 64 ≤ data.len() verified below.
-        if shoff.saturating_add(i * 64).saturating_add(64) > data.len() {
+        let section_offset = i.checked_mul(64).and_then(|n| shoff.checked_add(n));
+        let Some(section_offset) = section_offset else {
+            break;
+        };
+        let Some(shdr) = read_unaligned::<object::elf::SectionHeader64<object::Endianness>>(
+            data,
+            section_offset,
+        ) else {
             break; // malformed ELF — section header table walks past data
-        }
-        let shdr = unsafe {
-            &*((data.as_ptr().add(shoff + i * 64))
-                as *const object::elf::SectionHeader64<object::Endianness>)
         };
         let sh_type = shdr.sh_type.get(endian);
         if sh_type != SHT_SYMTAB && sh_type != SHT_DYNSYM {
@@ -60,7 +57,10 @@ fn find_symbol_address(data: &[u8], name: &[u8]) -> Option<u64> {
         let entsize = shdr.sh_entsize.get(endian) as usize;
         let link = shdr.sh_link.get(endian) as usize;
 
-        if offset + size > data.len() || entsize == 0 {
+        let Some(section_end) = offset.checked_add(size) else {
+            continue;
+        };
+        if section_end > data.len() || entsize == 0 {
             continue;
         }
 
@@ -68,28 +68,33 @@ fn find_symbol_address(data: &[u8], name: &[u8]) -> Option<u64> {
         if link >= shnum {
             continue;
         }
-        // SAFETY: shoff + link * 64 + 64 ≤ data.len() verified below.
-        if shoff.saturating_add(link * 64).saturating_add(64) > data.len() {
+        let Some(link_offset) = link.checked_mul(64).and_then(|n| shoff.checked_add(n)) else {
+            continue;
+        };
+        let Some(strhdr) =
+            read_unaligned::<object::elf::SectionHeader64<object::Endianness>>(data, link_offset)
+        else {
             continue; // malformed ELF — string table section header out of range
-        }
-        let strhdr = unsafe {
-            &*((data.as_ptr().add(shoff + link * 64))
-                as *const object::elf::SectionHeader64<object::Endianness>)
         };
         let stroff = strhdr.sh_offset.get(endian) as usize;
         let strsize = strhdr.sh_size.get(endian) as usize;
-        if stroff + strsize > data.len() {
+        let Some(str_end) = stroff.checked_add(strsize) else {
+            continue;
+        };
+        if str_end > data.len() {
             continue;
         }
-        let strtab = &data[stroff..stroff + strsize];
+        let strtab = &data[stroff..str_end];
 
         // Scan symbols
         let nsyms = size / entsize;
         for j in 0..nsyms {
-            // SAFETY: offset + j * entsize + entsize ≤ offset + size ≤ data.len()
-            // because j < nsyms = size/entsize, so j * entsize < size.
-            let sym: &Sym64<object::Endianness> = unsafe {
-                &*((data.as_ptr().add(offset + j * entsize)) as *const Sym64<object::Endianness>)
+            let Some(symbol_offset) = j.checked_mul(entsize).and_then(|n| offset.checked_add(n))
+            else {
+                break;
+            };
+            let Some(sym) = read_unaligned::<Sym64<object::Endianness>>(data, symbol_offset) else {
+                break;
             };
             let name_off = sym.st_name.get(endian) as usize;
             if name_off == SHN_UNDEF as usize || name_off >= strtab.len() {
@@ -107,6 +112,20 @@ fn find_symbol_address(data: &[u8], name: &[u8]) -> Option<u64> {
     }
 
     None
+}
+
+/// Read a plain ELF metadata structure without requiring the byte slice to be
+/// naturally aligned. The bounds check is performed before the pointer is
+/// formed; `read_unaligned` avoids creating an invalid aligned reference.
+fn read_unaligned<T: Copy>(data: &[u8], offset: usize) -> Option<T> {
+    let end = offset.checked_add(std::mem::size_of::<T>())?;
+    if end > data.len() {
+        return None;
+    }
+
+    // SAFETY: `offset..end` is within the initialized byte slice and
+    // `read_unaligned` does not require the source pointer to be aligned.
+    Some(unsafe { std::ptr::read_unaligned(data.as_ptr().add(offset) as *const T) })
 }
 
 /// Parsed Go binary with DWARF debug info ready for probe point resolution.
@@ -1432,9 +1451,14 @@ mod tests {
     #[test]
     #[ignore = "requires out/detrix_example_app built with golang:1.26"]
     fn resolve_probe_point_go126_dwarf5() {
-        let info =
-            DwarfInfo::parse("/Users/ilyadyachenko/Documents/Yandex.Disk/_src/detrix/detrix-docs/out/detrix_example_app")
-                .expect("parse binary");
+        let binary_path = std::env::var_os("DETRIX_GO126_FIXTURE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../out/detrix_example_app")
+            });
+        let info = DwarfInfo::parse(&binary_path).unwrap_or_else(|error| {
+            panic!("parse Go 1.26 fixture {}: {error}", binary_path.display())
+        });
         let point = info
             .resolve_probe_point(
                 "/src/fixtures/go/string_capture/main.go",
