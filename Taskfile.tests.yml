@@ -3,6 +3,20 @@ version: "3"
 # Detrix Test Tasks
 # Included from main Taskfile.yml
 
+# Base images — single source of truth: fixtures/docker/images.env
+# (dotenv is not supported in included Taskfiles, so we read it via sh vars)
+vars:
+  RUST_IMAGE:
+    sh: grep '^RUST_IMAGE=' fixtures/docker/images.env | cut -d= -f2
+  GO_IMAGE:
+    sh: grep '^GO_IMAGE=' fixtures/docker/images.env | cut -d= -f2
+  GO_CLASSIC_IMAGE:
+    sh: grep '^GO_CLASSIC_IMAGE=' fixtures/docker/images.env | cut -d= -f2
+  PYTHON_IMAGE:
+    sh: grep '^PYTHON_IMAGE=' fixtures/docker/images.env | cut -d= -f2
+  RUNTIME_IMAGE:
+    sh: grep '^RUNTIME_IMAGE=' fixtures/docker/images.env | cut -d= -f2
+
 tasks:
   check-orphans:
     desc: Check for orphaned or zombie test processes (detrix_example_app, lldb-dap, debugpy, dlv, detrix serve)
@@ -158,11 +172,11 @@ tasks:
     cmds:
       - |
         for i in 1 2 3; do
-          docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --force-recreate --wait mock-jwks detrix-jwt && break
+          docker compose --env-file fixtures/docker/images.env -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --force-recreate --wait mock-jwks detrix-jwt && break
           echo "docker compose up --build failed (attempt $i/3), retrying in 5s..."
           sleep 5
         done
-      - defer: docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} down mock-jwks detrix-jwt
+      - defer: docker compose --env-file fixtures/docker/images.env -f {{.COMPOSE_FILE}} -p {{.PROJECT}} down mock-jwks detrix-jwt
       - cargo test -p detrix-testing --test jwks_cloud_e2e -- --ignored --nocapture --test-threads=1
       - task: check-orphans
 
@@ -175,11 +189,11 @@ tasks:
     cmds:
       - |
         for i in 1 2 3; do
-          docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --wait && break
+          docker compose --env-file fixtures/docker/images.env -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --wait && break
           echo "docker compose up --build failed (attempt $i/3), retrying in 5s..."
           sleep 5
         done
-      - defer: docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} down -v
+      - defer: docker compose --env-file fixtures/docker/images.env -f {{.COMPOSE_FILE}} -p {{.PROJECT}} down -v
       - cargo test -p detrix-testing --test 'keycloak_*_e2e' -- --ignored --nocapture --test-threads=1
       - task: check-orphans
 
@@ -198,7 +212,7 @@ tasks:
       COMPOSE_FILE: fixtures/docker/docker-compose.yml
       PROJECT: detrix-cloud-test
     cmds:
-      - docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} build --no-cache detrix
+      - docker compose --env-file fixtures/docker/images.env -f {{.COMPOSE_FILE}} -p {{.PROJECT}} build --no-cache detrix
 
   # ── eBPF Images and Binary Compilation ───────────────────────────────────────
   #
@@ -239,19 +253,37 @@ tasks:
       BUILDER: detrix-ebpf-builder
       DOCKERFILE: fixtures/docker/Dockerfile.ebpf-test
     cmds:
+      # Ensure base images are available (registry pulls can fail transiently → retry)
+      - |
+        for img in {{.RUST_IMAGE}} {{.GO_IMAGE}}; do
+          for i in 1 2 3; do
+            docker pull "$img" > /dev/null 2>&1 && break
+            echo "docker pull $img failed (attempt $i/3), retrying in 5s..."
+            sleep 5
+            [ "$i" -eq 3 ] && { echo "docker pull $img failed after 3 attempts"; exit 1; }
+          done
+        done
       # Extract the rust-deps stage — it has protobuf-compiler installed and
       # all Cargo dependencies pre-fetched via `cargo fetch --locked`.
       # This image is stable: only rebuild when Cargo.lock or package versions change.
-      - docker build --target rust-deps -f {{.DOCKERFILE}} -t {{.BUILDER}} .
+      - docker build --target rust-deps --build-arg RUST_IMAGE={{.RUST_IMAGE}} --build-arg GO_IMAGE={{.GO_IMAGE}} -f {{.DOCKERFILE}} -t {{.BUILDER}} .
 
   build-ebpf-shared-bins:
     desc: "Compile shared eBPF artifacts used by inject-style tests (daemon + primary Go fixture)"
     vars:
       BUILDER: detrix-ebpf-builder
-      GO_IMAGE: golang:1.24.13-bookworm
       OUT: "{{.ROOT_DIR}}/out"
+    deps: [build-ebpf-builder]
     cmds:
       - mkdir -p {{.OUT}}
+      # Ensure the Go toolchain image is available (registry pulls can fail transiently → retry)
+      - |
+        for i in 1 2 3; do
+          docker pull {{.GO_IMAGE}} > /dev/null 2>&1 && break
+          echo "docker pull {{.GO_IMAGE}} failed (attempt $i/3), retrying in 5s..."
+          sleep 5
+          [ "$i" -eq 3 ] && { echo "docker pull {{.GO_IMAGE}} failed after 3 attempts"; exit 1; }
+        done
       - |
         docker run --rm \
           -v "{{.ROOT_DIR}}:/src" \
@@ -283,10 +315,19 @@ tasks:
     deps: [build-ebpf-shared-bins]
     vars:
       BUILDER: detrix-ebpf-builder
-      GO_IMAGE: golang:1.24.13-bookworm
       OUT: "{{.ROOT_DIR}}/out"
     cmds:
       - mkdir -p {{.OUT}}
+      # Ensure Go toolchain images are available (registry pulls can fail transiently → retry)
+      - |
+        for img in {{.GO_IMAGE}} {{.GO_CLASSIC_IMAGE}}; do
+          for i in 1 2 3; do
+            docker pull "$img" > /dev/null 2>&1 && break
+            echo "docker pull $img failed (attempt $i/3), retrying in 5s..."
+            sleep 5
+            [ "$i" -eq 3 ] && { echo "docker pull $img failed after 3 attempts"; exit 1; }
+          done
+        done
       # ── Rust: daemon + test binary ──────────────────────────────────────────
       # Source is mounted read-write (output written to ./out/).
       # Named volumes persist caches across runs:
@@ -336,7 +377,7 @@ tasks:
           -v "ebpf-go-mod:/go/pkg/mod" \
           -v "ebpf-go-build:/root/.cache/go-build" \
           -w /src/fixtures/go/classic_map \
-          golang:1.23.12-bookworm \
+          {{.GO_CLASSIC_IMAGE}} \
           go build \
             -gcflags="all=-N -l" \
             -ldflags="-compressdwarf=false" \
@@ -425,7 +466,13 @@ tasks:
       IMAGE: detrix-ebpf-test
       DOCKERFILE: fixtures/docker/Dockerfile.ebpf-test
     cmds:
-      - docker build -f {{.DOCKERFILE}} -t {{.IMAGE}} .
+      - |
+        for i in 1 2 3; do
+          docker build --build-arg RUST_IMAGE={{.RUST_IMAGE}} --build-arg GO_IMAGE={{.GO_IMAGE}} -f {{.DOCKERFILE}} -t {{.IMAGE}} . && break
+          echo "docker build failed (attempt $i/3), retrying in 5s..."
+          sleep 5
+          [ "$i" -eq 3 ] && { echo "docker build failed after 3 attempts"; exit 1; }
+        done
       - docker run --privileged --rm {{.IMAGE}}
 
   test-ebpf-pull:
@@ -436,11 +483,23 @@ tasks:
       PLAYGROUND: detrix-ebpf-playground
       PG_DOCKERFILE: fixtures/docker/Dockerfile.ebpf-playground
     cmds:
-      - docker pull golang:1.24.13-bookworm
-      - docker pull rust:1.94.1-bookworm
-      - docker pull debian:bookworm-20260316-slim
+      - |
+        for img in {{.GO_IMAGE}} {{.RUST_IMAGE}} {{.RUNTIME_IMAGE}}; do
+          for i in 1 2 3; do
+            docker pull "$img" > /dev/null 2>&1 && break
+            echo "docker pull $img failed (attempt $i/3), retrying in 5s..."
+            sleep 5
+            [ "$i" -eq 3 ] && { echo "docker pull $img failed after 3 attempts"; exit 1; }
+          done
+        done
       - docker build -f {{.PG_DOCKERFILE}} -t {{.PLAYGROUND}} .
-      - docker build -f {{.DOCKERFILE}} -t {{.IMAGE}} .
+      - |
+        for i in 1 2 3; do
+          docker build --build-arg RUST_IMAGE={{.RUST_IMAGE}} --build-arg GO_IMAGE={{.GO_IMAGE}} -f {{.DOCKERFILE}} -t {{.IMAGE}} . && break
+          echo "docker build failed (attempt $i/3), retrying in 5s..."
+          sleep 5
+          [ "$i" -eq 3 ] && { echo "docker build failed after 3 attempts"; exit 1; }
+        done
       - docker run --privileged --rm {{.IMAGE}}
 
   test-ebpf-clean:
@@ -451,8 +510,20 @@ tasks:
       PLAYGROUND: detrix-ebpf-playground
       PG_DOCKERFILE: fixtures/docker/Dockerfile.ebpf-playground
     cmds:
-      - docker build --no-cache -f {{.PG_DOCKERFILE}} -t {{.PLAYGROUND}} .
-      - docker build --no-cache -f {{.DOCKERFILE}} -t {{.IMAGE}} .
+      - |
+        for i in 1 2 3; do
+          docker build --no-cache -f {{.PG_DOCKERFILE}} -t {{.PLAYGROUND}} . && break
+          echo "docker build failed (attempt $i/3), retrying in 5s..."
+          sleep 5
+          [ "$i" -eq 3 ] && { echo "docker build failed after 3 attempts"; exit 1; }
+        done
+      - |
+        for i in 1 2 3; do
+          docker build --no-cache --build-arg RUST_IMAGE={{.RUST_IMAGE}} --build-arg GO_IMAGE={{.GO_IMAGE}} -f {{.DOCKERFILE}} -t {{.IMAGE}} . && break
+          echo "docker build failed (attempt $i/3), retrying in 5s..."
+          sleep 5
+          [ "$i" -eq 3 ] && { echo "docker build failed after 3 attempts"; exit 1; }
+        done
       - docker run --privileged --rm {{.IMAGE}}
 
   # Docker Cloud E2E Tests
@@ -464,11 +535,11 @@ tasks:
     cmds:
       - |
         for i in 1 2 3; do
-          docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --wait && break
+          docker compose --env-file fixtures/docker/images.env -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --wait && break
           echo "docker compose up --build failed (attempt $i/3), retrying in 5s..."
           sleep 5
         done
-      - defer: docker compose -f {{.COMPOSE_FILE}} -p {{.PROJECT}} down -v
+      - defer: docker compose --env-file fixtures/docker/images.env -f {{.COMPOSE_FILE}} -p {{.PROJECT}} down -v
       - cargo test -p detrix-testing --test docker_cloud_e2e -- --ignored --nocapture --test-threads=1
       - task: check-orphans
 

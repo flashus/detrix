@@ -1,8 +1,11 @@
+# syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
 # Go Test App Docker Image
 # Multi-stage: static build of fixture + Delve, scratch runtime
 
 # ---- Build Stage ----
-FROM golang:1.24 AS builder
+ARG GO_IMAGE
+FROM ${GO_IMAGE} AS builder
 
 WORKDIR /src
 

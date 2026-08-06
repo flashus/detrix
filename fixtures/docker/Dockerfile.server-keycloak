@@ -1,10 +1,17 @@
+# syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
 # Detrix Server Docker Image for Keycloak E2E
-# Same as Dockerfile.server but uses alpine runtime instead of scratch,
+# Same as Dockerfile.server but uses debian runtime instead of scratch,
 # so we can read the service JWT from shared volume at startup.
 
 # Reuse the same build stages from Dockerfile.server
-FROM rust:alpine AS deps
-RUN apk add --no-cache build-base protobuf
+ARG RUST_IMAGE
+ARG RUNTIME_IMAGE
+FROM ${RUST_IMAGE} AS deps
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential musl-tools protobuf-compiler ca-certificates
 RUN ARCH=$(uname -m) && rustup target add ${ARCH}-unknown-linux-musl
 ENV CARGO_TARGET_DIR=/build/target
 WORKDIR /src
@@ -45,10 +52,11 @@ RUN --mount=type=cache,target=/build/target \
     cargo build --release --locked --target ${ARCH}-unknown-linux-musl --bin detrix -p detrix && \
     cp /build/target/${ARCH}-unknown-linux-musl/release/detrix /build/detrix
 
-# ---- Runtime (alpine — has shell for token reading) ----
-FROM alpine:3.20
+# ---- Runtime (debian — has shell for token reading) ----
+FROM ${RUNTIME_IMAGE}
 
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /build/detrix /usr/local/bin/detrix
 COPY fixtures/docker/detrix.toml /data/detrix/detrix.toml
 

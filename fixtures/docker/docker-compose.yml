@@ -3,6 +3,8 @@ services:
     build:
       context: ../..
       dockerfile: fixtures/docker/Dockerfile.server
+      args:
+        RUST_IMAGE: ${RUST_IMAGE}
     ports:
       - "8095:8090"
       - "50065:50061"
@@ -31,6 +33,8 @@ services:
     build:
       context: ./mock-jwks
       dockerfile: Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/jwks')"]
       interval: 2s
@@ -41,6 +45,8 @@ services:
     build:
       context: ../..
       dockerfile: fixtures/docker/Dockerfile.server
+      args:
+        RUST_IMAGE: ${RUST_IMAGE}
     ports:
       - "8097:8090"
       - "50066:50061"
@@ -69,6 +75,8 @@ services:
     build:
       context: ../..
       dockerfile: fixtures/docker/Dockerfile.python
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE}
     ports:
       - "18091:8091"
     depends_on:
@@ -89,6 +97,8 @@ services:
     build:
       context: ../..
       dockerfile: fixtures/docker/Dockerfile.go
+      args:
+        GO_IMAGE: ${GO_IMAGE}
     depends_on:
       detrix:
         condition: service_healthy
@@ -112,6 +122,9 @@ services:
     build:
       context: ../..
       dockerfile: fixtures/docker/Dockerfile.rust
+      args:
+        RUST_IMAGE: ${RUST_IMAGE}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE}
     depends_on:
       detrix:
         condition: service_healthy

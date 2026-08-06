@@ -23,8 +23,8 @@ services:
   # Init container: fetches a long-lived service JWT from Keycloak and writes
   # it to a shared volume. Both detrix-keycloak and test-app-go read this token.
   token-init:
-    image: alpine:3.20
-    command: sh -c "apk add --no-cache curl > /dev/null 2>&1 && sh /scripts/fetch-token.sh"
+    image: ${RUNTIME_IMAGE}
+    command: sh -c "apt-get update > /dev/null 2>&1 && apt-get install -y --no-install-recommends curl ca-certificates > /dev/null 2>&1 && rm -rf /var/lib/apt/lists/* && sh /scripts/fetch-token.sh"
     depends_on:
       keycloak:
         condition: service_healthy
@@ -46,6 +46,9 @@ services:
     build:
       context: ../..
       dockerfile: fixtures/docker/Dockerfile.server-keycloak
+      args:
+        RUST_IMAGE: ${RUST_IMAGE}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE}
     ports:
       - "8098:8090"
       - "50067:50061"
@@ -78,6 +81,9 @@ services:
     build:
       context: ../..
       dockerfile: fixtures/docker/Dockerfile.go-keycloak
+      args:
+        GO_IMAGE: ${GO_IMAGE}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE}
     depends_on:
       detrix-keycloak:
         condition: service_healthy

@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
 # eBPF Integration Test Image
 #
 # Builds the detrix daemon + Go fixture + Rust test binary, then runs the
@@ -25,7 +27,9 @@
 #   runner     — inherits from detrix-ebpf-playground (same glibc as rust:bookworm).
 
 # ---------- Stage 1: Build Go fixture with debug symbols ----------
-FROM golang:1.24.13-bookworm AS go-builder
+ARG GO_IMAGE
+ARG RUST_IMAGE
+FROM ${GO_IMAGE} AS go-builder
 
 WORKDIR /src
 
@@ -53,7 +57,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # ---------- Stage 2: Fetch Rust dependencies (baked into layer for cache) ----------
 # rust:bookworm already has rustc + cargo + build-essential (incl. libc6-dev).
 # No curl download — this layer is stable and caches well.
-FROM rust:1.94.1-bookworm AS rust-deps
+FROM ${RUST_IMAGE} AS rust-deps
 
 # Only extra dep not in rust:bookworm base is protobuf-compiler (for prost build.rs).
 # Cache mounts keep downloaded .deb files across layer rebuilds — apt never re-downloads.

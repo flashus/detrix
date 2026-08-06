@@ -1,4 +1,7 @@
-FROM python:3.12-slim
+# syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
+ARG PYTHON_IMAGE
+FROM ${PYTHON_IMAGE}
 WORKDIR /app
 COPY server.py jwks.json ./
 EXPOSE 8080

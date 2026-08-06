@@ -23,6 +23,7 @@ server_grpc_url = "http://detrix:50061"
 agent_id_file = "/var/lib/detrix/agent-id"
 metrics_port = 9091
 verify_tls = false
+dev_mode = true
 
 [agent.scanner]
 scan_interval_secs = 2

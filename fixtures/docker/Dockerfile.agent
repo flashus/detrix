@@ -1,5 +1,9 @@
+# syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
 # ── Stage 1: Fetch deps (baked registry layer) ────────────────────
-FROM rust:1.94.1-bookworm AS rust-deps
+ARG RUST_IMAGE
+ARG GO_IMAGE
+FROM ${RUST_IMAGE} AS rust-deps
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends protobuf-compiler
@@ -50,7 +54,7 @@ RUN --mount=type=cache,target=/build/target \
 #   -v /usr/src/linux-headers-$(uname -r):/usr/src/linux-headers-$(uname -r):ro
 # Reuse the same Debian/Go base as the eBPF Go fixtures/demo to avoid pulling
 # another runtime base image in local Docker workflows.
-FROM golang:1.24.13-bookworm
+FROM ${GO_IMAGE}
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     headers_pkg="linux-headers-${arch}"; \

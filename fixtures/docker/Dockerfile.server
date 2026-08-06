@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
 # Detrix Server Docker Image
 # Multi-stage build: static musl binary + scratch runtime (~50MB total)
 #
@@ -23,7 +25,8 @@
 # equivalent dep-caching behaviour without this issue.
 
 # ---------- Stage 1: Fetch dependencies (baked into layer for GHA cache) ----------
-FROM rust:1.94.1-bookworm AS deps
+ARG RUST_IMAGE
+FROM ${RUST_IMAGE} AS deps
 
 # build-essential + musl-tools: native build deps and musl linker/tooling
 # protobuf-compiler: provides the protoc binary for proto codegen

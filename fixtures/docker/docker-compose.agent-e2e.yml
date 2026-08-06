@@ -5,6 +5,8 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile.server
+      args:
+        RUST_IMAGE: ${RUST_IMAGE}
     ports:
       - "8096:8090"
       - "50066:50061"
@@ -18,6 +20,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.go-bare
+      args:
+        GO_IMAGE: ${GO_IMAGE}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE}
     pid: host
     privileged: true
     volumes:
@@ -30,6 +35,9 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile.agent
+      args:
+        RUST_IMAGE: ${RUST_IMAGE}
+        GO_IMAGE: ${GO_IMAGE}
     pid: host
     privileged: true
     cap_add:

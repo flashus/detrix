@@ -331,7 +331,9 @@ Observe code running inside Docker containers or remote hosts. The AI agent conn
 Build the Detrix server image from source:
 
 ```bash
-docker build -f fixtures/docker/Dockerfile.server -t detrix-server .
+# Base images come from fixtures/docker/images.env.
+# The wrapper sources images.env and passes all image build args.
+fixtures/docker/build.sh -f fixtures/docker/Dockerfile.server -t detrix-server .
 ```
 
 Then reference it in your `docker-compose.yml`:

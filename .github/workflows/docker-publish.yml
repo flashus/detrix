@@ -61,6 +61,14 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
+      - name: Load base image versions
+        run: |
+          set -a; . ./fixtures/docker/images.env; set +a
+          echo "RUST_IMAGE=$RUST_IMAGE" >> "$GITHUB_ENV"
+          echo "GO_IMAGE=$GO_IMAGE" >> "$GITHUB_ENV"
+          echo "PYTHON_IMAGE=$PYTHON_IMAGE" >> "$GITHUB_ENV"
+          echo "RUNTIME_IMAGE=$RUNTIME_IMAGE" >> "$GITHUB_ENV"
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
@@ -68,6 +76,8 @@ jobs:
           context: .
           file: fixtures/docker/Dockerfile.server
           platforms: ${{ matrix.platform }}
+          build-args: |
+            RUST_IMAGE=${{ env.RUST_IMAGE }}
           labels: ${{ steps.meta.outputs.labels }}
           # Push by digest (no tag yet) — the merge job attaches tags to the manifest
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
