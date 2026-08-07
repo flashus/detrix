@@ -105,8 +105,8 @@ pub struct ScannerConfig {
     /// The agent canonicalises the requested path and rejects anything outside
     /// these directories, preventing a compromised server from reading arbitrary files.
     ///
-    /// Empty = allow any path the agent process can read (legacy behaviour;
-    /// a warning is logged on each unrestricted read). Configure this in production.
+    /// Empty = allow any path only when `agent.dev_mode = true`; agent start rejects
+    /// this configuration otherwise. Configure explicit prefixes in production.
     #[serde(default)]
     pub allowed_read_prefixes: Vec<PathBuf>,
 }
@@ -196,6 +196,14 @@ impl AgentConfig {
                 )
             })?;
         }
+        if self.scanner.allowed_read_prefixes.is_empty() && !self.dev_mode {
+            return Err(
+                "agent.scanner.allowed_read_prefixes must contain at least one directory "
+                    .to_string()
+                    + "for non-development agent deployments; set agent.dev_mode=true only "
+                    + "in an isolated test environment",
+            );
+        }
         Ok(())
     }
 
@@ -257,6 +265,10 @@ mod tests {
         let config = AgentConfig {
             server_grpc_url: "http://localhost:50061".to_string(),
             token_file: Some(token_path.clone()),
+            scanner: ScannerConfig {
+                allowed_read_prefixes: vec![PathBuf::from("/tmp")],
+                ..Default::default()
+            },
             ..Default::default()
         };
         let result = config.validate_for_agent();
@@ -270,6 +282,10 @@ mod tests {
         let config = AgentConfig {
             server_grpc_url: "http://localhost:50061".to_string(),
             token_file: None,
+            scanner: ScannerConfig {
+                allowed_read_prefixes: vec![PathBuf::from("/tmp")],
+                ..Default::default()
+            },
             ..Default::default()
         };
         let result = config.validate_for_agent();
@@ -280,6 +296,10 @@ mod tests {
     fn test_validate_for_agent_accepts_grpcs_scheme() {
         let config = AgentConfig {
             server_grpc_url: "grpcs://server:50061".to_string(),
+            scanner: ScannerConfig {
+                allowed_read_prefixes: vec![PathBuf::from("/tmp")],
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert!(config.validate_for_agent().is_ok());
@@ -289,6 +309,10 @@ mod tests {
     fn test_validate_for_agent_accepts_grpc_scheme() {
         let config = AgentConfig {
             server_grpc_url: "grpc://server:50061".to_string(),
+            scanner: ScannerConfig {
+                allowed_read_prefixes: vec![PathBuf::from("/tmp")],
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert!(config.validate_for_agent().is_ok());
@@ -314,6 +338,28 @@ mod tests {
         let result = config.validate_for_agent();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unrecognized scheme"));
+    }
+
+    #[test]
+    fn test_validate_for_agent_rejects_unrestricted_reads() {
+        let config = AgentConfig {
+            server_grpc_url: "https://detrix-server:50061".to_string(),
+            ..Default::default()
+        };
+        let result = config.validate_for_agent();
+        assert!(result
+            .unwrap_err()
+            .contains("allowed_read_prefixes must contain"));
+    }
+
+    #[test]
+    fn test_validate_for_agent_allows_unrestricted_reads_only_in_dev_mode() {
+        let config = AgentConfig {
+            server_grpc_url: "http://detrix-server:50061".to_string(),
+            dev_mode: true,
+            ..Default::default()
+        };
+        assert!(config.validate_for_agent().is_ok());
     }
 
     #[test]

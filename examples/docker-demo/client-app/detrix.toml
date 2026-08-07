@@ -29,3 +29,4 @@ dev_mode = true
 scan_interval_secs = 2
 include_patterns = ["/usr/local/bin/order-service"]
 require_dwarf = true
+allowed_read_prefixes = ["/src", "/usr/local/bin", "/app"]

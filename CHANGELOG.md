@@ -5,7 +5,7 @@ All notable changes to Detrix will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — Agent Mode
+## [1.3.0] — Linux eBPF + Agent Mode
 
 ### New Features
 
@@ -39,6 +39,7 @@ New `[agent]` section in `detrix.toml`:
 # Server-side (agent auth)
 [agent]
 agent_tokens = ["<sha256-of-token>"]
+# Set this to the oldest agent version you intend to support.
 min_compatible_agent_version = "1.3.0"
 ```
 
@@ -495,4 +496,3 @@ This is the initial release - no migrations needed.
 - [Repository](https://github.com/flashus/detrix)
 - [Issues](https://github.com/flashus/detrix/issues)
 - [Documentation](https://github.com/flashus/detrix/tree/main/docs)
-

@@ -18,11 +18,10 @@ use detrix_core::{connection::AGENT_NAME_PREFIX, ConnectionId};
 // ============================================================================
 
 /// Helper: create a connection identity for an agent-managed connection.
-fn agent_connection_id(agent_id: &str, binary_path: &str, hostname: &str) -> ConnectionId {
+fn agent_connection_id(_agent_id: &str, binary_path: &str, hostname: &str) -> ConnectionId {
     use detrix_core::ConnectionIdentity;
-    let basename = binary_path.rsplit('/').next().unwrap_or(binary_path);
-    let short_id = &agent_id[..8.min(agent_id.len())];
-    let name = format!("{AGENT_NAME_PREFIX}{short_id}/{basename}");
+    let stable_binary_path = binary_path.trim_start_matches('/');
+    let name = format!("{AGENT_NAME_PREFIX}{stable_binary_path}");
     let identity = ConnectionIdentity::new(&name, detrix_core::SourceLanguage::Go, "/", hostname);
     ConnectionId(identity.to_uuid())
 }
@@ -47,19 +46,17 @@ fn test_connection_id_differs_hostname() {
 #[test]
 fn test_connection_id_differs_binary_path() {
     let id1 = agent_connection_id("agent-abc123", "/app/server", "host1");
-    let id2 = agent_connection_id("agent-abc123", "/app/worker", "host1");
+    let id2 = agent_connection_id("agent-abc123", "/usr/local/bin/server", "host1");
     assert_ne!(id1, id2);
 }
 
-/// ConnectionId incorporates the agent_id short prefix, so two distinct agents
-/// running the same binary on the same host produce distinct ConnectionIds.
+/// The live agent_id is routing state, not connection identity. Replacing the
+/// agent on the same host must preserve the connection ID and its metrics.
 #[test]
-fn test_connection_id_includes_agent_id_prefix() {
+fn test_connection_id_ignores_agent_id() {
     let id1 = agent_connection_id("agent-OLD_ID_123", "/app/server", "host1");
     let id2 = agent_connection_id("agent-NEW_ID_456", "/app/server", "host1");
-    // The name embeds the agent_id short prefix, so IDs intentionally differ.
-    // Server migration logic should key on (hostname, binary_path) separately.
-    assert_ne!(id1, id2);
+    assert_eq!(id1, id2);
 }
 
 // ============================================================================

@@ -76,4 +76,4 @@ RUN set -eux; \
     ln -sf "/usr/include/${multiarch}/asm" /usr/include/asm; \
     rm -rf /var/lib/apt/lists/*
 COPY --from=builder /out/detrix /usr/local/bin/detrix
-ENTRYPOINT ["detrix", "agent", "start"]
+ENTRYPOINT ["detrix", "--config", "/etc/detrix/config.toml", "agent", "start"]

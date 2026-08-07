@@ -1,6 +1,6 @@
 # Detrix Architecture
 
-**Version:** 1.3.0 | **Last Updated:** April 2026
+**Version:** 1.3.0 | **Last Updated:** August 2026
 
 Detrix is an LLM-first dynamic observability platform that enables developers and AI agents to add metrics to any line of code without redeployment or code changes.
 
@@ -106,7 +106,7 @@ For centralized observability where a single server manages multiple machines, D
 **Key design decisions:**
 
 - **Zero proto leakage** — `AgentConnectionManager` speaks only in domain types. The gRPC handler in `detrix-api` converts proto ↔ domain at the boundary. No `prost` types cross into `detrix-application`.
-- **Connection ID determinism** — Connections are identified by `SHA256(name|language|workspace_root|hostname)`. Agent-created connections use `name = "agent/{agent_id_short}/{binary_basename}"`, `workspace_root = "/"`, and the agent's hostname. This means **metrics automatically migrate** when an agent restarts with a new `agent_id` — same hostname + binary path = same connection ID.
+- **Connection ID determinism** — Connections are identified by `SHA256(name|language|workspace_root|hostname)`. Agent-created connections use `name = "agent/{binary_path}"`, `workspace_root = "/"`, and the observed hostname. The live `agent_id` is only stream-routing state, so metrics remain attached when an agent is replaced on the same host without colliding same-named binaries in different directories.
 - **Multi-tenant visibility** — Agent connections have `user_id = None` (infrastructure — no owner). They are visible to all authenticated users. Any user can add metrics to agent connections; those metrics follow per-user ownership.
 - **Agent auth** — Agents authenticate via bearer token. The server validates `SHA-256(token)` against `agent_tokens` in its config. Separate from JWT/static user auth.
 - **Resilience** — `RemoteAdapter` includes a circuit breaker (3 consecutive timeouts in 60s → open, 30s cooldown → half-open). Event backpressure: bounded channel (1024 batches) with drop-on-full semantics and `DropCountUpdate` reporting.
@@ -117,6 +117,7 @@ Server `detrix.toml` (agent auth):
 ```toml
 [agent]
 agent_tokens                 = ["<sha256-of-agent-token>"]
+# Set this to the oldest agent version you intend to support.
 min_compatible_agent_version = "1.3.0"
 ```
 
@@ -131,6 +132,7 @@ verify_tls      = true
 scan_interval_secs = 30
 include_patterns   = ["/app/*", "/usr/local/bin/*"]
 require_dwarf      = true
+allowed_read_prefixes = ["/app", "/usr/local/bin"]
 ```
 
 **Usage:**

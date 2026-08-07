@@ -23,7 +23,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 **Detrix** is an LLM-first dynamic observability platform that enables developers and AI agents to add metrics to any line of code without redeployment — including code running in Docker containers and remote hosts (cloud debugging).
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 **Language:** Rust (edition 2021, rust-version 1.89)
 **Architecture:** Clean Architecture with Domain-Driven Design
 

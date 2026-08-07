@@ -336,6 +336,7 @@ See the [Clients Manual](docs/CLIENTS.md) for full documentation.
 | | |
 |---|---|
 | [Installation Guide](docs/INSTALL.md) | Install, language setup, agent config, cloud debugging |
+| [Standalone Agent Mode](docs/AGENT.md) | Centralized Linux/Go/eBPF observation with authenticated agents |
 | [Authentication](docs/AUTH.md) | Auth modes, per-user tokens, JWT/JWKS, access control |
 | [CLI Reference](docs/CLI.md) | Command-line interface |
 | [Clients Manual](docs/CLIENTS.md) | Python, Go, Rust client libraries |

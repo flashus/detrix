@@ -32,13 +32,12 @@ use detrix_testing::MockConnectionRepository;
 // Helpers
 // ============================================================================
 
-fn make_connections(agent_id: &str, hostname: &str, count: usize) -> Vec<Connection> {
+fn make_connections(_agent_id: &str, hostname: &str, count: usize) -> Vec<Connection> {
     (0..count)
         .filter_map(|i| {
             let binary_path = format!("/app/go_app_{}", i);
             let basename = format!("go_app_{}", i);
-            let short_id = &agent_id[..8.min(agent_id.len())];
-            let name = format!("{AGENT_NAME_PREFIX}{short_id}/{basename}");
+            let name = format!("{AGENT_NAME_PREFIX}{basename}");
             let identity = ConnectionIdentity::new(&name, SourceLanguage::Go, "/", hostname);
             Connection::new_with_identity(identity, binary_path, 1024 + i as u16).ok()
         })

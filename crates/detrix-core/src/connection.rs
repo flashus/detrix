@@ -18,7 +18,7 @@ pub const MIN_UNRESERVED_PORT: u16 = 1024;
 
 /// Name prefix for all agent-managed connections.
 ///
-/// Agent connections use `"agent/<short_agent_id>/<binary_basename>"` as their name.
+/// Agent connections use `"agent/<binary_path>"` as their name.
 /// This prefix is the cross-crate contract between `detrix-core`, `detrix-application`,
 /// and test helpers — never hardcode `"agent/"` elsewhere.
 pub const AGENT_NAME_PREFIX: &str = "agent/";
@@ -226,8 +226,8 @@ fn is_agent_managed_identity(identity: &ConnectionIdentity) -> bool {
 impl Connection {
     /// Returns true when this connection is owned by a Detrix agent rather than a local adapter.
     ///
-    /// Agent-managed connections use a stable persisted name prefix (`agent/<id>/...`) so the
-    /// daemon can recognize them before the in-memory routing table is rebuilt on startup.
+    /// Agent-managed connections use a stable persisted name prefix (`agent/...`) so the daemon
+    /// can recognize them before the in-memory routing table is rebuilt on startup.
     pub fn is_agent_managed(&self) -> bool {
         self.name
             .as_deref()
@@ -914,7 +914,7 @@ mod tests {
     fn test_agent_managed_connection_allows_port_zero() {
         // Agent-managed (eBPF) connections have no network port — port 0 is a sentinel.
         let identity = ConnectionIdentity::new(
-            format!("{AGENT_NAME_PREFIX}{}/detrix_example_app", "abc12345"),
+            format!("{AGENT_NAME_PREFIX}app/detrix_example_app"),
             SourceLanguage::Go,
             "/",
             "host1",

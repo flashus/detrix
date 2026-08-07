@@ -26,7 +26,7 @@ metrics_port = 9091
 
 # Restrict server-requested file reads to these directory prefixes.
 # Prevents a compromised server from reading arbitrary files on the agent host.
-# allowed_read_prefixes = ["/app", "/usr/local/bin"]
+allowed_read_prefixes = ["/src", "/app", "/usr/local/bin"]
 
 # ── Scanner configuration ──────────────────────────────────────────
 [agent.scanner]

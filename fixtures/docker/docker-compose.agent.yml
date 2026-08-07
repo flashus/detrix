@@ -15,30 +15,36 @@
 services:
   detrix-server:
     build:
+      context: ../..
       dockerfile: fixtures/docker/Dockerfile.server
+      args:
+        RUST_IMAGE: ${RUST_IMAGE}
     ports:
       - "8090:8090"
       - "50061:50061"
     volumes:
       - server-data:/data/detrix
-      - ./fixtures/docker/detrix.toml:/data/detrix/detrix.toml:ro
+      - ./detrix.toml:/data/detrix/detrix.toml:ro
     environment:
       DETRIX_CONFIG: /data/detrix/detrix.toml
 
   detrix-agent:
     build:
+      context: ../..
       dockerfile: fixtures/docker/Dockerfile.agent
-    environment:
-      DETRIX_CONFIG: /etc/detrix/detrix.toml
+      args:
+        RUST_IMAGE: ${RUST_IMAGE}
+        GO_IMAGE: ${GO_IMAGE}
     volumes:
       # Agent config with server URL and token
-      - ./fixtures/docker/detrix.agent.toml:/etc/detrix/detrix.toml:ro
+      - ./detrix.agent.toml:/etc/detrix/config.toml:ro
       # Auth token file
-      - ./fixtures/docker/agent-token:/etc/detrix/agent-token:ro
+      - ./agent-test-token:/etc/detrix/agent-token:ro
       # Persist agent ID across restarts
       - agent-data:/var/lib/detrix
       # Kernel debugfs for eBPF
       - /sys/kernel/debug:/sys/kernel/debug:ro
+      - ../..:/src:ro
       # Uncomment if host kernel != bookworm default (~6.1):
       # - /usr/src:/usr/src:ro
     cap_add:
@@ -54,7 +60,10 @@ services:
 
   my-go-app:
     build:
+      context: ../..
       dockerfile: fixtures/docker/Dockerfile.go
+      args:
+        GO_IMAGE: ${GO_IMAGE}
     # The agent observes this app's binary via /proc on the shared PID namespace
     # No special capabilities needed — the agent does the eBPF work
 

@@ -413,6 +413,7 @@ scan_interval_secs = 1
 include_patterns = ["{fixture_glob}"]
 exclude_patterns = []
 require_dwarf = true
+allowed_read_prefixes = ["/src"]
 "#,
             grpc_port = self.grpc_port,
             token_line = token_line,
@@ -521,8 +522,10 @@ require_dwarf = true
         }
     }
 
-    async fn restart_agent(&mut self) {
+    async fn replace_agent(&mut self) {
         Self::stop_named_process("agent_runner", &mut self.agent_process);
+        fs::remove_file(self.temp_dir.path().join("agent-id"))
+            .expect("Failed to remove persisted agent ID");
         self.start_agent(Some(AGENT_TEST_TOKEN)).await;
     }
 
@@ -668,7 +671,7 @@ async fn test_agent_reconnect() {
         .await
         .expect("Failed to create metric");
 
-    harness.restart_agent().await;
+    harness.replace_agent().await;
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let new_connection_id =

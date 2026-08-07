@@ -22,6 +22,7 @@ name: CI
 # Python/Go clients are pure (no Rust workspace dep) — parallel with core tests.
 # Rust client is a workspace member — waits for lint to share compile cache.
 # Cloud E2E (docker-compose) is excluded here; run manually via task t:test-cloud.
+# Agent E2E runs in the dedicated privileged Linux job below.
 
 on:
   push:
@@ -35,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       core:          ${{ steps.f.outputs.core }}
+      agent:         ${{ steps.f.outputs.agent }}
       client_python: ${{ steps.f.outputs.client_python }}
       client_go:     ${{ steps.f.outputs.client_go }}
       client_rust:   ${{ steps.f.outputs.client_rust }}
@@ -51,6 +53,17 @@ jobs:
               - 'Cargo.lock'
               - 'fixtures/**'
               - '!fixtures/docker/**'
+            agent:
+              - 'crates/detrix-agent/**'
+              - 'crates/detrix-application/src/services/agent_connection_manager/**'
+              - 'crates/detrix-api/src/grpc/agent.rs'
+              - 'crates/detrix-config/src/agent.rs'
+              - 'crates/detrix-ebpf/**'
+              - 'crates/detrix-testing/tests/agent*'
+              - 'fixtures/docker/Dockerfile.agent'
+              - 'fixtures/docker/docker-compose.agent*'
+              - 'fixtures/docker/detrix.agent*'
+              - 'Taskfile.tests.yml'
             client_python:
               - 'clients/python/**'
             client_go:
@@ -228,6 +241,18 @@ jobs:
           gist_id: ${{ vars.BADGE_GIST_ID }}
           job_name: e2e-go
           count: ${{ steps.count.outputs.count }}
+
+  # ── Agent mode: privileged Linux/Docker E2E ────────────────────────────────
+  test-agent:
+    needs: changes
+    if: needs.changes.outputs.agent == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-task@v2
+      - name: Agent mode E2E
+        run: task tests:test-agent
 
   # ── Core: E2E — Rust / lldb-dap ───────────────────────────────────────────
   test-e2e-rust:

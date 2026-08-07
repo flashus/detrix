@@ -25,3 +25,9 @@ blob_capture_bytes = 64
 max_capture_depth = 2
 max_struct_fields = -1
 max_array_values = 32
+
+# Agent-mode example authentication. This hash matches the test token mounted
+# by docker-compose.agent.yml; replace it for any non-test deployment.
+[agent]
+agent_tokens = ["e4c0a87e760240da600e6d0c5c37516742a3d691feb803a33dcbbe8405e64b1e"]
+min_compatible_agent_version = "1.3.0"

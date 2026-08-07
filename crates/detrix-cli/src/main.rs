@@ -523,7 +523,13 @@ async fn main() -> Result<()> {
         Commands::Usage => {
             commands::usage::run(require_ctx()?, cli.format, cli.quiet, cli.no_color).await
         }
-        Commands::Agent { action } => commands::agent::run(action, &cli.config).await,
+        Commands::Agent { action } => {
+            let config_path = ctx
+                .as_ref()
+                .map(|context| context.config_path.to_string_lossy().into_owned())
+                .unwrap_or(cli.config);
+            commands::agent::run(action, &config_path).await
+        }
     }
 }
 

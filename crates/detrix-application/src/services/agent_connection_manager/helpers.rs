@@ -2,11 +2,6 @@
 
 use super::types::OutgoingAgentMessage;
 
-/// Short ID for display — first 8 chars of hex.
-pub fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
-}
-
 /// Semantic version comparison result.
 pub(super) enum SemverCmp {
     Compatible,

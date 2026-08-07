@@ -350,6 +350,46 @@ Normally configured in `.mcp.json`, not run manually. See [INSTALL.md](INSTALL.m
 
 ---
 
+## Standalone Agent
+
+Agent mode is Linux-only in this pre-release and currently discovers Go ELF
+binaries for local eBPF capture. See the [Agent Mode Guide](AGENT.md) before
+deploying it to a remote host.
+
+### `detrix agent start`
+
+Start the agent and connect it to the configured server:
+
+```bash
+detrix --config /etc/detrix/detrix.toml agent start
+detrix --config /etc/detrix/detrix.toml agent start \
+  --server https://detrix.example.com:50061 \
+  --token-file /etc/detrix/agent-token
+```
+
+The configuration must contain `agent.server_grpc_url`, a readable token file,
+and at least one `agent.scanner.allowed_read_prefixes` entry unless
+`agent.dev_mode = true` is explicitly used for an isolated test.
+
+### `detrix agent scan`
+
+Perform a dry-run `/proc` scan without connecting to the server:
+
+```bash
+detrix --config /etc/detrix/detrix.toml agent scan --verbose
+```
+
+### `detrix agent status`
+
+Query the local agent health and Prometheus metrics endpoint:
+
+```bash
+detrix agent status
+detrix agent status --metrics-url http://127.0.0.1:9091
+```
+
+---
+
 ## Rust Debugging
 
 ### `detrix lldb-serve <program>`

@@ -1,49 +1,18 @@
-# Detrix Agent E2E Test Configuration
-#
-# This is the agent configuration used by the detrix-agent container
-# in the docker-compose.agent-e2e.yml test setup.
+# Detrix Agent E2E Test Configuration.
 
 [agent]
-# Enable agent mode
-enabled = true
-
-# Agent ID file (persistent across restarts)
 agent_id_file = "/var/lib/detrix/agent-id"
-
-# Server gRPC endpoint
 server_grpc_url = "http://detrix-agent-server:50061"
-
-# Token authentication
-token_file = "/var/lib/detrix/agent-token"
-
-# Prometheus /metrics and /health bind address and port.
-# 0.0.0.0 so the Prometheus scraper container can reach it.
+token_file = "/etc/detrix/agent-token"
 metrics_host = "0.0.0.0"
 metrics_port = 9095
-
-[scanner]
-enabled = true
-scan_interval_secs = 10
-
-# Include patterns for Go binaries
-include_patterns = ["go", "app"]
-
-# Exclude patterns
-exclude_patterns = []
-
-# Require DWARF debug info for Go binaries
-require_dwarf = true
-
-[reconnect]
-# Reconnection settings
 reconnect_interval_secs = 2
 reconnect_max_interval_secs = 60
+heartbeat_interval_secs = 10
 
-[heartbeat]
-# Heartbeat interval
-interval_secs = 10
-
-[transport]
-# eBPF configuration for Go
-# The agent will use eBPF uprobes on Linux
-backend = "ebpf"
+[agent.scanner]
+scan_interval_secs = 10
+include_patterns = ["/app/*", "/usr/local/bin/*"]
+exclude_patterns = []
+require_dwarf = true
+allowed_read_prefixes = ["/src"]

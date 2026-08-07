@@ -1,10 +1,8 @@
-version: "3.8"
-
 services:
   detrix-agent-server:
     build:
       context: ../..
-      dockerfile: Dockerfile.server
+      dockerfile: fixtures/docker/Dockerfile.server
       args:
         RUST_IMAGE: ${RUST_IMAGE}
     ports:
@@ -13,6 +11,7 @@ services:
     volumes:
       - ./detrix.agent-server.toml:/etc/detrix/config.toml:ro
       - ./agent-test-token:/etc/detrix/agent-tokens/test-token:ro
+      - server-data:/data/detrix
     environment:
       - RUST_LOG=info,detrix_application=debug,detrix_agent=debug
 
@@ -34,7 +33,7 @@ services:
   detrix-agent:
     build:
       context: ../..
-      dockerfile: Dockerfile.agent
+      dockerfile: fixtures/docker/Dockerfile.agent
       args:
         RUST_IMAGE: ${RUST_IMAGE}
         GO_IMAGE: ${GO_IMAGE}
@@ -47,6 +46,9 @@ services:
       - /proc:/host/proc
       - /sys/kernel/debug:/sys/kernel/debug:ro
       - ./detrix.agent-e2e.toml:/etc/detrix/config.toml:ro
+      - ./agent-test-token:/etc/detrix/agent-token:ro
+      - agent-data:/var/lib/detrix
+      - ../..:/src:ro
     depends_on:
       - detrix-agent-server
       - go-fixture
@@ -58,3 +60,7 @@ services:
 networks:
   default:
     name: detrix-agent-e2e-test
+
+volumes:
+  server-data:
+  agent-data:

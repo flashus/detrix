@@ -573,7 +573,7 @@ tasks:
     vars:
       PLAYGROUND: detrix-ebpf-playground
       OUT: "{{.ROOT_DIR}}/out"
-    deps: [build-agent-bins]
+    deps: [build-ebpf-playground, build-agent-bins]
     cmds:
       - |
         docker run --privileged --rm \

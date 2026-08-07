@@ -25,15 +25,26 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use detrix_core::{connection::AGENT_NAME_PREFIX, Connection, ConnectionId};
+use detrix_core::{connection::AGENT_NAME_PREFIX, Connection, ConnectionId, SourceLanguage};
 use detrix_logging::{error, info, warn};
 use detrix_ports::ConnectionRepositoryRef;
 
-use self::helpers::{extract_request_id, semver_compare, short_id, SemverCmp};
+use self::helpers::{extract_request_id, semver_compare, SemverCmp};
 use self::types::AgentInfo;
 
-fn stable_agent_identity_hostname(agent_id: &str) -> &str {
-    agent_id
+/// Build the persisted identity for an agent-managed binary.
+///
+/// `agent_id` identifies a live stream and may change when the agent loses its
+/// state file. It must not participate in the connection identity: metrics are
+/// keyed by the observed host and binary, so they survive agent replacement.
+fn agent_connection_identity(
+    binary_path: &str,
+    language: SourceLanguage,
+    hostname: &str,
+) -> detrix_core::ConnectionIdentity {
+    let stable_binary_path = binary_path.trim_start_matches('/');
+    let name = format!("{AGENT_NAME_PREFIX}{stable_binary_path}");
+    detrix_core::ConnectionIdentity::new(&name, language, "/", hostname)
 }
 
 fn incoming_connection_id(msg: &IncomingAgentMessage) -> Option<&ConnectionId> {
@@ -117,23 +128,8 @@ impl AgentConnectionManager {
         // Pre-compute connection identities for batch save
         let mut identities = Vec::with_capacity(binaries.len());
         for binary in &binaries {
-            let binary_basename = binary
-                .binary_path
-                .rsplit('/')
-                .next()
-                .unwrap_or(&binary.binary_path);
-            let name = format!(
-                "{}{}/{}",
-                AGENT_NAME_PREFIX,
-                short_id(&agent_id),
-                binary_basename
-            );
-            let identity = detrix_core::ConnectionIdentity::new(
-                &name,
-                binary.language,
-                "/",
-                stable_agent_identity_hostname(&agent_id),
-            );
+            let identity =
+                agent_connection_identity(&binary.binary_path, binary.language, &hostname);
             identities.push((
                 identity,
                 binary.binary_path.clone(),
@@ -573,19 +569,8 @@ impl AgentConnectionManager {
         // Handle removed: cancel pending, cleanup, disconnect
         for removed_path in &removed_paths {
             let removed_binary = current_paths[removed_path.as_str()];
-            let binary_basename = removed_path.rsplit('/').next().unwrap_or(removed_path);
-            let name = format!(
-                "{}{}/{}",
-                AGENT_NAME_PREFIX,
-                short_id(agent_id),
-                binary_basename
-            );
-            let identity = detrix_core::ConnectionIdentity::new(
-                &name,
-                removed_binary.language,
-                "/",
-                stable_agent_identity_hostname(agent_id),
-            );
+            let identity =
+                agent_connection_identity(removed_path, removed_binary.language, &hostname);
             let conn_id = ConnectionId(identity.to_uuid());
 
             // a. Cancel in-flight requests
@@ -617,23 +602,8 @@ impl AgentConnectionManager {
 
         // Handle added: register new connections
         for binary in &added {
-            let binary_basename = binary
-                .binary_path
-                .rsplit('/')
-                .next()
-                .unwrap_or(&binary.binary_path);
-            let name = format!(
-                "{}{}/{}",
-                AGENT_NAME_PREFIX,
-                short_id(agent_id),
-                binary_basename
-            );
-            let identity = detrix_core::ConnectionIdentity::new(
-                &name,
-                binary.language,
-                "/",
-                stable_agent_identity_hostname(agent_id),
-            );
+            let identity =
+                agent_connection_identity(&binary.binary_path, binary.language, &hostname);
             let conn_id = ConnectionId(identity.to_uuid());
             let language = identity.language.as_str().to_string();
 
@@ -1195,12 +1165,6 @@ mod tests {
     fn test_semver_compare_invalid_version() {
         let result = semver_compare("bad", "1.3.0");
         assert!(matches!(result, SemverCmp::Incompatible { .. }));
-    }
-
-    #[test]
-    fn test_short_id() {
-        assert_eq!(short_id("abc1234567890"), "abc12345");
-        assert_eq!(short_id("ab"), "ab");
     }
 
     #[test]
