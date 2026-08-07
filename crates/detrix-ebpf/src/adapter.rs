@@ -479,7 +479,7 @@ async fn run_event_correlator(
                 let thread_id = probe_event
                     .goid
                     .map(|g| g as i64)
-                    .or_else(|| Some(probe_event.tid as i64));
+                    .or(Some(probe_event.tid as i64));
 
                 let metric_event = EbpfAdapter::probe_event_to_metric_event(
                     &probe_event.values,
