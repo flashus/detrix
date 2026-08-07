@@ -244,11 +244,13 @@ tasks:
     vars:
       PLAYGROUND: detrix-ebpf-playground
       DOCKERFILE: fixtures/docker/Dockerfile.ebpf-playground
+    deps: [build-ebpf-builder]
     cmds:
       - docker build -f {{.DOCKERFILE}} -t {{.PLAYGROUND}} .
 
   build-ebpf-builder:
     desc: "Build the eBPF builder image (once; rust:bookworm + protobuf-compiler + pre-fetched crates)"
+    run: once
     vars:
       BUILDER: detrix-ebpf-builder
       DOCKERFILE: fixtures/docker/Dockerfile.ebpf-test

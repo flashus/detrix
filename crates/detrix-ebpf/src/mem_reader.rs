@@ -71,7 +71,7 @@ impl LinuxProcessMemoryReader {
     }
 
     /// Check if a process is still alive. Returns false if the process has exited.
-    fn pid_exists(pid: u32) -> bool {
+    pub(crate) fn pid_exists(pid: u32) -> bool {
         std::path::Path::new(&format!("/proc/{}", pid)).exists()
     }
 }

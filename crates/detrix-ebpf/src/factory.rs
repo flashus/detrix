@@ -280,8 +280,10 @@ mod ebpf_go_factory_tests {
         let factory = EbpfGoFactory::new(Arc::new(StubFactory), "/tmp");
         // host = "127.0.0.1" (not a path) should fall back to inner DAP factory
         let result = factory.create_go_adapter("127.0.0.1", 0).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = match result {
+            Ok(_) => panic!("expected Err"),
+            Err(err) => err,
+        };
         // StubFactory returns "stub go" — proves it fell through to inner factory
         assert!(err.to_string().contains("stub go"));
     }
