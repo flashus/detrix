@@ -27,6 +27,17 @@ pub struct DapBroker {
     /// Next sequence number for outgoing messages
     next_seq: Arc<Mutex<i64>>,
 
+    /// Serialize DAP requests for a single adapter session.
+    ///
+    /// DAP permits responses to be correlated by sequence number, but Delve
+    /// performs stateful operations such as `setBreakpoints`, `continue`, and
+    /// `evaluate` against one debuggee.  Letting those requests overlap can
+    /// leave Delve in an invalid session state under load (especially when a
+    /// logpoint event races with the next breakpoint update), after which the
+    /// adapter closes the DAP connection.  Keep the request sequence strictly
+    /// ordered while retaining concurrent brokers for independent sessions.
+    request_lock: Mutex<()>,
+
     /// Pending requests awaiting responses (keyed by request seq)
     pending_requests: Arc<RwLock<HashMap<i64, ResponseSender>>>,
 
@@ -73,6 +84,7 @@ impl DapBroker {
 
         Self {
             next_seq,
+            request_lock: Mutex::new(()),
             pending_requests,
             event_subscribers,
             stdin,
@@ -101,6 +113,7 @@ impl DapBroker {
 
     /// Send a message without waiting for response
     pub async fn send_message_no_wait(&self, message: ProtocolMessage) -> Result<()> {
+        let _request_guard = self.request_lock.lock().await;
         self.send_message(message).await
     }
 
@@ -121,6 +134,8 @@ impl DapBroker {
         timeout: std::time::Duration,
     ) -> Result<Response> {
         use std::time::Instant;
+
+        let _request_guard = self.request_lock.lock().await;
 
         let cmd: String = command.into();
         let seq = self.next_sequence().await;
@@ -212,6 +227,8 @@ impl DapBroker {
         arguments: Option<serde_json::Value>,
         failure_window: std::time::Duration,
     ) -> Result<()> {
+        let _request_guard = self.request_lock.lock().await;
+
         let cmd: String = command.into();
         let seq = self.next_sequence().await;
         debug!(command = %cmd, seq, "Sending DAP request (no-wait with failure detection)");
