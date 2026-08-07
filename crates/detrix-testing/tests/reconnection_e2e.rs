@@ -818,23 +818,20 @@ async fn test_rust_connection_persistence() {
     let mut reconnected = false;
 
     while start.elapsed() < Duration::from_secs(15) {
-        match daemon_client.list_connections().await {
-            Ok(resp) => {
-                for conn in &resp.data {
-                    if conn.connection_id == connection_id
-                        && conn.status.to_lowercase().contains("connected")
-                        && !conn.status.to_lowercase().contains("disconnected")
-                    {
-                        reporter.info(&format!(
-                            "Connection {} status: {}",
-                            conn.connection_id, conn.status
-                        ));
-                        reconnected = true;
-                        break;
-                    }
+        if let Ok(resp) = daemon_client.list_connections().await {
+            for conn in &resp.data {
+                if conn.connection_id == connection_id
+                    && conn.status.to_lowercase().contains("connected")
+                    && !conn.status.to_lowercase().contains("disconnected")
+                {
+                    reporter.info(&format!(
+                        "Connection {} status: {}",
+                        conn.connection_id, conn.status
+                    ));
+                    reconnected = true;
+                    break;
                 }
             }
-            Err(_) => {}
         }
 
         if reconnected {

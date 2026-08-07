@@ -21,6 +21,7 @@ pub const API_V1_METRIC_ENABLE: &str = "/api/v1/metrics/{id}/enable";
 pub const API_V1_METRIC_DISABLE: &str = "/api/v1/metrics/{id}/disable";
 pub const API_V1_METRIC_VALUE: &str = "/api/v1/metrics/{id}/value";
 pub const API_V1_METRIC_HISTORY: &str = "/api/v1/metrics/{id}/history";
+pub const API_V1_METRIC_DROP_COUNT: &str = "/api/v1/metrics/{id}/drop-count";
 
 pub const API_V1_EVENTS: &str = "/api/v1/events";
 

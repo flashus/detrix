@@ -9,16 +9,18 @@
 use anyhow::{Context, Result};
 use detrix_application::ports::{DlqRepositoryRef, EventOutputRef, RemoteAppControlRef};
 use detrix_application::{
-    middleware::ReconnectingAdapterFactory, AppContext, ConnectionRepositoryRef,
-    DapAdapterFactoryRef, EventRepositoryRef, FileSourceChain, FileSourceRef, MetricRepositoryRef,
+    middleware::ReconnectingAdapterFactory, AgentConnectionManager, AgentConnectionManagerRef,
+    AppContext, ConnectionRepositoryRef, DapAdapterFactoryRef, EventRepositoryRef, FileSourceChain,
+    FileSourceRef, MetricRepositoryRef,
 };
 use detrix_config::{
-    AdapterConnectionConfig, AnchorConfig, ApiConfig, Config, DaemonConfig, DlqBackend,
-    LimitsConfig, SafetyConfig, StorageConfig, VfsConfig,
+    AdapterConnectionConfig, AgentConfig, AnchorConfig, ApiConfig, Config, DaemonConfig,
+    DlqBackend, LimitsConfig, SafetyConfig, StorageConfig, VfsConfig,
 };
 use detrix_dap::DapAdapterFactoryImpl;
 use detrix_logging::{debug, info};
 use detrix_storage::{DlqStorage, SqliteConfig, SqliteStorage};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -60,7 +62,7 @@ impl InfrastructureComponents {
     /// * `limits_config` - Limits configuration (max metrics, expression length)
     /// * `output` - Optional event output (GELF, etc.)
     #[allow(clippy::too_many_arguments)]
-    pub fn into_app_context(
+    pub async fn into_app_context(
         self,
         api_config: &ApiConfig,
         safety_config: &SafetyConfig,
@@ -71,6 +73,7 @@ impl InfrastructureComponents {
         limits_config: &LimitsConfig,
         vfs_config: &VfsConfig,
         output: Option<EventOutputRef>,
+        agent_config: Option<AgentConfig>,
     ) -> AppContextWithStorage {
         // Convert DlqStorage to DlqRepositoryRef if available
         let dlq_repo: Option<DlqRepositoryRef> = self.dlq_storage.map(|s| s as DlqRepositoryRef);
@@ -99,22 +102,79 @@ impl InfrastructureComponents {
         let bridge_source = Arc::new(detrix_api::file_sources::BridgeSource::new(
             timeout, max_size,
         ));
-        let available_sources: Vec<FileSourceRef> = vec![
+
+        // Create AgentConnectionManager whenever agent support is available on the server.
+        // Authentication remains optional: an empty token list means dev mode / allow-all.
+        let agent_manager: Option<AgentConnectionManagerRef> = agent_config.as_ref().map(|cfg| {
+            Arc::new(AgentConnectionManager::new(
+                Arc::clone(&self.storage) as ConnectionRepositoryRef,
+                Arc::clone(&self.storage) as detrix_application::MetricRepositoryRef,
+                Some(cfg.clone()),
+                None, // system_event_tx — not available yet; events still flow via dispatch
+            ))
+        });
+
+        // Build available sources, adding AgentFileSource if agent mode is active
+        let mut available_sources: Vec<FileSourceRef> = vec![
             Arc::new(detrix_api::file_sources::ControlPlaneSource::new(
                 timeout,
                 max_size,
                 std::env::var("DETRIX_TOKEN").ok(),
             )),
             Arc::clone(&bridge_source) as FileSourceRef,
-            Arc::new(detrix_api::file_sources::DiskSource),
         ];
+        if let Some(ref mgr) = agent_manager {
+            available_sources.push(
+                Arc::new(detrix_application::AgentFileSource::new(mgr.clone())) as FileSourceRef,
+            );
+            info!("AgentFileSource added to file source chain (highest priority)");
+        }
+        available_sources.push(Arc::new(detrix_api::file_sources::DiskSource) as FileSourceRef);
+
         let file_source_chain = Arc::new(FileSourceChain::new(
             Arc::clone(&vfs),
             available_sources,
             &vfs_config.source_priority,
         ));
 
-        let app_context = AppContext::new(
+        // Instantiate LSP purity analyzers for languages with lsp.enabled = true
+        let mut purity_analyzers = HashMap::new();
+        if safety_config.python.lsp.enabled {
+            match detrix_lsp::PythonPurityAnalyzer::new(&safety_config.python.lsp) {
+                Ok(a) => {
+                    purity_analyzers.insert(
+                        detrix_core::SourceLanguage::Python,
+                        Arc::new(a) as detrix_application::PurityAnalyzerRef,
+                    );
+                }
+                Err(e) => detrix_logging::warn!("Python LSP purity analyzer init failed: {e}"),
+            }
+        }
+        if safety_config.go.lsp.enabled {
+            match detrix_lsp::GoPurityAnalyzer::new(&safety_config.go.lsp) {
+                Ok(a) => {
+                    purity_analyzers.insert(
+                        detrix_core::SourceLanguage::Go,
+                        Arc::new(a) as detrix_application::PurityAnalyzerRef,
+                    );
+                }
+                Err(e) => detrix_logging::warn!("Go LSP purity analyzer init failed: {e}"),
+            }
+        }
+        if safety_config.rust.lsp.enabled {
+            match detrix_lsp::RustPurityAnalyzer::new(&safety_config.rust.lsp) {
+                Ok(a) => {
+                    purity_analyzers.insert(
+                        detrix_core::SourceLanguage::Rust,
+                        Arc::new(a) as detrix_application::PurityAnalyzerRef,
+                    );
+                }
+                Err(e) => detrix_logging::warn!("Rust LSP purity analyzer init failed: {e}"),
+            }
+        }
+
+        let agent_manager_for_context = agent_manager.clone();
+        let mut app_context = AppContext::new(
             Arc::clone(&self.storage) as MetricRepositoryRef,
             Arc::clone(&self.storage) as EventRepositoryRef,
             Arc::clone(&self.storage) as ConnectionRepositoryRef,
@@ -133,7 +193,14 @@ impl InfrastructureComponents {
             vfs,
             file_source_chain,
             Arc::clone(&self.storage) as detrix_application::ConnectionReferenceRepositoryRef,
+            purity_analyzers,
+            agent_manager,
         );
+        if let Some(mgr) = agent_manager_for_context {
+            mgr.set_adapter_lifecycle_manager(app_context.adapter_lifecycle_manager.clone())
+                .await;
+            app_context = app_context.with_agent_connection_manager(mgr);
+        }
         AppContextWithStorage {
             app_context,
             storage: self.storage,
@@ -143,7 +210,7 @@ impl InfrastructureComponents {
 
     /// Create AppContext with default configs
     #[allow(dead_code)]
-    pub fn into_app_context_default(self) -> AppContextWithStorage {
+    pub async fn into_app_context_default(self) -> AppContextWithStorage {
         self.into_app_context(
             &ApiConfig::default(),
             &SafetyConfig::default(),
@@ -154,7 +221,9 @@ impl InfrastructureComponents {
             &LimitsConfig::default(),
             &VfsConfig::default(),
             None,
+            None, // No agent config
         )
+        .await
     }
 }
 
@@ -335,31 +404,51 @@ async fn init_dlq_storage(
     Ok(Some(Arc::new(dlq_storage)))
 }
 
-/// Create adapter factory with optional reconnection middleware
+/// Create adapter factory with optional reconnection middleware.
+///
+/// On Linux, Go connections are routed to eBPF uprobes via `EbpfGoFactory`.
+/// The `host` field of a Go connection must be the path to the ELF binary.
+/// All other languages continue to use DAP adapters regardless of platform.
 fn init_adapter_factory(
     base_path: &Path,
     options: &InitOptions,
     config: &Config,
 ) -> Result<DapAdapterFactoryRef> {
-    let base_factory = Arc::new(DapAdapterFactoryImpl::new(base_path.to_path_buf()));
+    let dap_factory = Arc::new(DapAdapterFactoryImpl::new(base_path.to_path_buf()));
 
-    let factory: DapAdapterFactoryRef = if options.enable_reconnection {
-        let reconnect_config = options
-            .reconnect_config
-            .clone()
-            .unwrap_or_else(|| config.adapter.reconnect.clone());
+    // On Linux, wrap with EbpfGoFactory so Go connections use eBPF uprobes.
+    // Pass capture config from [ebpf] section so max_capture_depth etc. are respected.
+    let factory: DapAdapterFactoryRef = {
+        #[cfg(target_os = "linux")]
+        let dap_factory: DapAdapterFactoryRef =
+            Arc::new(detrix_ebpf::EbpfGoFactory::new_with_config(
+                dap_factory,
+                base_path.to_path_buf(),
+                detrix_ebpf::CaptureConfig::from(&config.ebpf),
+            ));
 
-        Arc::new(ReconnectingAdapterFactory::new(
-            base_factory,
-            reconnect_config,
-        ))
-    } else {
-        base_factory
+        #[cfg(not(target_os = "linux"))]
+        let dap_factory: DapAdapterFactoryRef = dap_factory;
+
+        if options.enable_reconnection {
+            let reconnect_config = options
+                .reconnect_config
+                .clone()
+                .unwrap_or_else(|| config.adapter.reconnect.clone());
+
+            Arc::new(ReconnectingAdapterFactory::new(
+                dap_factory,
+                reconnect_config,
+            ))
+        } else {
+            dap_factory
+        }
     };
 
     debug!(
-        "Adapter factory initialized (reconnection: {})",
-        options.enable_reconnection
+        "Adapter factory initialized (reconnection: {}, ebpf: {})",
+        options.enable_reconnection,
+        cfg!(target_os = "linux"),
     );
     Ok(factory)
 }

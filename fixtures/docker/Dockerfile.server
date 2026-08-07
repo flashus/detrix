@@ -1,8 +1,11 @@
+# syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
 # Detrix Server Docker Image
 # Multi-stage build: static musl binary + scratch runtime (~50MB total)
 #
-# Base: rust:alpine — smallest available (~300MB vs ~900MB for slim Debian variants).
-# Alpine uses musl natively so no musl-tools or cross-compilation setup needed.
+# Base: rust:1.94.1-bookworm.
+# We still build a static musl binary, but use the Debian Rust image because
+# Docker Hub metadata fetches for rust:alpine have been flaky in local demos.
 #
 # Caching strategy (two-stage for GitHub Actions compatibility):
 #
@@ -22,13 +25,17 @@
 # equivalent dep-caching behaviour without this issue.
 
 # ---------- Stage 1: Fetch dependencies (baked into layer for GHA cache) ----------
-FROM rust:alpine AS deps
+ARG RUST_IMAGE
+FROM ${RUST_IMAGE} AS deps
 
-# build-base: gcc + musl-dev for C FFI crates (e.g. bundled SQLite)
-# protobuf: provides the protoc binary for proto codegen
+# build-essential + musl-tools: native build deps and musl linker/tooling
+# protobuf-compiler: provides the protoc binary for proto codegen
 # Installed here (not in builder) so the packages are baked into the deps layer
 # and captured by GHA layer cache — no re-download on every build.
-RUN apk add --no-cache build-base protobuf
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential musl-tools protobuf-compiler ca-certificates
 
 # Add musl target for static linking
 RUN ARCH=$(uname -m) && rustup target add ${ARCH}-unknown-linux-musl
@@ -40,11 +47,13 @@ WORKDIR /src
 # when dependencies change, not when source code changes.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/detrix-api/Cargo.toml         crates/detrix-api/
+COPY crates/detrix-agent/Cargo.toml       crates/detrix-agent/
 COPY crates/detrix-application/Cargo.toml crates/detrix-application/
 COPY crates/detrix-cli/Cargo.toml         crates/detrix-cli/
 COPY crates/detrix-config/Cargo.toml      crates/detrix-config/
 COPY crates/detrix-core/Cargo.toml        crates/detrix-core/
 COPY crates/detrix-dap/Cargo.toml         crates/detrix-dap/
+COPY crates/detrix-ebpf/Cargo.toml        crates/detrix-ebpf/
 COPY crates/detrix-logging/Cargo.toml     crates/detrix-logging/
 COPY crates/detrix-lsp/Cargo.toml         crates/detrix-lsp/
 COPY crates/detrix-output/Cargo.toml      crates/detrix-output/

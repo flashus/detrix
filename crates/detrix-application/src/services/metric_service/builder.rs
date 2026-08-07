@@ -6,8 +6,9 @@ use crate::services::anchor_service::AnchorServiceConfig;
 use crate::services::{AdapterLifecycleManager, DefaultAnchorService, FileInspectionService};
 use crate::AnchorServiceRef;
 use detrix_config::{AdapterConnectionConfig, AnchorConfig, LimitsConfig};
-use detrix_core::SystemEvent;
-use detrix_ports::VfsRef;
+use detrix_core::{SourceLanguage, SystemEvent};
+use detrix_ports::{PurityAnalyzerRef, VfsRef};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -79,6 +80,7 @@ pub struct MetricServiceBuilder {
     pub(super) anchor_service: Option<AnchorServiceRef>,
     pub(super) anchor_config: Option<AnchorServiceConfig>,
     pub(super) vfs: Option<VfsRef>,
+    pub(super) purity_analyzers: HashMap<SourceLanguage, PurityAnalyzerRef>,
 }
 
 impl MetricServiceBuilder {
@@ -98,6 +100,7 @@ impl MetricServiceBuilder {
             anchor_service: None,
             anchor_config: None,
             vfs: None,
+            purity_analyzers: HashMap::new(),
         }
     }
 
@@ -150,6 +153,17 @@ impl MetricServiceBuilder {
         self
     }
 
+    /// Set LSP purity analyzers for resolving unknown functions in Trusted mode.
+    ///
+    /// If not set (or empty), LSP purity resolution is skipped entirely.
+    pub fn purity_analyzers(
+        mut self,
+        analyzers: HashMap<SourceLanguage, PurityAnalyzerRef>,
+    ) -> Self {
+        self.purity_analyzers = analyzers;
+        self
+    }
+
     /// Build the MetricService
     pub fn build(self) -> MetricService {
         // Create anchor service: use provided service, or create from config, or default
@@ -173,6 +187,7 @@ impl MetricServiceBuilder {
             file_inspection: FileInspectionService::new(vfs),
             system_event_tx: self.system_event_tx,
             anchor_service,
+            purity_analyzers: self.purity_analyzers,
         }
     }
 }

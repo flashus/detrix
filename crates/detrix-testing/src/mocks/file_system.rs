@@ -94,7 +94,7 @@ impl VirtualFileSystem for MockVfs {
     fn exists(&self, path: &str) -> Result<bool> {
         // Check cache
         let cache = self.cache.read().expect("MockVfs cache lock poisoned");
-        for ((_, p), _) in cache.iter() {
+        for (_, p) in cache.keys() {
             if p == path {
                 return Ok(true);
             }

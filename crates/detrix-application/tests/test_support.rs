@@ -1,6 +1,6 @@
 use detrix_application::{
-    DapAdapter, DapAdapterFactory, DapAdapterRef, EventRepository, RemoveMetricResult,
-    SetMetricResult,
+    DapAdapter, DapAdapterFactory, DapAdapterRef, EventRepository, MetricEventSummary,
+    RemoveMetricResult, SetMetricResult,
 };
 use detrix_core::{Metric, MetricEvent, MetricId, Result};
 use std::collections::HashMap;
@@ -16,7 +16,9 @@ use std::sync::Mutex as StdMutex;
 use tokio::sync::mpsc;
 
 // Use canonical mocks from detrix-testing
+#[allow(unused_imports)]
 pub use detrix_testing::MockConnectionRepository;
+#[allow(unused_imports)]
 pub use detrix_testing::MockMetricRepository;
 
 #[allow(dead_code)]
@@ -122,6 +124,12 @@ impl DapAdapter for StatefulMockDapAdapter {
 #[derive(Debug)]
 pub struct StatefulMockAdapterFactory {
     adapters: RwLock<HashMap<String, Arc<StatefulMockDapAdapter>>>,
+}
+
+impl Default for StatefulMockAdapterFactory {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StatefulMockAdapterFactory {
@@ -259,6 +267,7 @@ pub struct MockEventRepository {
 }
 
 impl MockEventRepository {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             events: RwLock::new(Vec::new()),
@@ -365,6 +374,28 @@ impl EventRepository for MockEventRepository {
     async fn count_by_metric_id(&self, metric_id: MetricId) -> Result<i64> {
         let events = self.events.read().await;
         Ok(events.iter().filter(|e| e.metric_id == metric_id).count() as i64)
+    }
+
+    async fn count_by_metric_ids(
+        &self,
+        metric_ids: &[MetricId],
+    ) -> Result<std::collections::HashMap<MetricId, MetricEventSummary>> {
+        let events = self.events.read().await;
+        let mut result = std::collections::HashMap::new();
+        for &id in metric_ids {
+            let matching: Vec<_> = events.iter().filter(|e| e.metric_id == id).collect();
+            if !matching.is_empty() {
+                let last_ts = matching.iter().map(|e| e.timestamp).max();
+                result.insert(
+                    id,
+                    MetricEventSummary {
+                        count: matching.len() as u64,
+                        last_timestamp_micros: last_ts,
+                    },
+                );
+            }
+        }
+        Ok(result)
     }
 
     async fn count_all(&self) -> Result<i64> {

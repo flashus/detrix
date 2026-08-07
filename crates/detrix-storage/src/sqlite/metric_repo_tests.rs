@@ -332,7 +332,7 @@ async fn test_metric_anchor_persistence() {
         context_before: Some("    amount = calculate_total()".to_string()),
         source_line: Some("    user.balance -= amount".to_string()),
         context_after: Some("    log.info('Payment processed')".to_string()),
-        last_verified_at: Some(1700000000000000),
+        last_verified_at: Some(1_700_000_000_000_000),
         original_location: Some("@payment.py#15".to_string()),
     });
     metric.anchor_status = AnchorStatus::Verified;
@@ -366,7 +366,7 @@ async fn test_metric_anchor_persistence() {
         anchor.context_after,
         Some("    log.info('Payment processed')".to_string())
     );
-    assert_eq!(anchor.last_verified_at, Some(1700000000000000));
+    assert_eq!(anchor.last_verified_at, Some(1_700_000_000_000_000));
     assert_eq!(anchor.original_location, Some("@payment.py#15".to_string()));
     assert_eq!(found.anchor_status, AnchorStatus::Verified);
 }

@@ -10,6 +10,7 @@ use detrix_storage::{SqliteConfig, SqliteStorage};
 use detrix_testing::fixtures::{auth_py_path, fixtures_dir, test_py_path};
 use detrix_testing::MockDapAdapterFactory;
 use rmcp::handler::server::wrapper::Parameters;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -59,6 +60,8 @@ impl TestFixture {
             vfs,
             file_source_chain,
             Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
+            HashMap::new(),
+            None, // agent_config
         );
 
         let state = Arc::new(ApiState::builder(context, storage).build());

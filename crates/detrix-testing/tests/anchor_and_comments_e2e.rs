@@ -164,7 +164,7 @@ def main():
             ..
         } => {
             assert!(
-                new_line >= 13 && new_line <= 17,
+                (13..=17).contains(&new_line),
                 "Should relocate to around line 15, got {}",
                 new_line
             );
@@ -184,7 +184,7 @@ def main():
         RelocationResult::RelocatedInSymbol { new_line, .. } => {
             // Symbol-based relocation may find a different line within the same function
             assert!(
-                new_line >= 13 && new_line <= 17,
+                (13..=17).contains(&new_line),
                 "Should relocate to around line 15, got {}",
                 new_line
             );
@@ -293,7 +293,7 @@ def main():
         } => {
             // Should relocate to around line 18 (14 + 4 docstring lines)
             assert!(
-                new_line >= 16 && new_line <= 20,
+                (16..=20).contains(&new_line),
                 "Should relocate to around line 18, got {}",
                 new_line
             );
@@ -304,7 +304,7 @@ def main():
         }
         RelocationResult::RelocatedInSymbol { new_line, .. } => {
             assert!(
-                new_line >= 16 && new_line <= 20,
+                (16..=20).contains(&new_line),
                 "Should relocate to around line 18, got {}",
                 new_line
             );
@@ -415,7 +415,7 @@ func main() {
             ..
         } => {
             assert!(
-                new_line >= 18 && new_line <= 22,
+                (18..=22).contains(&new_line),
                 "Should relocate to around line 20, got {}",
                 new_line
             );
@@ -431,7 +431,7 @@ func main() {
         }
         RelocationResult::RelocatedInSymbol { new_line, .. } => {
             assert!(
-                new_line >= 18 && new_line <= 22,
+                (18..=22).contains(&new_line),
                 "Should relocate to around line 20, got {}",
                 new_line
             );
@@ -539,7 +539,7 @@ fn main() {
             ..
         } => {
             assert!(
-                new_line >= 16 && new_line <= 20,
+                (16..=20).contains(&new_line),
                 "Should relocate to around line 18, got {}",
                 new_line
             );
@@ -555,7 +555,7 @@ fn main() {
         }
         RelocationResult::RelocatedInSymbol { new_line, .. } => {
             assert!(
-                new_line >= 16 && new_line <= 20,
+                (16..=20).contains(&new_line),
                 "Should relocate to around line 18, got {}",
                 new_line
             );
@@ -699,7 +699,7 @@ def place_order(symbol, quantity, price, side):
             assert_eq!(old_line, 10, "Old line should be 10");
             // New line should be significantly higher (we added ~22-28 lines)
             assert!(
-                new_line >= 30 && new_line <= 45,
+                (30..=45).contains(&new_line),
                 "New line should be around 35-40, got {}",
                 new_line
             );
@@ -938,7 +938,7 @@ def main():
             );
             // The metric line moved from 11 to around 22 (11 new lines added)
             assert!(
-                new_line >= 20 && new_line <= 25,
+                (20..=25).contains(&new_line),
                 "Should relocate to around line 22, got {}",
                 new_line
             );
@@ -953,7 +953,7 @@ def main():
                 symbol_name, old_line, new_line
             );
             assert!(
-                new_line >= 20 && new_line <= 25,
+                (20..=25).contains(&new_line),
                 "Should relocate to around line 22, got {}",
                 new_line
             );

@@ -37,6 +37,7 @@ use detrix_config::ApiConfig;
 use detrix_storage::{SqliteConfig, SqliteStorage};
 use detrix_testing::fixtures::{app_py_path, fixtures_dir, test_py_path};
 use detrix_testing::MockDapAdapterFactory;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -103,6 +104,8 @@ impl TestServer {
             vfs,
             file_source_chain,
             Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
+            HashMap::new(),
+            None, // agent_config
         );
 
         // Create a mock connection so metrics can be added
@@ -214,6 +217,8 @@ impl TestServer {
             vfs,
             file_source_chain,
             Arc::clone(&storage) as ConnectionReferenceRepositoryRef,
+            HashMap::new(),
+            None, // agent_config
         );
 
         let identity = detrix_core::ConnectionIdentity::new(

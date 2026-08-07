@@ -62,6 +62,18 @@ pub struct AddArgs {
     /// Start metric enabled (default: true)
     #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
     enabled: bool,
+
+    /// Capture mode: stream, sample, throttle, first (default: stream)
+    #[arg(long, value_name = "MODE")]
+    mode: Option<String>,
+
+    /// For sample mode: capture every Nth hit (default: 100)
+    #[arg(long, value_name = "N")]
+    sample_rate: Option<u32>,
+
+    /// For throttle mode: max events per second (default: 10)
+    #[arg(long, value_name = "N")]
+    throttle_rate: Option<u32>,
 }
 
 #[derive(Args)]
@@ -109,6 +121,9 @@ async fn add(endpoints: &DaemonEndpoints, args: AddArgs, formatter: &Formatter) 
         group: args.group,
         enabled: args.enabled,
         replace: args.replace,
+        mode: args.mode,
+        sample_rate: args.sample_rate,
+        throttle_rate: args.throttle_rate,
     };
 
     let metric = client

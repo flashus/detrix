@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, trace, warn};
 
+use crate::config::DebugAdapter;
 use crate::error::{Error, Result, ResultExt};
 
 /// Maximum number of port allocation retries.
@@ -27,20 +28,24 @@ pub struct LldbProcess {
     pub port: u16,
 }
 
-/// Manager for lldb-dap process lifecycle.
+/// Manager for lldb-dap / CodeLLDB process lifecycle.
 pub struct LldbManager {
-    /// Path to lldb-dap binary.
+    /// Path to debug adapter binary (lldb-dap or codelldb).
     lldb_dap_path: PathBuf,
 
-    /// Timeout for lldb-dap to start.
+    /// Which adapter type to use.
+    adapter_type: DebugAdapter,
+
+    /// Timeout for adapter to start.
     timeout: Duration,
 }
 
 impl LldbManager {
     /// Create a new LLDB manager.
-    pub fn new(lldb_dap_path: PathBuf, timeout: Duration) -> Self {
+    pub fn new(lldb_dap_path: PathBuf, adapter_type: DebugAdapter, timeout: Duration) -> Self {
         Self {
             lldb_dap_path,
+            adapter_type,
             timeout,
         }
     }
@@ -91,22 +96,37 @@ impl LldbManager {
     /// If we tried to send attach from within this process, lldb-dap would use
     /// ptrace to stop us, causing a deadlock.
     fn spawn_lldb(&self, host: &str, port: u16) -> Result<LldbProcess> {
-        // Build command:
-        // lldb-dap --connection listen://host:port
-        let listen_addr = format!("listen://{}:{}", host, port);
-
-        debug!(
-            "Starting lldb-dap: {:?} --connection {}",
-            self.lldb_dap_path, listen_addr
-        );
-
-        let mut child = Command::new(&self.lldb_dap_path)
-            .args(["--connection", &listen_addr])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .lldb("failed to start process")?;
+        let mut child = match self.adapter_type {
+            DebugAdapter::LldbDap => {
+                // lldb-dap --connection listen://host:port
+                let listen_addr = format!("listen://{}:{}", host, port);
+                debug!(
+                    "Starting lldb-dap: {:?} --connection {}",
+                    self.lldb_dap_path, listen_addr
+                );
+                Command::new(&self.lldb_dap_path)
+                    .args(["--connection", &listen_addr])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .lldb("failed to start lldb-dap")?
+            }
+            DebugAdapter::CodeLLDB => {
+                // codelldb --port <port>
+                debug!(
+                    "Starting CodeLLDB: {:?} --port {}",
+                    self.lldb_dap_path, port
+                );
+                Command::new(&self.lldb_dap_path)
+                    .args(["--port", &port.to_string()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .lldb("failed to start CodeLLDB")?
+            }
+        };
 
         // Wait for lldb-dap to accept connections
         if let Err(e) = self.wait_for_ready(host, port, &mut child) {

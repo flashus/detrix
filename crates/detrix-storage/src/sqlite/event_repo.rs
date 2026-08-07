@@ -8,7 +8,9 @@ use detrix_config::constants::SQLITE_MAX_VARIABLES;
 use detrix_core::entities::{ExpressionValue, MetricEvent, MetricId};
 use detrix_core::error::Result;
 use detrix_core::ConnectionId;
+use detrix_ports::MetricEventSummary;
 use sqlx::Row;
+use std::collections::HashMap;
 use tracing::trace;
 
 #[async_trait]
@@ -202,22 +204,33 @@ impl EventRepository for SqliteStorage {
             return Ok(Vec::new());
         }
 
-        // Build IN clause with placeholders
-        let placeholders: Vec<&str> = metric_ids.iter().map(|_| "?").collect();
-        let query = format!(
-            "SELECT * FROM metric_events WHERE metric_id IN ({}) ORDER BY timestamp DESC LIMIT ?",
-            placeholders.join(", ")
-        );
+        // Chunk to stay within SQLite variable limit (999).
+        const CHUNK_SIZE: usize = SQLITE_MAX_VARIABLES;
+        let mut all_rows: Vec<MetricEvent> = Vec::new();
 
-        let mut query_builder = sqlx::query(&query);
-        for id in metric_ids {
-            query_builder = query_builder.bind(id.0 as i64); // SQLite only supports i64
+        for chunk in metric_ids.chunks(CHUNK_SIZE) {
+            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+            let query = format!(
+                "SELECT * FROM metric_events WHERE metric_id IN ({}) ORDER BY timestamp DESC LIMIT ?",
+                placeholders.join(", ")
+            );
+
+            let mut q = sqlx::query(&query);
+            for id in chunk {
+                q = q.bind(id.0 as i64);
+            }
+            q = q.bind(limit);
+
+            let rows = q.fetch_all(self.pool()).await?;
+            for row in &rows {
+                all_rows.push(row_to_event(row)?);
+            }
         }
-        query_builder = query_builder.bind(limit);
 
-        let rows = query_builder.fetch_all(self.pool()).await?;
-
-        rows.iter().map(row_to_event).collect()
+        // Re-sort and re-apply limit across chunks.
+        all_rows.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
+        all_rows.truncate(limit as usize);
+        Ok(all_rows)
     }
 
     async fn find_by_metric_id_and_time_range(
@@ -253,6 +266,53 @@ impl EventRepository for SqliteStorage {
                 .await?;
 
         Ok(count)
+    }
+
+    async fn count_by_metric_ids(
+        &self,
+        metric_ids: &[MetricId],
+    ) -> Result<HashMap<MetricId, MetricEventSummary>> {
+        if metric_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Chunk to stay within SQLite variable limit
+        const CHUNK_SIZE: usize = SQLITE_MAX_VARIABLES;
+        let mut result: HashMap<MetricId, MetricEventSummary> = HashMap::new();
+
+        for chunk in metric_ids.chunks(CHUNK_SIZE) {
+            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+            // SAFETY: Dynamic SQL is necessary here because the number of metric IDs
+            // is only known at runtime. The query uses parameterized placeholders
+            // (no user-controlled string interpolation). sqlx validates the query
+            // structure at prepare time; only the IN clause length varies dynamically.
+            let query = format!(
+                "SELECT metric_id, COUNT(*) as cnt, MAX(timestamp) as last_ts \
+                 FROM metric_events WHERE metric_id IN ({}) GROUP BY metric_id",
+                placeholders.join(", ")
+            );
+
+            let mut q = sqlx::query(&query);
+            for id in chunk {
+                q = q.bind(id.0 as i64);
+            }
+
+            let rows = q.fetch_all(self.pool()).await?;
+            for row in rows {
+                let metric_id_raw: i64 = row.try_get("metric_id")?;
+                let cnt: i64 = row.try_get("cnt")?;
+                let last_ts: Option<i64> = row.try_get("last_ts")?;
+                result.insert(
+                    MetricId(metric_id_raw as u64),
+                    MetricEventSummary {
+                        count: cnt as u64,
+                        last_timestamp_micros: last_ts,
+                    },
+                );
+            }
+        }
+
+        Ok(result)
     }
 
     async fn count_all(&self) -> Result<i64> {

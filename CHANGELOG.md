@@ -5,6 +5,60 @@ All notable changes to Detrix will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — Linux eBPF + Agent Mode
+
+### New Features
+
+#### `detrix agent` — Standalone Agent Subcommand
+
+A lightweight binary deployed on each observed machine that runs the eBPF stack
+locally and streams data to a centralized `detrix` server over gRPC.
+
+- **Server-side**: `AgentConnectionManager` manages agent connections with
+  lock-split registration, SQLite batch upserts, and `connection_requests`
+  tracking for in-flight request cancellation.
+- **RemoteAdapter**: Proxies `DapAdapter` trait calls to agents transparently.
+  Includes circuit breaker (3 timeouts in 60s → open, 30s cooldown → half-open)
+  and 30s `last_confirmed_at` Ping cooldown.
+- **Agent binary**: `/proc` scanner with PID-reuse detection (inode tracking),
+  5-minute re-registration cooldown, event backpressure (bounded channel with
+  `DropCountUpdate`), and Prometheus `/metrics` + `/health` endpoint.
+- **CLI**: `detrix agent start` / `scan` / `status` subcommands.
+- **Auth**: Bearer token authentication via `SHA-256(token)` comparison. Separate
+  from JWT/static user auth.
+- **Zero proto leakage**: `AgentConnectionManager` uses only domain types; proto
+  conversion happens at the gRPC boundary.
+- **Connection ID determinism**: `SHA256(name|language|workspace_root|hostname)`
+  means metrics auto-migrate when agents restart with new `agent_id`.
+- **Multi-tenant**: Agent connections are `user_id = None` (visible to all users).
+
+#### Configuration
+
+New `[agent]` section in `detrix.toml`:
+```toml
+# Server-side (agent auth)
+[agent]
+agent_tokens = ["<sha256-of-token>"]
+# Set this to the oldest agent version you intend to support.
+min_compatible_agent_version = "1.3.0"
+```
+
+#### File sources
+
+New `AgentFileSource` — highest-priority file source for agent connections,
+fetches file content via `ReadFile` command over the gRPC stream.
+
+#### SourceKind enum
+
+New `SourceKind::Agent` variant for VFS source priority configuration.
+
+### Testing
+
+- 14 agent integration tests (connection ID determinism, circuit breaker,
+  proto conversions, scanner, event messages).
+- Docker deployment files: `Dockerfile.agent`, `docker-compose.agent.yml`,
+  `detrix.agent.toml`.
+
 ## [1.2.0] 2026-03-21 — Multi-Tenant Authentication
 
 > **⚠️ BREAKING CHANGES** — This release introduces multi-tenant authentication.
@@ -442,4 +496,3 @@ This is the initial release - no migrations needed.
 - [Repository](https://github.com/flashus/detrix)
 - [Issues](https://github.com/flashus/detrix/issues)
 - [Documentation](https://github.com/flashus/detrix/tree/main/docs)
-

@@ -22,10 +22,9 @@ use jsonwebtoken::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::sync::RwLock;
 
 /// Errors that can occur during JWT validation
 #[derive(Debug, Error)]
@@ -271,11 +270,56 @@ impl JwksValidator {
         Ok(token_data.claims)
     }
 
+    /// Validate a JWT token synchronously using only cached keys.
+    ///
+    /// Unlike `validate_token`, this does **not** perform any network I/O.
+    /// If the key for this token's `kid` is not in cache, returns
+    /// `JwtError::KeyNotFound`. Callers should ensure keys are pre-loaded
+    /// at startup via `force_refresh()`.
+    ///
+    /// This is safe to call from synchronous contexts (e.g. tonic interceptors).
+    pub fn validate_token_sync(&self, token: &str) -> Result<JwtClaims, JwtError> {
+        let header = decode_header(token).invalid_header()?;
+        let kid = header
+            .kid
+            .ok_or_else(|| JwtError::InvalidHeader("Missing kid in token header".to_string()))?;
+        if header.alg != Algorithm::RS256 {
+            return Err(JwtError::UnsupportedAlgorithm(header.alg));
+        }
+
+        // Synchronous cache read — no await, no I/O.
+        let decoding_key = {
+            let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
+            cache
+                .keys
+                .get(&kid)
+                .cloned()
+                .ok_or_else(|| JwtError::KeyNotFound(kid.clone()))?
+        };
+
+        let mut validation = Validation::new(Algorithm::RS256);
+        if let Some(ref issuer) = self.issuer {
+            validation.set_issuer(&[issuer]);
+        }
+        if let Some(ref audience) = self.audience {
+            validation.set_audience(&[audience]);
+        }
+
+        let token_data: TokenData<JwtClaims> =
+            decode(token, &decoding_key, &validation).validation_failed()?;
+
+        debug!(
+            sub = ?token_data.claims.sub,
+            "JWT sync validation successful"
+        );
+        Ok(token_data.claims)
+    }
+
     /// Get decoding key for a kid, refreshing cache if needed
     async fn get_decoding_key(&self, kid: &str) -> Result<DecodingKey, JwtError> {
-        // Try to get from cache first
+        // Try to get from cache first — lock held only briefly, not across await.
         {
-            let cache = self.cache.read().await;
+            let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
             if !cache.is_expired(self.cache_ttl) {
                 if let Some(key) = cache.keys.get(kid) {
                     debug!(kid = %kid, "Using cached decoding key");
@@ -284,11 +328,11 @@ impl JwksValidator {
             }
         }
 
-        // Cache miss or expired - refresh keys
+        // Cache miss or expired — async network refresh.
         self.refresh_keys().await?;
 
-        // Try again after refresh
-        let cache = self.cache.read().await;
+        // Try again after refresh — brief sync lock, not held across await.
+        let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
         cache
             .keys
             .get(kid)
@@ -300,7 +344,7 @@ impl JwksValidator {
     async fn refresh_keys(&self) -> Result<(), JwtError> {
         info!(jwks_url = %self.jwks_url, "Refreshing JWKS keys");
 
-        // Fetch JWKS
+        // Network I/O — async. Lock is NOT held here.
         let response = self.client.get(&self.jwks_url).send().await?;
 
         if !response.status().is_success() {
@@ -338,31 +382,31 @@ impl JwksValidator {
 
         info!(key_count = keys.len(), "JWKS keys refreshed");
 
-        // Update cache
-        let mut cache = self.cache.write().await;
+        // Update cache — brief sync write lock, not held across any await.
+        let mut cache = self.cache.write().unwrap_or_else(|p| p.into_inner());
         cache.keys = keys;
         cache.fetched_at = Instant::now();
 
         Ok(())
     }
 
-    /// Force refresh of JWKS keys
+    /// Force refresh of JWKS keys.
     ///
-    /// Useful for key rotation scenarios where you want to immediately
-    /// fetch new keys without waiting for cache expiration.
+    /// Call at daemon startup to pre-populate the cache so that the synchronous
+    /// gRPC interceptor can validate tokens without network I/O.
     pub async fn force_refresh(&self) -> Result<(), JwtError> {
         self.refresh_keys().await
     }
 
     /// Check if the validator has any cached keys
-    pub async fn has_cached_keys(&self) -> bool {
-        let cache = self.cache.read().await;
+    pub fn has_cached_keys(&self) -> bool {
+        let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
         !cache.keys.is_empty()
     }
 
     /// Get the number of cached keys
-    pub async fn cached_key_count(&self) -> usize {
-        let cache = self.cache.read().await;
+    pub fn cached_key_count(&self) -> usize {
+        let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
         cache.keys.len()
     }
 }

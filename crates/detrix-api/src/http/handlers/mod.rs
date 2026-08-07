@@ -53,8 +53,8 @@ pub use metrics::{
 };
 pub use operations::{disable_metric, enable_metric, update_metric, UpdateMetricRequest};
 pub use values::{
-    get_metric_history, get_metric_value, MetricHistoryParams, MetricHistoryResponse,
-    MetricValueResponse,
+    get_metric_drop_count, get_metric_history, get_metric_value, MetricDropCountResponse,
+    MetricHistoryParams, MetricHistoryResponse, MetricValueResponse,
 };
 pub use vfs::{
     get_cached_hashes, provide_file, validate_cache, GetCachedHashesResponse, ProvideFileRequest,

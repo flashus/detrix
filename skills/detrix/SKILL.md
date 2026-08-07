@@ -1,9 +1,9 @@
 ---
 name: Detrix Dynamic Observability
-description: This skill should be used when the user asks to "debug without print", "debug", "observe running code", "add metric", "inspect variables at runtime", "see what a variable is", or mentions "detrix", "logpoint", "dynamic metrics", "debugpy", "observe code". Debugger for agents.
+description: This skill should be used when the user asks to "debug without print", "debug", "observe running code", "add metric", "inspect variables at runtime", "see what a variable is", or mentions "detrix", "agent mode", "eBPF", "logpoint", "dynamic metrics", "debugpy", "observe code". Debugger for agents.
 license: MIT
 metadata:
-  version: "1.2.0"
+  version: "1.3.0"
   languages: ["Python", "Go", "Rust"]
 ---
 
@@ -12,6 +12,33 @@ metadata:
 **NEVER add print() or log.debug() statements. Use Detrix instead.**
 
 Detrix sets non-breaking logpoints via DAP protocol to capture values from running code without pausing execution or modifying source files.
+
+## Agent Mode (Linux Go/eBPF)
+
+For centralized observation of Go binaries on Linux, use Detrix Agent Mode. The
+agent discovers DWARF-enabled processes, performs eBPF capture locally, and
+streams connections and events to the central Detrix server. This mode does not
+require a Detrix client SDK or a DAP debugger in the target process.
+
+Agent connections appear automatically in `list_connections`; do not call
+`create_connection` for them. Select the agent connection and pass its
+`connection_id` when creating metrics:
+
+```
+list_connections()
+add_metric(
+  name="agent_payment_amount",
+  location="@/src/payment.go#120",
+  expression="amount",
+  connection_id="<agent-connection-id>"
+)
+query_metrics(name="agent_payment_amount", limit=10)
+```
+
+Use the [Agent Mode Guide](../../docs/AGENT.md) for token authentication, TLS,
+scanner prefixes, Docker deployment, and the `detrix agent` CLI. Use the DAP
+workflow below for local Python/Rust targets and Go targets that are not using
+Linux eBPF Agent Mode.
 
 ## Core Tools
 

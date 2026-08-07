@@ -462,7 +462,7 @@ mod tests {
             for _ in 0..10 {
                 f.write_all(&chunk).unwrap();
             }
-            f.write_all(&[b'B']).unwrap();
+            f.write_all(b"B").unwrap();
         }
 
         let (port, client) = start_and_client().await;
@@ -1032,7 +1032,7 @@ mod tests {
         let result = discover_cwd_mapping(&format!("/fake_prefix{}", file.to_str().unwrap()));
         // We can't predict CWD in tests, but we can verify the function
         // works with a known existing path on disk.
-        let result2 = discover_cwd_mapping(&file.to_str().unwrap());
+        let result2 = discover_cwd_mapping(file.to_str().unwrap());
         // When the path already exists at its absolute location, the function
         // should find it with suffix_start=1 (strip RootDir component only).
         // On unix, /path/to/file → components are [RootDir, "path", "to", "file"]

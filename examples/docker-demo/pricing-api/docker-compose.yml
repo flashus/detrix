@@ -7,3 +7,4 @@ services:
 networks:
   demo:
     name: docker-demo
+    external: true

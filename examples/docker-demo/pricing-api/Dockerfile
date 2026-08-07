@@ -1,4 +1,7 @@
-FROM golang:1.24 AS builder
+# syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
+ARG GO_IMAGE
+FROM ${GO_IMAGE} AS builder
 WORKDIR /src
 COPY go.mod main.go ./
 RUN --mount=type=cache,target=/root/.cache/go-build \

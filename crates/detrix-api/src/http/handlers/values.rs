@@ -94,6 +94,7 @@ pub async fn get_metric_value(
 
 /// Query parameters for metric history
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MetricHistoryParams {
     #[serde(default = "default_history_limit")]
     pub limit: i64,
@@ -191,5 +192,78 @@ pub async fn get_metric_history(
         total_count: events_to_return.len(),
         events: events_to_return,
         has_more,
+    }))
+}
+
+/// Drop count response for eBPF ring buffer monitoring
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricDropCountResponse {
+    pub metric_id: u64,
+    pub metric_name: String,
+    pub drop_count: u64,
+    /// Human-readable explanation of the drop count
+    pub explanation: String,
+}
+
+/// Get the ring buffer drop count for an eBPF-based metric.
+///
+/// Returns the number of events dropped due to ring buffer overflow
+/// for the specified metric. Only applicable to eBPF-based adapters
+/// (Go on Linux); returns 0 for DAP-based adapters.
+///
+/// # Path Parameters
+/// - `id`: Metric ID (integer)
+///
+/// # Response
+/// Returns `MetricDropCountResponse` with drop count and explanation.
+///
+/// # Errors
+/// - 404 Not Found: Metric not found
+pub async fn get_metric_drop_count(
+    State(state): State<Arc<ApiState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<u64>,
+) -> Result<Json<MetricDropCountResponse>, HttpError> {
+    info!("REST: get_metric_drop_count (id={})", id);
+
+    // Get metric first
+    let metric = state
+        .context
+        .metric_service
+        .get_metric(MetricId(id))
+        .await
+        .http_context("Failed to get metric")?
+        .http_not_found(&format!("Metric {}", id))?;
+
+    // Enforce read scope
+    let client_id = super::extract_client_id(&headers)?;
+    let scope = user.scope(client_id);
+    if !scope.can_read(&metric) {
+        return Err(HttpError::not_found(format!("Metric {}", id)));
+    }
+
+    // Get drop count from adapter lifecycle manager
+    let drop_count = state
+        .context
+        .adapter_lifecycle_manager
+        .get_metric_drop_count(&metric.name)
+        .await;
+
+    let explanation = if drop_count == 0 {
+        "No events dropped — ring buffer is keeping up".to_string()
+    } else {
+        format!(
+            "{} events dropped due to ring buffer overflow. Consider reducing active logpoints or moving them off hot paths.",
+            drop_count
+        )
+    };
+
+    Ok(Json(MetricDropCountResponse {
+        metric_id: id,
+        metric_name: metric.name,
+        drop_count,
+        explanation,
     }))
 }

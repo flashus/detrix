@@ -1,0 +1,288 @@
+//! Factory for creating eBPF adapters
+//!
+//! Creates `EbpfAdapter` instances for Go binaries on Linux.
+//! On non-Linux platforms, `EbpfAdapterFactory` methods return errors, and
+//! `EbpfGoFactory` transparently delegates to the inner DAP factory.
+
+use crate::adapter::EbpfAdapter;
+use crate::error::{Error, Result};
+use crate::probe::types::CaptureConfig;
+
+use async_trait::async_trait;
+use detrix_ports::{DapAdapterFactory, DapAdapterFactoryRef, DapAdapterRef};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// Factory for creating eBPF-based adapters.
+///
+/// Unlike `DapAdapterFactory` which creates per-language adapters,
+/// this factory creates eBPF adapters specifically for Go binaries
+/// on Linux. Other languages continue to use DAP adapters.
+pub struct EbpfAdapterFactory {
+    /// Base path for resolving relative binary paths.
+    base_path: PathBuf,
+    /// Capture limits for generated BPF programs and ring buffer parsing.
+    capture_config: CaptureConfig,
+}
+
+impl EbpfAdapterFactory {
+    pub fn new(base_path: impl Into<PathBuf>) -> Self {
+        Self {
+            base_path: base_path.into(),
+            capture_config: CaptureConfig::default(),
+        }
+    }
+
+    /// Create a factory with custom capture limits derived from config.
+    pub fn new_with_config(base_path: impl Into<PathBuf>, capture_config: CaptureConfig) -> Self {
+        Self {
+            base_path: base_path.into(),
+            capture_config,
+        }
+    }
+
+    /// Create an eBPF adapter for a Go binary.
+    ///
+    /// # Arguments
+    /// * `binary_path` - Path to the Go ELF binary with DWARF debug info.
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - Not running on Linux
+    /// - Binary doesn't exist or isn't readable
+    pub fn create_go_adapter(&self, binary_path: impl AsRef<Path>) -> Result<DapAdapterRef> {
+        let path = if binary_path.as_ref().is_absolute() {
+            binary_path.as_ref().to_path_buf()
+        } else {
+            self.base_path.join(binary_path)
+        };
+
+        if !path.exists() {
+            return Err(Error::Adapter(format!(
+                "Binary not found: {}",
+                path.display()
+            )));
+        }
+
+        let adapter = EbpfAdapter::new_with_config(path, self.capture_config.clone())
+            .map_err(|e: crate::error::Error| Error::Adapter(e.to_string()))?;
+        Ok(Arc::new(adapter) as DapAdapterRef)
+    }
+
+    /// Check if eBPF adapters are available on this platform.
+    pub fn is_available() -> bool {
+        cfg!(target_os = "linux")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn factory_create_with_existing_binary() {
+        let tmp = NamedTempFile::new().unwrap();
+        let factory = EbpfAdapterFactory::new("/tmp");
+        let result = factory.create_go_adapter(tmp.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn factory_create_nonexistent_binary_fails() {
+        let factory = EbpfAdapterFactory::new("/tmp");
+        let result = factory.create_go_adapter("/nonexistent/binary");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn factory_resolves_relative_path() {
+        let tmp = NamedTempFile::new_in("/tmp").unwrap();
+        let filename = tmp.path().file_name().unwrap().to_str().unwrap();
+        let factory = EbpfAdapterFactory::new("/tmp");
+        let result = factory.create_go_adapter(filename);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn is_available_matches_platform() {
+        let available = EbpfAdapterFactory::is_available();
+        if cfg!(target_os = "linux") {
+            assert!(available);
+        } else {
+            assert!(!available);
+        }
+    }
+}
+
+/// Composite adapter factory that routes Go connections to eBPF on Linux,
+/// delegating all other languages (and Go on non-Linux) to the inner DAP factory.
+///
+/// # Binary path convention
+///
+/// On Linux, `create_go_adapter(host, port)` treats `host` as the path to the
+/// Go ELF binary (e.g., `"/opt/myapp/bin/server"`). The `port` argument is
+/// unused — eBPF attaches directly to the binary without a debugger daemon.
+///
+/// On non-Linux, all calls are forwarded to the inner factory unchanged.
+pub struct EbpfGoFactory {
+    /// Inner factory for Python, Rust, and Go fallback on non-Linux.
+    inner: DapAdapterFactoryRef,
+    /// eBPF factory for Go connections on Linux.
+    #[allow(dead_code)] // Only used inside #[cfg(target_os = "linux")] blocks
+    ebpf: EbpfAdapterFactory,
+}
+
+impl EbpfGoFactory {
+    /// Create a composite factory with default capture limits.
+    ///
+    /// * `inner`     — base DAP factory (used for non-Go adapters)
+    /// * `base_path` — base directory for resolving relative binary paths
+    pub fn new(inner: DapAdapterFactoryRef, base_path: impl Into<PathBuf>) -> Self {
+        Self {
+            inner,
+            ebpf: EbpfAdapterFactory::new(base_path),
+        }
+    }
+
+    /// Create a composite factory with capture limits from config.
+    pub fn new_with_config(
+        inner: DapAdapterFactoryRef,
+        base_path: impl Into<PathBuf>,
+        capture_config: CaptureConfig,
+    ) -> Self {
+        Self {
+            inner,
+            ebpf: EbpfAdapterFactory::new_with_config(base_path, capture_config),
+        }
+    }
+}
+
+#[async_trait]
+impl DapAdapterFactory for EbpfGoFactory {
+    async fn create_python_adapter(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> detrix_core::Result<DapAdapterRef> {
+        self.inner.create_python_adapter(host, port).await
+    }
+
+    async fn create_go_adapter(&self, host: &str, port: u16) -> detrix_core::Result<DapAdapterRef> {
+        // On Linux: if host is a binary path (starts with '/'), use eBPF uprobe.
+        // Otherwise (IP address for Delve/DAP), fall through to inner factory.
+        // On non-Linux: always delegate to inner factory.
+        #[cfg(target_os = "linux")]
+        {
+            if host.starts_with('/') {
+                let _ = port;
+                self.ebpf
+                    .create_go_adapter(host)
+                    .map_err(|e| detrix_core::Error::Adapter(e.to_string()))
+            } else {
+                self.inner.create_go_adapter(host, port).await
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.inner.create_go_adapter(host, port).await
+        }
+    }
+
+    async fn create_rust_adapter(
+        &self,
+        host: &str,
+        port: u16,
+        program: Option<&str>,
+        pid: Option<u32>,
+    ) -> detrix_core::Result<DapAdapterRef> {
+        self.inner
+            .create_rust_adapter(host, port, program, pid)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod ebpf_go_factory_tests {
+    use super::*;
+    use detrix_core::Result;
+    use detrix_ports::DapAdapterRef;
+
+    /// Minimal stub factory that records calls.
+    struct StubFactory;
+
+    #[async_trait]
+    impl DapAdapterFactory for StubFactory {
+        async fn create_python_adapter(&self, _host: &str, _port: u16) -> Result<DapAdapterRef> {
+            Err(detrix_core::Error::Adapter("stub python".to_string()))
+        }
+        async fn create_go_adapter(&self, _host: &str, _port: u16) -> Result<DapAdapterRef> {
+            Err(detrix_core::Error::Adapter("stub go".to_string()))
+        }
+        async fn create_rust_adapter(
+            &self,
+            _host: &str,
+            _port: u16,
+            _program: Option<&str>,
+            _pid: Option<u32>,
+        ) -> Result<DapAdapterRef> {
+            Err(detrix_core::Error::Adapter("stub rust".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn python_delegates_to_inner() {
+        let factory = EbpfGoFactory::new(Arc::new(StubFactory), "/tmp");
+        match factory.create_python_adapter("127.0.0.1", 5678).await {
+            Err(e) => assert!(e.to_string().contains("stub python")),
+            Ok(_) => panic!("expected Err"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rust_delegates_to_inner() {
+        let factory = EbpfGoFactory::new(Arc::new(StubFactory), "/tmp");
+        match factory
+            .create_rust_adapter("127.0.0.1", 1234, None, None)
+            .await
+        {
+            Err(e) => assert!(e.to_string().contains("stub rust")),
+            Ok(_) => panic!("expected Err"),
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "linux"))]
+    async fn go_delegates_to_inner_on_non_linux() {
+        let factory = EbpfGoFactory::new(Arc::new(StubFactory), "/tmp");
+        match factory.create_go_adapter("127.0.0.1", 2345).await {
+            Err(e) => assert!(e.to_string().contains("stub go")),
+            Ok(_) => panic!("expected Err"),
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn go_uses_ebpf_on_linux_with_valid_binary() {
+        use tempfile::NamedTempFile;
+        let tmp = NamedTempFile::new().unwrap();
+        let factory = EbpfGoFactory::new(Arc::new(StubFactory), "/tmp");
+        // host = binary path on Linux
+        let result = factory
+            .create_go_adapter(tmp.path().to_str().unwrap(), 0)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn go_falls_back_to_dap_for_non_path_host_on_linux() {
+        let factory = EbpfGoFactory::new(Arc::new(StubFactory), "/tmp");
+        // host = "127.0.0.1" (not a path) should fall back to inner DAP factory
+        let result = factory.create_go_adapter("127.0.0.1", 0).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // StubFactory returns "stub go" — proves it fell through to inner factory
+        assert!(err.to_string().contains("stub go"));
+    }
+}

@@ -121,6 +121,9 @@ pub async fn run(
             group: args.group.clone(),
             enabled: true,
             replace: true,
+            mode: None,
+            sample_rate: None,
+            throttle_rate: None,
         };
 
         match client.add_metric(params).await {

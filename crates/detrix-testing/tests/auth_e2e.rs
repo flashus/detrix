@@ -930,12 +930,9 @@ async fn test_grpc_external_jwt_valid_token() {
 
     // Request with valid JWT should succeed
     let result = client.list_metrics(request).await;
-    if result.is_err() {
+    if let Err(e) = result {
         executor.print_daemon_logs(100);
-        panic!(
-            "Request with valid JWT should succeed: {:?}",
-            result.unwrap_err()
-        );
+        panic!("Request with valid JWT should succeed: {:?}", e);
     }
 
     println!("✓ gRPC valid JWT grants access!");

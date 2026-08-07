@@ -4,6 +4,17 @@ use detrix_core::PurityLevel;
 use serde::Serialize;
 use std::collections::HashSet;
 
+/// A function whose purity was resolved by LSP analysis.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolvedFunction {
+    /// Function name
+    pub name: String,
+    /// Resolution result: "pure" or "impure"
+    pub resolution: String,
+    /// How it was resolved (e.g., "LSP call hierarchy analysis")
+    pub source: String,
+}
+
 /// Result of expression safety validation
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidationResult {
@@ -27,6 +38,9 @@ pub struct ValidationResult {
 
     /// Functions classified as impure (blocked)
     pub impure_functions: HashSet<String>,
+
+    /// Functions whose purity was resolved by LSP analysis
+    pub resolved_functions: Vec<ResolvedFunction>,
 }
 
 impl ValidationResult {
@@ -40,6 +54,7 @@ impl ValidationResult {
             function_calls: HashSet::new(),
             unknown_functions: HashSet::new(),
             impure_functions: HashSet::new(),
+            resolved_functions: Vec::new(),
         }
     }
 
@@ -53,6 +68,7 @@ impl ValidationResult {
             function_calls,
             unknown_functions: HashSet::new(),
             impure_functions: HashSet::new(),
+            resolved_functions: Vec::new(),
         }
     }
 
@@ -66,6 +82,7 @@ impl ValidationResult {
             function_calls: HashSet::new(),
             unknown_functions: HashSet::new(),
             impure_functions: HashSet::new(),
+            resolved_functions: Vec::new(),
         }
     }
 
@@ -83,6 +100,7 @@ impl ValidationResult {
             function_calls,
             unknown_functions: HashSet::new(),
             impure_functions: HashSet::new(),
+            resolved_functions: Vec::new(),
         }
     }
 
@@ -104,6 +122,7 @@ impl ValidationResult {
             function_calls,
             unknown_functions,
             impure_functions,
+            resolved_functions: Vec::new(),
         }
     }
 

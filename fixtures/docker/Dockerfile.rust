@@ -1,9 +1,13 @@
+# syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
 # Rust Test App Docker Image
 # Multi-stage: build fixture with debug symbols, runtime with lldb-dap
 
 # ---- Build Stage ----
 # Pin to bookworm so the binary links against glibc 2.36 (matching the runtime stage).
-FROM rust:1-bookworm AS builder
+ARG RUST_IMAGE
+ARG RUNTIME_IMAGE
+FROM ${RUST_IMAGE} AS builder
 
 WORKDIR /src
 
@@ -28,7 +32,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp /build/target/debug/detrix_example_app /src/fixtures/rust/detrix_example_app
 
 # ---- Runtime Stage ----
-FROM debian:bookworm-slim
+FROM ${RUNTIME_IMAGE}
 
 # Install lldb-21 from apt.llvm.org (LLVM 21+ has the --connection flag for lldb-dap).
 # Full package installation is required — minimal binary extraction (via ldd) doesn't save

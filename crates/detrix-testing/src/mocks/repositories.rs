@@ -15,8 +15,9 @@ use detrix_core::{
 };
 use detrix_ports::{
     ConnectionReferenceRepository, ConnectionRepository, DlqEntry, DlqEntryStatus, DlqRepository,
-    EventRepository, MetricRepository, SystemEventRepository,
+    EventRepository, MetricEventSummary, MetricRepository, SystemEventRepository,
 };
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
@@ -420,7 +421,7 @@ impl EventRepository for MockEventRepository {
             .cloned()
             .collect();
         // Sort by timestamp descending to match real DB behavior
-        filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        filtered.sort_by_key(|e| Reverse(e.timestamp));
         Ok(filtered.into_iter().take(limit as usize).collect())
     }
 
@@ -437,7 +438,7 @@ impl EventRepository for MockEventRepository {
             .cloned()
             .collect();
         // Sort by timestamp descending to match real DB behavior
-        filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        filtered.sort_by_key(|e| Reverse(e.timestamp));
         Ok(filtered.into_iter().take(limit as usize).collect())
     }
 
@@ -453,7 +454,7 @@ impl EventRepository for MockEventRepository {
             .cloned()
             .collect();
         // Sort by timestamp descending to match real DB behavior
-        filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        filtered.sort_by_key(|e| Reverse(e.timestamp));
         Ok(filtered.into_iter().take(limit as usize).collect())
     }
 
@@ -473,13 +474,35 @@ impl EventRepository for MockEventRepository {
             .cloned()
             .collect();
         // Sort by timestamp descending to match real DB behavior
-        filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        filtered.sort_by_key(|e| Reverse(e.timestamp));
         Ok(filtered.into_iter().take(limit as usize).collect())
     }
 
     async fn count_by_metric_id(&self, metric_id: MetricId) -> Result<i64> {
         let events = self.events.read().unwrap();
         Ok(events.iter().filter(|e| e.metric_id == metric_id).count() as i64)
+    }
+
+    async fn count_by_metric_ids(
+        &self,
+        metric_ids: &[MetricId],
+    ) -> Result<std::collections::HashMap<MetricId, MetricEventSummary>> {
+        let events = self.events.read().unwrap();
+        let mut result = std::collections::HashMap::new();
+        // Always include every requested ID — matching the real SQLite behavior which
+        // returns (0, None) for IDs with no events rather than omitting them.
+        for &id in metric_ids {
+            let matching: Vec<_> = events.iter().filter(|e| e.metric_id == id).collect();
+            let last_ts = matching.iter().map(|e| e.timestamp).max();
+            result.insert(
+                id,
+                MetricEventSummary {
+                    count: matching.len() as u64,
+                    last_timestamp_micros: last_ts,
+                },
+            );
+        }
+        Ok(result)
     }
 
     async fn count_all(&self) -> Result<i64> {
@@ -489,7 +512,7 @@ impl EventRepository for MockEventRepository {
     async fn find_recent(&self, limit: i64) -> Result<Vec<MetricEvent>> {
         let events = self.events.read().unwrap();
         let mut sorted: Vec<_> = events.iter().cloned().collect();
-        sorted.sort_by(|a, b| b.timestamp.cmp(&a.timestamp)); // desc by timestamp
+        sorted.sort_by_key(|e| Reverse(e.timestamp));
         Ok(sorted.into_iter().take(limit as usize).collect())
     }
 
@@ -511,7 +534,7 @@ impl EventRepository for MockEventRepository {
             .filter(|(_, e)| e.metric_id == metric_id)
             .map(|(i, e)| (i, e.timestamp))
             .collect();
-        metric_events.sort_by(|a, b| b.1.cmp(&a.1)); // desc by timestamp
+        metric_events.sort_by_key(|&(_, ts)| Reverse(ts));
 
         // Mark indices to remove (beyond keep_count)
         let to_remove: std::collections::HashSet<_> = metric_events
@@ -641,7 +664,7 @@ impl SystemEventRepository for MockSystemEventRepository {
     async fn find_recent(&self, limit: i64) -> Result<Vec<SystemEvent>> {
         let events = self.events.read().unwrap();
         let mut sorted: Vec<_> = events.iter().cloned().collect();
-        sorted.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        sorted.sort_by_key(|e| Reverse(e.timestamp));
         Ok(sorted.into_iter().take(limit as usize).collect())
     }
 
@@ -663,7 +686,7 @@ impl SystemEventRepository for MockSystemEventRepository {
         }
 
         // Sort by timestamp descending, keep only most recent
-        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.sort_by_key(|e| Reverse(e.timestamp));
         let to_delete = events.len() - max_events;
         events.truncate(max_events);
         Ok(to_delete as u64)
@@ -850,6 +873,14 @@ impl ConnectionRepository for MockConnectionRepository {
             .map(|(id, _)| id.clone())
             .collect();
         Ok(stale_ids)
+    }
+
+    async fn save_batch(&self, connections: &[Connection]) -> Result<usize> {
+        let mut conns = self.connections.lock().await;
+        for connection in connections {
+            conns.insert(connection.id.clone(), connection.clone());
+        }
+        Ok(connections.len())
     }
 }
 

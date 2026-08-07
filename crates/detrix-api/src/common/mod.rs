@@ -5,7 +5,7 @@ pub mod diff_parser;
 pub mod expression_extractor;
 pub mod parsing;
 
-pub use auth::{authenticate_token, AuthError, AuthState};
+pub use auth::{authenticate_token, authenticate_token_sync, AuthError, AuthState};
 
 pub use diff_parser::{parse_diff, DiffParseResult, ParsedDiffLine, UnparseableLine};
 pub use expression_extractor::{

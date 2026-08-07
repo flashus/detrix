@@ -16,6 +16,7 @@ fn default_enabled() -> bool {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for adding a new metric")]
 pub struct AddMetricParams {
     #[schemars(description = "Unique metric name (letters, numbers, underscore, dash)")]
@@ -86,6 +87,7 @@ pub struct AddMetricParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for removing a metric")]
 pub struct RemoveMetricParams {
     #[schemars(description = "Name of the metric to remove")]
@@ -93,6 +95,7 @@ pub struct RemoveMetricParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for toggling a metric")]
 pub struct ToggleMetricParams {
     #[schemars(description = "Name of the metric")]
@@ -102,6 +105,7 @@ pub struct ToggleMetricParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for listing metrics")]
 pub struct ListMetricsParams {
     #[schemars(description = "Filter by group name")]
@@ -115,6 +119,7 @@ pub struct ListMetricsParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for querying metric events")]
 pub struct QueryMetricsParams {
     #[schemars(description = "Metric name to query")]
@@ -130,6 +135,7 @@ pub struct QueryMetricsParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for getting a metric by name")]
 pub struct GetMetricParams {
     #[schemars(description = "Name of the metric to retrieve")]
@@ -137,6 +143,7 @@ pub struct GetMetricParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for updating an existing metric")]
 pub struct UpdateMetricParams {
     #[schemars(description = "Name of the metric to update")]
@@ -160,6 +167,7 @@ pub struct UpdateMetricParams {
 /// The `observe` tool combines connection selection, file inspection, and metric creation
 /// into a single call. It's the recommended way to add metrics for most use cases.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(
     description = "Observe a value in code. Simplest way to add metrics - auto-finds line if not specified."
 )]
@@ -219,6 +227,7 @@ pub struct ObserveParams {
 /// Detrix metrics for them. Uses a "smart" approach: auto-adds what it can
 /// parse confidently, reports failures with suggestions for manual `observe` calls.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(
     description = "Enable metrics from git diff. Parses print/log statements and creates observation points automatically."
 )]
@@ -247,6 +256,7 @@ pub struct EnableFromDiffParams {
 // ============================================================================
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(
     description = "Wake an app's Detrix client via its control plane. The app starts its debugger and registers with this Detrix server."
 )]
@@ -266,6 +276,7 @@ pub struct WakeParams {
 // ============================================================================
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(
     description = "Sleep an app's Detrix client via its control plane. The app stops its debugger and unregisters from this Detrix server."
 )]
@@ -281,6 +292,7 @@ pub struct SleepParams {
 // ============================================================================
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for creating a debugger connection")]
 pub struct CreateConnectionParams {
     #[schemars(description = "Host address (e.g., '127.0.0.1', 'localhost')")]
@@ -329,6 +341,7 @@ pub struct CreateConnectionParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for closing a debugger connection")]
 pub struct CloseConnectionParams {
     #[schemars(description = "Connection ID to close")]
@@ -336,6 +349,7 @@ pub struct CloseConnectionParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for getting a specific connection")]
 pub struct GetConnectionParams {
     #[schemars(description = "Connection ID to retrieve")]
@@ -343,6 +357,7 @@ pub struct GetConnectionParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for listing connections")]
 pub struct ListConnectionsParams {
     #[schemars(description = "Only show active (connected) connections")]
@@ -358,6 +373,7 @@ pub struct ListConnectionsParams {
 // ============================================================================
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for validating an expression")]
 pub struct ValidateExpressionParams {
     /// Expression to validate for safety
@@ -369,6 +385,7 @@ pub struct ValidateExpressionParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(
     description = "Parameters for inspecting a file to find correct metric placement. Use BEFORE add_metric to find the right line for your expression."
 )]
@@ -394,6 +411,7 @@ pub struct InspectFileParams {
 // ============================================================================
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for group operations")]
 pub struct GroupParams {
     #[schemars(description = "Name of the group")]
@@ -401,6 +419,7 @@ pub struct GroupParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for listing groups")]
 pub struct ListGroupsParams {
     #[schemars(
@@ -414,6 +433,7 @@ pub struct ListGroupsParams {
 // ============================================================================
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for getting configuration")]
 pub struct GetConfigParams {
     #[schemars(description = "Output format: 'toml' (default) or 'json'")]
@@ -421,6 +441,7 @@ pub struct GetConfigParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for updating configuration")]
 pub struct UpdateConfigParams {
     #[schemars(description = "Partial TOML configuration to merge with current config")]
@@ -430,6 +451,7 @@ pub struct UpdateConfigParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for validating configuration")]
 pub struct ValidateConfigParams {
     #[schemars(description = "TOML configuration to validate")]
@@ -441,6 +463,7 @@ pub struct ValidateConfigParams {
 // ============================================================================
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(
     description = "Parameters for querying system events (crashes, connections, metric changes)"
 )]
@@ -466,6 +489,7 @@ pub struct QuerySystemEventsParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for acknowledging system events")]
 pub struct AcknowledgeEventsParams {
     #[schemars(description = "Event IDs to acknowledge")]
@@ -477,6 +501,7 @@ pub struct AcknowledgeEventsParams {
 // ============================================================================
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(
     description = "Disconnect all local debugger adapters. Stops all active debug sessions. Metrics remain configured and will be re-enabled when connections are re-established."
 )]
@@ -487,6 +512,7 @@ pub struct DisconnectAllParams {}
 // ============================================================================
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(
     description = "Parameters for providing file content to cache in the Virtual File System. Use in cloud/Docker deployments where the server has no direct access to source files."
 )]
@@ -502,6 +528,7 @@ pub struct ProvideFileParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "File hash entry for cache validation")]
 pub struct FileHash {
     #[schemars(description = "File path")]
@@ -512,6 +539,7 @@ pub struct FileHash {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(
     description = "Parameters for validating cache hashes. Server compares client hashes with cached content and evicts mismatched files."
 )]
@@ -524,6 +552,7 @@ pub struct ValidateCacheParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 #[schemars(description = "Parameters for getting all cached file hashes for a connection")]
 pub struct GetCachedFilesParams {
     #[schemars(description = "Connection ID to get cached files for")]

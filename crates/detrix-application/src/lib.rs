@@ -100,12 +100,12 @@ pub use detrix_ports::{
     DlqEntry, DlqEntryStatus, DlqRepository, DlqRepositoryRef, ErrorCountRow, EventOutput,
     EventOutputRef, EventRepository, EventRepositoryRef, FetchResult, FileEvent, FileSource,
     FileSourceRef, FileWatcher, FileWatcherConfig, FileWatcherRef, GroupSummary,
-    McpUsageRepository, McpUsageRepositoryRef, MetricFilter, MetricRepository, MetricRepositoryRef,
-    NullFileWatcher, NullOutput, OwnerFilter, PurityAnalyzer, PurityAnalyzerRef, PurityCache,
-    PurityCacheEntry, PurityCacheKey, PurityCacheRef, PurityCacheStats, RemoveMetricResult,
-    SetMetricResult, SourceContext, SourceMetadata, SymbolInfo, SystemEventRepository,
-    SystemEventRepositoryRef, ToggleMetricResult, ToolCountRow, UsageStats, VfsRef,
-    VirtualFileSystem,
+    McpUsageRepository, McpUsageRepositoryRef, MetricEventSummary, MetricFilter, MetricRepository,
+    MetricRepositoryRef, NullFileWatcher, NullOutput, OwnerFilter, PurityAnalyzer,
+    PurityAnalyzerRef, PurityCache, PurityCacheEntry, PurityCacheKey, PurityCacheRef,
+    PurityCacheStats, RemoveMetricResult, SetMetricResult, SourceContext, SourceMetadata,
+    SymbolInfo, SystemEventRepository, SystemEventRepositoryRef, ToggleMetricResult, ToolCountRow,
+    UsageStats, VfsRef, VirtualFileSystem,
 };
 
 // Thread-safe reference to expression validator (defined here since ExpressionValidator is in this crate)
@@ -113,14 +113,17 @@ pub type ExpressionValidatorRef = std::sync::Arc<dyn safety::ExpressionValidator
 pub use safety::{ExpressionValidator, PythonValidator, ValidationResult, ValidatorRegistry};
 pub use scope::{check_read_access, extract_scope, MetricScope};
 pub use services::{
-    resolve_file_path, AdapterLifecycleManager, AnchorServiceConfig, Audience, CallTimer,
-    CodeContext, CodeLine, ConfigService, ConfigUpdateResult, ConnectionService,
-    DefaultAnchorService, DisconnectAllResult, EnvironmentCheckResult, EnvironmentService,
-    EventCaptureService, FileChangeResult, FileInspectionRequest, FileInspectionResult,
-    FileInspectionService, FileOverview, FileSourceChain, JwksValidator, JwtClaims, JwtError,
-    LanguageCapabilities, LineInspectionResult, LspSymbolLookup, LspSymbolLookupRef,
-    ManagedAdapterInfo, ManagedAdapterStatus, McpErrorCode, McpUsageCounters, McpUsageEvent,
-    McpUsageService, MetricService, NotifyFileWatcher, NullLspLookup, RemoteAppService,
-    SourceLanguage, StreamingService, SystemEventService, TextSearchMatch, UsageSnapshot,
-    VariableDefinition, VariableSearchResult, WorkflowStats, RESTART_REQUIRED_FIELDS,
+    resolve_file_path, AdapterLifecycleManager, AgentBinaryInfo, AgentCapabilities,
+    AgentConnectionManager, AgentConnectionManagerRef, AgentFileSource, AnchorServiceConfig,
+    Audience, CallTimer, CodeContext, CodeLine, ConfigService, ConfigUpdateResult,
+    ConnectionService, DefaultAnchorService, DisconnectAllResult, EnvironmentCheckResult,
+    EnvironmentService, EventCaptureService, FileChangeResult, FileInspectionRequest,
+    FileInspectionResult, FileInspectionService, FileOverview, FileSourceChain,
+    IncomingAgentMessage, JwksValidator, JwtClaims, JwtError, LanguageCapabilities,
+    LineInspectionResult, LspSymbolLookup, LspSymbolLookupRef, ManagedAdapterInfo,
+    ManagedAdapterStatus, McpErrorCode, McpUsageCounters, McpUsageEvent, McpUsageService,
+    MetricService, NotifyFileWatcher, NullLspLookup, OutgoingAgentMessage, RegisterResult,
+    RemoteAdapter, RemoteAppService, SourceLanguage, StreamingService, SystemEventService,
+    TextSearchMatch, UsageSnapshot, VariableDefinition, VariableInfo, VariableSearchResult,
+    WorkflowStats, RESTART_REQUIRED_FIELDS,
 };

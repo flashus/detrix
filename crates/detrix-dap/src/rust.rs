@@ -180,10 +180,19 @@ impl OutputParser for RustOutputParser {
         "rust"
     }
 
-    /// CodeLLDB starts in running state by default when attaching,
-    /// but may need continue depending on launch configuration.
+    /// lldb-dap 22.x (LLVM) pauses the process after attach, requiring
+    /// an explicit continue to resume execution. This was `false` when
+    /// using CodeLLDB (which starts in running state), but lldb-dap
+    /// behaves like Delve — process is stopped after attach.
+    ///
+    /// NOTE (CodeLLDB double-continue): If you use CodeLLDB directly (not
+    /// lldb-dap), it auto-resumes after attach. Sending an explicit continue
+    /// to an already-running process is harmless but causes a brief pause.
+    /// If you observe a pause after attach with CodeLLDB, set
+    /// `needs_continue_after_connect = false` in your AdapterConfig or use
+    /// the lldb-dap wrapper which handles this transparently.
     fn needs_continue_after_connect() -> bool {
-        false
+        true
     }
 }
 
@@ -569,10 +578,16 @@ impl RustAdapter {
         //  symbols.load-on-demand true  +  target.preload-symbols false
         //      Defer symbol table loading until actually needed (e.g., a logpoint
         //      expression is evaluated); avoid eager loading during the scan.
+        // These settings optimize lldb-dap attach performance on macOS.
+        // NOTE: Some settings are lldb-dap specific and may not exist in CodeLLDB
+        // or older LLVM versions. To support both adapters, we only include
+        // settings known to work across lldb-dap AND CodeLLDB.
+        // The `plugin.symbol-locator.debugsymbols.enable-background-lookup` setting
+        // is lldb-dap specific (LLVM 19+) and causes a fatal error in CodeLLDB.
         let mut commands = vec![
             "settings set symbols.enable-external-lookup false".to_string(),
-            "settings set plugin.symbol-locator.debugsymbols.enable-background-lookup false"
-                .to_string(),
+            // Removed: plugin.symbol-locator.debugsymbols.enable-background-lookup
+            // (not supported by CodeLLDB, causes fatal attach error)
             "settings set target.process.stop-on-sharedlibrary-events false".to_string(),
             "settings set symbols.load-on-demand true".to_string(),
             "settings set target.preload-symbols false".to_string(),
@@ -894,8 +909,8 @@ mod tests {
 
     #[test]
     fn test_needs_continue() {
-        // CodeLLDB doesn't need explicit continue
-        assert!(!RustOutputParser::needs_continue_after_connect());
+        // lldb-dap 22.x pauses after attach, needs explicit continue (like Delve)
+        assert!(RustOutputParser::needs_continue_after_connect());
     }
 
     #[tokio::test]

@@ -812,12 +812,13 @@ source_host = "detrix-local"
 # Source priority controls where files are fetched from first.
 [vfs]
 # Source priority order: which sources to try when fetching file content.
-# Valid values: "control_plane", "bridge", "disk"
+# Valid values: "agent", "control_plane", "bridge", "disk"
+# - agent: fetch from a remote detrix agent (requires [agent] setup)
 # - control_plane: fetch from cloud control plane (requires cloud setup)
 # - bridge: fetch from the MCP bridge's local file server (Docker/remote mode)
 # - disk: read directly from the daemon's local filesystem
-# Default: ["control_plane", "bridge", "disk"]
-# source_priority = ["control_plane", "bridge", "disk"]
+# Default: ["agent", "control_plane", "bridge", "disk"]
+# source_priority = ["agent", "control_plane", "bridge", "disk"]
 
 # Timeout for fetching files from control_plane or bridge sources (seconds).
 # Default: 30
@@ -832,6 +833,65 @@ source_host = "detrix-local"
 # Increase for large or stable codebases; decrease if files change frequently.
 # Default: 60 (seconds)
 # hot_reload_ttl_seconds = 60
+
+# ============================================================================
+# Agent Mode Configuration
+# ============================================================================
+# Settings for `detrix agent start` (remote agent binary) and for the server
+# to authenticate incoming agent connections.
+#
+# Agent-side fields (used by the agent binary):
+#   server_grpc_url, token_file, agent_id_file, reconnect_interval_secs,
+#   reconnect_max_interval_secs, heartbeat_interval_secs, metrics_host,
+#   metrics_port, verify_tls, ca_cert_file, scanner.*
+#
+# Server-side fields (used by `detrix serve` to accept agents):
+#   agent_tokens, min_compatible_agent_version, dev_mode,
+#   allowed_read_prefixes
+# [agent]
+# URL of the detrix server's agent gRPC port.
+# server_grpc_url = "https://detrix-server:50061"
+
+# File containing the bearer token to present to the server.
+# token_file = "/etc/detrix/agent-token"
+
+# Verify the server's TLS certificate against the system CA bundle.
+# Set to false only for development with self-signed certificates.
+# verify_tls = true
+
+# Optional path to a PEM CA certificate for self-signed server certificates.
+# ca_cert_file = "/etc/detrix/ca.pem"
+
+# Bind host for the Prometheus /metrics and /health endpoints.
+# metrics_host = "127.0.0.1"
+
+# HTTP port for the Prometheus /metrics and /health endpoints.
+# metrics_port = 9091
+
+# SHA-256 hashes of valid agent bearer tokens (server-side).
+# Generate: echo -n "my-secret-token" | sha256sum
+# agent_token_hashes = ["<64-char-sha256-hex>"]
+
+# Allow agent connections without authentication (DANGEROUS — dev only).
+# dev_mode = false
+
+# Restrict server-requested file reads to these directory prefixes.
+# Empty = allow any path the agent can read (logs a warning each time).
+# allowed_read_prefixes = ["/app", "/usr/local/bin"]
+
+[ebpf]
+# Maximum number of variables captured per uprobe hit (1-16)
+max_capture_vars = 8
+# Maximum string content bytes per Go string variable (multiple of 8, max 255)
+string_capture_bytes = 64
+# Maximum bytes for fixed-size arrays and struct blobs (multiple of 8)
+blob_capture_bytes = 256
+# Maximum recursion depth for nested type capture (0-32)
+max_capture_depth = 3
+# Maximum struct fields to capture per struct (-1 = all, >= 0 = limit)
+max_struct_fields = -1
+# Maximum array/slice/map elements to capture
+max_array_values = 64
 
 # ════════════════════════════════════════════════════════════════════════════
 # End of Configuration

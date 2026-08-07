@@ -5,7 +5,7 @@
 use super::{default_mode, metric_to_rest_response};
 use crate::constants::status;
 use crate::generated::detrix::v1::Location;
-use crate::grpc::conversions::core_event_to_proto;
+use crate::grpc::conversions::{core_event_to_proto, metric_to_info_with_stats};
 use crate::http::error::{HttpError, ToHttpBadRequest, ToHttpOption, ToHttpResult};
 use crate::http::middleware::AuthenticatedUser;
 use crate::state::ApiState;
@@ -15,7 +15,7 @@ use axum::{
     http::StatusCode,
     Extension, Json,
 };
-use detrix_application::MetricFilter;
+use detrix_application::{EventRepository, MetricFilter};
 use detrix_config::DEFAULT_QUERY_LIMIT;
 use detrix_core::{ConnectionId, MetricId};
 use serde::{Deserialize, Serialize};
@@ -195,11 +195,22 @@ pub async fn list_metrics(
         .await
         .http_context("Failed to list metrics")?;
 
-    // Convert to DTOs
+    // Batch-fetch event counts for all metrics (single DB query)
+    let metric_ids: Vec<MetricId> = metrics.iter().filter_map(|m| m.id).collect();
+    let hit_counts =
+        EventRepository::count_by_metric_ids(state.event_repository.as_ref(), &metric_ids)
+            .await
+            .http_context("Failed to fetch event counts for metrics")?;
+
+    // Convert to DTOs, injecting real hit counts
     let dtos: Vec<MetricInfo> = metrics
         .iter()
         .filter_map(|m| {
-            metric_to_rest_response(m)
+            let (hit_count, last_hit_at) =
+                m.id.and_then(|id| hit_counts.get(&id))
+                    .map(|s| (s.count, s.last_timestamp_micros))
+                    .unwrap_or((0, None));
+            metric_to_info_with_stats(m, hit_count, last_hit_at)
                 .inspect_err(|e| warn!(metric_name = %m.name, "Skipping metric: {}", e))
                 .ok()
         })

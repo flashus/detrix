@@ -451,17 +451,14 @@ async fn test_localhost_exempt_different_endpoints() {
 
     for endpoint in &endpoints {
         for _ in 0..requests_per_endpoint {
-            match client.get(format!("{}{}", base_url, endpoint)).send().await {
-                Ok(resp) => {
-                    let status = resp.status();
-                    // Accept both 200 and 404 (endpoint may not exist) as "not rate limited"
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        total_rate_limited += 1;
-                    } else {
-                        total_success += 1;
-                    }
+            if let Ok(resp) = client.get(format!("{}{}", base_url, endpoint)).send().await {
+                let status = resp.status();
+                // Accept both 200 and 404 (endpoint may not exist) as "not rate limited"
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    total_rate_limited += 1;
+                } else {
+                    total_success += 1;
                 }
-                Err(_) => {}
             }
         }
     }
@@ -513,16 +510,13 @@ async fn test_localhost_exempt_sustained_load() {
     println!("Making sustained requests for {:?}...", duration);
 
     while start.elapsed() < duration {
-        match client.get(format!("{}/health", base_url)).send().await {
-            Ok(resp) => {
-                request_count += 1;
-                if resp.status() == StatusCode::OK {
-                    success_count += 1;
-                } else if resp.status() == StatusCode::TOO_MANY_REQUESTS {
-                    rate_limited_count += 1;
-                }
+        if let Ok(resp) = client.get(format!("{}/health", base_url)).send().await {
+            request_count += 1;
+            if resp.status() == StatusCode::OK {
+                success_count += 1;
+            } else if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                rate_limited_count += 1;
             }
-            Err(_) => {}
         }
         // Small delay between requests
         tokio::time::sleep(Duration::from_millis(10)).await;

@@ -113,14 +113,15 @@ impl FixtureCodeMap {
 }
 
 // Go fixture line numbers — single source of truth.
-// Update MAIN_LINE if you add/remove lines before `func main()` in
-// fixtures/go/detrix_example_app.go
+// Update MAIN_LINE if you add/remove lines before `func tradeTick()` in
+// fixtures/go/string_capture/main.go
 pub mod go_lines {
     use super::FixtureCodeMap;
 
-    /// Line of `func main()` in detrix_example_app.go.
-    /// Update this if you add/remove lines before `func main()`.
-    pub const MAIN_LINE: u32 = 101;
+    /// Line of `func tradeTick()` in fixtures/go/string_capture/main.go.
+    /// All offsets are relative to this line.
+    /// Update this if you add/remove lines before `tradeTick`.
+    pub const MAIN_LINE: u32 = 103;
 
     /// Last line of the Order struct (`}` on line 87).
     /// Used by scope-aware tests to verify struct fields are deprioritized.
@@ -128,7 +129,7 @@ pub mod go_lines {
 
     /// Symbol map: (name, decl_offset, first_safe_logpoint_offset)
     ///
-    /// Each entry describes a named point in func main():
+    /// Each entry describes a named point in func tradeTick():
     ///   - decl_offset: offset from MAIN_LINE where the symbol is assigned/declared.
     ///   - first_safe_logpoint_offset: first offset where the symbol is safely in scope.
     ///
@@ -136,18 +137,22 @@ pub mod go_lines {
     /// RHS executes), so a variable is NOT yet in scope at its own declaration line.
     const SYMBOL_MAP: &[(&str, u32, u32)] = &[
         // (name,             decl, logpt)
-        ("signal_handler", 13, 13), // go signalHandler() goroutine — no new var
-        ("symbol", 26, 27),         // symbol := ...; safe from +27 (quantity)
-        ("quantity", 27, 28),       // quantity := ...; safe from +28 (price)
-        ("price", 28, 31),          // price := ...; safe from +31 (orderID)
-        ("orderID", 31, 34),        // orderID := placeOrder(); safe from +34 (entryPrice)
-        ("entryPrice", 34, 35),     // entryPrice := price; safe from +35 (currentPrice)
-        ("currentPrice", 35, 36),   // currentPrice := ...; safe from +36 (pnl)
-        ("pnl", 36, 39),            // pnl := calculatePnl(); safe from +39 (totalPnl)
-        ("totalPnl", 39, 40),       // totalPnl = ...; safe from +40 (lastOrderID)
-        ("lastOrderID", 40, 42),    // lastOrderID := orderID; safe from +42 (log)
-        ("log", 42, 42),            // log(...) call — all vars in scope
-        ("sleep", 44, 44),          // time.Sleep — all vars in scope
+        // Offsets are relative to MAIN_LINE (func tradeTick line).
+        ("iteration", 4, 5),      // *iteration++; safe from +5 (symbol)
+        ("symbol", 5, 6),         // symbol := ...; safe from +6 (quantity)
+        ("quantity", 6, 7),       // quantity := ...; safe from +7 (price)
+        ("price", 7, 8),          // price := ...; safe from +8 (direction)
+        ("direction", 8, 12),     // direction := ...; safe from +12 (labelConcat)
+        ("labelConcat", 12, 17),  // labelConcat := ...; safe from +17 (orderID)
+        ("labelSprintf", 14, 17), // labelSprintf := ...; safe from +17 (orderID)
+        ("orderID", 17, 20),      // orderID := ...; safe from +20 (entryPrice)
+        ("entryPrice", 20, 21),   // entryPrice := ...; safe from +21 (currentPrice)
+        ("currentPrice", 21, 22), // currentPrice := ...; safe from +22 (pnl)
+        ("pnl", 22, 25),          // pnl := ...; safe from +25 (totalPnl)
+        ("totalPnl", 25, 26),     // totalPnl = ...; safe from +26 (lastOrderID)
+        ("lastOrderID", 26, 29),  // lastOrderID := ...; safe from +29 (log)
+        ("log", 29, 29),          // log(...) call — all vars in scope
+        ("sleep", 31, 31),        // time.Sleep — all vars in scope
     ];
 
     /// Code map for the Go fixture.
@@ -159,6 +164,83 @@ pub mod go_lines {
     /// Prefer `CODEMAP.find_decl()` or `CODEMAP.find_logpoint()` for named points.
     pub const fn line(offset: u32) -> u32 {
         MAIN_LINE + offset
+    }
+}
+
+// Nested types fixture line numbers — for ebpf_nested_types_e2e.rs tests
+// Update NESTED_MAIN_LINE if you add/remove lines before `func main()` in
+// fixtures/go/nested_types/main.go
+pub mod go_nested_lines {
+    use super::FixtureCodeMap;
+
+    /// Line of `func main()` in nested_types/main.go
+    pub const NESTED_MAIN_LINE: u32 = 126;
+
+    /// Symbol map for nested types fixture
+    const SYMBOL_MAP: &[(&str, u32, u32)] = &[
+        // (name,             decl, logpt)
+        ("order", 28, 30),      // order := createRandomOrder()
+        ("history", 35, 36),    // history := PriceHistory{...}
+        ("ptrWrapper", 39, 40), // ptrWrapper := OrderPtr{...}
+        ("logOrder", 42, 42),   // logOrder(order) call
+        ("i", 46, 46),          // for i, item := range order.Items
+        ("item", 46, 46),
+        ("key", 52, 52), // for key, tag := range order.Tags
+        ("tag", 52, 52),
+        ("status", 57, 57),       // status := order.Status
+        ("categoryName", 60, 60), // categoryName := order.Product.Category.Name
+        ("timestamp", 63, 63),    // timestamp := order.Timestamp
+    ];
+
+    /// Code map for the nested types fixture.
+    pub static CODEMAP: FixtureCodeMap = FixtureCodeMap::new(NESTED_MAIN_LINE, SYMBOL_MAP);
+
+    pub const fn line(offset: u32) -> u32 {
+        NESTED_MAIN_LINE + offset
+    }
+}
+
+// Classic map fixture line numbers — for ebpf_classic_map_e2e.rs tests
+// Tests map capture with Go < 1.24 classic hash map implementation (hmap/bmap).
+// Update CLASSIC_MAIN_LINE if you add/remove lines before `func main()` in
+// fixtures/go/classic_map/main.go
+//
+// DWARF line verification (go tool objdump -s main.main):
+//   main.go:30 - func main() starts (MAIN_LINE)
+//   main.go:37 - iteration := 0
+//   main.go:39 - iteration++
+//   main.go:42 - order := Order{...} struct creation begins
+//   main.go:48 - order struct creation ends (Tags map assigned)
+//   main.go:51 - var nilMap map[string]int
+//   main.go:54 - logOrder(order) call
+//   main.go:57 - logNilMap(nilMap) call
+//   main.go:59 - time.Sleep(3 * time.Second)
+//
+// Key insight: The struct wrapper pattern (Order.Tags) is proven working.
+// Standalone maps may have incomplete DWARF location info in Go 1.23.
+pub mod go_classic_lines {
+    use super::FixtureCodeMap;
+
+    /// Line of `func main()` in classic_map/main.go
+    pub const CLASSIC_MAIN_LINE: u32 = 30;
+
+    /// Symbol map for classic map fixture.
+    /// Uses struct-wrapped map pattern: Order struct contains Tags map[string]string.
+    const SYMBOL_MAP: &[(&str, u32, u32)] = &[
+        // (name,            decl, logpt)
+        // iteration: simple int, good for smoke testing uprobe mechanism
+        ("iteration", 7, 9), // line 37: iteration := 0; line 39: iteration++
+        // order: struct with map field (struct wrapper pattern)
+        ("order", 12, 24), // line 42: order := Order{...}; line 54: logOrder(order)
+        // nilMap: nil map pointer (edge case)
+        ("nilMap", 21, 27), // line 51: var nilMap; line 57: logNilMap(nilMap)
+    ];
+
+    /// Code map for the classic map fixture.
+    pub static CODEMAP: FixtureCodeMap = FixtureCodeMap::new(CLASSIC_MAIN_LINE, SYMBOL_MAP);
+
+    pub const fn line(offset: u32) -> u32 {
+        CLASSIC_MAIN_LINE + offset
     }
 }
 
@@ -412,7 +494,7 @@ impl DapWorkflowConfig {
 
         Self {
             language: SourceLanguage::Go,
-            source_file: PathBuf::from("fixtures/go/detrix_example_app.go"),
+            source_file: PathBuf::from("fixtures/go/string_capture/main.go"),
             metrics: vec![
                 // Slot: pnl declaration line — orderID is already in scope here
                 MetricPoint::new("order_metric", CODEMAP.find_decl("pnl"), "orderID")
@@ -468,13 +550,9 @@ impl DapWorkflowConfig {
             inspect_line: CODEMAP.find_decl("pnl"),
             inspect_variable: "price".to_string(),
             invalid_metric: Some(
-                // signal_handler line: only sigChan in scope — good for "not in scope" test
-                MetricPoint::new(
-                    "bad_metric",
-                    CODEMAP.find_decl("signal_handler"),
-                    "nonexistent_var",
-                )
-                .with_group("go_workflow"),
+                // symbol line: good for "not in scope" test (expression "nonexistent_var" won't be found)
+                MetricPoint::new("bad_metric", CODEMAP.find_decl("symbol"), "nonexistent_var")
+                    .with_group("go_workflow"),
             ),
             group_name: "go_workflow".to_string(),
             event_wait_secs: 15,
@@ -1490,7 +1568,7 @@ impl DapWorkflowScenarios {
                                                 fi,
                                                 frame.file.as_deref().unwrap_or("<unknown>"),
                                                 frame.line.unwrap_or(0),
-                                                &frame.name
+                                                frame.name
                                             ));
                                         }
                                         if st.frames.len() > 5 {

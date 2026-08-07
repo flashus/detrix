@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
+# Minimal Go fixture for agent mode E2E tests
+#
+# This is a simple Go application that prints messages to stdout.
+# The agent will discover this binary via /proc/<pid>/exe,
+# attach eBPF uprobes, and send events to the server.
+
+ARG GO_IMAGE
+ARG RUNTIME_IMAGE
+FROM ${GO_IMAGE} AS builder
+
+WORKDIR /app
+
+# Create a simple Go program that loops and prints messages
+# No Detrix client library needed - the agent will attach via eBPF
+RUN cat > main.go << 'EOF'
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	fmt.Println("go-bare: starting")
+	for i := 0; ; i++ {
+		fmt.Printf("go-bare: iteration %d\n", i)
+		time.Sleep(1 * time.Second)
+	}
+}
+EOF
+
+# Compile with DWARF debug info (required for eBPF symbol lookup)
+RUN go build -gcflags="all=-N -l" -o go-bare main.go
+
+FROM ${RUNTIME_IMAGE}
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /app/go-bare .
+
+CMD ["/app/go-bare"]

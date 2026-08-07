@@ -1,0 +1,79 @@
+# syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
+# ── Stage 1: Fetch deps (baked registry layer) ────────────────────
+ARG RUST_IMAGE
+ARG GO_IMAGE
+FROM ${RUST_IMAGE} AS rust-deps
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends protobuf-compiler
+ENV RUSTUP_TOOLCHAIN=1.94.1
+ENV CARGO_TARGET_DIR=/build/target
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates/detrix-api/Cargo.toml         crates/detrix-api/
+COPY crates/detrix-agent/Cargo.toml       crates/detrix-agent/
+COPY crates/detrix-application/Cargo.toml crates/detrix-application/
+COPY crates/detrix-cli/Cargo.toml         crates/detrix-cli/
+COPY crates/detrix-config/Cargo.toml      crates/detrix-config/
+COPY crates/detrix-core/Cargo.toml        crates/detrix-core/
+COPY crates/detrix-dap/Cargo.toml         crates/detrix-dap/
+COPY crates/detrix-ebpf/Cargo.toml        crates/detrix-ebpf/
+COPY crates/detrix-logging/Cargo.toml     crates/detrix-logging/
+COPY crates/detrix-lsp/Cargo.toml         crates/detrix-lsp/
+COPY crates/detrix-output/Cargo.toml      crates/detrix-output/
+COPY crates/detrix-ports/Cargo.toml       crates/detrix-ports/
+COPY crates/detrix-storage/Cargo.toml     crates/detrix-storage/
+COPY crates/detrix-testing/Cargo.toml     crates/detrix-testing/
+COPY crates/detrix-tui/Cargo.toml         crates/detrix-tui/
+COPY clients/rust/Cargo.toml              clients/rust/
+RUN for dir in crates/*/; do \
+        mkdir -p "${dir}src" && touch "${dir}src/lib.rs" "${dir}src/main.rs"; \
+    done && \
+    mkdir -p clients/rust/src && touch clients/rust/src/lib.rs
+RUN cargo fetch --locked
+
+# ── Stage 2: Compile ──────────────────────────────────────────────
+FROM rust-deps AS builder
+COPY crates crates
+COPY clients/rust clients/rust
+COPY detrix.toml detrix.minimal.toml ./
+RUN find crates clients/rust -name "*.rs" -exec touch {} +
+RUN --mount=type=cache,target=/build/target \
+    mkdir -p /out && \
+    cargo build --release --locked --bin detrix && \
+    cp /build/target/release/detrix /out/detrix
+
+# ── Stage 3: Runtime ──────────────────────────────────────────────
+# Needs clang to compile eBPF programs at uprobe-attach time.
+#
+# IMPORTANT: linux-headers-amd64 installs headers for the default bookworm kernel (~6.1).
+# If the host kernel differs (e.g. custom 5.15 or 6.6), BPF compilation may fail with
+# "kernel headers not found for version X.Y.Z".
+# Workaround: mount host headers into the container:
+#   -v /usr/src/linux-headers-$(uname -r):/usr/src/linux-headers-$(uname -r):ro
+# Reuse the same Debian/Go base as the eBPF Go fixtures/demo to avoid pulling
+# another runtime base image in local Docker workflows.
+FROM ${GO_IMAGE}
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    headers_pkg="linux-headers-${arch}"; \
+    case "${arch}" in \
+        amd64) multiarch="x86_64-linux-gnu" ;; \
+        arm64) multiarch="aarch64-linux-gnu" ;; \
+        *) echo "Unsupported architecture: ${arch}" >&2; exit 1 ;; \
+    esac; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        clang \
+        llvm \
+        "${headers_pkg}" \
+        linux-libc-dev \
+        libbpf-dev \
+        libgcc-s1 \
+        libllvm14 \
+        ca-certificates; \
+    ln -sf "/usr/include/${multiarch}/asm" /usr/include/asm; \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=builder /out/detrix /usr/local/bin/detrix
+ENTRYPOINT ["detrix", "--config", "/etc/detrix/config.toml", "agent", "start"]

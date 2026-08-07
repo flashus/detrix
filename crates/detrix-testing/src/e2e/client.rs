@@ -64,20 +64,25 @@ pub struct MetricInfo {
 /// Note: This must be compatible with MetricEventDisplay from the MCP server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventInfo {
+    #[serde(alias = "metricName")]
     pub metric_name: String,
     #[serde(default)]
     pub value: String,
-    #[serde(default)]
+    #[serde(default, alias = "timestampIso")]
     pub timestamp_iso: String,
-    #[serde(default)]
+    #[serde(default, alias = "ageSeconds")]
     pub age_seconds: i64,
-    #[serde(default)]
+    #[serde(default, alias = "isError")]
     pub is_error: bool,
     /// Captured stack trace (if introspection enabled)
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none", default, alias = "stackTrace")]
     pub stack_trace: Option<detrix_core::CapturedStackTrace>,
     /// Captured memory snapshot (if introspection enabled)
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        alias = "memorySnapshot"
+    )]
     pub memory_snapshot: Option<detrix_core::MemorySnapshot>,
     /// Multi-expression values (each entry corresponds to an expression)
     #[serde(default)]

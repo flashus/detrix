@@ -207,7 +207,7 @@ mod tests {
             metric_id: MetricId(42),
             metric_name: "order_placed".to_string(),
             connection_id: ConnectionId::new("trading-bot-1"),
-            timestamp: 1733590800_123456, // 2024-12-07 some time, in microseconds
+            timestamp: 1_733_590_800_123_456, // 2024-12-07 some time, in microseconds
             thread_name: Some("MainThread".to_string()),
             thread_id: Some(12345),
             values: vec![ExpressionValue::with_numeric(
@@ -231,7 +231,7 @@ mod tests {
             metric_id: MetricId(43),
             metric_name: "error_context".to_string(),
             connection_id: ConnectionId::new("api-server"),
-            timestamp: 1733590801_000000,
+            timestamp: 1_733_590_801_000_000,
             thread_name: Some("worker-1".to_string()),
             thread_id: Some(9999),
             values: vec![ExpressionValue::new(
@@ -312,7 +312,7 @@ mod tests {
             msg.extra_fields.get("_expr_0_string"),
             Some(&serde_json::json!("BTCUSD"))
         );
-        assert!(msg.extra_fields.get("_expr_0_numeric").is_none());
+        assert!(!msg.extra_fields.contains_key("_expr_0_numeric"));
 
         // Expression 1: numeric
         assert_eq!(
@@ -356,7 +356,7 @@ mod tests {
         let event = sample_event();
         let msg = GelfMessage::from_event(&event, None);
 
-        // 1733590800_123456 microseconds = 1733590800.123456 seconds
+        // 1_733_590_800_123_456 microseconds = 1733590800.123456 seconds
         let expected = 1733590800.123456;
         assert!((msg.timestamp - expected).abs() < 0.000001);
     }

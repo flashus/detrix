@@ -22,35 +22,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+mod docker_fixtures;
+use docker_fixtures::*;
+
 // =============================================================================
-// Constants
+// Local constants (not shared with other test files)
 // =============================================================================
-
-/// Auth token matching DETRIX_TOKEN in docker-compose.yml.
-/// The daemon auto-enables Simple auth via this env var.
-const DOCKER_AUTH_TOKEN: &str = "docker-test-token";
-
-/// Docker daemon HTTP port (host-mapped from container 8090).
-const DAEMON_HTTP_PORT: u16 = 8095;
-
-/// Docker Compose file path (relative to workspace root).
-const COMPOSE_FILE: &str = "fixtures/docker/docker-compose.yml";
-
-/// Docker Compose project name.
-const COMPOSE_PROJECT: &str = "detrix-cloud-test";
-
-// App control plane URLs (Docker-internal, used by daemon to reach apps).
-const PYTHON_APP_URL: &str = "http://test-app-python:8091";
-const GO_APP_URL: &str = "http://test-app-go:8091";
-const RUST_APP_URL: &str = "http://test-app-rust:8091";
-
-// Advertise URL for Phase 6/7 (matches host-mapped daemon port).
-const ADVERTISE_URL: &str = "http://localhost:8095";
-
-// File paths inside containers (from DWARF debug info / runtime WORKDIR).
-const PYTHON_FILE: &str = "/app/trade_bot_forever.py";
-const GO_FILE: &str = "/src/fixtures/go/detrix_example_app.go";
-const RUST_FILE: &str = "/src/fixtures/rust/src/main.rs";
 
 // =============================================================================
 // Helpers
@@ -66,6 +43,72 @@ fn compose_file_abs() -> String {
         .unwrap()
         .join(COMPOSE_FILE);
     ws.to_string_lossy().into_owned()
+}
+
+/// Extract service name from app URL (e.g., "http://test-app-go:8091" → "test-app-go").
+fn service_name_from_url(app_url: &str) -> &str {
+    app_url
+        .strip_prefix("http://")
+        .and_then(|s| s.split(':').next())
+        .unwrap_or("unknown")
+}
+
+/// Check that a Docker container is running and print status if not.
+fn ensure_container_running(app_url: &str) {
+    let service = service_name_from_url(app_url);
+    let compose_file = compose_file_abs();
+    let output = std::process::Command::new("docker")
+        .args([
+            "compose",
+            "-f",
+            &compose_file,
+            "-p",
+            COMPOSE_PROJECT,
+            "ps",
+            "-a",
+            "--format",
+            "{{.Name}} {{.Status}}",
+            service,
+        ])
+        .output();
+    match output {
+        Ok(out) => {
+            let status = String::from_utf8_lossy(&out.stdout);
+            let trimmed = status.trim();
+            if trimmed.is_empty() {
+                println!(
+                    "  WARNING: container '{}' not found in compose project",
+                    service
+                );
+            } else if !trimmed.contains("running") {
+                println!(
+                    "  WARNING: container '{}' is NOT running: {}",
+                    service, trimmed
+                );
+                // Try to restart the container
+                println!("  Attempting to restart '{}'...", service);
+                let restart_out = std::process::Command::new("docker")
+                    .args([
+                        "compose",
+                        "-f",
+                        &compose_file,
+                        "-p",
+                        COMPOSE_PROJECT,
+                        "start",
+                        service,
+                    ])
+                    .output();
+                match restart_out {
+                    Ok(ro) if ro.status.success() => {
+                        println!("  Container '{}' restarted successfully", service);
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                    _ => println!("  Failed to restart container '{}'", service),
+                }
+            }
+        }
+        Err(e) => println!("  WARNING: failed to check container status: {}", e),
+    }
 }
 
 /// Poll `list_connections` until a connected connection with the given language appears.
@@ -321,6 +364,8 @@ async fn force_recreate_with_env(service: &str, envs: &[(&str, &str)]) {
 #[async_trait::async_trait]
 trait DockerBridgeExt {
     async fn wake(&mut self, app_url: &str) -> Result<String, String>;
+    async fn wake_with_retry(&mut self, app_url: &str, max_attempts: u32)
+        -> Result<String, String>;
     async fn sleep_app(&mut self, app_url: &str);
     async fn add_metric(
         &mut self,
@@ -337,12 +382,37 @@ trait DockerBridgeExt {
 #[async_trait::async_trait]
 impl DockerBridgeExt for McpBridgeProcess {
     async fn wake(&mut self, app_url: &str) -> Result<String, String> {
-        let result = self.call_tool("wake", json!({"app_url": app_url})).await?;
+        let result = self.call_tool("wake", json!({"appUrl": app_url})).await?;
         Ok(extract_text(&result))
     }
 
+    async fn wake_with_retry(
+        &mut self,
+        app_url: &str,
+        max_attempts: u32,
+    ) -> Result<String, String> {
+        let mut last_err = String::new();
+        for attempt in 1..=max_attempts {
+            match self.wake(app_url).await {
+                Ok(text) => return Ok(text),
+                Err(e) => {
+                    last_err = e;
+                    if attempt < max_attempts {
+                        println!(
+                            "  wake attempt {}/{} failed, retrying in 2s: {}",
+                            attempt, max_attempts, last_err
+                        );
+                        ensure_container_running(app_url);
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                }
+            }
+        }
+        Err(last_err)
+    }
+
     async fn sleep_app(&mut self, app_url: &str) {
-        let _ = self.call_tool("sleep", json!({"app_url": app_url})).await;
+        let _ = self.call_tool("sleep", json!({"appUrl": app_url})).await;
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
@@ -359,7 +429,7 @@ impl DockerBridgeExt for McpBridgeProcess {
                 "name": name,
                 "location": location,
                 "expressions": expressions,
-                "connection_id": connection_id
+                "connectionId": connection_id
             }),
         )
         .await?;
@@ -620,9 +690,33 @@ async fn test_cloud_e2e() {
         }
     }
 
-    // Verify daemon is reachable via direct HTTP (fast sanity check)
-    let healthy = client.health().await.expect("health check failed");
-    assert!(healthy, "Daemon should be healthy before starting tests");
+    // Verify daemon is reachable via direct HTTP.
+    // `docker compose up --wait` passes its healthcheck via `detrix status`
+    // (internal port 8090), but OrbStack's host port mapping for 8095 may have
+    // a brief lag — poll with retries to avoid a false-negative on a cold start.
+    {
+        let http_client = reqwest::Client::new();
+        let start = Instant::now();
+        loop {
+            if let Ok(resp) = http_client
+                .get(format!("http://127.0.0.1:{}/health", DAEMON_HTTP_PORT))
+                .timeout(Duration::from_secs(3))
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    break;
+                }
+            }
+            if start.elapsed() > Duration::from_secs(30) {
+                panic!(
+                    "Daemon failed to become healthy on port {} within 30s",
+                    DAEMON_HTTP_PORT
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
     println!("Daemon healthy at port {}", DAEMON_HTTP_PORT);
 
     let daemon_url = format!("http://127.0.0.1:{}", DAEMON_HTTP_PORT);
@@ -667,8 +761,15 @@ async fn test_cloud_e2e() {
     println!("  Python events captured: {}", py_event_count);
 
     // ── Phase 1b: Go ──
+    // Use wake_with_retry: test-app-go has no healthcheck so docker compose --wait
+    // returns as soon as the container starts, but detrix.Init() takes ~2s to bind
+    // port 8091 (FetchAdvertiseURL has a 2s timeout). Retry handles both the
+    // startup race and transient container restarts.
     println!("\n--- Phase 1b: Go ---");
-    bridge.wake(GO_APP_URL).await.expect("wake go failed");
+    bridge
+        .wake_with_retry(GO_APP_URL, 3)
+        .await
+        .expect("wake go failed");
 
     let go_conn = poll_for_connection_bridge(&mut bridge, "go", Duration::from_secs(15))
         .await
@@ -795,7 +896,7 @@ async fn test_cloud_e2e() {
             "file": "trade_bot_forever.py",
             "expressions": ["order_id"],
             "name": "cloud-py-cp",
-            "connection_id": &py_conn
+            "connectionId": &py_conn
         }))
         .await
         .expect("observe python via control plane failed");
@@ -848,7 +949,10 @@ async fn test_cloud_e2e() {
 
     // Wake Go and use explicit connection_id
     println!("\n--- Phase 3: waking Go ---");
-    bridge.wake(GO_APP_URL).await.expect("wake go failed");
+    bridge
+        .wake_with_retry(GO_APP_URL, 3)
+        .await
+        .expect("wake go failed");
 
     let go_conn = poll_for_connection_bridge(&mut bridge, "go", Duration::from_secs(15))
         .await
@@ -863,7 +967,7 @@ async fn test_cloud_e2e() {
             "file": GO_FILE,
             "expressions": ["symbol"],
             "name": "cloud-go-bridge",
-            "connection_id": &go_conn
+            "connectionId": &go_conn
         }))
         .await
         .expect("observe go via bridge failed");
@@ -965,7 +1069,7 @@ async fn test_cloud_e2e() {
             "file": "trade_bot_forever.py",
             "expressions": ["order_id"],
             "name": "cloud-py-git",
-            "connection_id": &py_conn
+            "connectionId": &py_conn
         }))
         .await
         .expect("observe python via git-pinned bridge failed");
@@ -1197,7 +1301,7 @@ async fn test_cloud_e2e() {
                 "file": "trade_bot_forever.py",
                 "expressions": ["order_id"],
                 "name": "cloud-py-adv",
-                "connection_id": &py_conn
+                "connectionId": &py_conn
             }))
             .await
             .expect("observe python via control plane failed");
@@ -1231,7 +1335,10 @@ async fn test_cloud_e2e() {
         )
         .await;
 
-        let go_wake_text = bridge.wake(GO_APP_URL).await.expect("wake go failed");
+        let go_wake_text = bridge
+            .wake_with_retry(GO_APP_URL, 3)
+            .await
+            .expect("wake go failed");
         assert!(
             go_wake_text.contains("daemon_url")
                 || go_wake_text.contains("daemonUrl")
@@ -1251,7 +1358,7 @@ async fn test_cloud_e2e() {
                 "file": GO_FILE,
                 "expressions": ["symbol"],
                 "name": "cloud-go-adv",
-                "connection_id": &go_conn_6b
+                "connectionId": &go_conn_6b
             }))
             .await
             .expect("observe go via bridge failed");
@@ -1463,7 +1570,7 @@ async fn test_cloud_e2e() {
         "params": {
             "name": "wake",
             "arguments": {
-                "app_url": PYTHON_APP_URL
+                "appUrl": PYTHON_APP_URL
             }
         },
         "id": 2
@@ -1746,7 +1853,7 @@ async fn test_cloud_e2e() {
         "params": {
             "name": "wake",
             "arguments": {
-                "app_url": PYTHON_APP_URL
+                "appUrl": PYTHON_APP_URL
             }
         },
         "id": 2
@@ -1818,7 +1925,10 @@ async fn test_cloud_e2e() {
 
     // Wake Go app
     println!("\n--- Phase 9: waking Go ---");
-    bridge.wake(GO_APP_URL).await.expect("wake go failed");
+    bridge
+        .wake_with_retry(GO_APP_URL, 3)
+        .await
+        .expect("wake go failed");
 
     let go_conn_9 = poll_for_connection_bridge(&mut bridge, "go", Duration::from_secs(15))
         .await
@@ -1839,7 +1949,7 @@ async fn test_cloud_e2e() {
             "expressions": ["symbol"],
             "find_variable": "symbol",
             "name": "cloud-go-scope-aware",
-            "connection_id": &go_conn_9
+            "connectionId": &go_conn_9
         }))
         .await
         .expect("observe go scope-aware failed");

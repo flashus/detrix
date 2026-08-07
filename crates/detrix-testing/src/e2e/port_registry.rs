@@ -291,8 +291,8 @@ mod tests {
         let p1 = registry.allocate();
         let p2 = registry.allocate();
         assert_ne!(p1, p2);
-        assert!(p1 >= 40000 && p1 < 40100);
-        assert!(p2 >= 40000 && p2 < 40100);
+        assert!((40000..40100).contains(&p1));
+        assert!((40000..40100).contains(&p2));
     }
 
     #[test]

@@ -1,8 +1,11 @@
+# syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
 # Go Test App Docker Image
 # Multi-stage: static build of fixture + Delve, scratch runtime
 
 # ---- Build Stage ----
-FROM golang:1.24 AS builder
+ARG GO_IMAGE
+FROM ${GO_IMAGE} AS builder
 
 WORKDIR /src
 
@@ -12,7 +15,7 @@ COPY clients/go /src/clients/go
 # Copy fixture (its go.mod has replace directive to local client)
 COPY fixtures/go /src/fixtures/go
 
-WORKDIR /src/fixtures/go
+WORKDIR /src/fixtures/go/string_capture
 
 # Build with debug symbols (required for Delve), static binary (no CGO)
 RUN --mount=type=cache,target=/root/.cache/go-build \

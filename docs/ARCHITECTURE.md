@@ -1,33 +1,40 @@
 # Detrix Architecture
 
-**Version:** 1.2.0 | **Last Updated:** March 2026
+**Version:** 1.3.0 | **Last Updated:** August 2026
 
 Detrix is an LLM-first dynamic observability platform that enables developers and AI agents to add metrics to any line of code without redeployment or code changes.
 
 ## How It Works
 
-Detrix uses **debugger protocols (DAP - Debug Adapter Protocol)** to set **non-breaking observation points** (logpoints) that capture metrics without modifying source code or pausing execution.
+Detrix uses three backends for capturing metrics without modifying source code or pausing execution:
+
+- **DAP (Debug Adapter Protocol)** — connects to a running debugger (debugpy, Delve, lldb-dap)
+- **eBPF uprobes** — attaches directly to Go binaries on Linux without a debugger (10–50× lower overhead)
+- **Agent mode** — a lightweight binary deployed on each observed machine that runs eBPF locally and streams to a centralized server
 
 ```
                               stdio (JSON-RPC)              HTTP POST /mcp
 ┌─────────────────┐         ┌─────────────────┐         ┌──────────────────┐
 │   Claude Code   │────────▶│  detrix mcp     │────────▶│  Detrix Daemon   │
 │   (AI Agent)    │◀────────│  (MCP Bridge)   │◀────────│                  │
-└─────────────────┘         └─────────────────┘         └────────┬─────────┘
-                                                                 │
-                                                                 │ DAP Protocol
-                                                                 │
-                         ┌───────────────────────────────────────┼───────────────┐
-                         │                                       │               │
-                         ▼                                       ▼               ▼
-                    ┌─────────┐                             ┌─────────┐    ┌─────────┐
-                    │ debugpy │                             │  delve  │    │lldb-dap │
-                    │(Python) │                             │  (Go)   │    │ (Rust)  │
-                    └────┬────┘                             └────┬────┘    └────┬────┘
-                         │                                       │               │
-                         ▼                                       ▼               ▼
-                    Your Python                             Your Go App   Your Rust App
+└─────────────────┘         └─────────────────┘         └──────┬─────┬─────┘
+                                                               │     │
+                                             ┌─────────────────┘     └──────────────────┐
+                                             │ DAP Protocol                              │ eBPF (Linux Go)
+                                             │                                           │
+                         ┌───────────────────┼───────────────┐                    ┌─────┴──────┐
+                         │                   │               │                    │   uprobe   │
+                         ▼                   ▼               ▼                    │  (kernel)  │
+                    ┌─────────┐         ┌─────────┐    ┌─────────┐               └─────┬──────┘
+                    │ debugpy │         │  delve  │    │lldb-dap │                     │
+                    │(Python) │         │(Go/mac) │    │ (Rust)  │                     │ process_vm_readv
+                    └────┬────┘         └────┬────┘    └────┬────┘                     │
+                         │                   │               │                          ▼
+                         ▼                   ▼               ▼                   Your Go App
+                    Your Python         Your Go App   Your Rust App              (Linux only)
 ```
+
+**Go on Linux** uses eBPF automatically — set `host` to the binary path instead of a Delve address. See [EBPF.md](EBPF.md) for details.
 
 **Flow (Bridge Mode - Default):**
 1. **Claude Code** calls MCP tools (e.g., `add_metric`) via stdio
@@ -62,6 +69,85 @@ For Docker containers and remote hosts, the daemon runs alongside your service a
 - **Token auth** — Set `DETRIX_TOKEN` on both daemon and client for secure multi-tenant deployments
 
 See `examples/docker-demo/` for a complete working Docker example.
+
+### Agent Mode (v1.3.0+)
+
+For centralized observability where a single server manages multiple machines, Detrix supports **agent mode**. A lightweight `detrix agent` runs on each observed machine, executes the eBPF stack locally, and streams data to a centralized server over gRPC bidirectional streams.
+
+```
+                  Centralised Server
+┌─────────────────────────────────────────────────────────────┐
+│                   detrix serve                               │
+│                                                              │
+│  REST / MCP / gRPC ──► MetricService ──► SQLite             │
+│                               │                              │
+│                  AdapterLifecycleManager                     │
+│                  ┌────────────┴──────────────────────┐      │
+│          check agent_manager first                    │      │
+│    ┌─────────────▼──────┐             ┌──────────────▼──────┐│
+│    │  RemoteAdapter      │             │ DapAdapterFactory   ││
+│    │  (agent-managed)    │             │ chain (unchanged)   ││
+│    └─────────────┬──────┘             └────────────────────┘│
+│                  │                                           │
+│  AgentConnectionManager ◄── AgentServiceImpl (gRPC handler)  │
+│  (domain types only)         (proto conversion boundary)     │
+└──────────────────┬───────────────────────────────────────────┘
+                   │  gRPC bidi stream — AgentService.ConnectAgent
+          ┌────────┼──────────────────────────┐
+          │        │                          │
+    ┌─────▼─────┐  │                  ┌───────▼───────┐
+    │  Agent A  │  │                  │  Agent B      │
+    │  Linux    │  │                  │  Linux        │
+    │           │  │                  │               │
+    │ EbpfAdapter│  │                  │ EbpfAdapter   │
+    └───────────┘  │                  └───────────────┘
+```
+
+**Key design decisions:**
+
+- **Zero proto leakage** — `AgentConnectionManager` speaks only in domain types. The gRPC handler in `detrix-api` converts proto ↔ domain at the boundary. No `prost` types cross into `detrix-application`.
+- **Connection ID determinism** — Connections are identified by `SHA256(name|language|workspace_root|hostname)`. Agent-created connections use `name = "agent/{binary_path}"`, `workspace_root = "/"`, and the observed hostname. The live `agent_id` is only stream-routing state, so metrics remain attached when an agent is replaced on the same host without colliding same-named binaries in different directories.
+- **Multi-tenant visibility** — Agent connections have `user_id = None` (infrastructure — no owner). They are visible to all authenticated users. Any user can add metrics to agent connections; those metrics follow per-user ownership.
+- **Agent auth** — Agents authenticate via bearer token. The server validates `SHA-256(token)` against `agent_tokens` in its config. Separate from JWT/static user auth.
+- **Resilience** — `RemoteAdapter` includes a circuit breaker (3 consecutive timeouts in 60s → open, 30s cooldown → half-open). Event backpressure: bounded channel (1024 batches) with drop-on-full semantics and `DropCountUpdate` reporting.
+
+**Configuration:**
+
+Server `detrix.toml` (agent auth):
+```toml
+[agent]
+agent_tokens                 = ["<sha256-of-agent-token>"]
+# Set this to the oldest agent version you intend to support.
+min_compatible_agent_version = "1.3.0"
+```
+
+Agent `detrix.toml`:
+```toml
+[agent]
+server_grpc_url = "https://detrix-server:50061"
+token_file      = "/etc/detrix/agent-token"
+verify_tls      = true
+
+[agent.scanner]
+scan_interval_secs = 30
+include_patterns   = ["/app/*", "/usr/local/bin/*"]
+require_dwarf      = true
+allowed_read_prefixes = ["/app", "/usr/local/bin"]
+```
+
+**Usage:**
+```bash
+# Start agent (connects to server, scans /proc, streams events)
+detrix agent start --config /etc/detrix/detrix.toml
+
+# Dry-run scan: see which binaries the agent will discover
+detrix agent scan --verbose
+
+# Check agent health
+detrix agent status
+```
+
+See `fixtures/docker/Dockerfile.agent` and `fixtures/docker/docker-compose.agent.yml` for deployment examples.
 
 ## Clean Architecture
 
@@ -107,6 +193,7 @@ detrix-application→ detrix-ports, detrix-core, detrix-config ONLY (NO infrastr
 detrix-ports      → detrix-core, detrix-config ONLY (port definitions)
 detrix-storage    → detrix-ports, detrix-core, detrix-application* (implements traits)
 detrix-dap        → detrix-ports, detrix-core, detrix-application* (implements traits)
+detrix-ebpf       → detrix-ports, detrix-core (eBPF adapter for Go/Linux)
 detrix-lsp        → detrix-ports, detrix-core, detrix-application* (implements traits)
 detrix-output     → detrix-ports, detrix-core, detrix-application* (implements traits)
 detrix-core       → NOTHING (pure domain)
@@ -216,6 +303,16 @@ detrix-testing    → detrix-ports, detrix-core, detrix-application (test mocks)
 - `GoOutputParser` - Go/delve specifics
 - `RustOutputParser` - Rust/lldb-dap specifics
 - All use same logpoint format: `DETRICS:name={expr1}\x1F{expr2}\x1F...` (expressions delimited by ASCII Unit Separator)
+
+**detrix-ebpf** - eBPF uprobe adapter for Go on Linux
+- `EbpfAdapter` - Implements `DapAdapter` trait via eBPF uprobes (Linux-only, gated with `cfg(target_os = "linux")`)
+- `EbpfGoFactory` - Composite factory: routes Go connections to eBPF on Linux, falls back to Delve/DAP on macOS
+- DWARF parsing (`dwarf/`) - Reads variable locations, types, and struct layouts from ELF debug info
+- BPF C codegen (`probe/program.rs`) - Generates uprobe C source from variable locations, compiles at runtime
+- Ring buffer parsing (`probe/ringbuf.rs`) - Reads raw BPF events; resolves strings/slices/maps via `process_vm_readv`
+- Per-probe drop counter (`DETRIX_DROP_CNT`) - Per-CPU counter for ring buffer overflow events, queried via `DapAdapter::get_drop_count()`
+- PID namespace handling - Uses `bpf_get_ns_current_pid_tgid` (kernel ≥ 5.7) to get container-local PIDs for Docker
+- See [EBPF.md](EBPF.md) for usage details
 
 **detrix-lsp** - LSP-based purity analysis (optional)
 - Call hierarchy traversal for user-defined functions

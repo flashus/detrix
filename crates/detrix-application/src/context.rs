@@ -26,16 +26,17 @@ use crate::ports::{
 };
 use crate::safety::ValidatorRegistry;
 use crate::services::{
-    AdapterLifecycleManager, AnchorServiceConfig, ConnectionService, DefaultAnchorService,
-    EventCaptureService, FileInspectionService, FileSourceChain, McpUsageService, MetricService,
-    RemoteAppService, StreamingService,
+    AdapterLifecycleManager, AgentConnectionManagerRef, AnchorServiceConfig, ConnectionService,
+    DefaultAnchorService, EventCaptureService, FileInspectionService, FileSourceChain,
+    McpUsageService, MetricService, RemoteAppService, StreamingService,
 };
 use detrix_config::{
     AdapterConnectionConfig, AnchorConfig, ApiConfig, DaemonConfig, LimitsConfig, SafetyConfig,
     StorageConfig,
 };
-use detrix_core::{MetricEvent, SystemEvent};
-use detrix_ports::VfsRef;
+use detrix_core::{MetricEvent, SourceLanguage, SystemEvent};
+use detrix_ports::{PurityAnalyzerRef, VfsRef};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -61,6 +62,9 @@ pub struct AppContext {
 
     /// Adapter lifecycle manager (protocol-agnostic)
     pub adapter_lifecycle_manager: Arc<AdapterLifecycleManager>,
+
+    /// Agent connection manager (optional — present when agent mode is configured)
+    pub agent_connection_manager: Option<AgentConnectionManagerRef>,
 
     /// MCP usage tracking service for tool usage analytics
     pub mcp_usage: Arc<McpUsageService>,
@@ -99,6 +103,7 @@ impl AppContext {
     /// * `auth_token` - Optional authentication token for remote app control (e.g. from DETRIX_TOKEN env var, read in CLI layer)
     /// * `vfs` - Virtual File System for source file access (cache + disk fallback)
     /// * `file_source_chain` - Pluggable file source chain for transparent remote file fetching
+    /// * `purity_analyzers` - LSP purity analyzers per language (empty map = disabled)
     ///
     /// Note: In practice, `metric_storage` and `event_storage` often point to the
     /// same underlying storage (e.g., SqliteStorage), but they're separate parameters
@@ -123,6 +128,8 @@ impl AppContext {
         vfs: VfsRef,
         file_source_chain: Arc<FileSourceChain>,
         reference_repo: ConnectionReferenceRepositoryRef,
+        purity_analyzers: HashMap<SourceLanguage, PurityAnalyzerRef>,
+        agent_manager: Option<AgentConnectionManagerRef>,
     ) -> Self {
         // Create broadcast channels for real-time events
         let (event_tx, _) = broadcast::channel::<MetricEvent>(api_config.event_buffer_capacity);
@@ -140,7 +147,7 @@ impl AppContext {
         });
 
         // Create the AdapterLifecycleManager with event batching and adapter config
-        let adapter_lifecycle_manager = Arc::new(AdapterLifecycleManager::with_config(
+        let adapter_lifecycle_manager = Arc::new(AdapterLifecycleManager::with_agent_manager(
             Arc::clone(&event_capture_service),
             event_tx.clone(),
             system_event_tx.clone(),
@@ -152,6 +159,7 @@ impl AppContext {
             daemon_config.drain_timeout_ms,
             output.clone(), // Pass GELF output to lifecycle manager
             Arc::clone(&vfs),
+            agent_manager.clone(),
         ));
 
         // Create the ConnectionService with the lifecycle manager
@@ -204,6 +212,7 @@ impl AppContext {
                     system_event_tx.clone(),
                 )
                 .validators(validators)
+                .purity_analyzers(purity_analyzers)
                 .adapter_config(adapter_config.clone())
                 .limits_config(limits_config.clone())
                 .anchor_service(anchor_service)
@@ -214,12 +223,20 @@ impl AppContext {
             event_capture_service,
             connection_service,
             adapter_lifecycle_manager,
+            agent_connection_manager: None, // Set via with_agent_connection_manager()
             mcp_usage,
             remote_app_service,
             file_inspection,
             vfs,
             file_source_chain,
         }
+    }
+
+    /// Set the agent connection manager on this context.
+    /// Returns a new AppContext with the agent manager configured.
+    pub fn with_agent_connection_manager(mut self, mgr: AgentConnectionManagerRef) -> Self {
+        self.agent_connection_manager = Some(mgr);
+        self
     }
 
     /// Create new application context with default config
@@ -251,6 +268,8 @@ impl AppContext {
             vfs,
             file_source_chain,
             reference_repo,
+            HashMap::new(), // No LSP purity analyzers
+            None,           // No agent manager
         )
     }
 

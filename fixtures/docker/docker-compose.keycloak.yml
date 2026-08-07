@@ -23,8 +23,8 @@ services:
   # Init container: fetches a long-lived service JWT from Keycloak and writes
   # it to a shared volume. Both detrix-keycloak and test-app-go read this token.
   token-init:
-    image: alpine:3.20
-    command: sh -c "apk add --no-cache curl > /dev/null 2>&1 && sh /scripts/fetch-token.sh"
+    image: ${RUNTIME_IMAGE}
+    command: sh -c "apt-get update > /dev/null 2>&1 && apt-get install -y --no-install-recommends curl ca-certificates > /dev/null 2>&1 && rm -rf /var/lib/apt/lists/* && sh /scripts/fetch-token.sh"
     depends_on:
       keycloak:
         condition: service_healthy
@@ -35,6 +35,9 @@ services:
       KEYCLOAK_USERNAME: go-service
       KEYCLOAK_PASSWORD: go-service-pass
       TOKEN_FILE: /shared/service-token
+      # Bypass host-injected proxy (e.g. OrbStack) for intra-container requests.
+      NO_PROXY: "keycloak,localhost,127.0.0.1"
+      no_proxy: "keycloak,localhost,127.0.0.1"
     volumes:
       - shared-token:/shared
       - ./keycloak/fetch-token.sh:/scripts/fetch-token.sh:ro
@@ -43,6 +46,9 @@ services:
     build:
       context: ../..
       dockerfile: fixtures/docker/Dockerfile.server-keycloak
+      args:
+        RUST_IMAGE: ${RUST_IMAGE}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE}
     ports:
       - "8098:8090"
       - "50067:50061"
@@ -54,6 +60,12 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       TOKEN_FILE: /shared/service-token
+      # Bypass host-injected proxy for intra-container and host requests:
+      # - keycloak:8080 for JWKS fetch
+      # - test-app-go:8091 for wake/sleep control plane calls
+      # - host.docker.internal: bridge file server (runs on host, reachable via host-gateway)
+      NO_PROXY: "keycloak,test-app-go,host.docker.internal,localhost,127.0.0.1"
+      no_proxy: "keycloak,test-app-go,host.docker.internal,localhost,127.0.0.1"
     depends_on:
       keycloak:
         condition: service_healthy
@@ -69,11 +81,16 @@ services:
     build:
       context: ../..
       dockerfile: fixtures/docker/Dockerfile.go-keycloak
+      args:
+        GO_IMAGE: ${GO_IMAGE}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE}
     depends_on:
       detrix-keycloak:
         condition: service_healthy
       token-init:
         condition: service_completed_successfully
+    # Restart on crash so wake retries can succeed after a container failure.
+    restart: on-failure
     volumes:
       - shared-token:/shared:ro
     environment:
@@ -84,6 +101,8 @@ services:
       DETRIX_CONTROL_PORT: "8091"
       DETRIX_REGISTER_TIMEOUT: "30"
       TOKEN_FILE: /shared/service-token
+      NO_PROXY: "detrix-keycloak,keycloak,localhost,127.0.0.1"
+      no_proxy: "detrix-keycloak,keycloak,localhost,127.0.0.1"
 
 volumes:
   detrix-keycloak-data:

@@ -8,7 +8,7 @@ use detrix_application::{
     MetricRepositoryRef,
 };
 use detrix_core::{
-    ConnectionId, ConnectionIdentity, ConnectionStatus, Error, Location, MetricEvent,
+    Connection, ConnectionId, ConnectionIdentity, ConnectionStatus, Error, Location, MetricEvent,
     SourceLanguage, SystemEvent,
 };
 use detrix_ports::{MetricRepository, VfsRef};
@@ -27,12 +27,6 @@ use test_support::{
 // ============================================================================
 // Mock Implementations for Testing
 // ============================================================================
-
-/// Mock ConnectionRepository for testing
-
-/// Mock EventRepository for testing
-
-/// Mock MetricRepository that returns empty (no pre-existing metrics)
 
 // ============================================================================
 // Helper to create test fixtures
@@ -1158,7 +1152,7 @@ async fn test_container_restart_skips_conflicting_metric_locations() {
     // the migration runs (e.g., added by a concurrent tool call).
     let new_identity =
         ConnectionIdentity::new("my-app", SourceLanguage::Python, "/workspace", "host-new");
-    let new_id = ConnectionId::new(&new_identity.to_uuid());
+    let new_id = ConnectionId::new(new_identity.to_uuid());
     let mut conflict_metric = sample_metric_with_connection("new-metric", &new_id.0);
     conflict_metric.location = Location {
         file: "/workspace/app.py".to_string(),
@@ -1424,5 +1418,48 @@ async fn test_restore_connections_skips_already_connected() {
     assert!(
         service.has_running_adapter(&connection_id).await,
         "late snapshot: restore must not stop the running adapter"
+    );
+}
+
+#[tokio::test]
+async fn test_restore_connections_skips_agent_managed_snapshot_entries() {
+    let (repo, metric_repo, reference_repo, lifecycle_manager, system_event_tx, vfs) =
+        create_test_fixtures();
+    let service = ConnectionService::new(
+        repo.clone(),
+        metric_repo,
+        reference_repo.clone(),
+        lifecycle_manager,
+        system_event_tx,
+        vfs,
+    );
+
+    let identity = ConnectionIdentity::new("agent/demo/exe", SourceLanguage::Go, "/", "host1");
+    let mut conn =
+        Connection::new_with_identity(identity, "/proc/1/exe".to_string(), 1024).unwrap();
+    conn.safe_mode = true;
+    repo.save(&conn).await.unwrap();
+
+    let snapshot = repo.list_all().await.unwrap();
+    let (reconnected, deleted) = service.restore_connections_on_startup(snapshot).await;
+
+    assert_eq!(
+        reconnected, 0,
+        "agent-managed rows must be ignored by startup restore"
+    );
+    assert_eq!(
+        deleted, 0,
+        "agent-managed rows must not be deleted by startup restore"
+    );
+
+    let conn_after = repo.get_connection(&conn.id).await.unwrap();
+    assert_eq!(
+        conn_after.status,
+        ConnectionStatus::Disconnected,
+        "agent-managed row should remain untouched until the agent re-registers"
+    );
+    assert!(
+        !service.has_running_adapter(&conn.id).await,
+        "daemon must not start a local adapter for agent-managed rows during startup restore"
     );
 }

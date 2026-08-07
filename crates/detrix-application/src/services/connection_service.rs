@@ -405,6 +405,42 @@ impl ConnectionService {
         Ok(connection_id)
     }
 
+    /// Access the connection repository for direct status updates.
+    /// Used by AgentConnectionManager to update connection status
+    /// without going through adapter lifecycle management.
+    #[allow(dead_code)]
+    pub(crate) fn connection_repo(&self) -> &ConnectionRepositoryRef {
+        &self.connection_repo
+    }
+
+    /// Create multiple connections in a single SQLite transaction.
+    ///
+    /// This method:
+    /// 1. Creates Connection entities from identities
+    /// 2. Saves all connections atomically via `save_batch`
+    /// 3. Does NOT start adapters or emit events — caller handles lifecycle
+    ///
+    /// Used by agent mode registration where the server receives multiple
+    /// binaries at once and needs to create connections without starting
+    /// individual adapters.
+    pub async fn create_connections_batch(
+        &self,
+        identities: Vec<(ConnectionIdentity, String, u16, bool)>,
+    ) -> Result<Vec<ConnectionId>> {
+        let mut connections = Vec::with_capacity(identities.len());
+        for (identity, host, port, safe_mode) in identities {
+            Connection::validate_user_id(None)?;
+            let mut connection = Connection::new_with_identity(identity, host, port)?;
+            connection.safe_mode = safe_mode;
+            connections.push(connection);
+        }
+
+        let ids: Vec<ConnectionId> = connections.iter().map(|c| c.id.clone()).collect();
+        self.connection_repo.save_batch(&connections).await?;
+
+        Ok(ids)
+    }
+
     /// Finalize a successful adapter start: update status to Connected, add client
     /// reference, and emit the connection-created system event.
     ///
@@ -763,6 +799,17 @@ impl ConnectionService {
         for conn in connections {
             let conn_id = conn.id.clone();
             let addr = format!("{}:{}", conn.host, conn.port);
+
+            // Agent-owned connections must be re-established by the agent registration flow.
+            // Restoring them here races with startup and can attach the daemon to a stale
+            // /proc/<pid>/exe path before the agent has rebuilt the routing table.
+            if conn.is_agent_managed() {
+                debug!(
+                    "Skipping startup restore for agent-managed connection {} at {}",
+                    conn_id.0, addr
+                );
+                continue;
+            }
 
             // Skip connections that are already active — they were created during the current
             // session (race with this background task) and must not be interrupted.

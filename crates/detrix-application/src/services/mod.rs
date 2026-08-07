@@ -5,7 +5,9 @@
 //! handle DTO mapping and delegate to these services.
 
 pub mod adapter_lifecycle_manager;
+pub mod agent_connection_manager;
 pub mod anchor_service;
+pub mod circuit_breaker;
 pub mod config_service;
 pub mod connection_service;
 pub mod dlq_recovery_service;
@@ -15,10 +17,13 @@ pub mod file_inspection_service;
 pub mod file_inspection_types;
 pub mod file_serving;
 pub mod file_source_chain;
+pub mod file_sources;
 pub mod file_watcher_service;
 pub mod jwt_validator;
 pub mod mcp_usage_service;
 pub mod metric_service;
+pub mod remote_adapter;
+pub use remote_adapter::RemoteAdapter;
 pub mod remote_app_service;
 pub mod shutdown;
 pub mod streaming_service;
@@ -27,6 +32,11 @@ pub mod system_event_service;
 pub use adapter_lifecycle_manager::{
     AdapterLifecycleManager, DisconnectAllResult, ManagedAdapterInfo, ManagedAdapterStatus,
     StartAdapterResult,
+};
+// Agent connection manager (for server-side agent support)
+pub use agent_connection_manager::{
+    AgentBinaryInfo, AgentCapabilities, AgentConnectionManager, AgentConnectionManagerRef,
+    IncomingAgentMessage, OutgoingAgentMessage, RegisterResult, VariableInfo,
 };
 pub use anchor_service::{
     AnchorServiceConfig, DefaultAnchorService, LspSymbolLookup, LspSymbolLookupRef, NullLspLookup,
@@ -43,6 +53,7 @@ pub use file_inspection_types::{
 };
 pub use file_serving::{FileServingError, FileServingService, ReadFileRequest, ReadFileResponse};
 pub use file_source_chain::FileSourceChain;
+pub use file_sources::AgentFileSource;
 pub use file_watcher_service::{FileWatcherOrchestrator, NotifyFileWatcher};
 pub use metric_service::{FileChangeResult, MetricService, MetricServiceBuilder};
 pub use streaming_service::{

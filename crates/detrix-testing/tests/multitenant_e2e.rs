@@ -69,6 +69,29 @@ impl MultitenantDaemon {
     }
 
     async fn start(&mut self) -> Result<(), String> {
+        const MAX_DAEMON_START_ATTEMPTS: usize = 5;
+
+        for attempt in 1..=MAX_DAEMON_START_ATTEMPTS {
+            match self.start_once().await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < MAX_DAEMON_START_ATTEMPTS && e.contains("port") => {
+                    self.stop_daemon();
+                    self.http_port = get_http_port();
+                    self.grpc_port = get_grpc_port();
+                    eprintln!(
+                        "multitenant_e2e: daemon start attempt {attempt} failed ({e}); \
+                         retrying on HTTP {} / gRPC {}",
+                        self.http_port, self.grpc_port
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err("daemon start retry loop exhausted".to_string())
+    }
+
+    async fn start_once(&mut self) -> Result<(), String> {
         let db_path = self.temp_dir.path().join("detrix.db");
         let config_content = format!(
             r#"
@@ -142,6 +165,13 @@ enable_ast_analysis = false
             return Err(format!("daemon not ready on :{}", self.http_port));
         }
         Ok(())
+    }
+
+    fn stop_daemon(&mut self) {
+        if let Some(mut p) = self.daemon_process.take() {
+            let _ = p.kill();
+            let _ = p.wait();
+        }
     }
 
     /// Start debugpy on the pre-allocated debugpy_port and create a shared DAP connection.
@@ -352,10 +382,7 @@ enable_ast_analysis = false
 
 impl Drop for MultitenantDaemon {
     fn drop(&mut self) {
-        if let Some(mut p) = self.daemon_process.take() {
-            let _ = p.kill();
-            let _ = p.wait();
-        }
+        self.stop_daemon();
         if let Some(mut p) = self.debugpy_process.take() {
             let _ = p.kill();
             let _ = p.wait();

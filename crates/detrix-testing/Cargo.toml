@@ -15,6 +15,7 @@ detrix-config = { path = "../detrix-config" }
 detrix-ports = { path = "../detrix-ports" }
 detrix-application = { path = "../detrix-application" }
 detrix-api = { path = "../detrix-api" }
+detrix-agent = { path = "../detrix-agent" }
 
 # Async runtime
 tokio.workspace = true

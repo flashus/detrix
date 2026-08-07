@@ -1,0 +1,18 @@
+# Detrix Agent E2E Test Configuration.
+
+[agent]
+agent_id_file = "/var/lib/detrix/agent-id"
+server_grpc_url = "http://detrix-agent-server:50061"
+token_file = "/etc/detrix/agent-token"
+metrics_host = "0.0.0.0"
+metrics_port = 9095
+reconnect_interval_secs = 2
+reconnect_max_interval_secs = 60
+heartbeat_interval_secs = 10
+
+[agent.scanner]
+scan_interval_secs = 10
+include_patterns = ["/app/*", "/usr/local/bin/*"]
+exclude_patterns = []
+require_dwarf = true
+allowed_read_prefixes = ["/src"]

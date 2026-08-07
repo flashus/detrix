@@ -39,6 +39,7 @@ pub fn metric_to_content(metric: &Metric) -> Vec<Content> {
 /// A wrapper for MetricEvent that adds human-readable timestamp information
 /// for LLM agents to easily understand event freshness
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MetricEventDisplay {
     /// Event ID
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -280,6 +281,7 @@ fn format_code_lines(messages: &mut Vec<Content>, lines: &[CodeLine]) {
 /// A wrapper for SystemEvent that adds human-readable timestamp information
 /// for LLM agents to easily understand event freshness
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemEventDisplay {
     /// Event ID
     #[serde(skip_serializing_if = "Option::is_none")]

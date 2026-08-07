@@ -1,0 +1,64 @@
+[package]
+name = "detrix-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core and config
+detrix-core = { path = "../detrix-core" }
+detrix-config = { path = "../detrix-config" }
+detrix-logging = { path = "../detrix-logging" }
+detrix-ebpf = { path = "../detrix-ebpf" }
+detrix-dap = { path = "../detrix-dap" }
+detrix-ports = { path = "../detrix-ports" }
+
+# gRPC client for connecting to server
+detrix-api = { path = "../detrix-api" }
+tonic = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# UUID for request IDs
+uuid.workspace = true
+
+# DashMap for concurrent maps
+dashmap = { workspace = true }
+
+# Metrics HTTP server
+axum = { workspace = true }
+
+# CLI (for --version etc.)
+clap = { workspace = true, features = ["derive"] }
+
+# Error handling
+thiserror.workspace = true
+
+# Hostname detection
+hostname = "0.4"
+
+# Glob pattern matching
+glob = "0.3"
+
+# ELF / DWARF detection for scanner
+object = { workspace = true }
+
+# Custom TLS verifier (needed for verify_tls=false in dev environments).
+# rustls is already a transitive dep via tonic; listed directly for explicit version control.
+rustls = { version = "0.23", features = ["ring"] }
+
+[lints]
+workspace = true

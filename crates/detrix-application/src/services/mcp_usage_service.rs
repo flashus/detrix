@@ -3,6 +3,8 @@
 //! Tracks tool invocations, error patterns, and workflow adherence
 //! to enable data-driven improvements to MCP tool descriptions.
 
+use std::cmp::Reverse;
+
 use detrix_config::constants::DEFAULT_MCP_USAGE_HISTORY;
 pub use detrix_core::{McpErrorCode, McpUsageEvent};
 use serde::{Deserialize, Serialize};
@@ -201,7 +203,7 @@ impl McpUsageCounters {
         ];
         // Filter zero counts and sort by count descending
         errors.retain(|(_, count)| *count > 0);
-        errors.sort_by(|a, b| b.1.cmp(&a.1));
+        errors.sort_by_key(|&(_, count)| Reverse(count));
         errors
     }
 }

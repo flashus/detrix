@@ -829,6 +829,16 @@ pub enum OperationWarning {
         /// The error message
         error: String,
     },
+
+    /// LSP purity analysis resolved an unknown function (informational).
+    PurityResolution {
+        /// Function name that was resolved
+        function_name: String,
+        /// Resolution result: "pure" or "impure"
+        resolution: String,
+        /// How it was resolved (e.g., "LSP call hierarchy analysis")
+        source: String,
+    },
 }
 
 impl std::fmt::Display for OperationWarning {
@@ -935,6 +945,17 @@ impl std::fmt::Display for OperationWarning {
                     f,
                     "Anchor capture failed for metric '{}' at {}: {}",
                     metric_name, location, error
+                )
+            }
+            Self::PurityResolution {
+                function_name,
+                resolution,
+                source,
+            } => {
+                write!(
+                    f,
+                    "LSP purity: '{}' resolved as {} ({})",
+                    function_name, resolution, source
                 )
             }
         }

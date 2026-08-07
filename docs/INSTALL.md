@@ -243,6 +243,14 @@ See `examples/docker-demo/` for a complete working example.
 
 ---
 
+## Standalone Agent Mode
+
+For a central server observing multiple Linux hosts, use the [Agent Mode
+Guide](AGENT.md). It covers token configuration, TLS, file-read restrictions,
+Docker deployment, health checks, and the `detrix agent` CLI.
+
+---
+
 ## Authentication
 
 Detrix is **secure by default**. When no `[api.auth]` section is configured, the daemon auto-generates a token saved to `~/detrix/auth-token`. The MCP bridge discovers it automatically — no setup needed for single-user local development.

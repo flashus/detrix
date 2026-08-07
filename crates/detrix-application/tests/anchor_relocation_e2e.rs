@@ -1459,10 +1459,7 @@ mod integration_full_lifecycle {
             RelocationResult::RelocatedByContext { new_line, .. }
             | RelocationResult::RelocatedInSymbol { new_line, .. } => {
                 // Verify new location makes sense
-                assert!(
-                    new_line >= 7 && new_line <= 10,
-                    "New line should be around 9"
-                );
+                assert!((7..=10).contains(&new_line), "New line should be around 9");
             }
             RelocationResult::Orphaned { reason, .. } => {
                 // Also acceptable if changes are too significant

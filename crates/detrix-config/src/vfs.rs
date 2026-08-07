@@ -7,7 +7,7 @@
 //!
 //! ```toml
 //! [vfs]
-//! source_priority = ["control_plane", "disk"]  # File source chain priority
+//! source_priority = ["agent", "control_plane", "disk"]  # File source chain priority
 //! fetch_timeout_seconds = 10                    # HTTP fetch timeout
 //! max_file_size_bytes = 10485760                # 10MB max file size
 //! ```
@@ -38,6 +38,8 @@ pub enum SourceKind {
     ControlPlane,
     /// Fetch from MCP bridge's file server (supports git-pinned serving)
     Bridge,
+    /// Fetch from agent (remote file access via gRPC stream)
+    Agent,
     /// Read from local filesystem
     Disk,
 }
@@ -48,6 +50,7 @@ impl SourceKind {
         match self {
             SourceKind::ControlPlane => "control_plane",
             SourceKind::Bridge => "bridge",
+            SourceKind::Agent => "agent",
             SourceKind::Disk => "disk",
         }
     }
@@ -80,7 +83,11 @@ pub struct VfsConfig {
 }
 
 fn default_source_priority() -> Vec<SourceKind> {
-    vec![SourceKind::ControlPlane, SourceKind::Disk]
+    vec![
+        SourceKind::Agent,
+        SourceKind::ControlPlane,
+        SourceKind::Disk,
+    ]
 }
 
 fn default_fetch_timeout_seconds() -> u64 {

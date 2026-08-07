@@ -21,8 +21,9 @@ use crate::scope::MetricScope;
 use crate::services::{AdapterLifecycleManager, FileInspectionService};
 use crate::Result;
 use detrix_config::{AdapterConnectionConfig, LimitsConfig};
-use detrix_core::{ConnectionId, Metric, SystemEvent};
-use std::collections::BTreeSet;
+use detrix_core::{ConnectionId, Metric, SourceLanguage, SystemEvent};
+use detrix_ports::PurityAnalyzerRef;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -48,6 +49,8 @@ pub struct MetricService {
     pub(super) system_event_tx: broadcast::Sender<SystemEvent>,
     /// Anchor service for location tracking across code changes
     pub(super) anchor_service: AnchorServiceRef,
+    /// LSP purity analyzers per language (for resolving unknown functions in Trusted mode)
+    pub(super) purity_analyzers: HashMap<SourceLanguage, PurityAnalyzerRef>,
 }
 
 impl std::fmt::Debug for MetricService {

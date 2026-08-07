@@ -1761,7 +1761,7 @@ impl TestExecutor {
     pub fn go_detrix_example_app_path(&self) -> Option<PathBuf> {
         let script_path = self
             .workspace_root
-            .join("fixtures/go/detrix_example_app.go");
+            .join("fixtures/go/string_capture/main.go");
         if script_path.exists() {
             Some(script_path)
         } else {
@@ -2550,6 +2550,10 @@ port = {}
 
 [safety]
 enable_ast_analysis = false
+
+[ebpf]
+max_capture_depth = 10
+capture_goid = true
 "#,
             workspace_path_str,
             db_path_str,
@@ -2614,7 +2618,7 @@ enable_ast_analysis = false
             .current_dir(&self.workspace_root)
             .env(
                 "RUST_LOG",
-                "detrix=debug,detrix_dap=debug,detrix_application=debug,detrix_api=debug,info",
+                "detrix=debug,detrix_dap=debug,detrix_application=debug,detrix_api=debug,detrix_ebpf=debug,info",
             )
             // Isolate DETRIX_HOME to the per-test temp dir so that any fallback paths
             // (auth-token, credentials.toml, default DB) don't collide across parallel tests.

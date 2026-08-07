@@ -211,6 +211,7 @@ pub async fn close_connection(
 
 /// Cleanup stale connections response
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CleanupResponse {
     /// Number of connections that were removed
     pub deleted: u64,

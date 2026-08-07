@@ -16,6 +16,13 @@ use std::fmt;
 /// Minimum unreserved port number (ports 0-1023 are reserved for system services)
 pub const MIN_UNRESERVED_PORT: u16 = 1024;
 
+/// Name prefix for all agent-managed connections.
+///
+/// Agent connections use `"agent/<binary_path>"` as their name.
+/// This prefix is the cross-crate contract between `detrix-core`, `detrix-application`,
+/// and test helpers — never hardcode `"agent/"` elsewhere.
+pub const AGENT_NAME_PREFIX: &str = "agent/";
+
 /// Placeholder workspace root used when the actual workspace is unknown.
 ///
 /// Clients send this value when they cannot determine their working directory.
@@ -208,7 +215,25 @@ fn default_auto_reconnect() -> bool {
     true
 }
 
+/// Returns true when the identity names an agent-managed connection.
+///
+/// Agent-managed connections use the `agent/` name prefix and carry no
+/// network port (eBPF-backed), so port validation is skipped for them.
+fn is_agent_managed_identity(identity: &ConnectionIdentity) -> bool {
+    identity.name.starts_with(AGENT_NAME_PREFIX)
+}
+
 impl Connection {
+    /// Returns true when this connection is owned by a Detrix agent rather than a local adapter.
+    ///
+    /// Agent-managed connections use a stable persisted name prefix (`agent/...`) so the daemon
+    /// can recognize them before the in-memory routing table is rebuilt on startup.
+    pub fn is_agent_managed(&self) -> bool {
+        self.name
+            .as_deref()
+            .is_some_and(|name| name.starts_with(AGENT_NAME_PREFIX))
+    }
+
     /// Returns the workspace root if it's a valid, usable path.
     ///
     /// Filters out placeholder values ("/unknown") and empty strings.
@@ -232,8 +257,10 @@ impl Connection {
         // Validate identity
         identity.validate()?;
 
-        // Validate port range (MIN_UNRESERVED_PORT-65535)
-        if port < MIN_UNRESERVED_PORT {
+        // Validate port range (MIN_UNRESERVED_PORT-65535).
+        // Agent-managed connections (eBPF) have no network port — they use
+        // port 0 as a sentinel, so exempt them from this check.
+        if port < MIN_UNRESERVED_PORT && !is_agent_managed_identity(&identity) {
             return Err(Error::InvalidConfig(
                 format!(
                     "Port {} is below {} (reserved range)",
@@ -881,5 +908,32 @@ mod tests {
 
         // With ttl_days = 0, anything older than today should be inactive
         assert!(conn.inactive_for_days(0, now));
+    }
+
+    #[test]
+    fn test_agent_managed_connection_allows_port_zero() {
+        // Agent-managed (eBPF) connections have no network port — port 0 is a sentinel.
+        let identity = ConnectionIdentity::new(
+            format!("{AGENT_NAME_PREFIX}app/detrix_example_app"),
+            SourceLanguage::Go,
+            "/",
+            "host1",
+        );
+        let conn = Connection::new_with_identity(identity, "/proc/22/exe".to_string(), 0)
+            .expect("agent-managed connection with port 0 should be allowed");
+        assert_eq!(conn.port, 0);
+        assert!(conn.is_agent_managed());
+    }
+
+    #[test]
+    fn test_non_agent_connection_rejects_port_zero() {
+        // Non-agent connections must still enforce the reserved port range.
+        let identity = ConnectionIdentity::new("trade-bot", SourceLanguage::Python, "/ws", "host");
+        let result = Connection::new_with_identity(identity, "127.0.0.1".to_string(), 0);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Port 0 is below 1024 (reserved range)"));
     }
 }

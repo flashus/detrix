@@ -252,17 +252,20 @@ async fn run_direct(config_path: &str, config: &Config) -> Result<()> {
     info!("Adapter factory initialized with reconnection middleware");
 
     // Create application context from infrastructure components
-    let ctx = infra.into_app_context(
-        &config.api,
-        &config.safety,
-        &config.storage,
-        &config.daemon,
-        &config.adapter,
-        &config.anchor,
-        &config.limits,
-        &config.vfs,
-        gelf_output.clone(),
-    );
+    let ctx = infra
+        .into_app_context(
+            &config.api,
+            &config.safety,
+            &config.storage,
+            &config.daemon,
+            &config.adapter,
+            &config.anchor,
+            &config.limits,
+            &config.vfs,
+            gelf_output.clone(),
+            Some(config.agent.clone()),
+        )
+        .await;
 
     // Create API state from the pre-configured AppContext
     let api_state = Arc::new(
@@ -452,12 +455,23 @@ pub async fn spawn_daemon_for_mcp(
             MAX_SPAWN_ATTEMPTS
         );
 
-        // Open log file for stdout/stderr (fresh handle per attempt)
-        let log_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&daemon_log_path)
-            .context("Failed to open daemon log file")?;
+        // Open log file for stdout/stderr (fresh handle per attempt).
+        // Truncate on first attempt so stale content from old test runs doesn't
+        // bleed into the log tail we read after a failure.
+        let log_file = if attempt == 1 {
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&daemon_log_path)
+                .context("Failed to open daemon log file")?
+        } else {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&daemon_log_path)
+                .context("Failed to open daemon log file")?
+        };
         let log_file_stderr = log_file
             .try_clone()
             .context("Failed to clone log file handle")?;
@@ -607,13 +621,24 @@ pub async fn spawn_daemon_for_mcp(
             }
         }
 
-        // If daemon died and we have retries left, try again
-        if daemon_died && attempt < MAX_SPAWN_ATTEMPTS {
-            continue;
-        }
-
-        // Either daemon died on last attempt, or timed out
+        // If daemon died and we have retries left, try again — but first check if another
+        // bridge already spawned the daemon (race condition: two bridges start simultaneously).
         if daemon_died {
+            // Check if a healthy daemon is now running (spawned by a concurrent bridge)
+            let discovery = DaemonDiscovery::new().with_pid_file(pid_file);
+            if let Ok(Some(existing)) = discovery.find_daemon() {
+                if is_daemon_healthy(&existing.host, existing.http_port).await {
+                    info!(
+                        "Daemon already running (PID: {:?}) at {}:{} — using existing instance",
+                        existing.pid, existing.host, existing.http_port
+                    );
+                    return Ok(existing.http_port);
+                }
+            }
+
+            if attempt < MAX_SPAWN_ATTEMPTS {
+                continue;
+            }
             break;
         }
 

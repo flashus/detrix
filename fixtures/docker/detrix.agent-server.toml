@@ -1,0 +1,29 @@
+# Detrix server configuration for the standalone agent E2E compose stack.
+
+[api.rest]
+host = "0.0.0.0"
+port = 8090
+
+[api.grpc]
+host = "0.0.0.0"
+port = 50061
+
+[storage]
+path = "/data/detrix/data.db"
+
+[vfs]
+source_priority = ["agent", "disk"]
+fetch_timeout_seconds = 10
+
+[agent]
+# SHA-256("test-token-12345"); this is test-only authentication.
+agent_tokens = ["e4c0a87e760240da600e6d0c5c37516742a3d691feb803a33dcbbe8405e64b1e"]
+min_compatible_agent_version = "1.3.0"
+
+[ebpf]
+max_capture_vars = 4
+string_capture_bytes = 64
+blob_capture_bytes = 64
+max_capture_depth = 2
+max_struct_fields = -1
+max_array_values = 32

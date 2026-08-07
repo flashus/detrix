@@ -35,6 +35,7 @@ pub use go::GoValidator;
 pub use python::PythonValidator;
 pub use rust::RustValidator;
 pub use treesitter::TreeSitterResult;
+pub use validation_result::ResolvedFunction;
 pub use validation_result::ValidationResult;
 
 use crate::error::{Result, SafetyError};
@@ -175,6 +176,107 @@ impl ValidatorRegistry {
             Err(_) => return false,
         };
         self.validators.contains_key(&lang)
+    }
+}
+
+// --- Async LSP purity resolution (separate impl block) ---
+
+impl ValidatorRegistry {
+    /// Resolve unknown function purity via LSP analysis (async enrichment).
+    ///
+    /// Called after sync `validate()` when the result contains `unknown_functions`
+    /// (typically in Trusted mode only — Strict mode blocks unknowns earlier).
+    ///
+    /// For each unknown function, queries the language-specific `PurityAnalyzer`:
+    /// - **Pure** → remove from `unknown_functions`, remove corresponding warning
+    /// - **Impure** → add error, set `is_safe = false`
+    /// - **Unknown / Error** → leave warning as-is (graceful degradation)
+    ///
+    /// No-op when no analyzer is configured for the language.
+    pub async fn resolve_purity(
+        &self,
+        result: &mut ValidationResult,
+        language: SourceLanguage,
+        file_path: &str,
+        analyzers: &HashMap<SourceLanguage, detrix_ports::PurityAnalyzerRef>,
+    ) {
+        let Some(analyzer) = analyzers.get(&language) else {
+            return;
+        };
+
+        // Ensure LSP server is ready (lazy start)
+        if let Err(e) = analyzer.ensure_ready().await {
+            tracing::warn!(
+                lang = %language.as_str(),
+                error = %e,
+                "LSP purity analyzer not available, skipping"
+            );
+            return;
+        }
+
+        // Snapshot unknown functions (we mutate the sets during iteration)
+        let unknowns: Vec<String> = result.unknown_functions.iter().cloned().collect();
+
+        for func_name in &unknowns {
+            match analyzer
+                .analyze_function(func_name, std::path::Path::new(file_path))
+                .await
+            {
+                Ok(analysis) => match analysis.level {
+                    detrix_core::PurityLevel::Pure => {
+                        result.unknown_functions.remove(func_name);
+                        result
+                            .warnings
+                            .retain(|w| !w.contains(&format!("'{func_name}'")));
+                        result.resolved_functions.push(ResolvedFunction {
+                            name: func_name.clone(),
+                            resolution: "pure".to_string(),
+                            source: "LSP call hierarchy analysis".to_string(),
+                        });
+                        tracing::debug!(func = %func_name, "LSP: resolved as pure");
+                    }
+                    detrix_core::PurityLevel::Impure => {
+                        result.unknown_functions.remove(func_name);
+                        result.impure_functions.insert(func_name.clone());
+                        let reasons: Vec<String> = analysis
+                            .impure_calls
+                            .iter()
+                            .map(|c| format!("{}: {}", c.function_name, c.reason))
+                            .collect();
+                        result.add_error(format!(
+                            "Function '{}' is impure (LSP analysis): {}",
+                            func_name,
+                            reasons.join(", ")
+                        ));
+                        result.resolved_functions.push(ResolvedFunction {
+                            name: func_name.clone(),
+                            resolution: "impure".to_string(),
+                            source: "LSP call hierarchy analysis".to_string(),
+                        });
+                        tracing::info!(func = %func_name, "LSP: resolved as impure, blocked");
+                    }
+                    detrix_core::PurityLevel::Unknown => {
+                        tracing::debug!(func = %func_name, "LSP: still unknown after analysis");
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        func = %func_name,
+                        error = %e,
+                        "LSP analysis failed, leaving as unknown"
+                    );
+                }
+            }
+        }
+
+        // Update overall purity level
+        if result.unknown_functions.is_empty() && result.impure_functions.is_empty() {
+            result.purity = detrix_core::PurityLevel::Pure;
+            result.is_safe = result.purity.is_safe();
+        } else if !result.impure_functions.is_empty() {
+            result.purity = detrix_core::PurityLevel::Impure;
+            result.is_safe = result.purity.is_safe();
+        }
     }
 }
 

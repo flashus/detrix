@@ -316,7 +316,7 @@ mod tests {
             for _ in 0..10 {
                 f.write_all(&chunk).unwrap();
             }
-            f.write_all(&[b'B']).unwrap();
+            f.write_all(b"B").unwrap();
         }
 
         let svc = FileServingService::new();

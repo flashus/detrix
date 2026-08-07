@@ -8,12 +8,12 @@ use crate::utils::init::{init_infrastructure, InitOptions};
 use crate::utils::pid::PidFile;
 use anyhow::{Context, Result};
 use detrix_api::generated::detrix::v1::{
-    connection_service_server::ConnectionServiceServer,
+    agent_service_server::AgentServiceServer, connection_service_server::ConnectionServiceServer,
     metrics_service_server::MetricsServiceServer, streaming_service_server::StreamingServiceServer,
 };
 use detrix_api::grpc::{
-    create_auth_interceptor, AuthInterceptorState, ConnectionServiceImpl, MetricsServiceImpl,
-    StreamingServiceImpl,
+    agent::AgentServiceImpl, create_agent_auth_interceptor, create_auth_interceptor,
+    AuthInterceptorState, ConnectionServiceImpl, MetricsServiceImpl, StreamingServiceImpl,
 };
 use detrix_api::http::HttpServer;
 use detrix_api::tonic::transport::Server;
@@ -328,17 +328,20 @@ pub async fn run(
     let infra = init_infrastructure(&config, config_dir, InitOptions::from_config(&config)).await?;
 
     // Create application context from infrastructure components
-    let ctx = infra.into_app_context(
-        &config.api,
-        &config.safety,
-        &config.storage,
-        &config.daemon,
-        &config.adapter,
-        &config.anchor,
-        &config.limits,
-        &config.vfs,
-        gelf_output.clone(),
-    );
+    let ctx = infra
+        .into_app_context(
+            &config.api,
+            &config.safety,
+            &config.storage,
+            &config.daemon,
+            &config.adapter,
+            &config.anchor,
+            &config.limits,
+            &config.vfs,
+            gelf_output.clone(),
+            Some(config.agent.clone()),
+        )
+        .await;
     let app_context = ctx.app_context;
     let storage = ctx.storage;
     let bridge_file_source = ctx.bridge_file_source;
@@ -479,6 +482,35 @@ pub async fn run(
         info!("🔑 Creating JWT validator for external auth mode...");
         match JwksValidator::new(&config.api.auth.jwt) {
             Ok(validator) => {
+                // Pre-fetch JWKS keys with retry — transient 502/network errors at container
+                // startup (common in Docker Desktop on macOS) must not leave the cache empty.
+                let mut preload_ok = false;
+                for attempt in 1u32..=5 {
+                    match validator.force_refresh().await {
+                        Ok(()) => {
+                            info!(
+                                key_count = validator.cached_key_count(),
+                                "JWKS keys pre-fetched"
+                            );
+                            preload_ok = true;
+                            break;
+                        }
+                        Err(e) if attempt < 5 => {
+                            let delay_ms = 200 * (1u64 << (attempt - 1)); // 200, 400, 800, 1600
+                            warn!(
+                                error = %e,
+                                attempt,
+                                retry_ms = delay_ms,
+                                "JWKS preload failed, retrying"
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "JWKS preload failed after 5 attempts — JWT auth may reject until keys are refreshed");
+                        }
+                    }
+                }
+                let _ = preload_ok;
                 info!(
                     jwks_url = ?config.api.auth.jwt.jwks_url,
                     "✓ JWT validator created"
@@ -570,6 +602,11 @@ pub async fn run(
         let metrics_service = MetricsServiceImpl::new(Arc::clone(&api_state));
         let streaming_service = StreamingServiceImpl::new(Arc::clone(&api_state));
         let connection_service = ConnectionServiceImpl::new(Arc::clone(&api_state));
+        let agent_service = api_state
+            .context
+            .agent_connection_manager
+            .as_ref()
+            .map(|_| AgentServiceImpl::new(Arc::clone(&api_state)));
 
         // Create auth interceptor for gRPC (mirrors HTTP auth middleware)
         let grpc_auth_state = match jwt_validator {
@@ -579,11 +616,25 @@ pub async fn run(
             None => AuthInterceptorState::new(config.api.auth.clone()),
         };
         let auth_interceptor = create_auth_interceptor(grpc_auth_state);
+        let agent_auth_interceptor = create_agent_auth_interceptor(
+            config.agent.agent_token_hashes.clone(),
+            config.agent.dev_mode,
+        );
 
         if config.api.auth.is_enabled() {
             info!(mode = ?config.api.auth.mode, "✓ gRPC authentication enabled");
         } else {
             info!("✓ gRPC authentication disabled (all endpoints public)");
+        }
+        if !config.agent.agent_token_hashes.is_empty() {
+            info!(
+                count = config.agent.agent_token_hashes.len(),
+                "✓ Agent gRPC auth: token hash(es) configured"
+            );
+        } else if config.agent.dev_mode {
+            warn!("Agent gRPC auth DISABLED (dev_mode=true) — not safe for production");
+        } else {
+            warn!("Agent gRPC endpoint active but no token hashes configured and dev_mode=false — all agent connections will be rejected");
         }
 
         let grpc_addr: SocketAddr = format!("{}:{}", config.api.grpc.host, grpc_port)
@@ -608,7 +659,7 @@ pub async fn run(
         };
 
         let handle = tokio::spawn(async move {
-            if let Err(e) = Server::builder()
+            let server = Server::builder()
                 .add_service(MetricsServiceServer::with_interceptor(
                     metrics_service,
                     auth_interceptor.clone(),
@@ -620,10 +671,20 @@ pub async fn run(
                 .add_service(ConnectionServiceServer::with_interceptor(
                     connection_service,
                     auth_interceptor,
+                ));
+
+            let server = if let Some(agent_service) = agent_service {
+                info!("Registering AgentService on gRPC server");
+                server.add_service(AgentServiceServer::with_interceptor(
+                    agent_service,
+                    agent_auth_interceptor,
                 ))
-                .serve_with_shutdown(grpc_addr, shutdown_signal)
-                .await
-            {
+            } else {
+                info!("AgentService disabled on gRPC server (no agent manager)");
+                server
+            };
+
+            if let Err(e) = server.serve_with_shutdown(grpc_addr, shutdown_signal).await {
                 error!("gRPC server error: {}", e);
             }
         });
