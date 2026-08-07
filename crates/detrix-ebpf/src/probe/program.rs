@@ -176,11 +176,11 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
             let zero_fill = format!("    event->var{idx} = 0;");
             let read = if *offset >= 0 {
                 format!(
-                    "    bpf_probe_read_user(&event->var{idx}, {size}, (void *)(ctx->sp + {offset}));"
+                    "    bpf_probe_read_user(&event->var{idx}, {size}, (void *)(DETRIX_STACK_PTR + {offset}));"
                 )
             } else {
                 format!(
-                    "    bpf_probe_read_user(&event->var{idx}, {size}, (void *)(ctx->sp - {}));",
+                    "    bpf_probe_read_user(&event->var{idx}, {size}, (void *)(DETRIX_STACK_PTR - {}));",
                     offset.unsigned_abs()
                 )
             };
@@ -208,7 +208,7 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                 VariableLocation::StackOffset { offset } => {
                     format!(
                         "    event->var{idx} = 0;\
-\n    bpf_probe_read_user(&event->var{idx}, 8, (void *)(ctx->sp + ({offset})));"
+\n    bpf_probe_read_user(&event->var{idx}, 8, (void *)(DETRIX_STACK_PTR + ({offset})));"
                     )
                 }
                 VariableLocation::Register(reg) => {
@@ -222,7 +222,7 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                 VariableLocation::StackOffset { offset } => {
                     format!(
                         "    event->var{idx}_len = 0;\
-\n    bpf_probe_read_user(&event->var{idx}_len, 8, (void *)(ctx->sp + ({offset})));"
+\n    bpf_probe_read_user(&event->var{idx}_len, 8, (void *)(DETRIX_STACK_PTR + ({offset})));"
                     )
                 }
                 VariableLocation::Register(reg) => {
@@ -270,10 +270,10 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
             // var{idx} (u64) is left as 0; actual data goes in var{idx}_blob[N].
             let capture = (*byte_size).min(config.max_blob_capture);
             if *offset >= 0 {
-                format!("    bpf_probe_read_user(event->var{idx}_blob, {capture}, (void *)(ctx->sp + {offset}));")
+                format!("    bpf_probe_read_user(event->var{idx}_blob, {capture}, (void *)(DETRIX_STACK_PTR + {offset}));")
             } else {
                 format!(
-                    "    bpf_probe_read_user(event->var{idx}_blob, {capture}, (void *)(ctx->sp - {}));",
+                    "    bpf_probe_read_user(event->var{idx}_blob, {capture}, (void *)(DETRIX_STACK_PTR - {}));",
                     offset.unsigned_abs()
                 )
             }
@@ -284,10 +284,10 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
             // This produces the same BPF code as a plain StackOffset scalar read.
             let size = 8usize;
             if *offset >= 0 {
-                format!("    bpf_probe_read_user(&event->var{idx}, {size}, (void *)(ctx->sp + {offset}));")
+                format!("    bpf_probe_read_user(&event->var{idx}, {size}, (void *)(DETRIX_STACK_PTR + {offset}));")
             } else {
                 format!(
-                    "    bpf_probe_read_user(&event->var{idx}, {size}, (void *)(ctx->sp - {}));",
+                    "    bpf_probe_read_user(&event->var{idx}, {size}, (void *)(DETRIX_STACK_PTR - {}));",
                     offset.unsigned_abs()
                 )
             }
@@ -345,7 +345,9 @@ fn simple_read_expr(loc: &VariableLocation, field: &str) -> String {
             format!("event->{field} = (u64)ctx->{};", reg.pt_regs_field())
         }
         VariableLocation::StackOffset { offset } => {
-            format!("bpf_probe_read_user(&event->{field}, 8, (void *)(ctx->sp + ({offset})));")
+            format!(
+                "bpf_probe_read_user(&event->{field}, 8, (void *)(DETRIX_STACK_PTR + ({offset})));"
+            )
         }
         _ => format!("event->{field} = 0; // unsupported"),
     }
@@ -448,7 +450,7 @@ mod tests {
         let prog =
             generate_bpf_program(&vars, false, None, None, &CaptureConfig::default()).unwrap();
         assert!(prog.source.contains("bpf_probe_read_user"));
-        assert!(prog.source.contains("ctx->sp"));
+        assert!(prog.source.contains("DETRIX_STACK_PTR"));
     }
 
     #[test]
@@ -584,7 +586,7 @@ mod tests {
     fn generate_read_expr_stack_positive() {
         let var = make_var("x", VariableLocation::stack(16), VariableSize::DWord);
         let expr = generate_read_expr(&var, 2, &CaptureConfig::default());
-        assert!(expr.contains("ctx->sp + 16"));
+        assert!(expr.contains("DETRIX_STACK_PTR + 16"));
         assert!(expr.contains("var2"));
         assert!(expr.contains(", 4,")); // DWord = 4 bytes
     }
@@ -593,7 +595,7 @@ mod tests {
     fn generate_read_expr_stack_negative() {
         let var = make_var("x", VariableLocation::stack(-8), VariableSize::QWord);
         let expr = generate_read_expr(&var, 0, &CaptureConfig::default());
-        assert!(expr.contains("ctx->sp - 8"));
+        assert!(expr.contains("DETRIX_STACK_PTR - 8"));
     }
 
     #[test]
@@ -676,7 +678,7 @@ mod tests {
             expr.contains("bpf_probe_read_user(event->var0_blob"),
             "missing bpf_probe_read_user for blob"
         );
-        assert!(expr.contains("ctx->sp - 32"));
+        assert!(expr.contains("DETRIX_STACK_PTR - 32"));
         assert!(expr.contains(", 16,"), "capture size should be 16");
     }
 

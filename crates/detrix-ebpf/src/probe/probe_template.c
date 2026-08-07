@@ -40,6 +40,16 @@ struct pt_regs {
 };
 #endif
 
+// DWARF stack offsets are relative to the target's stack pointer.  The
+// register field differs between the architectures supported by this probe.
+#if defined(__TARGET_ARCH_arm64)
+#define DETRIX_STACK_PTR ctx->sp
+#elif defined(__TARGET_ARCH_x86) || defined(__TARGET_ARCH_x86_64)
+#define DETRIX_STACK_PTR ctx->rsp
+#else
+#error "Unsupported BPF target architecture"
+#endif
+
 char LICENSE[] SEC("license") = "Dual MIT/GPL";
 
 // Namespace info for translating host PIDs to container-local PIDs.

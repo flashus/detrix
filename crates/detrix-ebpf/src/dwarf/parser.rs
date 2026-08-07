@@ -391,7 +391,8 @@ impl DwarfInfo {
         let function_name = find_function_at_pc(&dwarf, pc)?;
 
         // Step 3: Compute CFA-to-SP delta at the uprobe PC so that DW_OP_fbreg offsets
-        // (CFA-relative) can be converted to SP-relative (what BPF ctx->sp refers to).
+        // (CFA-relative) can be converted to SP-relative (what BPF's
+        // DETRIX_STACK_PTR refers to).
         // Returns 0 if .debug_frame is missing/unreadable, which keeps old behaviour.
         let cfa_sp_delta = get_cfa_sp_delta(&obj, endian, pc);
         detrix_logging::debug!(
@@ -974,7 +975,8 @@ fn evaluate_location_expr<R: Reader>(
                 //   x86-64: DW_OP_breg7 N  (RSP = DWARF reg 7)
                 //   ARM64:  DW_OP_breg31 N (SP  = DWARF reg 31)
                 // We model all base-register+offset accesses as StackOffset so
-                // the BPF program can use ctx->sp. For Go local variables this is
+                // the BPF program can use its architecture-specific stack pointer.
+                // For Go local variables this is
                 // always correct because Go only uses SP/RSP as the base register.
                 detrix_logging::info!("[DWARF eval] RegisterOffset breg7={}", offset);
                 if let Some(prev) = pending.take() {

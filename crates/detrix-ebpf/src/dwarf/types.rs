@@ -102,7 +102,8 @@ pub enum VariableLocation {
     Register(Register),
 
     /// Variable is at a stack offset relative to the frame base (RSP).
-    /// Read via `bpf_probe_read_user(&val, size, ctx->sp + offset)`.
+    /// Read via `bpf_probe_read_user` from the architecture-specific stack
+    /// pointer (`ctx->rsp` on x86-64, `ctx->sp` on arm64) plus this offset.
     StackOffset {
         /// Offset from frame base (can be negative for locals below RSP).
         offset: i64,

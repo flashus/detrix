@@ -495,11 +495,14 @@ impl Drop for UprobeManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(target_os = "linux"))]
     use crate::dwarf::types::{
         ProbePoint, Register, ResolvedVariable, VariableLocation, VariableSize,
     };
+    #[cfg(not(target_os = "linux"))]
     use std::path::PathBuf;
 
+    #[cfg(not(target_os = "linux"))]
     fn test_probe_point() -> ProbePoint {
         ProbePoint {
             binary_path: PathBuf::from("/test/binary"),
@@ -531,6 +534,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn attach_and_detach() {
         let mut mgr = UprobeManager::new("/test/binary");
         let point = test_probe_point();
@@ -545,6 +549,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn attach_duplicate_fails() {
         let mut mgr = UprobeManager::new("/test/binary");
         let point = test_probe_point();
@@ -567,6 +572,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn detach_all_clears_everything() {
         let mut mgr = UprobeManager::new("/test/binary");
         let point = test_probe_point();
@@ -580,6 +586,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn multiple_probes_tracked_independently() {
         let mut mgr = UprobeManager::new("/test/binary");
         let point = test_probe_point();
@@ -597,6 +604,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn drop_detaches_all() {
         let mut mgr = UprobeManager::new("/test/binary");
         let point = test_probe_point();
@@ -606,6 +614,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn attach_with_events_records_probe() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut mgr = UprobeManager::new_with_events("/test/binary", tx);
@@ -624,6 +633,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn get_drop_count_returns_zero_on_non_linux() {
         // On non-Linux, attach creates a mock probe with no actual BPF.
         // get_drop_count returns 0 for simplicity.
