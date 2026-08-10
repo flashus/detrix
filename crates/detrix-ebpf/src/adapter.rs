@@ -96,6 +96,18 @@ struct ActiveMetric {
     capture_goid: bool,
 }
 
+/// Return the stable internal key used for probe attachment and event correlation.
+///
+/// Metric names are operator-facing labels and are intentionally not unique in
+/// storage. Persisted IDs are the metric identity. The name fallback is only for
+/// unsaved metrics used by tests or direct adapter callers.
+fn metric_probe_key(metric: &Metric) -> String {
+    match metric.id {
+        Some(id) => format!("id:{}", id.0),
+        None => format!("name:{}", metric.name),
+    }
+}
+
 impl EbpfAdapter {
     /// Create a new eBPF adapter for a Go binary.
     ///
@@ -361,10 +373,12 @@ impl DapAdapter for EbpfAdapter {
             metric.name
         );
 
+        let probe_key = metric_probe_key(metric);
+
         self.uprobe_manager
             .write()
             .await
-            .attach(&metric.name, &probe_point, g_addr_offset, goid_offset)
+            .attach(&probe_key, &probe_point, g_addr_offset, goid_offset)
             .map_err(|e| {
                 detrix_logging::error!(
                     "[EbpfAdapter] uprobe attach failed for '{}': {}",
@@ -377,7 +391,7 @@ impl DapAdapter for EbpfAdapter {
         let actual_line = metric.location.line;
 
         self.active_metrics.write().await.insert(
-            metric.name.clone(),
+            probe_key,
             ActiveMetric {
                 metric: metric.clone(),
                 probe_point,
@@ -393,13 +407,14 @@ impl DapAdapter for EbpfAdapter {
     }
 
     async fn remove_metric(&self, metric: &Metric) -> detrix_core::Result<RemoveMetricResult> {
+        let probe_key = metric_probe_key(metric);
         self.uprobe_manager
             .write()
             .await
-            .detach(&metric.name)
+            .detach(&probe_key)
             .map_err(|e| detrix_core::Error::Adapter(e.to_string()))?;
 
-        self.active_metrics.write().await.remove(&metric.name);
+        self.active_metrics.write().await.remove(&probe_key);
 
         Ok(RemoveMetricResult::success())
     }
@@ -413,10 +428,21 @@ impl DapAdapter for EbpfAdapter {
     }
 
     fn get_drop_count(&self, metric_name: &str) -> detrix_core::Result<u64> {
+        let probe_keys: Vec<String> = self
+            .active_metrics
+            .try_read()
+            .map(|metrics| {
+                metrics
+                    .iter()
+                    .filter(|(_, active)| active.metric.name == metric_name)
+                    .map(|(key, _)| key.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let count = self
             .uprobe_manager
             .try_read()
-            .map(|guard| guard.get_drop_count(metric_name))
+            .map(|guard| probe_keys.iter().map(|key| guard.get_drop_count(key)).sum())
             .unwrap_or(0);
         Ok(count)
     }
@@ -458,9 +484,9 @@ async fn run_event_correlator(
 ) {
     use crate::probe::ringbuf::parse_ring_buffer_event;
 
-    while let Some((metric_name, raw_bytes)) = raw_rx.recv().await {
+    while let Some((probe_key, raw_bytes)) = raw_rx.recv().await {
         let guard = active_metrics.read().await;
-        let Some(active) = guard.get(&metric_name) else {
+        let Some(active) = guard.get(&probe_key) else {
             continue;
         };
 
@@ -493,7 +519,10 @@ async fn run_event_correlator(
                 }
             }
             Err(e) => {
-                detrix_logging::warn!("Failed to parse ring buffer event for '{metric_name}': {e}");
+                detrix_logging::warn!(
+                    "Failed to parse ring buffer event for '{}' ({probe_key}): {e}",
+                    active.metric.name
+                );
             }
         }
     }
@@ -516,6 +545,32 @@ mod tests {
             detrix_core::SourceLanguage::Go,
         )
         .expect("valid test metric")
+    }
+
+    fn test_metric_with_id(name: &str, id: u64) -> Metric {
+        let mut metric = test_metric();
+        metric.name = name.to_string();
+        metric.id = Some(MetricId(id));
+        metric
+    }
+
+    #[test]
+    fn probe_key_uses_metric_id_not_display_name() {
+        let first = test_metric_with_id("duplicate-name", 41);
+        let second = test_metric_with_id("duplicate-name", 42);
+
+        let first_key = metric_probe_key(&first);
+        let second_key = metric_probe_key(&second);
+
+        assert_ne!(first_key, second_key);
+        assert!(first_key.contains("41"));
+        assert!(second_key.contains("42"));
+    }
+
+    #[test]
+    fn probe_key_has_deterministic_fallback_for_unsaved_metric() {
+        let metric = test_metric();
+        assert_eq!(metric_probe_key(&metric), "name:test-metric");
     }
 
     #[test]

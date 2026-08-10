@@ -11,7 +11,14 @@ use std::path::PathBuf;
 /// A program counter (instruction address) in the target binary.
 pub type ProgramCounter = u64;
 
-/// CPU register index (x86-64 DWARF register numbering).
+/// Architecture of the observed executable's DWARF register numbering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TargetArchitecture {
+    X86_64,
+    Aarch64,
+}
+
+/// CPU register described by target-specific DWARF register numbering.
 ///
 /// Maps to `struct pt_regs` fields in the eBPF program.
 /// See: DWARF register number assignments for x86-64 (AMD64 ABI).
@@ -34,6 +41,8 @@ pub enum Register {
     R13 = 13,
     R14 = 14,
     R15 = 15,
+    /// AArch64 general-purpose register X0-X30, or SP as register 31.
+    Arm64(u8),
 }
 
 impl Register {
@@ -41,6 +50,13 @@ impl Register {
     ///
     /// Returns `None` for registers we don't handle (XMM, segment, etc.).
     pub fn from_dwarf(reg_num: u16) -> Option<Self> {
+        Self::from_dwarf_for_arch(reg_num, TargetArchitecture::X86_64)
+    }
+
+    pub fn from_dwarf_for_arch(reg_num: u16, architecture: TargetArchitecture) -> Option<Self> {
+        if architecture == TargetArchitecture::Aarch64 {
+            return (reg_num <= 31).then_some(Self::Arm64(reg_num as u8));
+        }
         match reg_num {
             0 => Some(Self::Rax),
             1 => Some(Self::Rdx),
@@ -81,13 +97,27 @@ impl Register {
             Self::R13 => "r13",
             Self::R14 => "r14",
             Self::R15 => "r15",
+            Self::Arm64(_) => "regs",
+        }
+    }
+
+    /// Full C expression for reading this register from a uprobe `pt_regs` context.
+    pub fn pt_regs_access(&self) -> String {
+        match self {
+            Self::Arm64(31) => "ctx->sp".to_string(),
+            Self::Arm64(index) => format!("ctx->regs[{index}]"),
+            _ => format!("ctx->{}", self.pt_regs_field()),
         }
     }
 }
 
 impl fmt::Display for Register {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "%{}", self.pt_regs_field())
+        match self {
+            Self::Arm64(31) => write!(f, "%sp"),
+            Self::Arm64(index) => write!(f, "%x{index}"),
+            _ => write!(f, "%{}", self.pt_regs_field()),
+        }
     }
 }
 
@@ -136,6 +166,15 @@ pub enum VariableLocation {
         byte_size: usize,
     },
 
+    /// Fixed-size inline value split across multiple Go register-ABI pieces.
+    ///
+    /// The pieces contain the value itself, not a pointer to the value. The BPF
+    /// program copies each piece into an inline blob in source-order.
+    PiecewiseBlob {
+        pieces: Vec<VariablePiece>,
+        byte_size: usize,
+    },
+
     /// Variable's stack slot holds a POINTER to the actual struct on the heap.
     ///
     /// Produced when DWARF location contains `DW_OP_deref` (heap-escaped Go variables).
@@ -156,10 +195,25 @@ pub enum VariableLocation {
     },
 }
 
+/// One DWARF composite piece. A missing location is an explicitly undefined
+/// piece; it still occupies bytes in the reconstructed value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariablePiece {
+    pub location: Option<VariableLocation>,
+    pub byte_size: usize,
+}
+
 impl VariableLocation {
     /// Create a register location from a DWARF register number.
     pub fn from_register(dwarf_reg: u16) -> Option<Self> {
         Register::from_dwarf(dwarf_reg).map(Self::Register)
+    }
+
+    pub fn from_register_for_arch(
+        dwarf_reg: u16,
+        architecture: TargetArchitecture,
+    ) -> Option<Self> {
+        Register::from_dwarf_for_arch(dwarf_reg, architecture).map(Self::Register)
     }
 
     /// Create a stack offset location.
@@ -180,6 +234,9 @@ impl VariableLocation {
             Self::GoString { .. } => 2,
             Self::GoSlice { .. } => 3,
             Self::StackBlob { .. } => 1,
+            Self::PiecewiseBlob { pieces, .. } => {
+                pieces.iter().filter(|p| p.location.is_some()).count()
+            }
             Self::StackIndirect { .. } => 1,
             Self::GoMap { .. } => 1,
         }
@@ -205,6 +262,9 @@ impl fmt::Display for VariableLocation {
                 } else {
                     write!(f, "blob[{byte_size}b@sp-{:#x}]", offset.unsigned_abs())
                 }
+            }
+            Self::PiecewiseBlob { pieces, byte_size } => {
+                write!(f, "piecewise-blob[{byte_size}b/{} pieces]", pieces.len())
             }
             Self::StackIndirect { offset, byte_size } => {
                 if *offset >= 0 {
@@ -307,6 +367,12 @@ mod tests {
     fn register_pt_regs_field() {
         assert_eq!(Register::Rax.pt_regs_field(), "rax");
         assert_eq!(Register::R15.pt_regs_field(), "r15");
+    }
+
+    #[test]
+    fn arm64_register_access_uses_regs_array() {
+        let register = Register::from_dwarf_for_arch(3, TargetArchitecture::Aarch64).unwrap();
+        assert_eq!(register.pt_regs_access(), "ctx->regs[3]");
     }
 
     #[test]

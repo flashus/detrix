@@ -124,7 +124,8 @@ fn build_event_fields(
                 // Map pointer is already captured in var{i}. No extra fields needed.
                 // User-space iterates the map structure via process_vm_readv.
             }
-            VariableLocation::StackBlob { byte_size, .. } => {
+            VariableLocation::StackBlob { byte_size, .. }
+            | VariableLocation::PiecewiseBlob { byte_size, .. } => {
                 let capture = (*byte_size).min(config.max_blob_capture);
                 out.push_str(&format!("    u8  var{i}_blob[{capture}];\n"));
             }
@@ -165,10 +166,7 @@ fn build_var_reads(
 pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureConfig) -> String {
     match &var.location {
         VariableLocation::Register(reg) => {
-            format!(
-                "    event->var{idx} = (u64)ctx->{field};",
-                field = reg.pt_regs_field()
-            )
+            format!("    event->var{idx} = (u64){};", reg.pt_regs_access())
         }
         VariableLocation::StackOffset { offset } => {
             let size = var.size.bytes();
@@ -212,7 +210,7 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                     )
                 }
                 VariableLocation::Register(reg) => {
-                    format!("    event->var{idx} = (u64)ctx->{};", reg.pt_regs_field())
+                    format!("    event->var{idx} = (u64){};", reg.pt_regs_access())
                 }
                 _ => format!("    event->var{idx} = 0;"),
             };
@@ -226,10 +224,7 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                     )
                 }
                 VariableLocation::Register(reg) => {
-                    format!(
-                        "    event->var{idx}_len = (u64)ctx->{};",
-                        reg.pt_regs_field()
-                    )
+                    format!("    event->var{idx}_len = (u64){};", reg.pt_regs_access())
                 }
                 _ => format!("    event->var{idx}_len = 0;"),
             };
@@ -277,6 +272,49 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                     offset.unsigned_abs()
                 )
             }
+        }
+        VariableLocation::PiecewiseBlob { pieces, byte_size } => {
+            let capture = (*byte_size).min(config.max_blob_capture);
+            let mut out = format!("    __builtin_memset(event->var{idx}_blob, 0, {capture});");
+            let mut written = 0usize;
+
+            for piece in pieces {
+                if written >= capture {
+                    break;
+                }
+                let piece_size = (capture - written).min(piece.byte_size);
+                let Some(piece) = piece.location.as_ref() else {
+                    written += piece.byte_size;
+                    continue;
+                };
+                match piece {
+                    VariableLocation::Register(reg) => {
+                        for byte in 0..piece_size {
+                            out.push_str(&format!(
+                                "\n    event->var{idx}_blob[{}] = (u8)(((u64){}) >> {});",
+                                written + byte,
+                                reg.pt_regs_access(),
+                                byte * 8
+                            ));
+                        }
+                    }
+                    VariableLocation::StackOffset { offset } => {
+                        let address = if *offset >= 0 {
+                            format!("DETRIX_STACK_PTR + {offset}")
+                        } else {
+                            format!("DETRIX_STACK_PTR - {}", offset.unsigned_abs())
+                        };
+                        out.push_str(&format!(
+                            "\n    bpf_probe_read_user(&event->var{idx}_blob[{written}], {piece_size}, (void *)({address}));"
+                        ));
+                    }
+                    _ => unreachable!(
+                        "PiecewiseBlob is constructed only from scalar register/stack pieces"
+                    ),
+                }
+                written += piece_size;
+            }
+            out
         }
         VariableLocation::StackIndirect { offset, .. } => {
             // Heap-escaped struct: read the 8-byte pointer from the stack slot.
@@ -342,7 +380,7 @@ fn build_struct_field_definitions(
 fn simple_read_expr(loc: &VariableLocation, field: &str) -> String {
     match loc {
         VariableLocation::Register(reg) => {
-            format!("event->{field} = (u64)ctx->{};", reg.pt_regs_field())
+            format!("event->{field} = (u64){};", reg.pt_regs_access())
         }
         VariableLocation::StackOffset { offset } => {
             format!(
@@ -403,7 +441,7 @@ const GOID_EXTRACT: &str = r#"    // Extract goroutine ID (goid) from runtime.g 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dwarf::types::{Register, VariableLocation, VariableSize};
+    use crate::dwarf::types::{Register, VariableLocation, VariablePiece, VariableSize};
     use crate::probe::types::{CaptureConfig, MAX_CAPTURE_VARS, MAX_STRING_CAPTURE};
 
     fn make_var(name: &str, loc: VariableLocation, size: VariableSize) -> ResolvedVariable {
@@ -680,6 +718,119 @@ mod tests {
         );
         assert!(expr.contains("DETRIX_STACK_PTR - 32"));
         assert!(expr.contains(", 16,"), "capture size should be 16");
+    }
+
+    #[test]
+    fn generate_read_expr_piecewise_blob_copies_partial_final_word() {
+        let var = ResolvedVariable {
+            name: "address".to_string(),
+            location: VariableLocation::PiecewiseBlob {
+                pieces: vec![
+                    VariableLocation::Register(Register::Rax),
+                    VariableLocation::Register(Register::Rbx),
+                    VariableLocation::Register(Register::Rcx),
+                ]
+                .into_iter()
+                .map(|location| VariablePiece {
+                    location: Some(location),
+                    byte_size: 8,
+                })
+                .collect(),
+                byte_size: 20,
+            },
+            size: VariableSize::QWord,
+            type_name: "[20]uint8".to_string(),
+            nested_type: None,
+        };
+
+        let expr = generate_read_expr(&var, 0, &CaptureConfig::default());
+
+        assert!(expr.contains("var0_blob[0]"));
+        assert!(expr.contains("ctx->rax"));
+        assert!(expr.contains("var0_blob[8]"));
+        assert!(expr.contains("ctx->rbx"));
+        assert!(expr.contains("var0_blob[16]"));
+        assert!(expr.contains("var0_blob[19]"));
+        assert!(expr.contains("ctx->rcx"));
+        assert!(!expr.contains("var0_blob[20]"));
+    }
+
+    #[test]
+    fn generate_piecewise_blob_uses_arm64_register_access() {
+        let var = make_var(
+            "address",
+            VariableLocation::PiecewiseBlob {
+                pieces: vec![
+                    VariableLocation::Register(Register::Arm64(0)),
+                    VariableLocation::Register(Register::Arm64(1)),
+                    VariableLocation::Register(Register::Arm64(2)),
+                ]
+                .into_iter()
+                .map(|location| VariablePiece {
+                    location: Some(location),
+                    byte_size: 8,
+                })
+                .collect(),
+                byte_size: 20,
+            },
+            VariableSize::QWord,
+        );
+        let expr = generate_read_expr(&var, 0, &CaptureConfig::default());
+        assert!(expr.contains("ctx->regs[0]"));
+        assert!(expr.contains("ctx->regs[1]"));
+        assert!(expr.contains("ctx->regs[2]"));
+        assert!(!expr.contains("ctx->rax"));
+        assert!(!expr.contains("ctx->ctx->"));
+    }
+
+    #[test]
+    fn generate_piecewise_blob_honors_dwarf_piece_sizes_and_undefined_gaps() {
+        let var = make_var(
+            "hash",
+            VariableLocation::PiecewiseBlob {
+                pieces: vec![
+                    VariablePiece {
+                        location: None,
+                        byte_size: 2,
+                    },
+                    VariablePiece {
+                        location: Some(VariableLocation::Register(Register::Rax)),
+                        byte_size: 4,
+                    },
+                    VariablePiece {
+                        location: Some(VariableLocation::stack(-16)),
+                        byte_size: 6,
+                    },
+                ],
+                byte_size: 12,
+            },
+            VariableSize::QWord,
+        );
+        let expr = generate_read_expr(&var, 0, &CaptureConfig::default());
+        assert!(expr.contains("var0_blob[2] ="));
+        assert!(expr.contains("var0_blob[5] ="));
+        assert!(expr.contains("var0_blob[6]"));
+        assert!(!expr.contains("var0_blob[0] ="));
+    }
+
+    #[test]
+    fn generate_go_string_length_uses_complete_register_access_expression() {
+        let var = ResolvedVariable {
+            name: "value".to_string(),
+            location: VariableLocation::GoString {
+                ptr: Box::new(VariableLocation::Register(Register::Arm64(0))),
+                len: Box::new(VariableLocation::Register(Register::Arm64(1))),
+            },
+            size: VariableSize::QWord,
+            type_name: "string".to_string(),
+            nested_type: None,
+        };
+
+        let expr = generate_read_expr(&var, 0, &CaptureConfig::default());
+
+        assert!(expr.contains("event->var0 = (u64)ctx->regs[0]"));
+        assert!(expr.contains("event->var0_len = (u64)ctx->regs[1]"));
+        assert!(!expr.contains("ctx->ctx->"));
     }
 
     #[test]

@@ -210,7 +210,8 @@ pub fn parse_ring_buffer_event(
                 })?;
                 CapturedValue::Slice { len, cap }
             }
-            crate::dwarf::types::VariableLocation::StackBlob { byte_size, .. } => {
+            crate::dwarf::types::VariableLocation::StackBlob { byte_size, .. }
+            | crate::dwarf::types::VariableLocation::PiecewiseBlob { byte_size, .. } => {
                 // var{idx} (u64) was already read above as `val` — it is 0 (unused).
                 // The BPF program filled var{idx}_blob[N] with the actual bytes inline.
                 let capture = (*byte_size).min(config.max_blob_capture);
@@ -801,6 +802,46 @@ mod tests {
             }
             other => panic!("Expected Bytes, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_piecewise_blob_returns_exact_inline_bytes() {
+        let blob: Vec<u8> = (0_u8..20).collect();
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&0_u64.to_le_bytes()); // var0 unused for inline blobs
+        data.extend_from_slice(&blob);
+
+        let vars = vec![ResolvedVariable {
+            name: "address".to_string(),
+            location: VariableLocation::PiecewiseBlob {
+                pieces: vec![
+                    VariableLocation::Register(Register::Rax),
+                    VariableLocation::Register(Register::Rbx),
+                    VariableLocation::Register(Register::Rcx),
+                ]
+                .into_iter()
+                .map(|location| crate::dwarf::types::VariablePiece {
+                    location: Some(location),
+                    byte_size: 8,
+                })
+                .collect(),
+                byte_size: 20,
+            },
+            size: VariableSize::QWord,
+            type_name: "[20]uint8".to_string(),
+            nested_type: None,
+        }];
+
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
+
+        assert_eq!(event.values, vec![CapturedValue::Bytes(blob)]);
     }
 
     #[test]

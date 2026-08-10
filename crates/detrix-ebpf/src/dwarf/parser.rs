@@ -7,7 +7,10 @@
 //! Uses `gimli` for DWARF parsing and `object` for ELF reading.
 
 use super::typeinfo::{resolve_type_info, TypeInfo};
-use super::types::{ProbePoint, ProgramCounter, ResolvedVariable, VariableLocation, VariableSize};
+use super::types::{
+    ProbePoint, ProgramCounter, ResolvedVariable, TargetArchitecture, VariableLocation,
+    VariablePiece, VariableSize,
+};
 use crate::error::{ErrContext, Error, Result};
 
 use gimli::{AttributeValue, DebuggingInformationEntry, DwAt, EndianSlice, Reader};
@@ -142,6 +145,7 @@ pub struct DwarfInfo {
     text_file_offset: u64,
     /// Cached endianness to avoid re-checking on every resolve call.
     is_little_endian: bool,
+    target_architecture: TargetArchitecture,
 }
 
 impl DwarfInfo {
@@ -169,6 +173,15 @@ impl DwarfInfo {
             .unwrap_or(0);
 
         let is_little_endian = obj.is_little_endian();
+        let target_architecture = match obj.architecture() {
+            object::Architecture::X86_64 => TargetArchitecture::X86_64,
+            object::Architecture::Aarch64 => TargetArchitecture::Aarch64,
+            architecture => {
+                return Err(Error::DwarfParse(format!(
+                    "Unsupported ELF architecture {architecture:?}"
+                )))
+            }
+        };
 
         Ok(Self {
             binary_path: path,
@@ -176,6 +189,7 @@ impl DwarfInfo {
             text_base: text_vma,
             text_file_offset,
             is_little_endian,
+            target_architecture,
         })
     }
 
@@ -384,27 +398,44 @@ impl DwarfInfo {
 
         let dwarf = load_dwarf(&obj, endian)?;
 
-        // Step 1: Resolve file:line → PC via .debug_line
-        let pc = resolve_line_to_pc(&dwarf, file, line)?;
-
-        // Step 2: Find the containing function
-        let function_name = find_function_at_pc(&dwarf, pc)?;
-
-        // Step 3: Compute CFA-to-SP delta at the uprobe PC so that DW_OP_fbreg offsets
-        // (CFA-relative) can be converted to SP-relative (what BPF's
-        // DETRIX_STACK_PTR refers to).
-        // Returns 0 if .debug_frame is missing/unreadable, which keeps old behaviour.
-        let cfa_sp_delta = get_cfa_sp_delta(&obj, endian, pc);
-        detrix_logging::debug!(
-            "[DWARF CFI] PC={:#x} cfa_sp_delta={} (CFA = SP + {})",
-            pc,
-            cfa_sp_delta,
-            cfa_sp_delta
-        );
-
-        // Step 4: Resolve variable locations at this PC
-        let variables =
-            resolve_variables_at_pc(&dwarf, pc, requested_vars, cfa_sp_delta, max_nested_depth)?;
+        // Step 1: Resolve file:line → all candidate PCs via .debug_line. A
+        // source line can map to several statement-boundary PCs; try each one
+        // so a short-lived local is not rejected merely because the first row
+        // precedes its DWARF location range.
+        let candidates = resolve_line_to_pcs(&dwarf, file, line)?;
+        let mut selected: Option<(ProgramCounter, String, Vec<ResolvedVariable>)> = None;
+        for pc in candidates {
+            let Ok(function_name) = find_function_at_pc(&dwarf, pc) else {
+                continue;
+            };
+            let cfa_sp_delta = get_cfa_sp_delta(&obj, endian, pc);
+            let variables = resolve_variables_at_pc(
+                &dwarf,
+                pc,
+                requested_vars,
+                cfa_sp_delta,
+                max_nested_depth,
+                self.target_architecture,
+            )?;
+            detrix_logging::debug!(
+                "[DWARF probe candidate] PC={:#x} vars={}",
+                pc,
+                variables.len()
+            );
+            let has_requested = requested_vars.is_empty()
+                || requested_vars
+                    .iter()
+                    .all(|name| variables.iter().any(|v| &v.name == name));
+            if selected.is_none() || has_requested {
+                selected = Some((pc, function_name, variables));
+            }
+            if has_requested {
+                break;
+            }
+        }
+        let (pc, function_name, variables) = selected.ok_or_else(|| {
+            Error::DwarfParse(format!("No executable PC found for {file}:{line}"))
+        })?;
 
         // aya uprobe attach(fn_name=None, offset, ...) expects a file offset,
         // not a virtual address. Convert: file_offset = text_file_offset + (pc - text_vma).
@@ -533,11 +564,11 @@ fn get_cfa_sp_delta(obj: &object::File<'_>, endian: gimli::RunTimeEndian, pc: u6
 /// 2. Relative + explicit directory entry (DWARF v5 dir≥0, or v4 dir≥1) → join
 /// 3. Relative + no dir entry (DWARF v4 `dir_index=0`) → join with `DW_AT_comp_dir`
 /// 4. Fallback → filename as-is (suffix match via `ends_with` may still find it)
-fn resolve_line_to_pc<R: Reader>(
+fn resolve_line_to_pcs<R: Reader>(
     dwarf: &gimli::Dwarf<R>,
     file: &str,
     line: u32,
-) -> Result<ProgramCounter> {
+) -> Result<Vec<ProgramCounter>> {
     if line == 0 {
         return Err(Error::DwarfParse("Line number must be > 0".to_string()));
     }
@@ -627,21 +658,29 @@ fn resolve_line_to_pc<R: Reader>(
         )));
     }
 
-    // Prefer exact match; fall back to smallest line >= target (next statement).
-    if let Some(&(_, pc)) = candidates.iter().find(|&&(l, _)| l == target_line) {
-        return Ok(pc);
-    }
+    let selected_line = if candidates.iter().any(|&(l, _)| l == target_line) {
+        target_line
+    } else {
+        candidates
+            .iter()
+            .filter(|&&(l, _)| l >= target_line)
+            .map(|&(l, _)| l)
+            .min()
+            .ok_or_else(|| {
+                Error::DwarfParse(format!(
+                    "No PC found for {file}:{line} (no DWARF entry at or after that line)"
+                ))
+            })?
+    };
 
-    candidates
-        .iter()
-        .filter(|&&(l, _)| l >= target_line)
-        .min_by_key(|&&(l, _)| l)
-        .map(|&(_, pc)| pc)
-        .ok_or_else(|| {
-            Error::DwarfParse(format!(
-                "No PC found for {file}:{line} (no DWARF entry at or after that line)"
-            ))
-        })
+    let mut pcs: Vec<_> = candidates
+        .into_iter()
+        .filter(|&(l, _)| l == selected_line)
+        .map(|(_, pc)| pc)
+        .collect();
+    pcs.sort_unstable_by(|a, b| b.cmp(a));
+    pcs.dedup();
+    Ok(pcs)
 }
 
 /// Find the function name containing a given PC.
@@ -686,6 +725,7 @@ fn resolve_variables_at_pc<R: Reader>(
     requested_vars: &[String],
     cfa_sp_delta: i64,
     max_nested_depth: usize,
+    target_architecture: TargetArchitecture,
 ) -> Result<Vec<ResolvedVariable>> {
     let mut resolved = Vec::new();
     let mut units = dwarf.units();
@@ -693,8 +733,30 @@ fn resolve_variables_at_pc<R: Reader>(
     while let Some(header) = units.next().context("resolve_vars: unit iteration")? {
         let unit = dwarf.unit(header).context("resolve_vars: unit parse")?;
         let mut entries = unit.entries();
+        // DWARF names are not globally unique. Keep the active lexical scope
+        // while walking the DIE tree so a same-named variable from another
+        // function or inline scope cannot satisfy an observation request.
+        let mut scope_stack: Vec<bool> = Vec::new();
 
         while let Some(entry) = entries.next_dfs().context("resolve_vars: DFS traversal")? {
+            let depth = entry.depth().max(0) as usize;
+            scope_stack.truncate(depth);
+            let parent_active = scope_stack.last().copied().unwrap_or(true);
+            let is_scope = matches!(
+                entry.tag(),
+                gimli::DW_TAG_subprogram
+                    | gimli::DW_TAG_inlined_subroutine
+                    | gimli::DW_TAG_lexical_block
+            );
+            let active = if is_scope {
+                parent_active && die_contains_pc(dwarf, &unit, entry, pc)?
+            } else {
+                parent_active
+            };
+            scope_stack.push(active);
+            if !active {
+                continue;
+            }
             if entry.tag() != gimli::DW_TAG_variable
                 && entry.tag() != gimli::DW_TAG_formal_parameter
             {
@@ -720,7 +782,9 @@ fn resolve_variables_at_pc<R: Reader>(
                 continue;
             }
 
-            if let Some(locations) = resolve_location_attr(entry, &unit, dwarf, pc, cfa_sp_delta)? {
+            if let Some(locations) =
+                resolve_location_attr(entry, &unit, dwarf, pc, cfa_sp_delta, target_architecture)?
+            {
                 // Resolve size and type name via DW_AT_type chain.
                 // Falls back to QWord / "unknown" on resolution failure.
                 let type_offset_debug = entry.attr_value(DwAt(gimli::constants::DW_AT_type.0));
@@ -859,6 +923,25 @@ fn resolve_variables_at_pc<R: Reader>(
     Ok(deduped)
 }
 
+fn die_contains_pc<R: Reader>(
+    dwarf: &gimli::Dwarf<R>,
+    unit: &gimli::Unit<R>,
+    entry: &DebuggingInformationEntry<R>,
+    pc: ProgramCounter,
+) -> Result<bool> {
+    let mut ranges = dwarf.die_ranges(unit, entry)?;
+    let mut saw_range = false;
+    while let Some(range) = ranges.next()? {
+        saw_range = true;
+        if pc >= range.begin && pc < range.end {
+            return Ok(true);
+        }
+    }
+    // Abstract lexical DIEs may omit ranges; in that case inherit the
+    // enclosing scope rather than discarding all of their children.
+    Ok(!saw_range)
+}
+
 /// Read DW_AT_name from a DIE, handling both inline strings and .debug_str refs.
 fn read_die_name<R: Reader>(
     entry: &DebuggingInformationEntry<R>,
@@ -893,7 +976,8 @@ fn resolve_location_attr<R: Reader>(
     dwarf: &gimli::Dwarf<R>,
     pc: ProgramCounter,
     cfa_sp_delta: i64,
-) -> Result<Option<Vec<VariableLocation>>> {
+    target_architecture: TargetArchitecture,
+) -> Result<Option<Vec<VariablePiece>>> {
     let loc_attr = match entry.attr_value(DwAt(gimli::constants::DW_AT_location.0)) {
         Some(attr) => attr,
         None => return Ok(None),
@@ -901,7 +985,7 @@ fn resolve_location_attr<R: Reader>(
 
     match loc_attr {
         AttributeValue::Exprloc(expr) => {
-            evaluate_location_expr(expr, unit.encoding(), cfa_sp_delta)
+            evaluate_location_expr(expr, unit.encoding(), cfa_sp_delta, target_architecture)
         }
         AttributeValue::LocationListsRef(offset) => {
             let mut loclists = dwarf.locations(unit, offset).context("Location list")?;
@@ -909,7 +993,12 @@ fn resolve_location_attr<R: Reader>(
             while let Some(entry) = loclists.next().context("Location entry")? {
                 let gimli::LocationListEntry { range, data, .. } = entry;
                 if pc >= range.begin && pc < range.end {
-                    return evaluate_location_expr(data, unit.encoding(), cfa_sp_delta);
+                    return evaluate_location_expr(
+                        data,
+                        unit.encoding(),
+                        cfa_sp_delta,
+                        target_architecture,
+                    );
                 }
             }
             Ok(None)
@@ -936,9 +1025,10 @@ fn evaluate_location_expr<R: Reader>(
     expr: gimli::Expression<R>,
     encoding: gimli::Encoding,
     cfa_sp_delta: i64,
-) -> Result<Option<Vec<VariableLocation>>> {
+    target_architecture: TargetArchitecture,
+) -> Result<Option<Vec<VariablePiece>>> {
     let mut ops = expr.operations(encoding);
-    let mut pieces: Vec<VariableLocation> = Vec::new();
+    let mut pieces: Vec<VariablePiece> = Vec::new();
     let mut pending: Option<VariableLocation> = None;
 
     detrix_logging::debug!("[DWARF eval] Starting location expression evaluation");
@@ -949,9 +1039,12 @@ fn evaluate_location_expr<R: Reader>(
             Some(gimli::Operation::Register { register }) => {
                 detrix_logging::debug!("[DWARF eval] Register {:?}", register);
                 if let Some(prev) = pending.take() {
-                    pieces.push(prev);
+                    pieces.push(VariablePiece {
+                        location: Some(prev),
+                        byte_size: 0,
+                    });
                 }
-                pending = VariableLocation::from_register(register.0);
+                pending = VariableLocation::from_register_for_arch(register.0, target_architecture);
             }
             Some(gimli::Operation::FrameOffset { offset }) => {
                 // DW_OP_fbreg N: variable at CFA + N.
@@ -965,7 +1058,10 @@ fn evaluate_location_expr<R: Reader>(
                     sp_offset
                 );
                 if let Some(prev) = pending.take() {
-                    pieces.push(prev);
+                    pieces.push(VariablePiece {
+                        location: Some(prev),
+                        byte_size: 0,
+                    });
                 }
                 pending = Some(VariableLocation::stack(sp_offset));
             }
@@ -980,17 +1076,22 @@ fn evaluate_location_expr<R: Reader>(
                 // always correct because Go only uses SP/RSP as the base register.
                 detrix_logging::info!("[DWARF eval] RegisterOffset breg7={}", offset);
                 if let Some(prev) = pending.take() {
-                    pieces.push(prev);
+                    pieces.push(VariablePiece {
+                        location: Some(prev),
+                        byte_size: 0,
+                    });
                 }
                 pending = Some(VariableLocation::stack(offset));
             }
-            Some(gimli::Operation::Piece { .. }) => {
+            Some(gimli::Operation::Piece { size_in_bits, .. }) => {
                 detrix_logging::debug!("[DWARF eval] Piece");
-                // DW_OP_piece follows a location op for composite types.
-                // Flush pending location into the pieces list.
-                if let Some(loc) = pending.take() {
-                    pieces.push(loc);
-                }
+                // DW_OP_piece follows a location op for composite types. Keep
+                // both its byte size and an explicitly undefined location.
+                // Delve's compositeMemory follows the same rule.
+                pieces.push(VariablePiece {
+                    location: pending.take(),
+                    byte_size: (size_in_bits / 8) as usize,
+                });
             }
             Some(gimli::Operation::Deref { .. }) => {
                 // DW_OP_deref: treat the pending address as a pointer and dereference.
@@ -1018,7 +1119,10 @@ fn evaluate_location_expr<R: Reader>(
 
     // Non-composite case: single location without DW_OP_piece.
     if let Some(loc) = pending.take() {
-        pieces.push(loc);
+        pieces.push(VariablePiece {
+            location: Some(loc),
+            byte_size: 0,
+        });
     }
 
     detrix_logging::debug!("[DWARF eval] Result: {:?} pieces", pieces.len());
@@ -1046,10 +1150,33 @@ fn evaluate_location_expr<R: Reader>(
 /// |--------|-----------------|--------------|
 /// | 2      | `is_string`     | `GoString { ptr: pieces[0], len: pieces[1] }` |
 /// | 3      | `is_slice`      | `GoSlice { ptr: pieces[0], len: pieces[1], cap: pieces[2] }` |
-fn upgrade_location_for_type(
-    locations: Vec<VariableLocation>,
+trait IntoVariablePiece {
+    fn into_piece(self) -> VariablePiece;
+}
+
+impl IntoVariablePiece for VariableLocation {
+    fn into_piece(self) -> VariablePiece {
+        VariablePiece {
+            location: Some(self),
+            byte_size: 0,
+        }
+    }
+}
+
+impl IntoVariablePiece for VariablePiece {
+    fn into_piece(self) -> VariablePiece {
+        self
+    }
+}
+
+fn upgrade_location_for_type<L: IntoVariablePiece>(
+    locations: Vec<L>,
     type_info: &TypeInfo,
 ) -> Result<VariableLocation> {
+    let locations: Vec<VariablePiece> = locations
+        .into_iter()
+        .map(IntoVariablePiece::into_piece)
+        .collect();
     // Debug logging for upgrade decision
     detrix_logging::debug!(
         "[DWARF upgrade] type={} is_string={} is_slice={} locations.len={} locations={:?}",
@@ -1063,23 +1190,50 @@ fn upgrade_location_for_type(
     // ── Multi-piece: Go register ABI composite types ──────────────────────────
     if locations.len() == 2 && type_info.is_string {
         // Guarded by len() == 2 above — pattern match eliminates unwrap.
-        let [ptr, len]: [VariableLocation; 2] = locations
+        let [ptr, len]: [VariablePiece; 2] = locations
             .try_into()
             .unwrap_or_else(|_| unreachable!("len() == 2 guarantees exactly 2 elements"));
         return Ok(VariableLocation::GoString {
-            ptr: Box::new(ptr),
-            len: Box::new(len),
+            ptr: Box::new(
+                ptr.location
+                    .ok_or_else(|| Error::DwarfParse("undefined string pointer piece".into()))?,
+            ),
+            len: Box::new(
+                len.location
+                    .ok_or_else(|| Error::DwarfParse("undefined string length piece".into()))?,
+            ),
         });
     }
     if locations.len() == 3 && type_info.is_slice {
         // Guarded by len() == 3 above — pattern match eliminates unwrap.
-        let [ptr, len, cap]: [VariableLocation; 3] = locations
+        let [ptr, len, cap]: [VariablePiece; 3] = locations
             .try_into()
             .unwrap_or_else(|_| unreachable!("len() == 3 guarantees exactly 3 elements"));
         return Ok(VariableLocation::GoSlice {
-            ptr: Box::new(ptr),
-            len: Box::new(len),
-            cap: Box::new(cap),
+            ptr: Box::new(
+                ptr.location
+                    .ok_or_else(|| Error::DwarfParse("undefined slice pointer piece".into()))?,
+            ),
+            len: Box::new(
+                len.location
+                    .ok_or_else(|| Error::DwarfParse("undefined slice length piece".into()))?,
+            ),
+            cap: Box::new(
+                cap.location
+                    .ok_or_else(|| Error::DwarfParse("undefined slice capacity piece".into()))?,
+            ),
+        });
+    }
+    if locations.len() > 1
+        && (type_info.is_array || type_info.is_struct)
+        && type_info.byte_size > 0
+        && locations
+            .iter()
+            .all(|p| p.location.as_ref().is_none_or(VariableLocation::is_scalar))
+    {
+        return Ok(VariableLocation::PiecewiseBlob {
+            pieces: locations,
+            byte_size: type_info.byte_size as usize,
         });
     }
 
@@ -1087,6 +1241,7 @@ fn upgrade_location_for_type(
     let location = locations
         .into_iter()
         .next()
+        .and_then(|p| p.location)
         .ok_or_else(|| Error::DwarfParse("empty locations after DWARF resolution".to_string()))?;
 
     detrix_logging::debug!(
@@ -1247,6 +1402,28 @@ mod tests {
                 ptr: Box::new(VariableLocation::stack(-64)),
                 len: Box::new(VariableLocation::stack(-56)),
                 cap: Box::new(VariableLocation::stack(-48)),
+            }
+        );
+    }
+
+    #[test]
+    fn upgrade_register_pieces_to_inline_array_blob() {
+        let pieces = vec![
+            VariableLocation::Register(Register::Rax),
+            VariableLocation::Register(Register::Rbx),
+            VariableLocation::Register(Register::Rcx),
+        ];
+
+        let result = upgrade_location_for_type(pieces.clone(), &array_type(20)).unwrap();
+
+        assert_eq!(
+            result,
+            VariableLocation::PiecewiseBlob {
+                pieces: pieces
+                    .into_iter()
+                    .map(IntoVariablePiece::into_piece)
+                    .collect(),
+                byte_size: 20,
             }
         );
     }
