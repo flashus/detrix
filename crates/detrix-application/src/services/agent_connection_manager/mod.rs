@@ -6,7 +6,7 @@
 //!
 //! # Key Design
 //!
-//! - `register_atomic`: write-lock for in-memory state, then SQLite batch outside lock.
+//! - `register_atomic`: serialized durable save/cleanup/routing publication.
 //!   `connection_to_agent` is only populated after the transaction commits.
 //! - `connection_requests`: separate DashMap tracking active request_ids per connection,
 //!   avoiding write-guard contention on AgentInfo.
@@ -105,6 +105,8 @@ impl AgentConnectionManager {
         binaries: Vec<AgentBinaryInfo>,
         outgoing_tx: AgentOutgoingTx,
     ) -> Result<RegisterResult, detrix_core::Error> {
+        let _registration_guard = self.registration_lock.lock().await;
+
         // ── Write lock: in-memory only ──
         let min_version = self
             .agent_config
@@ -687,6 +689,12 @@ impl AgentConnectionManager {
         };
 
         for stale_id in stale_ids {
+            // A row is not stale merely because the adapter has not yet reported
+            // Connected. Another live Agent may already own it (for example two
+            // Geth nodes exposing the same binary and workspace concurrently).
+            if self.connection_to_agent.contains_key(&stale_id) {
+                continue;
+            }
             match self
                 .metric_repo
                 .migrate_connection_id(&stale_id, &connection.id)
@@ -1224,6 +1232,64 @@ mod tests {
             .unregister_agent_if_current("agent-a", &new_tx)
             .await;
         assert!(!manager.agents.contains_key("agent-a"));
+    }
+
+    #[tokio::test]
+    async fn registering_same_binary_on_two_hosts_preserves_both_connections() {
+        let manager = test_manager();
+        let binary = AgentBinaryInfo {
+            binary_path: "/usr/local/bin/geth".to_string(),
+            pid: 1,
+            inode: 1,
+            build_info: String::new(),
+            has_dwarf: true,
+            exported_functions: Vec::new(),
+            language: SourceLanguage::Go,
+        };
+        let (sealer_tx, _sealer_rx) = mpsc::unbounded_channel();
+        let (follower_tx, _follower_rx) = mpsc::unbounded_channel();
+
+        manager
+            .register_atomic(
+                "agent-sealer".to_string(),
+                "geth-sealer-agent".to_string(),
+                "1.3.0".to_string(),
+                AgentCapabilities::default(),
+                vec![binary.clone()],
+                sealer_tx,
+            )
+            .await
+            .unwrap();
+        manager
+            .register_atomic(
+                "agent-follower".to_string(),
+                "geth-follower-agent".to_string(),
+                "1.3.0".to_string(),
+                AgentCapabilities::default(),
+                vec![binary],
+                follower_tx,
+            )
+            .await
+            .unwrap();
+
+        let sealer_id = ConnectionId(
+            agent_connection_identity(
+                "/usr/local/bin/geth",
+                SourceLanguage::Go,
+                "geth-sealer-agent",
+            )
+            .to_uuid(),
+        );
+        let follower_id = ConnectionId(
+            agent_connection_identity(
+                "/usr/local/bin/geth",
+                SourceLanguage::Go,
+                "geth-follower-agent",
+            )
+            .to_uuid(),
+        );
+        assert!(manager.owns_connection("agent-sealer", &sealer_id));
+        assert!(manager.owns_connection("agent-follower", &follower_id));
     }
 
     #[tokio::test]

@@ -25,7 +25,7 @@ impl EventRepository for SqliteStorage {
         // Serialize multi-expression values as JSON
         let values_json = serde_json::to_string(&event.values)?;
 
-        let id = sqlx::query(
+        let result = sqlx::query(
             r#"
             INSERT OR IGNORE INTO metric_events (
                 metric_id, metric_name, connection_id, timestamp, thread_name, thread_id,
@@ -33,7 +33,8 @@ impl EventRepository for SqliteStorage {
                 is_error, error_type, error_message, error_traceback,
                 request_id, session_id, stack_trace_json, memory_snapshot_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE EXISTS (SELECT 1 FROM metrics WHERE id = ?)
             "#,
         )
         .bind(event.metric_id.0 as i64) // SQLite only supports i64
@@ -51,11 +52,15 @@ impl EventRepository for SqliteStorage {
         .bind(&None::<String>) // session_id
         .bind(&stack_trace_json)
         .bind(&memory_snapshot_json)
+        .bind(event.metric_id.0 as i64)
         .execute(self.pool())
-        .await?
-        .last_insert_rowid();
+        .await?;
 
-        Ok(id)
+        if result.rows_affected() == 0 {
+            Ok(0)
+        } else {
+            Ok(result.last_insert_rowid())
+        }
     }
 
     async fn save_batch(&self, events: &[MetricEvent]) -> Result<Vec<i64>> {
@@ -78,21 +83,27 @@ impl EventRepository for SqliteStorage {
             let placeholder = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
             let joined = vec![placeholder; chunk.len()].join(", ");
 
-            // INSERT OR IGNORE: silently drops events whose metric_id no longer exists.
-            // This handles the race between event capture and metric removal: an event
-            // can be buffered for a metric that is deleted before the batch flush fires.
-            // Such events are meaningless (the metric is gone); ON DELETE CASCADE already
-            // removes existing events when a metric is deleted. IGNORE prevents a FK
-            // constraint failure from aborting the entire batch and losing valid events.
+            // Join buffered events to the live metric table in the same statement. SQLite's
+            // conflict clauses do not suppress foreign-key violations, so INSERT OR IGNORE
+            // alone cannot handle an event racing with metric removal. The join discards only
+            // orphaned events while preserving valid events from the same batch.
             let query = format!(
                 r#"
+                WITH input (
+                    metric_id, metric_name, connection_id, timestamp, thread_name, thread_id,
+                    values_json,
+                    is_error, error_type, error_message, error_traceback,
+                    request_id, session_id, stack_trace_json, memory_snapshot_json
+                ) AS (VALUES {})
                 INSERT OR IGNORE INTO metric_events (
                     metric_id, metric_name, connection_id, timestamp, thread_name, thread_id,
                     values_json,
                     is_error, error_type, error_message, error_traceback,
                     request_id, session_id, stack_trace_json, memory_snapshot_json
                 )
-                VALUES {}
+                SELECT input.*
+                FROM input
+                INNER JOIN metrics ON metrics.id = input.metric_id
                 "#,
                 joined
             );
@@ -592,6 +603,56 @@ mod tests {
             conn_ids.contains(&"conn-a") && conn_ids.contains(&"conn-b"),
             "Both connection_ids should be persisted"
         );
+    }
+
+    #[tokio::test]
+    async fn test_event_batch_save_discards_orphan_without_losing_valid_events() {
+        let storage = create_test_storage().await;
+        let metric = create_test_metric("orphan_race_test").await;
+        let metric_id = MetricRepository::save(&storage, &metric).await.unwrap();
+        let orphan_id = MetricId(metric_id.0 + 1_000_000);
+        let events = vec![
+            MetricEvent::new(
+                orphan_id,
+                "removed_metric".to_string(),
+                ConnectionId::from("conn-a"),
+                r#"{"orphan": true}"#.to_string(),
+            ),
+            MetricEvent::new(
+                metric_id,
+                "orphan_race_test".to_string(),
+                ConnectionId::from("conn-a"),
+                r#"{"valid": true}"#.to_string(),
+            ),
+        ];
+
+        let ids = EventRepository::save_batch(&storage, &events)
+            .await
+            .expect("an orphan buffered event must not abort the valid event");
+
+        assert_eq!(ids.len(), 1);
+        let saved = EventRepository::find_by_metric_id(&storage, metric_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].value_json(), r#"{"valid": true}"#);
+    }
+
+    #[tokio::test]
+    async fn test_event_save_discards_orphan_metric() {
+        let storage = create_test_storage().await;
+        let event = MetricEvent::new(
+            MetricId(1_000_000),
+            "removed_metric".to_string(),
+            ConnectionId::from("conn-a"),
+            r#"{"orphan": true}"#.to_string(),
+        );
+
+        let id = EventRepository::save(&storage, &event)
+            .await
+            .expect("an orphan buffered event should be discarded");
+
+        assert_eq!(id, 0);
     }
 
     /// Test batch save with large number of events (exceeds chunk size)

@@ -245,6 +245,10 @@ pub struct AgentConnectionManager {
     /// Connections currently being started by dispatch — prevents duplicate start_adapter
     /// calls when concurrent ConnectionUpdate(Connected) events arrive.
     pub(super) starting_adapters: Arc<DashSet<ConnectionId>>,
+    /// Serializes durable registration and stale-connection cleanup. Without this,
+    /// two hosts exposing the same binary can each observe the other's freshly
+    /// persisted Disconnected row as stale before routing ownership is installed.
+    pub(super) registration_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AgentConnectionManager {
@@ -272,6 +276,7 @@ impl AgentConnectionManager {
             adapter_lifecycle_manager: Arc::new(tokio::sync::RwLock::new(None)),
             liveness_timestamps: Arc::new(DashMap::new()),
             starting_adapters: Arc::new(DashSet::new()),
+            registration_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }

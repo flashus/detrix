@@ -34,10 +34,14 @@ pub struct RemoteAdapter {
     request_counter: AtomicUsize,
 }
 
+fn scoped_request_id(connection_id: &ConnectionId, sequence: usize) -> String {
+    format!("req-{}-{sequence}", connection_id.0)
+}
+
 impl RemoteAdapter {
     fn next_request_id(&self) -> String {
         let n = self.request_counter.fetch_add(1, Ordering::Relaxed);
-        format!("req-{n}")
+        scoped_request_id(&self.connection_id, n)
     }
 
     pub fn new(connection_id: ConnectionId, agent_manager: AgentConnectionManagerRef) -> Self {
@@ -261,5 +265,19 @@ impl DapAdapter for RemoteAdapter {
 
     fn get_drop_count(&self, _metric_name: &str) -> Result<u64> {
         Ok(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_ids_are_scoped_to_connection() {
+        let a = scoped_request_id(&ConnectionId("connection-a".to_string()), 0);
+        let b = scoped_request_id(&ConnectionId("connection-b".to_string()), 0);
+        assert_ne!(a, b);
+        assert!(a.contains("connection-a"));
+        assert!(b.contains("connection-b"));
     }
 }
