@@ -192,7 +192,7 @@ async fn restart_daemon() {
     let start = Instant::now();
     loop {
         if let Ok(resp) = http_client
-            .get(format!("http://127.0.0.1:{}/health", DAEMON_HTTP_PORT))
+            .get(format!("http://127.0.0.1:{}/health", daemon_http_port()))
             .timeout(Duration::from_secs(3))
             .send()
             .await
@@ -255,7 +255,7 @@ async fn restart_daemon_with_env(envs: &[(&str, &str)]) {
     let start = Instant::now();
     loop {
         if let Ok(resp) = http_client
-            .get(format!("http://127.0.0.1:{}/health", DAEMON_HTTP_PORT))
+            .get(format!("http://127.0.0.1:{}/health", daemon_http_port()))
             .timeout(Duration::from_secs(3))
             .send()
             .await
@@ -662,7 +662,7 @@ async fn admin_get_metric_id(
 async fn test_cloud_e2e() {
     // Docker Compose assumed running (Taskfile manages lifecycle).
     // McpClient kept only for Phase 7/8 (kept as-is); all other phases use McpBridgeProcess.
-    let client = McpClient::with_auth(DAEMON_HTTP_PORT, DOCKER_AUTH_TOKEN);
+    let client = McpClient::with_auth(daemon_http_port(), DOCKER_AUTH_TOKEN);
 
     // Print daemon build datetime (docker exec) to verify the image is fresh.
     let compose_abs = compose_file_abs();
@@ -699,7 +699,7 @@ async fn test_cloud_e2e() {
         let start = Instant::now();
         loop {
             if let Ok(resp) = http_client
-                .get(format!("http://127.0.0.1:{}/health", DAEMON_HTTP_PORT))
+                .get(format!("http://127.0.0.1:{}/health", daemon_http_port()))
                 .timeout(Duration::from_secs(3))
                 .send()
                 .await
@@ -711,15 +711,15 @@ async fn test_cloud_e2e() {
             if start.elapsed() > Duration::from_secs(30) {
                 panic!(
                     "Daemon failed to become healthy on port {} within 30s",
-                    DAEMON_HTTP_PORT
+                    daemon_http_port()
                 );
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
-    println!("Daemon healthy at port {}", DAEMON_HTTP_PORT);
+    println!("Daemon healthy at port {}", daemon_http_port());
 
-    let daemon_url = format!("http://127.0.0.1:{}", DAEMON_HTTP_PORT);
+    let daemon_url = format!("http://127.0.0.1:{}", daemon_http_port());
 
     // ── Phase 1: Basic observation (Python + Go + Rust) ──
     // Wake each app via real MCP bridge, poll for connection, add_metric,
@@ -1111,7 +1111,7 @@ async fn test_cloud_e2e() {
         find_detrix_binary(&ws_root).expect("detrix binary not found — run `cargo build` first");
     println!("  Binary: {:?}", detrix_bin);
 
-    let daemon_url = format!("http://127.0.0.1:{}", DAEMON_HTTP_PORT);
+    let daemon_url = format!("http://127.0.0.1:{}", daemon_http_port());
     let mut child = tokio::process::Command::new(&detrix_bin)
         .args(["mcp", "--daemon-url", &daemon_url])
         .env("DETRIX_TOKEN", DOCKER_AUTH_TOKEN)
@@ -1267,9 +1267,10 @@ async fn test_cloud_e2e() {
     // Restart daemon with advertise_url
     println!(
         "\n--- Restarting daemon with DETRIX_ADVERTISE_URL={} ---",
-        ADVERTISE_URL
+        advertise_url()
     );
-    restart_daemon_with_env(&[("TEST_ADVERTISE_URL", ADVERTISE_URL)]).await;
+    let advertise = advertise_url();
+    restart_daemon_with_env(&[("TEST_ADVERTISE_URL", advertise.as_str())]).await;
     println!("  Daemon restarted with advertise_url");
 
     // ── Phase 6a: Python (control plane file serving) ──
@@ -1284,11 +1285,11 @@ async fn test_cloud_e2e() {
         assert!(
             wake_text.contains("daemon_url")
                 || wake_text.contains("daemonUrl")
-                || wake_text.contains(ADVERTISE_URL),
+                || wake_text.contains(advertise_url().as_str()),
             "Wake text should contain daemon_url or the URL itself.\nText: {}",
             wake_text
         );
-        println!("  daemon_url verified: {}", ADVERTISE_URL);
+        println!("  daemon_url verified: {}", advertise_url());
 
         let py_conn = poll_for_connection_bridge(&mut bridge, "python", Duration::from_secs(15))
             .await
@@ -1342,11 +1343,11 @@ async fn test_cloud_e2e() {
         assert!(
             go_wake_text.contains("daemon_url")
                 || go_wake_text.contains("daemonUrl")
-                || go_wake_text.contains(ADVERTISE_URL),
+                || go_wake_text.contains(advertise_url().as_str()),
             "Wake text should contain daemon_url or the URL itself.\nText: {}",
             go_wake_text
         );
-        println!("  daemon_url verified: {}", ADVERTISE_URL);
+        println!("  daemon_url verified: {}", advertise_url());
 
         let go_conn_6b = poll_for_connection_bridge(&mut bridge, "go", Duration::from_secs(15))
             .await
@@ -1389,8 +1390,8 @@ async fn test_cloud_e2e() {
         match bridge.wake(RUST_APP_URL).await {
             Ok(rust_wake_text) => {
                 // Check daemon_url even if we might skip later
-                if rust_wake_text.contains(ADVERTISE_URL) {
-                    println!("  daemon_url verified: {}", ADVERTISE_URL);
+                if rust_wake_text.contains(advertise_url().as_str()) {
+                    println!("  daemon_url verified: {}", advertise_url());
                 }
 
                 if let Some(rust_conn) =
@@ -1466,9 +1467,10 @@ async fn test_cloud_e2e() {
     // Restart daemon with advertise_url (clean DB for fresh state)
     println!(
         "\n--- Restarting daemon with DETRIX_ADVERTISE_URL={} ---",
-        ADVERTISE_URL
+        advertise_url()
     );
-    restart_daemon_with_env(&[("TEST_ADVERTISE_URL", ADVERTISE_URL)]).await;
+    let advertise = advertise_url();
+    restart_daemon_with_env(&[("TEST_ADVERTISE_URL", advertise.as_str())]).await;
     println!("  Daemon restarted");
 
     // Spawn detrix mcp with IP-based daemon URL (differs from advertise_url string)
@@ -1477,7 +1479,7 @@ async fn test_cloud_e2e() {
         find_detrix_binary(&ws_root_7).expect("detrix binary not found — run `cargo build` first");
 
     // Use 127.0.0.1 (IP) so it differs from advertise_url "localhost" (hostname)
-    let bridge_daemon_url = format!("http://127.0.0.1:{}", DAEMON_HTTP_PORT);
+    let bridge_daemon_url = format!("http://127.0.0.1:{}", daemon_http_port());
     println!(
         "  Spawning detrix mcp --daemon-url {} (IP-based, differs from advertise_url)",
         bridge_daemon_url
@@ -1602,7 +1604,7 @@ async fn test_cloud_e2e() {
 
     // Assert daemon_url is present in the response
     assert!(
-        wake_text.contains("daemon_url") || wake_text.contains(ADVERTISE_URL),
+        wake_text.contains("daemon_url") || wake_text.contains(advertise_url().as_str()),
         "Wake response should contain daemon_url.\nText: {}",
         wake_text
     );
@@ -1616,7 +1618,8 @@ async fn test_cloud_e2e() {
     );
     println!(
         "  Auto-switch confirmed: {} → {}",
-        bridge_daemon_url, ADVERTISE_URL
+        bridge_daemon_url,
+        advertise_url()
     );
 
     // Send get_status — should succeed after auto-switch
@@ -1672,7 +1675,7 @@ async fn test_cloud_e2e() {
     println!("\n--- Phase 8a: Daemon health returns advertise_url ---");
     let http_client = reqwest::Client::new();
     let health_resp = http_client
-        .get(format!("http://127.0.0.1:{}/health", DAEMON_HTTP_PORT))
+        .get(format!("http://127.0.0.1:{}/health", daemon_http_port()))
         .timeout(Duration::from_secs(5))
         .send()
         .await
@@ -1686,11 +1689,11 @@ async fn test_cloud_e2e() {
         .and_then(|v| v.as_str());
     assert_eq!(
         health_advertise_url,
-        Some(ADVERTISE_URL),
+        Some(advertise_url().as_str()),
         "Daemon health should return advertise_url.\nHealth JSON: {}",
         health_json
     );
-    println!("  Daemon health advertise_url: {}", ADVERTISE_URL);
+    println!("  Daemon health advertise_url: {}", advertise_url());
 
     // ── Phase 8b: Python client /detrix/discover returns advertise_url ──
     // Python control plane is mapped to host port 18091
@@ -1732,9 +1735,10 @@ async fn test_cloud_e2e() {
         .and_then(|v| v.as_str())
         .expect("discover should return daemon_url");
     assert_eq!(
-        discover_daemon_url, ADVERTISE_URL,
+        discover_daemon_url,
+        advertise_url(),
         "Discover should return advertise_url ({}), not internal Docker URL",
-        ADVERTISE_URL
+        advertise_url()
     );
     println!("  Discover daemon_url: {} (correct!)", discover_daemon_url);
 
@@ -1775,7 +1779,8 @@ async fn test_cloud_e2e() {
     let creds_path = temp_dir.path().join("credentials.toml");
     let creds_content = format!(
         "[targets.\"localhost:{}\"]\ntoken = \"{}\"\n",
-        DAEMON_HTTP_PORT, DOCKER_AUTH_TOKEN
+        daemon_http_port(),
+        DOCKER_AUTH_TOKEN
     );
     std::fs::write(&creds_path, &creds_content).expect("write credentials");
     println!("  Credentials written to {:?}", creds_path);
@@ -1784,7 +1789,8 @@ async fn test_cloud_e2e() {
     sleep_app(&client, PYTHON_APP_URL).await;
 
     // Restart daemon with clean DB and advertise_url
-    restart_daemon_with_env(&[("TEST_ADVERTISE_URL", ADVERTISE_URL)]).await;
+    let advertise = advertise_url();
+    restart_daemon_with_env(&[("TEST_ADVERTISE_URL", advertise.as_str())]).await;
     println!("  Daemon restarted with advertise_url");
 
     // Spawn bridge pointing to a wrong daemon URL initially
@@ -1794,7 +1800,7 @@ async fn test_cloud_e2e() {
         find_detrix_binary(&ws_root_8).expect("detrix binary not found — run `cargo build` first");
 
     // Use the actual daemon URL but the bridge should still go through discovery
-    let bridge_daemon_url_8 = format!("http://127.0.0.1:{}", DAEMON_HTTP_PORT);
+    let bridge_daemon_url_8 = format!("http://127.0.0.1:{}", daemon_http_port());
     let mut mcp_child_8 = tokio::process::Command::new(&detrix_bin_8)
         .args(["mcp", "--daemon-url", &bridge_daemon_url_8])
         .env("DETRIX_TOKEN", DOCKER_AUTH_TOKEN)
@@ -2026,7 +2032,7 @@ async fn test_cloud_e2e() {
     const BOB_TOKEN: &str = "dtx_bob_cloud_xxxx";
     const ADMIN_TOKEN: &str = "dtx_admin_cloud_xx";
 
-    let daemon_url_10 = format!("http://127.0.0.1:{}", DAEMON_HTTP_PORT);
+    let daemon_url_10 = format!("http://127.0.0.1:{}", daemon_http_port());
 
     // ── Phase 10a: Alice wakes Python and adds a metric ──
     println!("\n--- Phase 10a: Alice adds Python metric ---");

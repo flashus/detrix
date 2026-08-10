@@ -6,8 +6,8 @@ services:
       args:
         RUST_IMAGE: ${RUST_IMAGE}
     ports:
-      - "8095:8090"
-      - "50065:50061"
+      - "${DETRIX_TEST_DAEMON_HTTP_PORT:-8095}:8090"
+      - "${DETRIX_TEST_DAEMON_GRPC_PORT:-50065}:50061"
     volumes:
       - detrix-data:/data/detrix
       - ./detrix.toml:/data/detrix/detrix.toml:ro

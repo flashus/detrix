@@ -534,15 +534,64 @@ tasks:
     vars:
       COMPOSE_FILE: fixtures/docker/docker-compose.yml
       PROJECT: detrix-cloud-test
+      HTTP_PORT:
+        sh: |
+          if [ -n "${DETRIX_TEST_DAEMON_HTTP_PORT:-}" ]; then
+            printf '%s\n' "$DETRIX_TEST_DAEMON_HTTP_PORT"
+          else
+            for port in 8095 18095 28095; do
+              if ! lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+                printf '%s\n' "$port"
+                exit 0
+              fi
+            done
+            echo "no free Docker cloud HTTP port found" >&2
+            exit 1
+          fi
+      GRPC_PORT:
+        sh: |
+          if [ -n "${DETRIX_TEST_DAEMON_GRPC_PORT:-}" ]; then
+            printf '%s\n' "$DETRIX_TEST_DAEMON_GRPC_PORT"
+          else
+            for port in 50065 50067 50068; do
+              if ! lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+                printf '%s\n' "$port"
+                exit 0
+              fi
+            done
+            echo "no free Docker cloud gRPC port found" >&2
+            exit 1
+          fi
+      TARGET_DIR:
+        sh: printf '%s\n' "${DETRIX_TEST_TARGET_DIR:-/private/tmp/detrix-cloud-target}"
     cmds:
       - |
+        RUSTC_WRAPPER= CARGO_TARGET_DIR="{{.TARGET_DIR}}" cargo build --release --bin detrix
+      - |
+        export DETRIX_TEST_DAEMON_HTTP_PORT="{{.HTTP_PORT}}"
+        export DETRIX_TEST_DAEMON_GRPC_PORT="{{.GRPC_PORT}}"
+        export DETRIX_TEST_ADVERTISE_URL="http://localhost:${DETRIX_TEST_DAEMON_HTTP_PORT}"
+        echo "Docker cloud ports: HTTP=${DETRIX_TEST_DAEMON_HTTP_PORT}, gRPC=${DETRIX_TEST_DAEMON_GRPC_PORT}"
+        started=0
         for i in 1 2 3; do
-          docker compose --env-file fixtures/docker/images.env -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --wait && break
+          if docker compose --env-file fixtures/docker/images.env -f {{.COMPOSE_FILE}} -p {{.PROJECT}} up -d --build --wait; then
+            started=1
+            break
+          fi
           echo "docker compose up --build failed (attempt $i/3), retrying in 5s..."
-          sleep 5
+          [ "$i" -lt 3 ] && sleep 5
         done
+        if [ "$started" -ne 1 ]; then
+          echo "docker compose failed after 3 attempts; refusing to run the E2E test" >&2
+          exit 1
+        fi
       - defer: docker compose --env-file fixtures/docker/images.env -f {{.COMPOSE_FILE}} -p {{.PROJECT}} down -v
-      - cargo test -p detrix-testing --test docker_cloud_e2e -- --ignored --nocapture --test-threads=1
+      - |
+        export DETRIX_TEST_DAEMON_HTTP_PORT="{{.HTTP_PORT}}"
+        export DETRIX_TEST_DAEMON_GRPC_PORT="{{.GRPC_PORT}}"
+        export DETRIX_TEST_ADVERTISE_URL="http://localhost:${DETRIX_TEST_DAEMON_HTTP_PORT}"
+        export DETRIX_BIN="{{.TARGET_DIR}}/release/detrix"
+        cargo test -p detrix-testing --test docker_cloud_e2e -- --ignored --nocapture --test-threads=1
       - task: check-orphans
 
   build-agent-bins:
