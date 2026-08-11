@@ -24,6 +24,7 @@ pub struct BinaryInfo {
     pub build_info: String,
     pub has_dwarf: bool,
     pub exported_functions: Vec<String>,
+    pub language: String,
 }
 
 /// /proc scanner that tracks discovered binaries and detects changes.
@@ -172,6 +173,7 @@ impl ProcScanner {
             } else {
                 true
             };
+            let language = detect_language(&binary_path_str);
             binaries.push(BinaryInfo {
                 binary_path: binary_path_str,
                 pid,
@@ -179,10 +181,37 @@ impl ProcScanner {
                 build_info: String::new(),
                 has_dwarf,
                 exported_functions: Vec::new(),
+                language,
             });
         }
 
         binaries
+    }
+}
+
+/// Identify the producer language from embedded compiler markers. Go remains
+/// the conservative default; Rust binaries contain `rustc` in DWARF/string
+/// tables. This is deliberately best-effort because the server still validates
+/// the requested capture profile before attaching a probe.
+fn detect_language(path: &str) -> String {
+    let target = fs::read_link(path)
+        .ok()
+        .unwrap_or_else(|| std::path::PathBuf::from(path));
+    if target
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .contains("rust")
+    {
+        return "rust".to_string();
+    }
+    let Ok(bytes) = fs::read(path) else {
+        return "go".to_string();
+    };
+    let sample = &bytes[..bytes.len().min(8 * 1024 * 1024)];
+    if sample.windows(5).any(|w| w == b"rustc") {
+        "rust".to_string()
+    } else {
+        "go".to_string()
     }
 }
 
@@ -198,6 +227,7 @@ mod tests {
             build_info: String::new(),
             has_dwarf: true,
             exported_functions: Vec::new(),
+            language: "go".to_string(),
         }
     }
 
@@ -321,5 +351,6 @@ pub fn binary_info_to_proto(info: &BinaryInfo) -> detrix_api::generated::detrix:
         has_dwarf: info.has_dwarf,
         exported_functions: info.exported_functions.clone(),
         inode: info.inode,
+        language: info.language.clone(),
     }
 }

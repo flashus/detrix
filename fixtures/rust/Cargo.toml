@@ -29,3 +29,9 @@ opt-level = 0
 [profile.release]
 # Keep debug symbols in release builds for observability
 debug = true
+# Agent/eBPF fixtures must expose stable stack/register DWARF locations.  The
+# production optimizer commonly keeps f64 values in SIMD registers (which are
+# not present in Linux pt_regs), making a non-pausing eBPF probe impossible.
+# Keep this fixture debugger-grade and deterministic; this does not affect
+# application release profiles outside the test fixture.
+opt-level = 0

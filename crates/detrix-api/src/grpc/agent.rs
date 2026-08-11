@@ -94,8 +94,10 @@ impl AgentService for AgentServiceImpl {
                 build_info: b.build_info,
                 has_dwarf: b.has_dwarf,
                 exported_functions: b.exported_functions,
-                // Agent scanner currently only reports eBPF-observable Go ELF binaries.
-                language: detrix_core::SourceLanguage::Go,
+                language: match b.language.as_str() {
+                    "rust" => detrix_core::SourceLanguage::Rust,
+                    _ => detrix_core::SourceLanguage::Go,
+                },
             })
             .collect();
 

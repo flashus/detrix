@@ -1,7 +1,7 @@
 //! Adapter Manager — manages local adapter instances per connection.
 //!
 //! Creates and manages local adapters for each connection assigned to this agent.
-//! For Go connections, uses eBPF uprobes. For Python/Rust, uses DAP adapters
+//! For Go connections, uses eBPF uprobes. Rust may opt into scalar eBPF; DAP remains the default.
 //! (Phase 5: Hybrid DAP mode — useful when debuggers bind to 127.0.0.1 only).
 
 use crate::error::{AgentError, Result};
@@ -16,7 +16,7 @@ use detrix_api::generated::detrix::v1::{
 };
 use detrix_core::{ConnectionId, Location, Metric, MetricEvent, ParseLanguageExt, SourceLanguage};
 use detrix_dap::{PythonAdapter, RustAdapter};
-use detrix_ebpf::{resolve_backend, CaptureBackend, CaptureConfig, EbpfAdapter, ProfileId};
+use detrix_ebpf::{CaptureBackend, CaptureConfig, EbpfAdapter, ProfileId};
 use detrix_logging::{debug, info, warn};
 use detrix_ports::DapAdapterRef;
 use std::path::PathBuf;
@@ -77,7 +77,7 @@ impl AdapterManager {
     /// Create a new connection — dispatches by language.
     ///
     /// For Go connections, uses eBPF uprobes.
-    /// For Python/Rust, uses DAP adapters connecting to local debuggers.
+    /// DAP remains the default for Python/Rust unless Rust explicitly requests eBPF.
     pub async fn create_connection(&self, msg: AgentCreateConnection) {
         let connection_id = msg.connection_id.clone();
         let language = msg.language.to_lowercase();
@@ -136,26 +136,6 @@ impl AdapterManager {
             capture_profile = ?requested_profile,
             "Creating connection"
         );
-
-        // Rust eBPF is deliberately opt-in and fail-closed until the
-        // privileged live gate is complete. Never route an explicit Rust
-        // eBPF request through the Go adapter or silently downgrade it.
-        if language == "rust" && requested_backend == CaptureBackend::Ebpf {
-            let error = resolve_backend(
-                CaptureBackend::Ebpf,
-                ProfileId::Rust,
-                cfg!(target_os = "linux"),
-                false,
-            )
-            .expect_err("Rust eBPF must remain gated until debug-image/runtime support is enabled");
-            self.send_connection_update(
-                &connection_id,
-                ConnectionStatus::Failed,
-                Some(&error.to_string()),
-            )
-            .await;
-            return;
-        }
 
         // CreateConnection is normally serialized by the stream reader, but a
         // duplicate command can still arrive after a reconnect or retry. Stop
@@ -274,6 +254,59 @@ impl AdapterManager {
                 }
             }
             "rust" => {
+                if requested_backend == CaptureBackend::Ebpf {
+                    let binary_path = PathBuf::from(&msg.binary_path);
+                    match EbpfAdapter::new_with_profile(
+                        &binary_path,
+                        self.capture_config.clone(),
+                        ProfileId::Rust,
+                    ) {
+                        Ok(adapter) => {
+                            let adapter: DapAdapterRef = Arc::new(adapter);
+                            if let Err(e) = adapter.start().await {
+                                warn!("Failed to start Rust EbpfAdapter: {e}");
+                                self.send_connection_update(
+                                    &connection_id,
+                                    ConnectionStatus::Failed,
+                                    Some(&e.to_string()),
+                                )
+                                .await;
+                                return;
+                            }
+                            match adapter.subscribe_events().await {
+                                Ok(event_rx) => {
+                                    self.adapters.insert(connection_id.clone(), adapter);
+                                    self.spawn_event_forwarder(connection_id.clone(), event_rx);
+                                    self.send_connection_update(
+                                        &connection_id,
+                                        ConnectionStatus::Connected,
+                                        None,
+                                    )
+                                    .await;
+                                }
+                                Err(e) => {
+                                    warn!("Failed to subscribe events from Rust EbpfAdapter: {e}");
+                                    self.send_connection_update(
+                                        &connection_id,
+                                        ConnectionStatus::Failed,
+                                        Some(&e.to_string()),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to create Rust EbpfAdapter: {e}");
+                            self.send_connection_update(
+                                &connection_id,
+                                ConnectionStatus::Failed,
+                                Some(&e.to_string()),
+                            )
+                            .await;
+                        }
+                    }
+                    return;
+                }
                 let port = match u16::try_from(msg.port) {
                     Ok(p) => p,
                     Err(_) => {

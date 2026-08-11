@@ -58,6 +58,7 @@ message BinaryInfo {
   bool   has_dwarf                   = 4;
   repeated string exported_functions = 5;
   uint64 inode                       = 6;
+  string language                    = 7;   // scanner-detected source language (go, rust)
 }
 
 // Reuses ConnectionStatus from connections.proto

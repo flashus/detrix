@@ -232,6 +232,7 @@ tasks:
   #   out/detrix                — detrix daemon (Linux ELF)
   #   out/ebpf_e2e_test         — test binary (Linux ELF)
   #   out/detrix_example_app    — Go fixture (Linux ELF, with DWARF)
+  #   out/rust_detrix_example_app — Rust fixture (Linux ELF, with DWARF)
   #
   # Typical workflow:
   #   task build-ebpf-playground   ← once: runtime image
@@ -271,7 +272,7 @@ tasks:
       - docker build --target rust-deps --build-arg RUST_IMAGE={{.RUST_IMAGE}} --build-arg GO_IMAGE={{.GO_IMAGE}} -f {{.DOCKERFILE}} -t {{.BUILDER}} .
 
   build-ebpf-shared-bins:
-    desc: "Compile shared eBPF artifacts used by inject-style tests (daemon + primary Go fixture)"
+    desc: "Compile shared eBPF artifacts used by inject-style tests (daemon + Go/Rust fixtures)"
     vars:
       BUILDER: detrix-ebpf-builder
       OUT: "{{.ROOT_DIR}}/out"
@@ -311,9 +312,27 @@ tasks:
             -gcflags="all=-N -l" \
             -ldflags="-compressdwarf=false" \
             -o /out/detrix_example_app .
+      # Build the Rust fixture with DWARF in the same Rust builder image.
+      # --target-dir bypasses fixtures/rust/.cargo/config.toml, whose host path
+      # is intentionally unsuitable inside the container. The path remains in
+      # the shared Cargo target volume so Rust fixture rebuilds stay cached.
+      - |
+        docker run --rm \
+          -v "{{.ROOT_DIR}}:/src" \
+          -v "ebpf-cargo-home:/usr/local/cargo" \
+          -v "ebpf-cargo-target:/build/target" \
+          -w /src \
+          {{.BUILDER}} \
+          sh -c '
+            cargo build --release --locked \
+              --manifest-path fixtures/rust/Cargo.toml \
+              --target-dir /build/target/fixture-rust && \
+            install -m 755 /build/target/fixture-rust/release/detrix_example_app \
+              /src/out/rust_detrix_example_app
+          '
 
   build-ebpf-bins:
-    desc: "Compile daemon + test binary + Go fixture for eBPF testing (output: ./out/)"
+    desc: "Compile daemon + test binaries + Go/Rust fixtures for eBPF testing (output: ./out/)"
     deps: [build-ebpf-shared-bins]
     vars:
       BUILDER: detrix-ebpf-builder
@@ -411,9 +430,14 @@ tasks:
           -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
           -v "{{.OUT}}/detrix_example_app:/usr/local/bin/detrix_example_app:ro" \
           -v "{{.OUT}}/ebpf_e2e_test:/usr/local/bin/ebpf_e2e_test:ro" \
+          -v "{{.OUT}}/rust_detrix_example_app:/usr/local/bin/rust_detrix_example_app:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/go/string_capture:/src/fixtures/go/string_capture:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/rust:/src/fixtures/rust:ro" \
           -e DETRIX_BIN=/usr/local/bin/detrix \
           -e GO_FIXTURE_BINARY=/usr/local/bin/detrix_example_app \
           -e GO_FIXTURE_SOURCE=/src/fixtures/go/string_capture/main.go \
+          -e RUST_FIXTURE_BINARY=/usr/local/bin/rust_detrix_example_app \
+          -e RUST_FIXTURE_SOURCE=/src/fixtures/rust/src/main.rs \
           {{.PLAYGROUND}} \
           /usr/local/bin/ebpf_e2e_test --ignored --nocapture
 
@@ -631,12 +655,61 @@ tasks:
           -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
           -v "{{.OUT}}/detrix_example_app:/usr/local/bin/detrix_example_app:ro" \
           -v "{{.OUT}}/agent_e2e_test:/usr/local/bin/agent_e2e_test:ro" \
+          -v "{{.OUT}}/rust_detrix_example_app:/usr/local/bin/rust_detrix_example_app:ro" \
           -v "{{.ROOT_DIR}}/fixtures/go/string_capture:/src/fixtures/go/string_capture:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/rust:/src/fixtures/rust:ro" \
           -e DETRIX_BIN=/usr/local/bin/detrix \
           -e AGENT_FIXTURE_BINARY=/usr/local/bin/detrix_example_app \
           -e AGENT_FIXTURE_SOURCE=/src/fixtures/go/string_capture/main.go \
+          -e RUST_FIXTURE_BINARY=/usr/local/bin/rust_detrix_example_app \
+          -e RUST_FIXTURE_SOURCE=/src/fixtures/rust/src/main.rs \
           {{.PLAYGROUND}} \
           /usr/local/bin/agent_e2e_test --ignored --nocapture --test-threads=1
+
+  test-agent-rust:
+    desc: "Run the explicit Rust eBPF agent smoke test in the shared privileged playground"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.ROOT_DIR}}/out"
+    deps: [build-ebpf-playground, build-agent-bins]
+    cmds:
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/rust_detrix_example_app:/usr/local/bin/rust_detrix_example_app:ro" \
+          -v "{{.OUT}}/agent_e2e_test:/usr/local/bin/agent_e2e_test:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/rust:/src/fixtures/rust:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e RUST_FIXTURE_BINARY=/usr/local/bin/rust_detrix_example_app \
+          -e RUST_FIXTURE_SOURCE=/src/fixtures/rust/src/main.rs \
+          -e DETRIX_AGENT_RUST_EBPF=1 \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/agent_e2e_test test_agent_rust_ebpf_basic --ignored --nocapture --test-threads=1
+
+  test-agent-both:
+    desc: "Run Go and Rust eBPF services together under one Detrix agent"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.ROOT_DIR}}/out"
+    deps: [build-ebpf-playground, build-agent-bins]
+    cmds:
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/detrix_example_app:/usr/local/bin/detrix_example_app:ro" \
+          -v "{{.OUT}}/rust_detrix_example_app:/usr/local/bin/rust_detrix_example_app:ro" \
+          -v "{{.OUT}}/agent_e2e_test:/usr/local/bin/agent_e2e_test:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/go/string_capture:/src/fixtures/go/string_capture:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/rust:/src/fixtures/rust:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e AGENT_FIXTURE_BINARY=/usr/local/bin/detrix_example_app \
+          -e AGENT_FIXTURE_SOURCE=/src/fixtures/go/string_capture/main.go \
+          -e RUST_FIXTURE_BINARY=/usr/local/bin/rust_detrix_example_app \
+          -e RUST_FIXTURE_SOURCE=/src/fixtures/rust/src/main.rs \
+          -e AGENT_FIXTURES=both \
+          -e DETRIX_AGENT_RUST_EBPF=1 \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/agent_e2e_test test_agent_go_and_rust_ebpf_same_agent --ignored --nocapture --test-threads=1
 
   # ── Cache cleanup ──────────────────────────────────────────────────────────────
 

@@ -219,6 +219,14 @@ impl AgentConnectionManager {
         // receives this frame.
         for (identity, binary_path, safe_mode) in &identities {
             let conn_id = ConnectionId(identity.to_uuid());
+            // Test runners can opt Rust binaries into the explicit eBPF path
+            // without changing the production default (auto/DAP).  This is
+            // intentionally process-scoped: Docker's privileged agent test
+            // sets it only for the Rust eBPF scenario.
+            let rust_ebpf = identity.language == SourceLanguage::Rust
+                && std::env::var("DETRIX_AGENT_RUST_EBPF")
+                    .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
             let _ = outgoing_tx.send(OutgoingAgentMessage::CreateConnection {
                 connection_id: conn_id.0.clone(),
                 language: identity.language.as_str().to_string(),
@@ -226,8 +234,8 @@ impl AgentConnectionManager {
                 host: hostname.clone(),
                 port: 0,
                 safe_mode: *safe_mode,
-                capture_backend: String::new(),
-                capture_profile: String::new(),
+                capture_backend: if rust_ebpf { "ebpf" } else { "" }.to_string(),
+                capture_profile: if rust_ebpf { "rust" } else { "" }.to_string(),
                 debug_info_path: String::new(),
             });
         }

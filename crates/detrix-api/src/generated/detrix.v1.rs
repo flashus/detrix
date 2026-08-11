@@ -4896,6 +4896,9 @@ pub struct BinaryInfo {
     pub exported_functions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(uint64, tag = "6")]
     pub inode: u64,
+    /// scanner-detected source language (go, rust)
+    #[prost(string, tag = "7")]
+    pub language: ::prost::alloc::string::String,
 }
 /// Reuses ConnectionStatus from connections.proto
 #[derive(serde::Serialize, serde::Deserialize)]

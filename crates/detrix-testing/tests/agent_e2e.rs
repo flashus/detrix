@@ -55,6 +55,17 @@ fn fixture_source_path() -> String {
         .unwrap_or_else(|_| "/src/fixtures/go/string_capture/main.go".to_string())
 }
 
+fn rust_fixture_binary_path() -> PathBuf {
+    std::env::var("RUST_FIXTURE_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/usr/local/bin/rust_detrix_example_app"))
+}
+
+fn rust_fixture_source_path() -> String {
+    std::env::var("RUST_FIXTURE_SOURCE")
+        .unwrap_or_else(|_| "/src/fixtures/rust/src/main.rs".to_string())
+}
+
 async fn poll_agent_connection(
     client: &RestClient,
     expected_host: &str,
@@ -254,6 +265,7 @@ struct AgentE2eHarness {
     server_process: Option<Child>,
     agent_process: Option<Child>,
     fixture_process: Option<Child>,
+    rust_fixture_process: Option<Child>,
     server_log_path: PathBuf,
     agent_log_path: PathBuf,
     fixture_log_path: PathBuf,
@@ -264,6 +276,10 @@ struct AgentE2eHarness {
 
 impl AgentE2eHarness {
     fn new() -> Self {
+        Self::new_with_fixture(fixture_binary_path(), fixture_source_path())
+    }
+
+    fn new_with_fixture(fixture_binary: PathBuf, fixture_source: String) -> Self {
         cleanup_orphaned_e2e_processes();
 
         let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
@@ -282,13 +298,14 @@ impl AgentE2eHarness {
             temp_dir,
             workspace_root,
             detrix_binary,
-            fixture_binary: fixture_binary_path(),
-            fixture_source: fixture_source_path(),
+            fixture_binary,
+            fixture_source,
             http_port: get_http_port(),
             grpc_port: get_grpc_port(),
             server_process: None,
             agent_process: None,
             fixture_process: None,
+            rust_fixture_process: None,
         };
 
         harness
@@ -436,6 +453,7 @@ allowed_read_prefixes = ["/src"]
             ])
             .current_dir(&self.workspace_root)
             .env("DETRIX_HOME", self.temp_dir.path())
+            .env("DETRIX_AGENT_RUST_EBPF", std::env::var("DETRIX_AGENT_RUST_EBPF").unwrap_or_default())
             .env(
                 "RUST_LOG",
                 "detrix=debug,detrix_application=debug,detrix_api=debug,detrix_agent=debug,detrix_ebpf=debug,info",
@@ -478,6 +496,32 @@ allowed_read_prefixes = ["/src"]
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
+    fn rust_fixture_host_path(&self) -> String {
+        let pid = self
+            .rust_fixture_process
+            .as_ref()
+            .expect("Rust fixture process not running")
+            .id();
+        format!("/proc/{pid}/exe")
+    }
+
+    async fn start_rust_fixture(&mut self) {
+        let stdout = fs::File::create(self.temp_dir.path().join("rust-fixture.log"))
+            .expect("Failed to create Rust fixture log");
+        let stderr = stdout
+            .try_clone()
+            .expect("Failed to clone Rust fixture log");
+        let process = Command::new(rust_fixture_binary_path())
+            .env("DETRIX_EBPF_WORKERS", "1")
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .expect("Failed to start Rust fixture");
+        register_e2e_process("agent_rust_fixture", process.id());
+        self.rust_fixture_process = Some(process);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
     async fn start_agent(&mut self, token: Option<&str>) {
         self.write_agent_config(token);
 
@@ -510,6 +554,9 @@ allowed_read_prefixes = ["/src"]
     async fn start_stack(&mut self) {
         self.start_server_with_auth(true).await;
         self.start_fixture().await;
+        if std::env::var("AGENT_FIXTURES").as_deref() == Ok("both") {
+            self.start_rust_fixture().await;
+        }
         self.start_agent(Some(AGENT_TEST_TOKEN)).await;
     }
 
@@ -531,6 +578,7 @@ allowed_read_prefixes = ["/src"]
 
     async fn restart_fixture(&mut self) {
         Self::stop_named_process("agent_fixture", &mut self.fixture_process);
+        Self::stop_named_process("agent_rust_fixture", &mut self.rust_fixture_process);
         self.start_fixture().await;
     }
 }
@@ -625,6 +673,172 @@ async fn test_agent_go_ebpf_basic() {
             .expect("Expected captured quantity value");
         assert!(quantity > 0, "Expected positive quantity, got {quantity}");
     }
+}
+
+#[tokio::test]
+#[ignore = "requires Linux + Docker privileged runner; use `task test-agent-rust`"]
+#[serial(agent_e2e)]
+async fn test_agent_rust_ebpf_basic() {
+    let mut harness =
+        AgentE2eHarness::new_with_fixture(rust_fixture_binary_path(), rust_fixture_source_path());
+    harness.start_stack().await;
+
+    let client = RestClient::new(harness.http_port);
+    let fixture_host = harness.fixture_host_path();
+    let connection_id = poll_agent_connection(&client, &fixture_host, Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|| {
+            harness.print_logs(160);
+            panic!("Expected Rust connection for fixture host {fixture_host}");
+        });
+
+    let metric_name = "agent-rust-ebpf-quantity-price";
+    // Observe after all requested locals have been initialized and are live.
+    // At line 109 `price` has not been declared yet, so a two-variable request
+    // is correctly rejected by DWARF preflight as an incomplete location.
+    let location = format!("@{}#114", harness.fixture_source);
+    let metric_id = client
+        .add_metric(AddMetricRequest {
+            name: metric_name.to_string(),
+            location,
+            expressions: vec!["quantity".to_string(), "price".to_string()],
+            connection_id,
+            language: Some("rust".to_string()),
+            group: None,
+            mode: None,
+            enabled: Some(true),
+            sample_rate: None,
+            sample_interval_seconds: None,
+            max_per_second: None,
+            capture_stack_trace: None,
+            stack_trace_ttl: None,
+            stack_trace_full: None,
+            stack_trace_head: None,
+            stack_trace_tail: None,
+            capture_memory_snapshot: None,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+        })
+        .await
+        .expect("Failed to create Rust eBPF metric")
+        .data;
+    println!("Created Rust eBPF metric: {metric_name} (id: {metric_id})");
+
+    let events = poll_events(&client, metric_name, Duration::from_secs(25)).await;
+    if events.is_empty() {
+        harness.print_logs(160);
+    } else {
+        print_received_events(metric_name, &events);
+    }
+    assert!(
+        !events.is_empty(),
+        "Expected Rust eBPF events from {metric_name}"
+    );
+
+    for event in &events {
+        let quantity = event_value(event, "quantity")
+            .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
+            .expect("Expected captured Rust quantity");
+        if !(1..=50).contains(&quantity) {
+            harness.print_logs(160);
+            panic!("Expected Rust quantity in fixture range 1..=50, got {quantity}");
+        }
+        let price = event_value(event, "price")
+            .and_then(|value| value.as_f64().or_else(|| value.as_str()?.parse().ok()))
+            .expect("Expected captured Rust price");
+        if !(100.0..=1000.0).contains(&price) {
+            harness.print_logs(160);
+            panic!("Expected Rust price in fixture range 100..=1000, got {price}");
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Linux + Docker privileged runner; use `task test-agent-both`"]
+#[serial(agent_e2e)]
+async fn test_agent_go_and_rust_ebpf_same_agent() {
+    assert_eq!(std::env::var("AGENT_FIXTURES").as_deref(), Ok("both"));
+    let mut harness = AgentE2eHarness::new();
+    harness.start_stack().await;
+    let client = RestClient::new(harness.http_port);
+
+    let go_host = harness.fixture_host_path();
+    let rust_host = harness.rust_fixture_host_path();
+    let go_connection = poll_agent_connection(&client, &go_host, Duration::from_secs(30))
+        .await
+        .expect("Go connection was not registered");
+    let rust_connection = poll_agent_connection(&client, &rust_host, Duration::from_secs(30))
+        .await
+        .expect("Rust connection was not registered");
+
+    let go_metric = client
+        .add_metric(AddMetricRequest {
+            name: "agent-both-go-quantity".to_string(),
+            location: format!(
+                "@{}#{}",
+                harness.fixture_source,
+                go_lines::CODEMAP.find_logpoint("quantity")
+            ),
+            expressions: vec!["quantity".to_string()],
+            connection_id: go_connection,
+            language: Some("go".to_string()),
+            group: None,
+            mode: None,
+            enabled: Some(true),
+            sample_rate: None,
+            sample_interval_seconds: None,
+            max_per_second: None,
+            capture_stack_trace: None,
+            stack_trace_ttl: None,
+            stack_trace_full: None,
+            stack_trace_head: None,
+            stack_trace_tail: None,
+            capture_memory_snapshot: None,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+        })
+        .await
+        .expect("Failed to create Go metric")
+        .data;
+    let rust_metric = client
+        .add_metric(AddMetricRequest {
+            name: "agent-both-rust-quantity".to_string(),
+            // Both Rust scalars are live at the call site (line 114).
+            location: format!("@{}#114", rust_fixture_source_path()),
+            expressions: vec!["quantity".to_string()],
+            connection_id: rust_connection,
+            language: Some("rust".to_string()),
+            group: None,
+            mode: None,
+            enabled: Some(true),
+            sample_rate: None,
+            sample_interval_seconds: None,
+            max_per_second: None,
+            capture_stack_trace: None,
+            stack_trace_ttl: None,
+            stack_trace_full: None,
+            stack_trace_head: None,
+            stack_trace_tail: None,
+            capture_memory_snapshot: None,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+        })
+        .await
+        .expect("Failed to create Rust metric")
+        .data;
+    println!("Created heterogeneous metrics: Go={go_metric}, Rust={rust_metric}");
+
+    let go_events = poll_events(&client, "agent-both-go-quantity", Duration::from_secs(25)).await;
+    let rust_events =
+        poll_events(&client, "agent-both-rust-quantity", Duration::from_secs(25)).await;
+    assert!(
+        !go_events.is_empty(),
+        "Expected Go events from shared agent"
+    );
+    assert!(
+        !rust_events.is_empty(),
+        "Expected Rust events from shared agent"
+    );
 }
 
 #[tokio::test]
