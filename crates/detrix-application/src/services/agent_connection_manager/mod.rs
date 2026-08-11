@@ -226,6 +226,9 @@ impl AgentConnectionManager {
                 host: hostname.clone(),
                 port: 0,
                 safe_mode: *safe_mode,
+                capture_backend: String::new(),
+                capture_profile: String::new(),
+                debug_info_path: String::new(),
             });
         }
 
@@ -651,6 +654,9 @@ impl AgentConnectionManager {
                 host: hostname.clone(),
                 port: 0,
                 safe_mode: true,
+                capture_backend: String::new(),
+                capture_profile: String::new(),
+                debug_info_path: String::new(),
             });
         }
 

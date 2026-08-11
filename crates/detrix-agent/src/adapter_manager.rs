@@ -16,7 +16,7 @@ use detrix_api::generated::detrix::v1::{
 };
 use detrix_core::{ConnectionId, Location, Metric, MetricEvent, ParseLanguageExt, SourceLanguage};
 use detrix_dap::{PythonAdapter, RustAdapter};
-use detrix_ebpf::{CaptureConfig, EbpfAdapter};
+use detrix_ebpf::{resolve_backend, CaptureBackend, CaptureConfig, EbpfAdapter, ProfileId};
 use detrix_logging::{debug, info, warn};
 use detrix_ports::DapAdapterRef;
 use std::path::PathBuf;
@@ -81,12 +81,81 @@ impl AdapterManager {
     pub async fn create_connection(&self, msg: AgentCreateConnection) {
         let connection_id = msg.connection_id.clone();
         let language = msg.language.to_lowercase();
+        let requested_backend = match CaptureBackend::parse(&msg.capture_backend) {
+            Ok(backend) => backend,
+            Err(error) => {
+                self.send_connection_update(
+                    &connection_id,
+                    ConnectionStatus::Failed,
+                    Some(&error.to_string()),
+                )
+                .await;
+                return;
+            }
+        };
+        let requested_profile = match msg.capture_profile.to_lowercase().as_str() {
+            "" => match language.as_str() {
+                "go" => ProfileId::Go,
+                "rust" => ProfileId::Rust,
+                _ => ProfileId::Go,
+            },
+            "go" => ProfileId::Go,
+            "rust" => ProfileId::Rust,
+            other => {
+                self.send_connection_update(
+                    &connection_id,
+                    ConnectionStatus::Failed,
+                    Some(&format!("unsupported capture profile: {other}")),
+                )
+                .await;
+                return;
+            }
+        };
+
+        let language_profile = match language.as_str() {
+            "go" => Some(ProfileId::Go),
+            "rust" => Some(ProfileId::Rust),
+            _ => None,
+        };
+        if let Some(language_profile) = language_profile {
+            if language_profile != requested_profile {
+                self.send_connection_update(
+                    &connection_id,
+                    ConnectionStatus::Failed,
+                    Some("capture_profile does not match connection language"),
+                )
+                .await;
+                return;
+            }
+        }
 
         info!(
             connection_id = %connection_id,
             language = %language,
+            capture_backend = ?requested_backend,
+            capture_profile = ?requested_profile,
             "Creating connection"
         );
+
+        // Rust eBPF is deliberately opt-in and fail-closed until the
+        // privileged live gate is complete. Never route an explicit Rust
+        // eBPF request through the Go adapter or silently downgrade it.
+        if language == "rust" && requested_backend == CaptureBackend::Ebpf {
+            let error = resolve_backend(
+                CaptureBackend::Ebpf,
+                ProfileId::Rust,
+                cfg!(target_os = "linux"),
+                false,
+            )
+            .expect_err("Rust eBPF must remain gated until debug-image/runtime support is enabled");
+            self.send_connection_update(
+                &connection_id,
+                ConnectionStatus::Failed,
+                Some(&error.to_string()),
+            )
+            .await;
+            return;
+        }
 
         // CreateConnection is normally serialized by the stream reader, but a
         // duplicate command can still arrive after a reconnect or retry. Stop

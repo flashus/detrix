@@ -384,6 +384,9 @@ fn domain_to_proto(msg: OutgoingAgentMessage) -> ServerMessage {
                 host,
                 port,
                 safe_mode,
+                capture_backend,
+                capture_profile,
+                debug_info_path,
             } => Msg::CreateConnection(AgentCreateConnection {
                 connection_id,
                 language,
@@ -391,6 +394,9 @@ fn domain_to_proto(msg: OutgoingAgentMessage) -> ServerMessage {
                 host,
                 port,
                 safe_mode,
+                capture_backend,
+                capture_profile,
+                debug_info_path,
             }),
             OutgoingAgentMessage::CloseConnection { connection_id } => {
                 Msg::CloseConnection(AgentCloseConnection { connection_id })

@@ -36,12 +36,27 @@
 //! On macOS, continue using DAP/Delve via `DapAdapterFactory`.
 
 pub mod adapter;
+pub mod capture_plan;
+pub mod compiler;
+pub mod debug_image;
 pub mod dwarf;
 pub mod error;
 pub mod factory;
 pub mod mem_reader;
+pub mod policy;
 pub mod probe;
+pub mod profile;
+pub mod registry;
+pub mod wire;
 
 pub use adapter::EbpfAdapter;
+pub use compiler::{CaptureCompiler, CompileError, CompiledCapture, PlanValidatorCompiler};
+pub use debug_image::{
+    DebugImageError, DebugImageMetadata, DebugImageProvider, DebugImageSource,
+    EmbeddedDebugImageProvider, TargetAbi,
+};
 pub use factory::{EbpfAdapterFactory, EbpfGoFactory};
+pub use policy::{resolve_backend, BackendDecision, CaptureBackend, PreflightError};
 pub use probe::types::CaptureConfig;
+pub use profile::{GoProfile, LanguageProfile, ProfileId, RustProfile};
+pub use registry::{BackendRegistry, CaptureBackendFactory, GoEbpfBackend, ProfileRegistry};

@@ -5112,6 +5112,17 @@ pub struct AgentCreateConnection {
     #[prost(bool, tag = "6")]
     #[serde(default)]
     pub safe_mode: bool,
+    /// Additive capture policy. Empty is equivalent to auto for compatibility.
+    ///
+    /// auto, dap, ebpf
+    #[prost(string, tag = "7")]
+    pub capture_backend: ::prost::alloc::string::String,
+    /// inferred from language when empty
+    #[prost(string, tag = "8")]
+    pub capture_profile: ::prost::alloc::string::String,
+    /// optional external DWARF image
+    #[prost(string, tag = "9")]
+    pub debug_info_path: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

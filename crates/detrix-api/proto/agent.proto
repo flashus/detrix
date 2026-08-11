@@ -175,6 +175,10 @@ message AgentCreateConnection {
   string host          = 4;
   uint32 port          = 5;
   bool   safe_mode     = 6;
+  // Additive capture policy. Empty is equivalent to auto for compatibility.
+  string capture_backend = 7; // auto, dap, ebpf
+  string capture_profile = 8; // inferred from language when empty
+  string debug_info_path = 9; // optional external DWARF image
 }
 
 message AgentCloseConnection { string connection_id = 1; }

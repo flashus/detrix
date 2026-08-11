@@ -126,6 +126,9 @@ pub enum OutgoingAgentMessage {
         host: String,
         port: u32,
         safe_mode: bool,
+        capture_backend: String,
+        capture_profile: String,
+        debug_info_path: String,
     },
     CloseConnection {
         connection_id: String,
