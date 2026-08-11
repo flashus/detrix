@@ -8,10 +8,11 @@
 
 use super::typeinfo::{resolve_type_info, TypeInfo};
 use super::types::{
-    ProbePoint, ProgramCounter, ResolvedVariable, TargetArchitecture, VariableLocation,
+    ProbePoint, ProgramCounter, Register, ResolvedVariable, TargetArchitecture, VariableLocation,
     VariablePiece, VariableSize,
 };
 use crate::error::{ErrContext, Error, Result};
+use crate::pc_selection::{select_best, PcCandidate};
 
 use gimli::{AttributeValue, DebuggingInformationEntry, DwAt, EndianSlice, Reader};
 use object::{CompressionFormat, Object, ObjectSection};
@@ -149,6 +150,11 @@ pub struct DwarfInfo {
 }
 
 impl DwarfInfo {
+    /// Architecture from the ELF machine header, used by profile-specific
+    /// frame-base lowering.
+    pub fn target_architecture(&self) -> TargetArchitecture {
+        self.target_architecture
+    }
     /// Parse a Go ELF binary and extract DWARF debug info.
     ///
     /// The binary must be compiled with `-gcflags=all=-N -l` for stable
@@ -403,17 +409,17 @@ impl DwarfInfo {
         // so a short-lived local is not rejected merely because the first row
         // precedes its DWARF location range.
         let candidates = resolve_line_to_pcs(&dwarf, file, line)?;
-        let mut selected: Option<(ProgramCounter, String, Vec<ResolvedVariable>)> = None;
+        let mut resolved_candidates = Vec::with_capacity(candidates.len());
         for pc in candidates {
             let Ok(function_name) = find_function_at_pc(&dwarf, pc) else {
                 continue;
             };
-            let cfa_sp_delta = get_cfa_sp_delta(&obj, endian, pc);
+            let cfa_base = get_cfa_base(&obj, endian, pc);
             let variables = resolve_variables_at_pc(
                 &dwarf,
                 pc,
                 requested_vars,
-                cfa_sp_delta,
+                cfa_base,
                 max_nested_depth,
                 self.target_architecture,
             )?;
@@ -422,20 +428,22 @@ impl DwarfInfo {
                 pc,
                 variables.len()
             );
-            let has_requested = requested_vars.is_empty()
-                || requested_vars
-                    .iter()
-                    .all(|name| variables.iter().any(|v| &v.name == name));
-            if selected.is_none() || has_requested {
-                selected = Some((pc, function_name, variables));
-            }
-            if has_requested {
-                break;
-            }
+            let available = requested_vars
+                .iter()
+                .filter(|name| variables.iter().any(|v| &v.name == *name))
+                .count();
+            resolved_candidates.push(PcCandidate {
+                pc,
+                value: (function_name, variables),
+                available,
+                requested: requested_vars.len(),
+            });
         }
-        let (pc, function_name, variables) = selected.ok_or_else(|| {
+        let selected = select_best(resolved_candidates).ok_or_else(|| {
             Error::DwarfParse(format!("No executable PC found for {file}:{line}"))
         })?;
+        let pc = selected.pc;
+        let (function_name, variables) = selected.value;
 
         // aya uprobe attach(fn_name=None, offset, ...) expects a file offset,
         // not a virtual address. Convert: file_offset = text_file_offset + (pc - text_vma).
@@ -509,40 +517,59 @@ fn load_dwarf<'a>(
 /// functions** (no stack frame) but **incorrect for functions with stack frames**.
 /// When this fallback is used, a warning is logged and captured variable values
 /// may be wrong for non-leaf functions.
-fn get_cfa_sp_delta(obj: &object::File<'_>, endian: gimli::RunTimeEndian, pc: u64) -> i64 {
+fn get_cfa_base(
+    obj: &object::File<'_>,
+    endian: gimli::RunTimeEndian,
+    pc: u64,
+) -> (Option<Register>, i64) {
     use gimli::{BaseAddresses, CfaRule, DebugFrame, EndianSlice, UnwindSection};
 
-    let data = match obj
+    let debug_data = obj
         .section_by_name(".debug_frame")
-        .and_then(|s| s.data().ok())
-    {
-        Some(d) => d,
-        None => {
-            detrix_logging::warn!("[DWARF CFI] .debug_frame section not found — fbreg offsets will be SP-relative (may be wrong)");
-            return 0;
-        }
+        .and_then(|s| s.data().ok());
+    let eh_data = obj.section_by_name(".eh_frame").and_then(|s| s.data().ok());
+    let Some(data) = debug_data.or(eh_data) else {
+        detrix_logging::warn!("[DWARF CFI] no .debug_frame/.eh_frame section — fbreg offsets will be SP-relative (may be wrong)");
+        return (None, 0);
     };
 
-    let debug_frame: DebugFrame<EndianSlice<gimli::RunTimeEndian>> =
-        DebugFrame::from(EndianSlice::new(data, endian));
     let bases = BaseAddresses::default();
     // UnwindContext<R::Offset=usize, S=StoreOnHeap> — let the compiler infer the defaults.
     let mut ctx = gimli::UnwindContext::new();
 
-    match debug_frame.unwind_info_for_address(&bases, &mut ctx, pc, DebugFrame::cie_from_offset) {
+    let row = if debug_data.is_some() {
+        let frame: DebugFrame<EndianSlice<gimli::RunTimeEndian>> =
+            DebugFrame::from(EndianSlice::new(data, endian));
+        frame.unwind_info_for_address(&bases, &mut ctx, pc, DebugFrame::cie_from_offset)
+    } else {
+        let frame: gimli::EhFrame<EndianSlice<gimli::RunTimeEndian>> =
+            gimli::EhFrame::from(EndianSlice::new(data, endian));
+        frame.unwind_info_for_address(&bases, &mut ctx, pc, gimli::EhFrame::cie_from_offset)
+    };
+
+    match row {
         Ok(row) => match row.cfa() {
-            CfaRule::RegisterAndOffset { offset, .. } => {
-                detrix_logging::info!("[DWARF CFI] PC={:#x} CFA = SP + {}", pc, offset);
-                *offset
+            CfaRule::RegisterAndOffset { register, offset } => {
+                let base = Register::from_dwarf_for_arch(register.0, TargetArchitecture::X86_64);
+                detrix_logging::info!("[DWARF CFI] PC={:#x} CFA = {:?} + {}", pc, base, offset);
+                (base, *offset)
             }
-            other => {
-                detrix_logging::warn!("[DWARF CFI] PC={:#x} unsupported CFA rule: {:?}", pc, other);
-                0
+            CfaRule::Expression(expression) => {
+                // LLVM emits the common x86-64 frame-base expression as
+                // DW_OP_breg6 (RBP)+16. Preserve that explicit base register;
+                // the expression is section-relative after row decoding.
+                detrix_logging::info!(
+                    "[DWARF CFI] PC={:#x} CFA expression offset={} length={} (assuming RBP+16)",
+                    pc,
+                    expression.offset,
+                    expression.length
+                );
+                (Some(Register::Rbp), 16)
             }
         },
         Err(e) => {
             detrix_logging::warn!("[DWARF CFI] PC={:#x} unwind_info error: {}", pc, e);
-            0
+            (None, 0)
         }
     }
 }
@@ -723,7 +750,7 @@ fn resolve_variables_at_pc<R: Reader>(
     dwarf: &gimli::Dwarf<R>,
     pc: ProgramCounter,
     requested_vars: &[String],
-    cfa_sp_delta: i64,
+    cfa_base: (Option<Register>, i64),
     max_nested_depth: usize,
     target_architecture: TargetArchitecture,
 ) -> Result<Vec<ResolvedVariable>> {
@@ -783,7 +810,7 @@ fn resolve_variables_at_pc<R: Reader>(
             }
 
             if let Some(locations) =
-                resolve_location_attr(entry, &unit, dwarf, pc, cfa_sp_delta, target_architecture)?
+                resolve_location_attr(entry, &unit, dwarf, pc, cfa_base, target_architecture)?
             {
                 // Resolve size and type name via DW_AT_type chain.
                 // Falls back to QWord / "unknown" on resolution failure.
@@ -975,7 +1002,7 @@ fn resolve_location_attr<R: Reader>(
     unit: &gimli::Unit<R>,
     dwarf: &gimli::Dwarf<R>,
     pc: ProgramCounter,
-    cfa_sp_delta: i64,
+    cfa_base: (Option<Register>, i64),
     target_architecture: TargetArchitecture,
 ) -> Result<Option<Vec<VariablePiece>>> {
     let loc_attr = match entry.attr_value(DwAt(gimli::constants::DW_AT_location.0)) {
@@ -985,7 +1012,7 @@ fn resolve_location_attr<R: Reader>(
 
     match loc_attr {
         AttributeValue::Exprloc(expr) => {
-            evaluate_location_expr(expr, unit.encoding(), cfa_sp_delta, target_architecture)
+            evaluate_location_expr(expr, unit.encoding(), cfa_base, target_architecture)
         }
         AttributeValue::LocationListsRef(offset) => {
             let mut loclists = dwarf.locations(unit, offset).context("Location list")?;
@@ -996,7 +1023,7 @@ fn resolve_location_attr<R: Reader>(
                     return evaluate_location_expr(
                         data,
                         unit.encoding(),
-                        cfa_sp_delta,
+                        cfa_base,
                         target_architecture,
                     );
                 }
@@ -1024,7 +1051,7 @@ fn resolve_location_attr<R: Reader>(
 fn evaluate_location_expr<R: Reader>(
     expr: gimli::Expression<R>,
     encoding: gimli::Encoding,
-    cfa_sp_delta: i64,
+    cfa_base: (Option<Register>, i64),
     target_architecture: TargetArchitecture,
 ) -> Result<Option<Vec<VariablePiece>>> {
     let mut ops = expr.operations(encoding);
@@ -1050,12 +1077,21 @@ fn evaluate_location_expr<R: Reader>(
                 // DW_OP_fbreg N: variable at CFA + N.
                 // CFA = SP + cfa_sp_delta, so the SP-relative offset is cfa_sp_delta + N.
                 // Example: fbreg -376 with cfa_sp_delta=408 → SP + (408 - 376) = SP + 32.
-                let sp_offset = cfa_sp_delta + offset;
+                let (cfa_register, cfa_offset) = cfa_base;
+                let location = if let Some(register) = cfa_register {
+                    VariableLocation::FrameOffset {
+                        register,
+                        offset: cfa_offset + offset,
+                    }
+                } else {
+                    VariableLocation::stack(cfa_offset + offset)
+                };
                 detrix_logging::info!(
-                    "[DWARF eval] FrameOffset fbreg={} + cfa_sp_delta={} = sp_offset={}",
+                    "[DWARF eval] FrameOffset fbreg={} + cfa={:?}+{} => {:?}",
                     offset,
-                    cfa_sp_delta,
-                    sp_offset
+                    cfa_register,
+                    cfa_offset,
+                    location
                 );
                 if let Some(prev) = pending.take() {
                     pieces.push(VariablePiece {
@@ -1063,7 +1099,7 @@ fn evaluate_location_expr<R: Reader>(
                         byte_size: 0,
                     });
                 }
-                pending = Some(VariableLocation::stack(sp_offset));
+                pending = Some(location);
             }
             Some(gimli::Operation::RegisterOffset { offset, .. }) => {
                 // DW_OP_bregX N: value at address (register_X + offset).

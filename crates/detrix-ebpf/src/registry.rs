@@ -1,12 +1,23 @@
 //! Registries are the extension seam for adding languages and backends.
 
+use crate::compiler::{CaptureCompiler, GoBpfCompiler, RustBpfCompiler};
 use crate::profile::{GoProfile, LanguageProfile, ProfileId, RustProfile};
+use crate::runtime::{ProfiledCaptureRuntime, RuntimeError};
+use crate::ScalarFieldSpec;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub trait CaptureBackendFactory: Send + Sync {
     fn id(&self) -> &'static str;
     fn supports(&self, profile: ProfileId) -> bool;
+    fn compiler(&self) -> Box<dyn CaptureCompiler>;
+    fn create_runtime(
+        &self,
+        profile: ProfileId,
+        plan_hash: &str,
+        fields: Vec<ScalarFieldSpec>,
+        max_payload: usize,
+    ) -> Result<ProfiledCaptureRuntime, RuntimeError>;
 }
 
 /// Capability-only registration for the current uprobe backend. Actual
@@ -21,6 +32,48 @@ impl CaptureBackendFactory for GoEbpfBackend {
     }
     fn supports(&self, profile: ProfileId) -> bool {
         profile == ProfileId::Go
+    }
+    fn compiler(&self) -> Box<dyn CaptureCompiler> {
+        Box::new(GoBpfCompiler::default())
+    }
+    fn create_runtime(
+        &self,
+        profile: ProfileId,
+        plan_hash: &str,
+        fields: Vec<ScalarFieldSpec>,
+        max_payload: usize,
+    ) -> Result<ProfiledCaptureRuntime, RuntimeError> {
+        if profile != ProfileId::Go {
+            return Err(RuntimeError::MissingIdentity);
+        }
+        ProfiledCaptureRuntime::new("go", plan_hash, fields, max_payload)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RustEbpfBackend;
+
+impl CaptureBackendFactory for RustEbpfBackend {
+    fn id(&self) -> &'static str {
+        "ebpf-rust"
+    }
+    fn supports(&self, profile: ProfileId) -> bool {
+        profile == ProfileId::Rust
+    }
+    fn compiler(&self) -> Box<dyn CaptureCompiler> {
+        Box::new(RustBpfCompiler::default())
+    }
+    fn create_runtime(
+        &self,
+        profile: ProfileId,
+        plan_hash: &str,
+        fields: Vec<ScalarFieldSpec>,
+        max_payload: usize,
+    ) -> Result<ProfiledCaptureRuntime, RuntimeError> {
+        if profile != ProfileId::Rust {
+            return Err(RuntimeError::MissingIdentity);
+        }
+        ProfiledCaptureRuntime::new("rust", plan_hash, fields, max_payload)
     }
 }
 
@@ -56,6 +109,7 @@ impl BackendRegistry {
     pub fn with_defaults() -> Self {
         let mut registry = Self::default();
         registry.register(Arc::new(GoEbpfBackend));
+        registry.register(Arc::new(RustEbpfBackend));
         registry
     }
     pub fn register(&mut self, backend: Arc<dyn CaptureBackendFactory>) {
@@ -81,5 +135,22 @@ mod tests {
         let b = r.get("ebpf").unwrap();
         assert!(b.supports(ProfileId::Go));
         assert!(!b.supports(ProfileId::Rust));
+        assert!(!b
+            .compiler()
+            .compile(
+                &crate::profile::GoProfile
+                    .scalar_plan("n", 1, crate::dwarf::types::Register::Rax,)
+                    .unwrap()
+            )
+            .unwrap()
+            .artifact
+            .is_empty());
+        let rust = r.get("ebpf-rust").unwrap();
+        assert!(rust.supports(ProfileId::Rust));
+        assert!(!rust.supports(ProfileId::Go));
+        assert!(matches!(
+            rust.create_runtime(ProfileId::Rust, "sha256:rust", vec![], 64),
+            Err(RuntimeError::EmptyPlan)
+        ));
     }
 }

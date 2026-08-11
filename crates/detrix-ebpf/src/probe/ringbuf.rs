@@ -314,7 +314,8 @@ pub fn parse_ring_buffer_event(
                 )
             }
             crate::dwarf::types::VariableLocation::Register(_)
-            | crate::dwarf::types::VariableLocation::StackOffset { .. } => {
+            | crate::dwarf::types::VariableLocation::StackOffset { .. }
+            | crate::dwarf::types::VariableLocation::FrameOffset { .. } => {
                 // When nested_type is present, `val` is the base address of a struct
                 // that BPF captured from a register or stack slot. Read the struct bytes
                 // from user-space and parse fields using DWARF info.
@@ -330,8 +331,10 @@ pub fn parse_ring_buffer_event(
                     )?
                 } else {
                     match var.type_name.as_str() {
-                        "float64" => CapturedValue::Float(f64::from_bits(val)),
-                        "float32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
+                        "float64" | "f64" => CapturedValue::Float(f64::from_bits(val)),
+                        "float32" | "f32" => {
+                            CapturedValue::Float(f32::from_bits(val as u32) as f64)
+                        }
                         _ => CapturedValue::Scalar(val),
                     }
                 }
@@ -567,27 +570,29 @@ mod tests {
     #[test]
     fn parse_top_level_float64_var() {
         let amount = 1234.5_f64;
-        let data = build_event_bytes(1, 2, 100, &[amount.to_bits()]);
-        let vars = vec![ResolvedVariable {
-            name: "amount".to_string(),
-            location: VariableLocation::Register(Register::Rax),
-            size: VariableSize::QWord,
-            type_name: "float64".to_string(),
-            nested_type: None,
-        }];
-        let event = parse_ring_buffer_event(
-            &data,
-            &vars,
-            false,
-            &CaptureConfig::default(),
-            &StubMemReader,
-        )
-        .unwrap();
+        for type_name in ["float64", "f64"] {
+            let data = build_event_bytes(1, 2, 100, &[amount.to_bits()]);
+            let vars = vec![ResolvedVariable {
+                name: "amount".to_string(),
+                location: VariableLocation::Register(Register::Rax),
+                size: VariableSize::QWord,
+                type_name: type_name.to_string(),
+                nested_type: None,
+            }];
+            let event = parse_ring_buffer_event(
+                &data,
+                &vars,
+                false,
+                &CaptureConfig::default(),
+                &StubMemReader,
+            )
+            .unwrap();
 
-        assert_eq!(event.values.len(), 1);
-        match &event.values[0] {
-            CapturedValue::Float(v) => assert!((*v - amount).abs() < f64::EPSILON),
-            other => panic!("Expected Float, got {other:?}"),
+            assert_eq!(event.values.len(), 1);
+            match &event.values[0] {
+                CapturedValue::Float(v) => assert!((*v - amount).abs() < f64::EPSILON),
+                other => panic!("Expected Float for {type_name}, got {other:?}"),
+            }
         }
     }
 
@@ -1520,6 +1525,8 @@ fn is_struct_type(type_name: &str) -> bool {
         "uintptr",
         "float32",
         "float64",
+        "f32",
+        "f64",
         "complex64",
         "complex128",
         "bool",
@@ -1623,7 +1630,7 @@ fn parse_slice_element(
                         len: 0,
                     })
                 }
-            } else if type_info.name == "float64" {
+            } else if type_info.name == "float64" || type_info.name == "f64" {
                 // Float64 element
                 let val = mem_reader.read_u64(pid, elem_addr).map_err(|e| {
                     crate::error::Error::RingBuffer(format!(
@@ -1631,7 +1638,7 @@ fn parse_slice_element(
                     ))
                 })?;
                 Ok(CapturedValue::Float(f64::from_bits(val)))
-            } else if type_info.name == "float32" {
+            } else if type_info.name == "float32" || type_info.name == "f32" {
                 // Float32 element - read as u64 and take lower 32 bits
                 let val = mem_reader.read_u64(pid, elem_addr).map_err(|e| {
                     crate::error::Error::RingBuffer(format!(
@@ -2192,8 +2199,10 @@ pub fn parse_struct_fields_from_addr(
                     Ok(val) => {
                         // Decode IEEE 754 float for float types
                         match field.type_info.name.as_str() {
-                            "float64" => CapturedValue::Float(f64::from_bits(val)),
-                            "float32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
+                            "float64" | "f64" => CapturedValue::Float(f64::from_bits(val)),
+                            "float32" | "f32" => {
+                                CapturedValue::Float(f32::from_bits(val as u32) as f64)
+                            }
                             _ => CapturedValue::Scalar(val),
                         }
                     }
@@ -2319,8 +2328,8 @@ fn parse_struct_fields_from_blob(
 
                 // Decode IEEE 754 float for float arrays
                 let elem_value = match field.type_info.array_element_type.as_str() {
-                    "float64" => CapturedValue::Float(f64::from_bits(val)),
-                    "float32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
+                    "float64" | "f64" => CapturedValue::Float(f64::from_bits(val)),
+                    "float32" | "f32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
                     _ => CapturedValue::Scalar(val),
                 };
 
@@ -2575,8 +2584,8 @@ fn parse_struct_fields_from_blob(
             // Decode IEEE 754 float instead of treating as integer
             match val_result {
                 Ok(val) => match field.type_info.name.as_str() {
-                    "float64" => CapturedValue::Float(f64::from_bits(val)),
-                    "float32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
+                    "float64" | "f64" => CapturedValue::Float(f64::from_bits(val)),
+                    "float32" | "f32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
                     _ => CapturedValue::Scalar(val),
                 },
                 Err(e) => CapturedValue::Error(e.to_string()),

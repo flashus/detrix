@@ -42,7 +42,7 @@ impl EbpfAdapterFactory {
         }
     }
 
-    /// Create an eBPF adapter for a Go binary.
+    /// Create an eBPF adapter for a Go or Rust ELF binary.
     ///
     /// # Arguments
     /// * `binary_path` - Path to the Go ELF binary with DWARF debug info.
@@ -52,6 +52,18 @@ impl EbpfAdapterFactory {
     /// - Not running on Linux
     /// - Binary doesn't exist or isn't readable
     pub fn create_go_adapter(&self, binary_path: impl AsRef<Path>) -> Result<DapAdapterRef> {
+        self.create_profile_adapter(ProfileId::Go, binary_path)
+    }
+
+    pub fn create_rust_adapter(&self, binary_path: impl AsRef<Path>) -> Result<DapAdapterRef> {
+        self.create_profile_adapter(ProfileId::Rust, binary_path)
+    }
+
+    fn create_profile_adapter(
+        &self,
+        profile: ProfileId,
+        binary_path: impl AsRef<Path>,
+    ) -> Result<DapAdapterRef> {
         let path = if binary_path.as_ref().is_absolute() {
             binary_path.as_ref().to_path_buf()
         } else {
@@ -65,14 +77,14 @@ impl EbpfAdapterFactory {
             )));
         }
 
-        let adapter = EbpfAdapter::new_with_config(path, self.capture_config.clone())
+        let adapter = EbpfAdapter::new_with_profile(path, self.capture_config.clone(), profile)
             .map_err(|e: crate::error::Error| Error::Adapter(e.to_string()))?;
         Ok(Arc::new(adapter) as DapAdapterRef)
     }
 
     /// Profile-dispatched construction seam.  Rust is registered in the
-    /// profile registry, but remains fail-closed until its decoder/runtime
-    /// implementation is enabled; it must never reuse Go layouts.
+    /// profile registry; Rust is scalar-only and must never reuse Go runtime
+    /// layout handling for composites.
     pub fn create_adapter(
         &self,
         profile: ProfileId,
@@ -80,9 +92,7 @@ impl EbpfAdapterFactory {
     ) -> Result<DapAdapterRef> {
         match profile {
             ProfileId::Go => self.create_go_adapter(binary_path),
-            ProfileId::Rust => Err(Error::Adapter(
-                "Rust eBPF profile is registered but not yet enabled; use DAP".into(),
-            )),
+            ProfileId::Rust => self.create_rust_adapter(binary_path),
         }
     }
 
@@ -122,13 +132,11 @@ mod tests {
     }
 
     #[test]
-    fn rust_profile_fails_closed_instead_of_using_go_adapter() {
+    fn rust_profile_uses_profiled_adapter_without_reusing_go_factory() {
         let tmp = NamedTempFile::new().unwrap();
         let factory = EbpfAdapterFactory::new("/tmp");
         let result = factory.create_adapter(ProfileId::Rust, tmp.path());
-        assert!(
-            matches!(result, Err(Error::Adapter(message)) if message.contains("Rust eBPF profile"))
-        );
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -223,6 +231,14 @@ impl DapAdapterFactory for EbpfGoFactory {
         program: Option<&str>,
         pid: Option<u32>,
     ) -> detrix_core::Result<DapAdapterRef> {
+        #[cfg(target_os = "linux")]
+        if host.starts_with('/') && program.is_none() && pid.is_none() {
+            let _ = port;
+            return self
+                .ebpf
+                .create_rust_adapter(host)
+                .map_err(|e| detrix_core::Error::Adapter(e.to_string()));
+        }
         self.inner
             .create_rust_adapter(host, port, program, pid)
             .await

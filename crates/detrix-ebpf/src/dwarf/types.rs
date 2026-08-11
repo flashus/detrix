@@ -139,6 +139,12 @@ pub enum VariableLocation {
         offset: i64,
     },
 
+    /// Variable at an offset from an explicit DWARF frame-base register
+    /// (typically RBP for Rust/LLVM).  Unlike `StackOffset`, this preserves
+    /// the register identity so uprobes do not incorrectly read RSP when the
+    /// compiler selected a frame-pointer CFA.
+    FrameOffset { register: Register, offset: i64 },
+
     /// Variable is a Go string (ptr + len at adjacent locations).
     /// Requires two reads: pointer and length.
     GoString {
@@ -223,7 +229,10 @@ impl VariableLocation {
 
     /// Returns true if this is a simple scalar location (register or stack).
     pub fn is_scalar(&self) -> bool {
-        matches!(self, Self::Register(_) | Self::StackOffset { .. })
+        matches!(
+            self,
+            Self::Register(_) | Self::StackOffset { .. } | Self::FrameOffset { .. }
+        )
     }
 
     /// Number of BPF reads needed to capture this variable.
@@ -231,6 +240,7 @@ impl VariableLocation {
         match self {
             Self::Register(_) => 1,
             Self::StackOffset { .. } => 1,
+            Self::FrameOffset { .. } => 1,
             Self::GoString { .. } => 2,
             Self::GoSlice { .. } => 3,
             Self::StackBlob { .. } => 1,
@@ -252,6 +262,13 @@ impl fmt::Display for VariableLocation {
                     write!(f, "[sp+{offset:#x}]")
                 } else {
                     write!(f, "[sp-{:#x}]", offset.unsigned_abs())
+                }
+            }
+            Self::FrameOffset { register, offset } => {
+                if *offset >= 0 {
+                    write!(f, "[{register}+{offset:#x}]")
+                } else {
+                    write!(f, "[{register}-{:#x}]", offset.unsigned_abs())
                 }
             }
             Self::GoString { .. } => write!(f, "go.string{{ptr, len}}"),

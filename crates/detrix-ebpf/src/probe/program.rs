@@ -184,6 +184,19 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
             };
             format!("{zero_fill}\n{read}")
         }
+        VariableLocation::FrameOffset { register, offset } => {
+            let size = var.size.bytes();
+            let zero_fill = format!("    event->var{idx} = 0;");
+            let base = register.pt_regs_access();
+            let address = if *offset >= 0 {
+                format!("({base} + {offset})")
+            } else {
+                format!("({base} - {})", offset.unsigned_abs())
+            };
+            let read =
+                format!("    bpf_probe_read_user(&event->var{idx}, {size}, (void *){address});");
+            format!("{zero_fill}\n{read}")
+        }
         VariableLocation::GoString { ptr, len } => {
             // Go string struct {ptr uintptr, len int} lives on the stack.
             // Step 1: read the ptr and len fields from their DWARF locations.

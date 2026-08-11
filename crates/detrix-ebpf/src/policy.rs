@@ -57,7 +57,7 @@ pub fn resolve_backend(
         });
     }
     // Go auto behavior is compatibility-sensitive. Rust auto remains DAP until
-    // its privileged live gate is complete; explicit ebpf is fail-closed.
+    // its privileged live gate is complete; explicit ebpf remains opt-in.
     if profile == ProfileId::Rust && requested == CaptureBackend::Auto {
         return Ok(BackendDecision {
             requested,

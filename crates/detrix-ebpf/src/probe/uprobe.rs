@@ -25,6 +25,7 @@ use crate::dwarf::types::ProbePoint;
 use crate::error::ErrContext;
 use crate::error::{Error, Result};
 use crate::probe::types::{CaptureConfig, ProbeConfig};
+use crate::profile::ProfileId;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -160,6 +161,26 @@ impl UprobeManager {
         g_addr_offset: Option<i64>,
         goid_offset: Option<u64>,
     ) -> Result<()> {
+        self.attach_for_profile(
+            metric_name,
+            probe_point,
+            g_addr_offset,
+            goid_offset,
+            ProfileId::Go,
+        )
+    }
+
+    /// Attach using a language profile. Go remains the compatibility default;
+    /// Rust currently shares only the bounded scalar renderer.
+    #[allow(unused_variables)]
+    pub fn attach_for_profile(
+        &mut self,
+        metric_name: &str,
+        probe_point: &ProbePoint,
+        g_addr_offset: Option<i64>,
+        goid_offset: Option<u64>,
+        profile: ProfileId,
+    ) -> Result<()> {
         #[allow(unused_variables)]
         // g_addr_offset/goid_offset are only used on Linux for TLS-based goid capture
         let _ = (g_addr_offset, goid_offset);
@@ -177,8 +198,13 @@ impl UprobeManager {
         };
 
         #[cfg(target_os = "linux")]
-        let handles =
-            self.load_and_attach_linux(metric_name, probe_point, g_addr_offset, goid_offset)?;
+        let handles = self.load_and_attach_linux(
+            metric_name,
+            probe_point,
+            g_addr_offset,
+            goid_offset,
+            profile,
+        )?;
 
         let probe = AttachedProbe {
             _config: config,
@@ -263,20 +289,27 @@ impl UprobeManager {
         probe_point: &ProbePoint,
         g_addr_offset: Option<i64>,
         goid_offset: Option<u64>,
+        profile: ProfileId,
     ) -> Result<AyaHandles> {
+        use crate::compiler::{GoBpfCompiler, RustBpfCompiler};
         use crate::probe::loader::compile_bpf;
-        use crate::probe::program::generate_bpf_program;
         use aya::programs::uprobe::UProbeLink;
         use aya::programs::UProbe;
 
         // Step 1: Generate BPF C source from variable locations
-        let bpf_program = generate_bpf_program(
-            &probe_point.variables,
-            self.capture_config.capture_goid,
-            g_addr_offset,
-            goid_offset,
-            &self.capture_config,
-        )?;
+        let bpf_program = match profile {
+            ProfileId::Go => GoBpfCompiler {
+                config: self.capture_config.clone(),
+                capture_goid: self.capture_config.capture_goid,
+                g_addr_offset,
+                goid_offset,
+            }
+            .compile_variables(&probe_point.variables)?,
+            ProfileId::Rust => RustBpfCompiler {
+                config: self.capture_config.clone(),
+            }
+            .compile_variables(&probe_point.variables)?,
+        };
 
         // Debug: log generated BPF source
         detrix_logging::debug!(

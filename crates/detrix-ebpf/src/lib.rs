@@ -1,4 +1,4 @@
-//! # detrix-ebpf — eBPF logpoint adapter for Go on Linux
+//! # detrix-ebpf — eBPF logpoint adapter for Go and Rust scalar capture on Linux
 //!
 //! Provides zero-pause variable capture at arbitrary source lines using
 //! eBPF uprobes instead of the Debug Adapter Protocol (DAP).
@@ -39,24 +39,38 @@ pub mod adapter;
 pub mod capture_plan;
 pub mod compiler;
 pub mod debug_image;
+pub mod decode;
 pub mod dwarf;
 pub mod error;
 pub mod factory;
 pub mod mem_reader;
+pub mod pc_selection;
 pub mod policy;
 pub mod probe;
 pub mod profile;
 pub mod registry;
+pub mod replay;
+pub mod runtime;
 pub mod wire;
 
 pub use adapter::EbpfAdapter;
-pub use compiler::{CaptureCompiler, CompileError, CompiledCapture, PlanValidatorCompiler};
+pub use compiler::{
+    CaptureCompiler, CompileError, CompiledCapture, GoBpfCompiler, PlanValidatorCompiler,
+    RustBpfCompiler,
+};
 pub use debug_image::{
     DebugImageError, DebugImageMetadata, DebugImageProvider, DebugImageSource,
     EmbeddedDebugImageProvider, TargetAbi,
 };
+pub use decode::{
+    decode_scalar_record, DecodedScalar, ScalarDecodeError, ScalarFieldSpec, ScalarKind,
+};
 pub use factory::{EbpfAdapterFactory, EbpfGoFactory};
 pub use policy::{resolve_backend, BackendDecision, CaptureBackend, PreflightError};
 pub use probe::types::CaptureConfig;
-pub use profile::{GoProfile, LanguageProfile, ProfileId, RustProfile};
-pub use registry::{BackendRegistry, CaptureBackendFactory, GoEbpfBackend, ProfileRegistry};
+pub use profile::{GoProfile, LanguageProfile, ProfileError, ProfileId, RustProfile};
+pub use registry::{
+    BackendRegistry, CaptureBackendFactory, GoEbpfBackend, ProfileRegistry, RustEbpfBackend,
+};
+pub use replay::{ReplayError, ReplayRecord};
+pub use runtime::{ProfiledCaptureRuntime, RuntimeCounters, RuntimeError, RuntimeState};

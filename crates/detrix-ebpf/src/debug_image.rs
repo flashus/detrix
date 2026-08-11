@@ -4,7 +4,7 @@
 //! same metadata contract can later be backed by GNU debuglink/build-id or
 //! split-DWARF providers without changing profiles or probe runtimes.
 
-use object::Object;
+use object::{BinaryFormat, Object};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +47,12 @@ impl DebugImageProvider for EmbeddedDebugImageProvider {
         })?;
         let file = object::File::parse(bytes.as_slice())
             .map_err(|source| DebugImageError::Object(source.to_string()))?;
+        if file.format() != BinaryFormat::Elf {
+            return Err(DebugImageError::UnsupportedFormat(format!(
+                "{:?}; eBPF requires ELF",
+                file.format()
+            )));
+        }
         let abi = match file.architecture() {
             object::Architecture::X86_64 => TargetAbi::X86_64,
             object::Architecture::Aarch64 => TargetAbi::Aarch64,
@@ -79,6 +85,8 @@ pub enum DebugImageError {
     },
     #[error("invalid object file: {0}")]
     Object(String),
+    #[error("unsupported debug-image format: {0}")]
+    UnsupportedFormat(String),
 }
 
 #[cfg(test)]

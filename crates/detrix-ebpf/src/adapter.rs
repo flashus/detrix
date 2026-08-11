@@ -1,4 +1,4 @@
-//! eBPF adapter implementing DapAdapter for Go on Linux
+//! eBPF adapter implementing DapAdapter for Go/Rust scalar capture on Linux
 //!
 //! Provides the same interface as DAP-based adapters but uses eBPF uprobes
 //! instead of the Debug Adapter Protocol. This gives ~10-50x lower overhead
@@ -24,12 +24,15 @@
 //!                       └─ event_tx → subscribe_events() caller
 //! ```
 
-use crate::dwarf::{DwarfInfo, ProbePoint, ResolvedVariable, VariableSize};
+use crate::decode::{ScalarFieldSpec, ScalarKind};
+use crate::dwarf::{DwarfInfo, ProbePoint, ResolvedVariable, VariableLocation, VariableSize};
 #[cfg(target_os = "linux")]
 use crate::error::Error;
 use crate::error::Result;
 use crate::probe::types::{CaptureConfig, CapturedValue};
 use crate::probe::UprobeManager;
+use crate::profile::ProfileId;
+use crate::runtime::ProfiledCaptureRuntime;
 
 use async_trait::async_trait;
 use detrix_core::{ExpressionValue, Metric, MetricEvent, MetricId, TypedValue};
@@ -38,7 +41,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 #[cfg(target_os = "linux")]
 use tokio::task::JoinHandle;
 
@@ -50,8 +53,9 @@ type RawEventRx = mpsc::UnboundedReceiver<(String, Vec<u8>)>;
 /// Implements the same `DapAdapter` trait as DAP-based adapters,
 /// making it a drop-in replacement from MetricService's perspective.
 pub struct EbpfAdapter {
-    /// Path to the target Go binary (ELF with DWARF).
+    /// Path to the target ELF binary with DWARF.
     binary_path: PathBuf,
+    profile_id: ProfileId,
     /// Parsed DWARF info (populated on start).
     dwarf: RwLock<Option<DwarfInfo>>,
     /// Uprobe manager — owns the BPF programs and ring buffer pollers.
@@ -94,6 +98,7 @@ struct ActiveMetric {
     /// The correlator passes this flag to `parse_ring_buffer_event` to parse the
     /// goid field from ring buffer events.
     capture_goid: bool,
+    runtime: Option<Arc<Mutex<ProfiledCaptureRuntime>>>,
 }
 
 /// Return the stable internal key used for probe attachment and event correlation.
@@ -109,7 +114,7 @@ fn metric_probe_key(metric: &Metric) -> String {
 }
 
 impl EbpfAdapter {
-    /// Create a new eBPF adapter for a Go binary.
+    /// Create a new eBPF adapter for a Go binary (compatibility default).
     ///
     /// The binary must be compiled with `-gcflags=all=-N -l` for
     /// reliable DWARF variable locations.
@@ -123,6 +128,14 @@ impl EbpfAdapter {
     pub fn new_with_config(
         binary_path: impl AsRef<Path>,
         capture_config: CaptureConfig,
+    ) -> Result<Self> {
+        Self::new_with_profile(binary_path, capture_config, ProfileId::Go)
+    }
+
+    pub fn new_with_profile(
+        binary_path: impl AsRef<Path>,
+        capture_config: CaptureConfig,
+        profile_id: ProfileId,
     ) -> Result<Self> {
         let path = binary_path.as_ref().to_path_buf();
         let (event_tx, event_rx) = mpsc::channel(1024);
@@ -145,6 +158,7 @@ impl EbpfAdapter {
         let (placeholder_tx, placeholder_rx) = mpsc::unbounded_channel();
         Ok(Self {
             binary_path: path.clone(),
+            profile_id,
             dwarf: RwLock::new(None),
             uprobe_manager: RwLock::new(UprobeManager::new_with_config(
                 &path,
@@ -375,10 +389,79 @@ impl DapAdapter for EbpfAdapter {
 
         let probe_key = metric_probe_key(metric);
 
+        let runtime = if self.profile_id == ProfileId::Rust {
+            // Rust/LLVM commonly lowers DW_OP_fbreg against an RBP CFA. Older
+            // DWARF CFI producers expose that CFA as an expression that gimli
+            // cannot retain after row decoding; preserve the Rust frame-base
+            // convention at the profile boundary instead of silently reading
+            // unrelated bytes from RSP.
+            let mut rust_probe_point = probe_point.clone();
+            let frame_register = match dwarf.target_architecture() {
+                crate::dwarf::types::TargetArchitecture::Aarch64 => {
+                    crate::dwarf::types::Register::Arm64(29)
+                }
+                crate::dwarf::types::TargetArchitecture::X86_64 => {
+                    crate::dwarf::types::Register::Rbp
+                }
+            };
+            for variable in &mut rust_probe_point.variables {
+                if let VariableLocation::StackOffset { offset } = variable.location {
+                    variable.location = VariableLocation::FrameOffset {
+                        register: frame_register,
+                        offset,
+                    };
+                }
+            }
+            let fields = rust_scalar_fields(&rust_probe_point.variables)?;
+            let mut runtime = ProfiledCaptureRuntime::new(
+                "rust",
+                format!("probe:{:x}", probe_point.pc),
+                fields,
+                self.capture_config.max_blob_capture.max(64),
+            )
+            .map_err(|e| detrix_core::Error::Adapter(e.to_string()))?;
+            runtime
+                .prepare()
+                .and_then(|_| runtime.attach())
+                .and_then(|_| runtime.activate())
+                .map_err(|e| detrix_core::Error::Adapter(e.to_string()))?;
+            Some(Arc::new(Mutex::new(runtime)))
+        } else {
+            None
+        };
+
+        let attach_point = if self.profile_id == ProfileId::Rust {
+            let mut point = probe_point.clone();
+            let frame_register = match dwarf.target_architecture() {
+                crate::dwarf::types::TargetArchitecture::Aarch64 => {
+                    crate::dwarf::types::Register::Arm64(29)
+                }
+                crate::dwarf::types::TargetArchitecture::X86_64 => {
+                    crate::dwarf::types::Register::Rbp
+                }
+            };
+            for variable in &mut point.variables {
+                if let VariableLocation::StackOffset { offset } = variable.location {
+                    variable.location = VariableLocation::FrameOffset {
+                        register: frame_register,
+                        offset,
+                    };
+                }
+            }
+            point
+        } else {
+            probe_point.clone()
+        };
         self.uprobe_manager
             .write()
             .await
-            .attach(&probe_key, &probe_point, g_addr_offset, goid_offset)
+            .attach_for_profile(
+                &probe_key,
+                &attach_point,
+                g_addr_offset,
+                goid_offset,
+                self.profile_id,
+            )
             .map_err(|e| {
                 detrix_logging::error!(
                     "[EbpfAdapter] uprobe attach failed for '{}': {}",
@@ -396,6 +479,7 @@ impl DapAdapter for EbpfAdapter {
                 metric: metric.clone(),
                 probe_point,
                 capture_goid: self.capture_config.capture_goid,
+                runtime,
             },
         );
 
@@ -501,6 +585,19 @@ async fn run_event_correlator(
             mem_reader.as_ref(),
         ) {
             Ok(probe_event) => {
+                if let Some(runtime) = &active.runtime {
+                    let payload =
+                        scalar_payload(&probe_event.values, &active.probe_point.variables);
+                    let mut runtime = runtime.lock().await;
+                    if let Ok(record) = runtime.encode_payload(&payload, false) {
+                        if let Err(error) = runtime.ingest(&record) {
+                            detrix_logging::warn!(
+                                "Rust profile runtime rejected event for '{}': {error}",
+                                active.metric.name
+                            );
+                        }
+                    }
+                }
                 // Prefer goroutine ID over OS thread ID for Go correlation.
                 let thread_id = probe_event
                     .goid
@@ -526,6 +623,56 @@ async fn run_event_correlator(
             }
         }
     }
+}
+
+fn rust_scalar_fields(variables: &[ResolvedVariable]) -> detrix_core::Result<Vec<ScalarFieldSpec>> {
+    let mut offset = 0usize;
+    let mut fields = Vec::with_capacity(variables.len());
+    for variable in variables {
+        let size = variable.size.bytes();
+        if size == 0 || size > 8 || variable.nested_type.is_some() {
+            return Err(detrix_core::Error::Adapter(format!(
+                "Rust eBPF supports scalar fields up to 8 bytes; '{}' is unsupported",
+                variable.name
+            )));
+        }
+        let kind = if variable.type_name.contains("f32") {
+            ScalarKind::Float32
+        } else if variable.type_name.contains("f64") {
+            ScalarKind::Float64
+        } else if variable.type_name == "bool" {
+            ScalarKind::Bool
+        } else if variable.type_name.starts_with('&') || variable.type_name.starts_with('*') {
+            ScalarKind::Address
+        } else if variable.type_name.starts_with('i') {
+            ScalarKind::Signed
+        } else {
+            ScalarKind::Unsigned
+        };
+        fields.push(ScalarFieldSpec {
+            name: variable.name.clone(),
+            offset,
+            size,
+            kind,
+        });
+        offset = offset.saturating_add(size);
+    }
+    Ok(fields)
+}
+
+#[cfg(target_os = "linux")]
+fn scalar_payload(values: &[CapturedValue], variables: &[ResolvedVariable]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for (value, variable) in values.iter().zip(variables) {
+        let size = variable.size.bytes();
+        let raw = match value {
+            CapturedValue::Scalar(value) => value.to_le_bytes().to_vec(),
+            CapturedValue::Float(value) => value.to_bits().to_le_bytes().to_vec(),
+            _ => vec![0; size],
+        };
+        payload.extend_from_slice(&raw[..size.min(raw.len())]);
+    }
+    payload
 }
 
 #[cfg(test)]
@@ -745,6 +892,7 @@ mod tests {
                         variables: vec![],
                     },
                     capture_goid: false,
+                    runtime: None,
                 },
             );
         }
