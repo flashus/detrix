@@ -73,7 +73,7 @@ stable locations used by the positive fixtures.
 
 The build task records compiler version, target triple, flags, source revision,
 working-tree state, source diff hash, and fixture binary hashes in
-`/private/tmp/detrix-session-target/out/rust-ebpf-build-metadata.txt`.
+`/private/tmp/detrix-session-target/host/out/rust-ebpf-build-metadata.txt`.
 
 ## Runtime requirements
 
@@ -98,18 +98,60 @@ task tests:test-agent-rust-reconnect
 task tests:test-agent-lifecycle
 task tests:test-agent-rust-optimized-unavailable
 task tests:test-agent-rust-external-debug
+task tests:test-agent-rust-composite-sustained
 task tests:test-dap-rust-semantic-control
 ```
 
-All host and Docker Cargo targets and test artifacts use the single disposable
-root `/private/tmp/detrix-session-target`. After three or four build/test
-cycles, clean only that root with:
+The sustained composite task uses a 60-second accounting window by default;
+override it without editing the Taskfile when a shorter smoke run is needed:
+
+```bash
+RUST_COMPOSITE_SUSTAINED_MS=3000 task tests:test-agent-rust-composite-sustained
+```
+
+All host and Docker Cargo targets, caches, staging binaries, and test artifacts
+use one canonical host directory under the disposable root:
+`/private/tmp/detrix-session-target/host`. To use another disposable child of
+`/private/tmp`, set the root once; every Taskfile, runtime binary lookup, and
+cleanup command follows it:
+
+```bash
+DETRIX_SESSION_TARGET_DIR=/private/tmp/my-detrix-session task tests:test-agent-rust
+```
+
+The eBPF builder image is similarly a single override rather than a value
+repeated in individual tasks. This is useful for an architecture-specific
+builder (for example, an amd64 image on an arm64 host):
+
+```bash
+DETRIX_EBPF_BUILDER_IMAGE=detrix-ebpf-builder-amd64 \
+  task tests:build-ebpf-playground
+```
+
+The playground Dockerfile receives that image through `EBPF_BUILDER_IMAGE`,
+so the same Taskfile commands remain reusable without editing paths or image
+names.
+
+After three or four build/test cycles, clean only that selected root with:
 
 ```bash
 task tests:clean-session-target
 ```
 
 Named Docker dependency volumes and downloaded base images are preserved.
+
+The latest AArch64 OrbStack validation passed the unchanged Go five-control
+suite, the heterogeneous Go/Rust same-agent control, and the 60-second 1-ms
+Rust composite accounting control. The latter persisted ordered struct events,
+required at least 100 new events during the window, and asserted
+received/forwarded/in-flight reconciliation plus independent kernel/decode/
+unavailable counters. The same-fixture host Rust DAP semantic control also
+passed with 26 steps, four scalar events, and stack/memory introspection. A
+clean retry of the privileged optimized-out Rust control passed and confirmed
+fail-closed behavior before probe installation. Native x86-64 artifacts build,
+but this OrbStack environment still rejects `perf_event_open` even with an
+unconfined privileged container; x86 live evidence therefore remains a
+separate host/CI gate.
 
 `tests:test-agent-rust-optimized-unavailable` builds a second fixture with
 `-C opt-level=3` and verifies that a dead local is rejected before probe

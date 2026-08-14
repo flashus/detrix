@@ -217,6 +217,7 @@ fn test_agent_capabilities_from_proto() {
         dap_python: proto_caps.dap_python,
         dap_go: proto_caps.dap_go,
         dap_rust: proto_caps.dap_rust,
+        ..Default::default()
     };
 
     assert!(caps.ebpf);

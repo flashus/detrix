@@ -17,7 +17,8 @@ use detrix_api::generated::detrix::v1::{
 use detrix_core::{ConnectionId, Location, Metric, MetricEvent, ParseLanguageExt, SourceLanguage};
 use detrix_dap::{GoAdapter, PythonAdapter, RustAdapter};
 use detrix_ebpf::{
-    resolve_backend, BackendDecision, CaptureBackend, CaptureConfig, EbpfAdapterFactory, ProfileId,
+    resolve_backend, BackendDecision, CaptureBackend, CaptureBackendFactory, CaptureConfig,
+    EbpfAdapterFactory, LanguageProfile, ProfileId,
 };
 use detrix_logging::{debug, info, warn};
 use detrix_ports::DapAdapterRef;
@@ -111,6 +112,17 @@ impl AdapterManager {
         Arc::clone(&self.scan_refresh_requested)
     }
 
+    /// Register an external eBPF profile before the manager is shared with
+    /// the agent stream. The profile and its backend own all dynamic
+    /// construction/lifecycle behavior; the manager only forwards events.
+    pub fn register_ebpf_profile(&mut self, profile: Arc<dyn LanguageProfile>) {
+        self.ebpf_factory.register_profile(profile);
+    }
+
+    pub fn register_ebpf_backend(&mut self, backend: Arc<dyn CaptureBackendFactory>) {
+        self.ebpf_factory.register_backend(backend);
+    }
+
     /// Create a new connection — dispatches by language.
     ///
     /// For Go connections, uses eBPF uprobes.
@@ -133,6 +145,21 @@ impl AdapterManager {
         let requested_profile = match infer_requested_profile(&language, &msg.capture_profile) {
             Ok(profile) => profile,
             Err(error) => {
+                let dynamic_name = if msg.capture_profile.trim().is_empty() {
+                    language.as_str()
+                } else {
+                    msg.capture_profile.trim()
+                }
+                .to_ascii_lowercase();
+                if requested_backend == CaptureBackend::Ebpf
+                    && self.ebpf_factory.has_registered_profile(&dynamic_name)
+                    && self
+                        .ebpf_factory
+                        .has_registered_backend_for_profile(&dynamic_name)
+                {
+                    self.create_dynamic_ebpf_connection(msg, dynamic_name).await;
+                    return;
+                }
                 self.send_connection_update(&connection_id, ConnectionStatus::Failed, Some(&error))
                     .await;
                 return;
@@ -210,6 +237,7 @@ impl AdapterManager {
                 requested: requested_backend,
                 selected: CaptureBackend::Dap,
                 profile: requested_profile,
+                profile_name: requested_profile.as_str().into(),
                 reason: "language has no registered eBPF profile".into(),
             }
         };
@@ -507,6 +535,73 @@ impl AdapterManager {
                     &connection_id,
                     ConnectionStatus::Failed,
                     Some("Unsupported language"),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn create_dynamic_ebpf_connection(
+        &self,
+        msg: AgentCreateConnection,
+        profile_name: String,
+    ) {
+        let connection_id = msg.connection_id.clone();
+        self.replace_connection(&connection_id).await;
+        self.connection_languages
+            .insert(connection_id.clone(), msg.language.to_ascii_lowercase());
+        self.connection_decisions.insert(
+            connection_id.clone(),
+            BackendDecision {
+                requested: CaptureBackend::Ebpf,
+                selected: CaptureBackend::Ebpf,
+                // Dynamic backends own their profile identity; this typed
+                // value is retained only for compatibility with policy data.
+                profile: ProfileId::Go,
+                profile_name: profile_name.clone(),
+                reason: "registry-provided eBPF profile".into(),
+            },
+        );
+        self.connection_drop_counts
+            .insert(connection_id.clone(), Arc::new(AtomicU64::new(0)));
+
+        let adapter = match self
+            .ebpf_factory
+            .create_registered_adapter(&profile_name, PathBuf::from(&msg.binary_path))
+        {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                self.send_connection_update(
+                    &connection_id,
+                    ConnectionStatus::Failed,
+                    Some(&error.to_string()),
+                )
+                .await;
+                return;
+            }
+        };
+        if let Err(error) = adapter.start().await {
+            self.send_connection_update(
+                &connection_id,
+                ConnectionStatus::Failed,
+                Some(&error.to_string()),
+            )
+            .await;
+            return;
+        }
+        match adapter.subscribe_events().await {
+            Ok(event_rx) => {
+                let forward_adapter = adapter.clone();
+                self.adapters.insert(connection_id.clone(), adapter);
+                self.spawn_event_forwarder(connection_id.clone(), event_rx, forward_adapter);
+                self.send_connection_update(&connection_id, ConnectionStatus::Connected, None)
+                    .await;
+            }
+            Err(error) => {
+                self.send_connection_update(
+                    &connection_id,
+                    ConnectionStatus::Failed,
+                    Some(&error.to_string()),
                 )
                 .await;
             }
@@ -958,7 +1053,7 @@ impl AdapterManager {
             .map(|decision| {
                 (
                     format!("{:?}", decision.selected).to_ascii_lowercase(),
-                    decision.profile.as_str().to_string(),
+                    decision.profile_name.clone(),
                     decision.reason.clone(),
                 )
             })
@@ -1012,9 +1107,9 @@ fn supported_capture_capabilities(
     capture_profile: &str,
 ) -> (Vec<u32>, Vec<String>, u32) {
     if decision.is_some_and(|decision| decision.selected == CaptureBackend::Ebpf)
-        && capture_profile == "rust"
+        && matches!(capture_profile, "go" | "rust")
     {
-        (vec![1], vec!["rust".to_string()], 4096)
+        (vec![1], vec![capture_profile.to_string()], 4096)
     } else {
         (Vec::new(), Vec::new(), 0)
     }
@@ -1129,6 +1224,7 @@ mod tests {
             requested: CaptureBackend::Auto,
             selected: CaptureBackend::Dap,
             profile: ProfileId::Rust,
+            profile_name: "rust".into(),
             reason: "fallback".into(),
         };
         assert_eq!(
@@ -1143,6 +1239,7 @@ mod tests {
             requested: CaptureBackend::Ebpf,
             selected: CaptureBackend::Ebpf,
             profile: ProfileId::Rust,
+            profile_name: "rust".into(),
             reason: "explicit".into(),
         };
         assert_eq!(

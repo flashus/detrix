@@ -432,15 +432,22 @@ impl DapAdapter for EbpfAdapter {
 
         let probe_key = metric_probe_key(metric);
 
-        let runtime_plan_hash =
-            (self.profile_id == ProfileId::Rust).then(|| format!("probe:{:x}", probe_point.pc));
-        let raw_envelope = runtime_plan_hash
-            .as_deref()
-            .map(|plan_hash| RawEnvelopeExpectation {
-                profile_tag: crate::compiler::profile_tag("rust"),
+        // The plan identity is shared by all eBPF profiles.  Rust adopted
+        // DRX1 first; Go now uses the same envelope when the connection has
+        // negotiated it, while the parser still accepts legacy records for
+        // older agents.
+        let runtime_plan_hash = Some(format!("probe:{:x}", probe_point.pc));
+        let raw_envelope = runtime_plan_hash.as_deref().map(|plan_hash| {
+            let profile = match self.profile_id {
+                ProfileId::Go => "go",
+                ProfileId::Rust => "rust",
+            };
+            RawEnvelopeExpectation {
+                profile_tag: crate::compiler::profile_tag(profile),
                 plan_tag: crate::compiler::plan_tag(plan_hash),
                 field_count: probe_point.variables.len(),
-            });
+            }
+        });
         let runtime = if self.profile_id == ProfileId::Rust {
             match rust_scalar_fields(&probe_point.variables) {
                 Ok(fields) => {

@@ -367,9 +367,9 @@ impl UprobeManager {
         profile: ProfileId,
         plan_hash: Option<&str>,
     ) -> Result<AyaHandles> {
-        use crate::compiler::{CaptureCompiler, GoBpfCompiler, RustBpfCompiler};
+        use crate::compiler::{GoBpfCompiler, RustBpfCompiler};
         use crate::probe::loader::compile_bpf_for_arch;
-        use crate::probe::program::BpfProgram;
+        use crate::probe::program::{BpfProgram, RawEnvelopeSpec};
         use aya::programs::uprobe::UProbeLink;
         use aya::programs::UProbe;
 
@@ -415,8 +415,12 @@ impl UprobeManager {
                     );
                     Error::Ebpf(error.to_string())
                 })?;
+                let envelope = plan_hash.map(|hash| RawEnvelopeSpec {
+                    profile_tag: crate::compiler::profile_tag("go"),
+                    plan_tag: crate::compiler::plan_tag(hash),
+                });
                 compiler
-                    .compile(&plan)
+                    .compile_with_envelope(&plan, envelope)
                     .and_then(|compiled| {
                         String::from_utf8(compiled.artifact)
                             .map(|source| BpfProgram {
@@ -425,7 +429,7 @@ impl UprobeManager {
                                 captures_goid: self.capture_config.capture_goid,
                                 g_addr_offset,
                                 goid_offset,
-                                versioned_envelope: false,
+                                versioned_envelope: envelope.is_some(),
                             })
                             .map_err(|error| {
                                 crate::compiler::CompileError::Backend(error.to_string())

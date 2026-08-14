@@ -1,10 +1,14 @@
 //! Registries are the extension seam for adding languages and backends.
 
 use crate::compiler::{CaptureCompiler, GoBpfCompiler, RustBpfCompiler};
+use crate::probe::types::CaptureConfig;
 use crate::profile::{GoProfile, LanguageProfile, ProfileId, RustProfile};
 use crate::runtime::{ProfiledCaptureRuntime, RuntimeError};
 use crate::ScalarFieldSpec;
+use detrix_ports::DapAdapterRef;
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::result::Result;
 use std::sync::Arc;
 
 pub trait CaptureBackendFactory: Send + Sync {
@@ -32,6 +36,26 @@ pub trait CaptureBackendFactory: Send + Sync {
         fields: Vec<ScalarFieldSpec>,
         max_payload: usize,
     ) -> Result<ProfiledCaptureRuntime, RuntimeError>;
+
+    /// Construct a runtime adapter for a registry profile key.
+    ///
+    /// Built-in Go/Rust construction remains available through
+    /// `EbpfAdapterFactory`'s compatibility methods. External backends should
+    /// override this hook to own their adapter, profile metadata, compiler,
+    /// and lifecycle without adding a manager language branch. The default is
+    /// deliberately fail-closed so registering a profile alone cannot claim
+    /// runtime support.
+    fn create_adapter(
+        &self,
+        _profile: &str,
+        _binary_path: &Path,
+        _base_path: &Path,
+        _capture_config: &CaptureConfig,
+    ) -> crate::error::Result<DapAdapterRef> {
+        Err(crate::error::Error::Adapter(
+            "backend has no dynamic adapter constructor".into(),
+        ))
+    }
 }
 
 /// Shared uprobe backend. Language-specific lowering is selected by profile;

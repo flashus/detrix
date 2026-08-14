@@ -273,7 +273,7 @@ impl Agent {
                 capabilities: Some(AgentCapabilities {
                     ebpf: cfg!(target_os = "linux"),
                     supported_envelope_schemas: vec![1],
-                    supported_capture_profiles: vec!["rust".into()],
+                    supported_capture_profiles: vec!["go".into(), "rust".into()],
                     max_capture_payload_bytes: 4096,
                     ..Default::default()
                 }),
@@ -517,7 +517,7 @@ impl Agent {
                                 capabilities: Some(AgentCapabilities {
                                     ebpf: cfg!(target_os = "linux"),
                                     supported_envelope_schemas: vec![1],
-                                    supported_capture_profiles: vec!["rust".into()],
+                                    supported_capture_profiles: vec!["go".into(), "rust".into()],
                                     max_capture_payload_bytes: 4096,
                                     ..Default::default()
                                 }),

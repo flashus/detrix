@@ -971,6 +971,64 @@ async fn test_agent_rust_ebpf_composite() {
             "{status}"
         );
         assert!(status.contains("unavailable=0"), "{status}");
+
+        // The bounded 1ms control above proves accounting on a short burst.
+        // A separate task can request a sustained window to exercise ring
+        // pressure without making every composite run pay the multi-second
+        // cost.
+        if let Some(window_ms) = std::env::var("RUST_COMPOSITE_SUSTAINED_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            let baseline = read_agent_metrics(harness.metrics_port)
+                .await
+                .expect("sustained run did not expose baseline agent metrics");
+            tokio::time::sleep(Duration::from_millis(window_ms)).await;
+            let sustained = read_agent_metrics(harness.metrics_port)
+                .await
+                .expect("sustained run did not expose agent metrics");
+            let sustained_received = *sustained
+                .get("detrix_agent_events_received_total")
+                .expect("sustained run missing received counter");
+            assert!(
+                sustained_received >= baseline
+                    .get("detrix_agent_events_received_total")
+                    .copied()
+                    .unwrap_or(0)
+                    + 100,
+                "sustained control observed too few new events (baseline={baseline:?}, after={sustained:?})"
+            );
+            let sustained_forwarded = *sustained
+                .get("detrix_agent_events_forwarded_total")
+                .expect("sustained run missing forwarded counter");
+            let sustained_transport_dropped = *sustained
+                .get("detrix_agent_events_dropped_total")
+                .expect("sustained run missing transport-drop counter");
+            let sustained_in_flight = *sustained
+                .get("detrix_agent_events_in_flight")
+                .expect("sustained run missing in-flight gauge");
+            assert_eq!(
+                sustained_received,
+                sustained_forwarded + sustained_transport_dropped + sustained_in_flight,
+                "sustained events must reconcile independently of kernel/decode drops: {sustained:?}"
+            );
+            assert!(!sustained
+                .get("detrix_agent_kernel_events_dropped_total")
+                .is_some_and(|after| {
+                    after
+                        < baseline
+                            .get("detrix_agent_kernel_events_dropped_total")
+                            .unwrap_or(&0)
+                }));
+            assert!(!sustained
+                .get("detrix_agent_decode_events_dropped_total")
+                .is_some_and(|after| {
+                    after
+                        < baseline
+                            .get("detrix_agent_decode_events_dropped_total")
+                            .unwrap_or(&0)
+                }));
+        }
     }
 
     // Exercise the lifecycle half of the composite path as well: the metric

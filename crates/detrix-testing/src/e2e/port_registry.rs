@@ -111,39 +111,14 @@ impl TestPortRegistry {
                 // ephemeral allocator instead of failing before the test
                 // process starts. Spaced callers still require a complete
                 // bindable window, which is checked below before fallback.
-                if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", 0)) {
-                    let ephemeral = listener
-                        .local_addr()
-                        .map(|address| address.port())
-                        .unwrap_or(0);
-                    let window_is_valid = ephemeral != 0
-                        && (spacing == 1 || (ephemeral as u32 + spacing as u32) < u16::MAX as u32);
-                    if window_is_valid {
-                        let mut window = Vec::new();
-                        let mut valid = true;
-                        for offset in 1..spacing {
-                            match std::net::TcpListener::bind((
-                                "127.0.0.1",
-                                ephemeral.saturating_add(offset),
-                            )) {
-                                Ok(candidate) => window.push(candidate),
-                                Err(_) => {
-                                    valid = false;
-                                    break;
-                                }
-                            }
-                        }
-                        drop(window);
-                        if valid {
-                            eprintln!(
-                                "TestPortRegistry: claimed range exhausted; using ephemeral base {ephemeral} (spacing {spacing})"
-                            );
-                            return (ephemeral, listener);
-                        }
-                    }
+                if let Some((ephemeral, listener)) = find_fallback_window(self.range_end, spacing) {
+                    eprintln!(
+                        "TestPortRegistry: claimed range exhausted; using fallback base {ephemeral} (spacing {spacing})"
+                    );
+                    return (ephemeral, listener);
                 }
                 panic!(
-                    "TestPortRegistry: range exhausted ({}-{}). \
+                    "TestPortRegistry: range exhausted ({}-{}), spacing={spacing}. \
                      Increase DEFAULT_RANGE_SIZE or reduce port spacing.",
                     self.range_start, self.range_end
                 );
@@ -164,6 +139,50 @@ impl TestPortRegistry {
     }
 }
 
+/// Find a bindable contiguous window after the process-local claim is full.
+///
+/// Binding port 0 is not sufficient for spaced callers: the kernel may choose
+/// a random ephemeral port whose following ports are occupied.  Scan a
+/// deterministic range instead and hold every successful bind until the whole
+/// window has been validated, eliminating the old false exhaustion failure.
+fn find_fallback_window(start: u16, spacing: u16) -> Option<(u16, std::net::TcpListener)> {
+    let spacing = spacing.max(1);
+    let first = start.max(BASE_PORT);
+    let last = MAX_PORT.saturating_sub(spacing.saturating_sub(1));
+    if first > last {
+        return None;
+    }
+
+    for candidate in first..=last {
+        if SYSTEM_RESERVED_PORTS.contains(&candidate) {
+            continue;
+        }
+        let listener = match std::net::TcpListener::bind(("127.0.0.1", candidate)) {
+            Ok(listener) => listener,
+            Err(_) => continue,
+        };
+        let mut window = Vec::with_capacity(spacing.saturating_sub(1) as usize);
+        let mut valid = true;
+        for offset in 1..spacing {
+            match std::net::TcpListener::bind(("127.0.0.1", candidate.saturating_add(offset))) {
+                Ok(port) => window.push(port),
+                Err(_) => {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        if valid {
+            // Keep the first listener; the additional probes only reserve the
+            // window during validation and are intentionally released before
+            // the caller starts its server.
+            drop(window);
+            return Some((candidate, listener));
+        }
+    }
+    None
+}
+
 /// Get the current test binary name (for diagnostics).
 fn current_binary_name() -> String {
     std::env::current_exe()
@@ -179,13 +198,21 @@ struct Registry {
     allocations: Vec<RegistryEntry>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct RegistryEntry {
     pid: u32,
     binary: String,
     range_start: u16,
     range_end: u16,
     ts: u64,
+    /// Process start time, in seconds since the Unix epoch.
+    ///
+    /// PIDs can be reused after a test process exits.  The start time makes
+    /// the registry identity `(pid, start_time)` instead of trusting the PID
+    /// alone.  A zero value denotes a legacy entry and is intentionally
+    /// discarded during the next cleanup pass.
+    #[serde(default)]
+    start_time: u64,
 }
 
 /// Claim a port range from the shared registry file.
@@ -225,11 +252,10 @@ fn claim_range(range_size: u16) -> TestPortRegistry {
         })
     };
 
-    // Clean entries from dead PIDs
+    // Clean entries from dead or PID-reused processes.  `kill(pid, 0)` alone
+    // is insufficient here because a new process may inherit the old PID.
     let before = registry.allocations.len();
-    registry
-        .allocations
-        .retain(|entry| is_process_alive(entry.pid));
+    registry.allocations.retain(process_identity_is_current);
     let cleaned = before - registry.allocations.len();
     if cleaned > 0 {
         eprintln!("TestPortRegistry: cleaned {cleaned} stale entries from dead PIDs");
@@ -262,6 +288,7 @@ fn claim_range(range_size: u16) -> TestPortRegistry {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let start_time = process_start_time(std::process::id()).unwrap_or(0);
 
     registry.allocations.push(RegistryEntry {
         pid: std::process::id(),
@@ -269,6 +296,7 @@ fn claim_range(range_size: u16) -> TestPortRegistry {
         range_start: start,
         range_end: end,
         ts,
+        start_time,
     });
 
     // Write back (truncate first)
@@ -309,6 +337,25 @@ fn is_process_alive(pid: u32) -> bool {
         // On non-Unix, assume alive (conservative — won't clean up stale entries)
         true
     }
+}
+
+/// Return the process start time used to disambiguate reused PIDs.
+fn process_start_time(pid: u32) -> Option<u64> {
+    if pid == 0 {
+        return None;
+    }
+    let system = sysinfo::System::new_all();
+    system
+        .process(sysinfo::Pid::from_u32(pid))
+        .map(|process| process.start_time())
+        .filter(|start_time| *start_time != 0)
+}
+
+/// Check the complete registry identity, not just whether the PID exists.
+fn process_identity_is_current(entry: &RegistryEntry) -> bool {
+    is_process_alive(entry.pid)
+        && entry.start_time != 0
+        && process_start_time(entry.pid) == Some(entry.start_time)
 }
 
 #[cfg(test)]
@@ -357,10 +404,51 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_spaced_range_uses_bindable_fallback_window() {
+        if std::net::TcpListener::bind(("127.0.0.1", 45000)).is_err() {
+            eprintln!("skipping fallback-window test: loopback bind unavailable");
+            return;
+        }
+        let registry = TestPortRegistry {
+            range_start: 45000,
+            range_end: 45001,
+            next_port: AtomicU16::new(45001),
+        };
+
+        let (port, listener) = registry.allocate_spaced_listener(16);
+        assert!(port >= 45001);
+        assert_eq!(listener.local_addr().unwrap().port(), port);
+    }
+
+    #[test]
     fn test_is_process_alive() {
         // Our own PID should be alive
         assert!(is_process_alive(std::process::id()));
         // PID 0 should not be alive
         assert!(!is_process_alive(0));
+    }
+
+    #[test]
+    fn test_process_identity_rejects_legacy_and_reused_pid_entries() {
+        let pid = std::process::id();
+        let start_time = process_start_time(pid).expect("current process has a start time");
+        let base = RegistryEntry {
+            pid,
+            binary: current_binary_name(),
+            range_start: 15000,
+            range_end: 16000,
+            ts: 0,
+            start_time,
+        };
+
+        assert!(process_identity_is_current(&base));
+
+        let mut reused_pid = base.clone();
+        reused_pid.start_time = start_time.saturating_sub(1).max(1);
+        assert!(!process_identity_is_current(&reused_pid));
+
+        let mut legacy = base;
+        legacy.start_time = 0;
+        assert!(!process_identity_is_current(&legacy));
     }
 }

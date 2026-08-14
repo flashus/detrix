@@ -25,6 +25,9 @@ pub struct BackendDecision {
     pub requested: CaptureBackend,
     pub selected: CaptureBackend,
     pub profile: ProfileId,
+    /// Registry key used for diagnostics and dynamic profiles. Built-in
+    /// callers keep `profile` for compatibility with typed policy rules.
+    pub profile_name: String,
     pub reason: String,
 }
 
@@ -53,6 +56,7 @@ pub fn resolve_backend(
             requested,
             selected: CaptureBackend::Dap,
             profile,
+            profile_name: profile.as_str().into(),
             reason: "explicit dap".into(),
         });
     }
@@ -63,6 +67,7 @@ pub fn resolve_backend(
             requested,
             selected: CaptureBackend::Dap,
             profile,
+            profile_name: profile.as_str().into(),
             reason: "rust eBPF remains opt-in until live gate".into(),
         });
     }
@@ -72,6 +77,7 @@ pub fn resolve_backend(
                 requested,
                 selected: CaptureBackend::Dap,
                 profile,
+                profile_name: profile.as_str().into(),
                 reason: "eBPF unavailable; auto fell back to DAP".into(),
             });
         }
@@ -83,6 +89,7 @@ pub fn resolve_backend(
                 requested,
                 selected: CaptureBackend::Dap,
                 profile,
+                profile_name: profile.as_str().into(),
                 reason: "usable variable DWARF unavailable; auto fell back to DAP".into(),
             });
         }
@@ -94,6 +101,7 @@ pub fn resolve_backend(
         requested,
         selected: CaptureBackend::Ebpf,
         profile,
+        profile_name: profile.as_str().into(),
         reason: "eBPF capability preflight passed".into(),
     })
 }

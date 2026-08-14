@@ -17,9 +17,13 @@ includes:
 # set DETRIX_SESSION_TARGET_DIR once (the default remains disposable).
 vars:
   SESSION_TARGET_DIR:
-    sh: "{{.ROOT_DIR}}/scripts/session-root-dir.sh"
+    sh: "{{.ROOT_DIR}}/scripts/session-root-dir.sh root"
   HOST_TARGET_DIR:
     sh: "{{.ROOT_DIR}}/scripts/session-root-dir.sh host"
+  OUT_DIR:
+    sh: "{{.ROOT_DIR}}/scripts/session-root-dir.sh out"
+  DOCKER_TARGET_DIR:
+    sh: "{{.ROOT_DIR}}/scripts/session-root-dir.sh docker"
 
 tasks:
   build:

@@ -71,6 +71,10 @@ impl EbpfAdapterFactory {
         self.profiles.get(profile).is_some()
     }
 
+    pub fn has_registered_backend_for_profile(&self, profile: &str) -> bool {
+        self.backends.for_profile_name(profile).is_some()
+    }
+
     /// String-keyed construction entry point for control-plane callers.
     /// Built-in profiles are mapped to their compatibility identities; an
     /// unknown registered profile is rejected until its runtime adapter can
@@ -80,12 +84,27 @@ impl EbpfAdapterFactory {
         profile: &str,
         binary_path: impl AsRef<Path>,
     ) -> Result<DapAdapterRef> {
-        match profile.trim().to_ascii_lowercase().as_str() {
+        let profile = profile.trim().to_ascii_lowercase();
+        match profile.as_str() {
             "go" => self.create_go_adapter(binary_path),
             "rust" => self.create_rust_adapter(binary_path),
-            other if self.has_registered_profile(other) => Err(Error::Adapter(format!(
-                "registered profile '{other}' has no typed runtime adapter"
-            ))),
+            other if self.has_registered_profile(other) => {
+                let backend = self.backends.for_profile_name(other).ok_or_else(|| {
+                    Error::Adapter(format!("No registered eBPF backend for {other}"))
+                })?;
+                let path = if binary_path.as_ref().is_absolute() {
+                    binary_path.as_ref().to_path_buf()
+                } else {
+                    self.base_path.join(binary_path)
+                };
+                if !path.exists() {
+                    return Err(Error::Adapter(format!(
+                        "Binary not found: {}",
+                        path.display()
+                    )));
+                }
+                backend.create_adapter(other, &path, &self.base_path, &self.capture_config)
+            }
             other => Err(Error::Adapter(format!(
                 "No registered eBPF profile for {other}"
             ))),
@@ -272,7 +291,87 @@ impl EbpfAdapterFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::CaptureCompiler;
+    use crate::profile::{LanguageProfile, ProfileCapabilities, TypeDescriptor};
+    use crate::registry::CaptureBackendFactory;
+    use crate::runtime::RuntimeError;
+    use crate::ScalarFieldSpec;
+    use detrix_ports::DapAdapterRef;
+    use std::path::Path;
     use tempfile::NamedTempFile;
+
+    #[derive(Debug)]
+    struct DynamicProfile;
+
+    impl LanguageProfile for DynamicProfile {
+        fn id(&self) -> &'static str {
+            "test-language"
+        }
+        fn architectures(&self) -> &'static [crate::dwarf::types::TargetArchitecture] {
+            &[]
+        }
+        fn capabilities(&self) -> ProfileCapabilities {
+            ProfileCapabilities {
+                scalar: true,
+                pointer: false,
+                inline_struct: false,
+                fixed_array: false,
+                string: false,
+                borrowed_str: false,
+                vector: false,
+                borrowed_slice: false,
+                slice: false,
+                enumeration: false,
+                niche_enumeration: false,
+                trait_object: false,
+                async_state: false,
+            }
+        }
+        fn classify_type(&self, _name: &str, byte_size: usize) -> TypeDescriptor {
+            TypeDescriptor::Scalar { size: byte_size }
+        }
+    }
+
+    #[derive(Debug)]
+    struct DynamicBackend;
+
+    impl CaptureBackendFactory for DynamicBackend {
+        fn id(&self) -> &'static str {
+            "dynamic-test"
+        }
+        fn supports(&self, _profile: crate::profile::ProfileId) -> bool {
+            false
+        }
+        fn supports_profile(&self, profile: &str) -> bool {
+            profile.eq_ignore_ascii_case("test-language")
+        }
+        fn compiler(
+            &self,
+            _profile: crate::profile::ProfileId,
+        ) -> std::result::Result<Box<dyn CaptureCompiler>, RuntimeError> {
+            Err(RuntimeError::MissingIdentity)
+        }
+        fn create_runtime(
+            &self,
+            _profile: crate::profile::ProfileId,
+            _plan_hash: &str,
+            _fields: Vec<ScalarFieldSpec>,
+            _max_payload: usize,
+        ) -> std::result::Result<crate::runtime::ProfiledCaptureRuntime, RuntimeError> {
+            Err(RuntimeError::MissingIdentity)
+        }
+        fn create_adapter(
+            &self,
+            profile: &str,
+            _binary_path: &Path,
+            _base_path: &Path,
+            _capture_config: &CaptureConfig,
+        ) -> crate::error::Result<DapAdapterRef> {
+            Err(crate::error::Error::Adapter(format!(
+                "dynamic constructor invoked for {profile}"
+            )))
+        }
+    }
 
     #[test]
     fn factory_create_with_existing_binary() {
@@ -318,6 +417,21 @@ mod tests {
         assert!(factory
             .create_registered_adapter("not-registered", tmp.path())
             .is_err());
+    }
+
+    #[test]
+    fn string_profile_entry_point_dispatches_dynamic_backend_constructor() {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut factory = EbpfAdapterFactory::new("/tmp");
+        factory.register_profile(Arc::new(DynamicProfile));
+        factory.register_backend(Arc::new(DynamicBackend));
+        let error = match factory.create_registered_adapter("TEST-LANGUAGE", tmp.path()) {
+            Ok(_) => panic!("dynamic constructor should return its diagnostic"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("dynamic constructor invoked for test-language"));
     }
 
     #[test]

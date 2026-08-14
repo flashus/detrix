@@ -23,8 +23,13 @@ case "${TARGET_DIR}" in
     ;;
 esac
 
-if [[ "${1:-}" == "host" ]]; then
-  printf '%s/host\n' "${TARGET_DIR}"
-else
-  printf '%s\n' "${TARGET_DIR}"
-fi
+case "${1:-root}" in
+  root) printf '%s\n' "${TARGET_DIR}" ;;
+  host) printf '%s/host\n' "${TARGET_DIR}" ;;
+  out) printf '%s/host/out\n' "${TARGET_DIR}" ;;
+  docker) printf '%s/host/docker\n' "${TARGET_DIR}" ;;
+  *)
+    echo "usage: $0 [root|host|out|docker]" >&2
+    exit 2
+    ;;
+esac

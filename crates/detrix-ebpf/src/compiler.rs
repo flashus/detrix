@@ -13,7 +13,8 @@ use crate::dwarf::types::{
 };
 use crate::error::Result as EbpfResult;
 use crate::probe::program::{
-    generate_bpf_program, generate_bpf_program_with_envelope, BpfProgram, RawEnvelopeSpec,
+    generate_bpf_program, generate_bpf_program_from_plan, generate_bpf_program_with_envelope,
+    BpfProgram, RawEnvelopeSpec,
 };
 use crate::probe::types::CaptureConfig;
 
@@ -240,95 +241,16 @@ impl RustBpfCompiler {
         &self,
         plan: &CapturePlan,
     ) -> std::result::Result<BpfProgram, CompileError> {
-        let variables = plan
-            .fields
-            .iter()
-            .map(|field| {
-                let scalar_field = match &field.op {
-                    ReadOp::Register {
-                        register,
-                        semantics,
-                    } if *semantics == ValueSemantics::Value
-                        || *semantics == ValueSemantics::Address =>
-                    {
-                        crate::capture_plan::CaptureField {
-                            op: ReadOp::Register {
-                                register: *register,
-                                semantics: ValueSemantics::Value,
-                            },
-                            ..field.clone()
-                        }
-                    }
-                    ReadOp::Stack {
-                        offset,
-                        size,
-                        semantics,
-                    } if *semantics == ValueSemantics::Value
-                        || *semantics == ValueSemantics::Address =>
-                    {
-                        crate::capture_plan::CaptureField {
-                            op: ReadOp::Stack {
-                                offset: *offset,
-                                size: *size,
-                                semantics: ValueSemantics::Value,
-                            },
-                            ..field.clone()
-                        }
-                    }
-                    ReadOp::Frame {
-                        register,
-                        offset,
-                        size,
-                        semantics,
-                    } if *semantics == ValueSemantics::Value
-                        || *semantics == ValueSemantics::Address =>
-                    {
-                        crate::capture_plan::CaptureField {
-                            op: ReadOp::Frame {
-                                register: *register,
-                                offset: *offset,
-                                size: *size,
-                                semantics: ValueSemantics::Value,
-                            },
-                            ..field.clone()
-                        }
-                    }
-                    ReadOp::Blob {
-                        offset,
-                        size,
-                        semantics: ValueSemantics::Value,
-                    } => crate::capture_plan::CaptureField {
-                        op: ReadOp::Blob {
-                            offset: *offset,
-                            size: *size,
-                            semantics: ValueSemantics::Value,
-                        },
-                        ..field.clone()
-                    },
-                    ReadOp::Header { .. } => field.clone(),
-                    ReadOp::Indirect { .. } | ReadOp::Map { .. } => {
-                        return Err(CompileError::UnsupportedLocation(format!(
-                            "Rust operation for '{}' is Go-specific",
-                            field.name
-                        )))
-                    }
-                    _ => {
-                        return Err(CompileError::UnsupportedLocation(format!(
-                            "Rust operation for '{}' is not a bounded scalar",
-                            field.name
-                        )))
-                    }
-                };
-                plan_field_to_go_variable(&scalar_field)
-            })
-            .collect::<std::result::Result<Vec<_>, CompileError>>()?;
-        self.compile_variables_with_envelope_for_arch(
-            &variables,
+        generate_bpf_program_from_plan(
+            plan,
+            false,
+            None,
+            None,
+            &self.config,
             Some(RawEnvelopeSpec {
                 profile_tag: profile_tag("rust"),
                 plan_tag: plan_tag(&plan.plan_hash),
             }),
-            plan.architecture,
         )
         .map_err(|error| CompileError::Backend(error.to_string()))
     }
@@ -614,10 +536,15 @@ impl GoBpfCompiler {
             &self.config,
         )
     }
-}
 
-impl CaptureCompiler for GoBpfCompiler {
-    fn compile(&self, plan: &CapturePlan) -> std::result::Result<CompiledCapture, CompileError> {
+    /// Compile a Go plan with an optional negotiated raw envelope. The
+    /// compatibility trait entry point below still emits legacy records when
+    /// no envelope has been negotiated.
+    pub fn compile_with_envelope(
+        &self,
+        plan: &CapturePlan,
+        envelope: Option<RawEnvelopeSpec>,
+    ) -> std::result::Result<CompiledCapture, CompileError> {
         plan.validate().map_err(CompileError::InvalidPlan)?;
         if plan.profile_id != "go" {
             return Err(CompileError::ProfileMismatch {
@@ -625,14 +552,15 @@ impl CaptureCompiler for GoBpfCompiler {
                 actual: plan.profile_id.clone(),
             });
         }
-        let variables = plan
-            .fields
-            .iter()
-            .map(plan_field_to_go_variable)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let program = self
-            .compile_variables(&variables)
-            .map_err(|error| CompileError::Backend(error.to_string()))?;
+        let program = generate_bpf_program_from_plan(
+            plan,
+            self.capture_goid,
+            self.g_addr_offset,
+            self.goid_offset,
+            &self.config,
+            envelope,
+        )
+        .map_err(|error| CompileError::Backend(error.to_string()))?;
         Ok(CompiledCapture {
             plan_hash: plan.plan_hash.clone(),
             architecture: plan.architecture,
@@ -641,6 +569,13 @@ impl CaptureCompiler for GoBpfCompiler {
     }
 }
 
+impl CaptureCompiler for GoBpfCompiler {
+    fn compile(&self, plan: &CapturePlan) -> std::result::Result<CompiledCapture, CompileError> {
+        self.compile_with_envelope(plan, None)
+    }
+}
+
+#[allow(dead_code)]
 fn plan_field_to_go_variable(
     field: &crate::capture_plan::CaptureField,
 ) -> std::result::Result<ResolvedVariable, CompileError> {
@@ -791,6 +726,7 @@ fn plan_field_to_go_variable(
     })
 }
 
+#[allow(dead_code)]
 fn read_op_to_location(op: &ReadOp) -> Result<VariableLocation, CompileError> {
     match op {
         ReadOp::Register { register, .. } => Ok(VariableLocation::Register(*register)),
@@ -833,6 +769,7 @@ fn header_base_location(location: &VariableLocation, kind: HeaderKind) -> Variab
     shift_location(location.clone(), delta)
 }
 
+#[allow(dead_code)]
 fn header_location(base: VariableLocation, kind: HeaderKind) -> VariableLocation {
     match kind {
         HeaderKind::String => VariableLocation::GoString {
@@ -868,6 +805,7 @@ fn header_location(base: VariableLocation, kind: HeaderKind) -> VariableLocation
     }
 }
 
+#[allow(dead_code)]
 fn header_type_name(kind: HeaderKind) -> &'static str {
     match kind {
         HeaderKind::String => "String",
@@ -998,6 +936,40 @@ mod tests {
     }
 
     #[test]
+    fn go_compiler_can_render_negotiated_drx1_envelope() {
+        let probe = ProbePoint {
+            binary_path: std::path::PathBuf::from("/tmp/go"),
+            pc: 0x47,
+            symbol_offset: 0x47,
+            function_name: "main.main".into(),
+            variables: vec![ResolvedVariable {
+                name: "counter".into(),
+                location: VariableLocation::Register(Register::Rax),
+                size: VariableSize::QWord,
+                type_name: "int".into(),
+                nested_type: None,
+            }],
+        };
+        let plan = GoBpfCompiler::plan_from_probe(&probe, "probe:47").unwrap();
+        let source = String::from_utf8(
+            GoBpfCompiler::default()
+                .compile_with_envelope(
+                    &plan,
+                    Some(RawEnvelopeSpec {
+                        profile_tag: profile_tag("go"),
+                        plan_tag: plan_tag("probe:47"),
+                    }),
+                )
+                .unwrap()
+                .artifact,
+        )
+        .unwrap();
+        assert!(source.contains("drx_magic"));
+        assert!(source.contains("drx_profile_tag"));
+        assert!(source.contains("DRX1") || source.contains("0x31585244"));
+    }
+
+    #[test]
     fn go_plan_preserves_indirect_and_map_semantics() {
         let probe = ProbePoint {
             binary_path: std::path::PathBuf::from("/tmp/go"),
@@ -1035,7 +1007,7 @@ mod tests {
         let source =
             String::from_utf8(GoBpfCompiler::default().compile(&plan).unwrap().artifact).unwrap();
         assert!(source.contains("DETRIX_STACK_PTR - 32"));
-        assert!(source.contains("DETRIX_STACK_PTR + (-40)"));
+        assert!(source.contains("DETRIX_STACK_PTR - 40"));
     }
 
     #[test]

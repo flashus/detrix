@@ -43,45 +43,53 @@ impl AgentCapabilities {
         reported_capture_profiles: &[String],
         reported_max_payload_bytes: u32,
     ) -> Result<(), String> {
-        if !selected_backend.eq_ignore_ascii_case("ebpf")
-            || !capture_profile.eq_ignore_ascii_case("rust")
-        {
-            // Go eBPF and DAP retain their pre-negotiation framing.
+        if !selected_backend.eq_ignore_ascii_case("ebpf") {
             return Ok(());
         }
 
         const DRX1_SCHEMA: u32 = 1;
         const DRX1_MIN_PAYLOAD_BYTES: u32 = 4096;
 
-        let registered_ok = self.supports_rust_drx1(DRX1_SCHEMA, DRX1_MIN_PAYLOAD_BYTES);
+        if !matches!(capture_profile.to_ascii_lowercase().as_str(), "go" | "rust") {
+            // Unknown/third-party profiles are admitted by their own backend
+            // policy; this built-in wire contract only covers Go and Rust.
+            return Ok(());
+        }
+
+        let registered_ok =
+            self.supports_profile_drx1(capture_profile, DRX1_SCHEMA, DRX1_MIN_PAYLOAD_BYTES);
+        // Older agents do not advertise a wire profile at all. Preserve the
+        // legacy Go eBPF admission path while upgraded agents negotiate DRX1;
+        // Rust remains opt-in and fail-closed until it proves the handshake.
+        if capture_profile.eq_ignore_ascii_case("go") && !registered_ok {
+            return Ok(());
+        }
         let reported_ok = reported_envelope_schemas.contains(&DRX1_SCHEMA)
             && reported_capture_profiles
                 .iter()
-                .any(|profile| profile.eq_ignore_ascii_case("rust"))
+                .any(|profile| profile.eq_ignore_ascii_case(capture_profile))
             && reported_max_payload_bytes >= DRX1_MIN_PAYLOAD_BYTES;
 
         if registered_ok && reported_ok {
             Ok(())
         } else if !registered_ok {
-            Err(
-                "agent registration does not advertise Rust DRX1/schema 1 with a 4096-byte payload"
-                    .into(),
-            )
+            Err(format!(
+                "agent registration does not advertise {capture_profile} DRX1/schema 1 with a 4096-byte payload"
+            ))
         } else {
-            Err(
-                "connection update does not confirm Rust DRX1/schema 1 with a 4096-byte payload"
-                    .into(),
-            )
+            Err(format!(
+                "connection update does not confirm {capture_profile} DRX1/schema 1 with a 4096-byte payload"
+            ))
         }
     }
 
-    fn supports_rust_drx1(&self, schema: u32, min_payload_bytes: u32) -> bool {
+    fn supports_profile_drx1(&self, profile: &str, schema: u32, min_payload_bytes: u32) -> bool {
         self.ebpf
             && self.supported_envelope_schemas.contains(&schema)
             && self
                 .supported_capture_profiles
                 .iter()
-                .any(|profile| profile.eq_ignore_ascii_case("rust"))
+                .any(|candidate| candidate.eq_ignore_ascii_case(profile))
             && self.max_capture_payload_bytes >= min_payload_bytes
     }
 }
@@ -105,6 +113,20 @@ mod capability_tests {
         let capabilities = rust_capabilities();
         assert!(capabilities
             .validate_capture_admission("ebpf", "rust", &[1], &["rust".into()], 4096)
+            .is_ok());
+    }
+
+    #[test]
+    fn accepts_matching_go_drx1_advertisement() {
+        let capabilities = AgentCapabilities {
+            ebpf: true,
+            supported_envelope_schemas: vec![1],
+            supported_capture_profiles: vec!["go".into()],
+            max_capture_payload_bytes: 4096,
+            ..AgentCapabilities::default()
+        };
+        assert!(capabilities
+            .validate_capture_admission("ebpf", "go", &[1], &["go".into()], 4096)
             .is_ok());
     }
 
