@@ -9,8 +9,7 @@
 //! 1. `DETRIX_BIN` env var (explicit path to binary)
 //! 2. `CARGO_TARGET_DIR` env var (explicit override)
 //! 3. `target-dir` from `<workspace>/.cargo/config.toml` (per-worktree config)
-//! 4. `~/detrix/target` (legacy convention for the main workspace)
-//! 5. `workspace_root/target` (default Cargo location)
+//! 4. `$DETRIX_SESSION_TARGET_DIR/host` (shared disposable fallback)
 //!
 //! # Workspace Root
 //!
@@ -31,6 +30,7 @@ use std::time::Duration;
 
 /// Directory for storing test process PID files
 const E2E_PID_DIR: &str = "/tmp/detrix_e2e_pids";
+const DEFAULT_SESSION_TARGET_DIR: &str = "/private/tmp/detrix-session-target";
 
 /// Default startup timeout for Python/debugpy (Python interpreter + module loading is slow).
 ///
@@ -369,10 +369,9 @@ pub fn kill_and_unregister_pid(name: &str, pid: u64) {
 /// Returns a list of potential target directories in priority order:
 /// 1. `CARGO_TARGET_DIR` env var (explicit override)
 /// 2. `target-dir` from `<workspace>/.cargo/config.toml` (respects per-worktree config)
-/// 3. `~/detrix/target` (legacy convention for the main workspace)
-/// 4. `workspace_root/target` (default Cargo location)
+/// 3. `$DETRIX_SESSION_TARGET_DIR/host` (shared disposable fallback)
 pub fn get_target_candidates(workspace_root: &std::path::Path) -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::with_capacity(4);
+    let mut candidates: Vec<PathBuf> = Vec::with_capacity(3);
 
     // Helper: push only if not already present (avoids duplicate searches).
     macro_rules! push_unique {
@@ -395,13 +394,12 @@ pub fn get_target_candidates(workspace_root: &std::path::Path) -> Vec<PathBuf> {
         push_unique!(configured);
     }
 
-    // 3. Legacy convention: ~/detrix/target (used by the main dev workspace).
-    if let Some(home) = dirs::home_dir() {
-        push_unique!(home.join("detrix/target"));
-    }
-
-    // 4. Fallback to workspace_root/target (default Cargo location).
-    push_unique!(workspace_root.join("target"));
+    // 3. Keep binary discovery inside the same disposable root used by the
+    // Taskfiles. DETRIX_BIN/CARGO_TARGET_DIR remain explicit escape hatches.
+    let session_root = std::env::var("DETRIX_SESSION_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_SESSION_TARGET_DIR));
+    push_unique!(session_root.join("host"));
 
     candidates
 }

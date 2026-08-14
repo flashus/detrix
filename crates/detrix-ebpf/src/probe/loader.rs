@@ -21,6 +21,7 @@
 //! Check with: `clang --target=bpf --print-supported-targets`
 //! Typically installed via: `apt install clang` / `dnf install clang`
 
+use crate::dwarf::types::TargetArchitecture;
 use crate::error::{Error, Result};
 use crate::probe::program::BpfProgram;
 
@@ -28,19 +29,102 @@ use std::path::PathBuf;
 
 // `-target bpf` strips __aarch64__ / __x86_64__ from the preprocessor, so
 // bpf_tracing.h cannot auto-detect the arch. We pass the flag explicitly.
-#[cfg(target_arch = "aarch64")]
-const BPF_ARCH_FLAG: &str = "-D__TARGET_ARCH_arm64";
-#[cfg(target_arch = "x86_64")]
-const BPF_ARCH_FLAG: &str = "-D__TARGET_ARCH_x86";
-#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-const BPF_ARCH_FLAG: &str = "-D__TARGET_ARCH_x86";
+fn bpf_arch_flag(architecture: TargetArchitecture) -> &'static str {
+    match architecture {
+        TargetArchitecture::Aarch64 => "-D__TARGET_ARCH_arm64",
+        TargetArchitecture::X86_64 => "-D__TARGET_ARCH_x86",
+    }
+}
+
+fn host_target_architecture() -> TargetArchitecture {
+    #[cfg(target_arch = "aarch64")]
+    {
+        return TargetArchitecture::Aarch64;
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        TargetArchitecture::X86_64
+    }
+}
+
+/// Architecture-aware compiler seam. The generated C remains language-neutral;
+/// only the kernel `pt_regs` ABI flag is selected here.
+pub trait ArchitectureBpfCompiler: Send + Sync {
+    fn compile_for_arch(
+        &self,
+        program: &BpfProgram,
+        architecture: TargetArchitecture,
+    ) -> Result<CompiledBpf>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ClangBpfCompiler;
+
+impl ArchitectureBpfCompiler for ClangBpfCompiler {
+    fn compile_for_arch(
+        &self,
+        program: &BpfProgram,
+        architecture: TargetArchitecture,
+    ) -> Result<CompiledBpf> {
+        compile_bpf_internal(program, architecture)
+    }
+}
+
+/// Explicit architecture adapters keep the target ABI decision out of the
+/// profile/compiler call sites. They intentionally share clang's renderer;
+/// their seam is where an architecture-specific verifier or renderer can be
+/// introduced without changing profiles.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct X86_64BpfCompiler;
+
+impl ArchitectureBpfCompiler for X86_64BpfCompiler {
+    fn compile_for_arch(
+        &self,
+        program: &BpfProgram,
+        architecture: TargetArchitecture,
+    ) -> Result<CompiledBpf> {
+        if architecture != TargetArchitecture::X86_64 {
+            return Err(Error::Ebpf(
+                "x86-64 compiler received a non-x86 target".into(),
+            ));
+        }
+        compile_bpf_internal(program, architecture)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Aarch64BpfCompiler;
+
+impl ArchitectureBpfCompiler for Aarch64BpfCompiler {
+    fn compile_for_arch(
+        &self,
+        program: &BpfProgram,
+        architecture: TargetArchitecture,
+    ) -> Result<CompiledBpf> {
+        if architecture != TargetArchitecture::Aarch64 {
+            return Err(Error::Ebpf(
+                "AArch64 compiler received a non-AArch64 target".into(),
+            ));
+        }
+        compile_bpf_internal(program, architecture)
+    }
+}
 
 /// A compiled BPF object ready for loading with aya.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BpfCompileReport {
+    pub compiler: String,
+    pub target_arch: String,
+    pub source_bytes: usize,
+    pub elf_bytes: usize,
+}
+
 pub struct CompiledBpf {
     /// Raw ELF bytes of the compiled BPF object.
     pub elf_bytes: Vec<u8>,
     /// Path to the source file (retained for debugging).
     pub source_path: PathBuf,
+    pub report: BpfCompileReport,
     /// The temp dir is kept alive to prevent cleanup of source_path.
     _temp_dir: tempfile::TempDir,
 }
@@ -54,6 +138,23 @@ pub struct CompiledBpf {
 /// - `clang` with BPF target support on PATH
 /// - Linux kernel headers (usually via `linux-headers-$(uname -r)`)
 pub fn compile_bpf(program: &BpfProgram) -> Result<CompiledBpf> {
+    compile_bpf_internal(program, host_target_architecture())
+}
+
+/// Compile with an explicit target ABI. This is used by cross-architecture
+/// plan tests and by deployments whose observed ELF architecture differs from
+/// the build host; the legacy `compile_bpf` API remains host-compatible.
+pub fn compile_bpf_for_arch(
+    program: &BpfProgram,
+    architecture: TargetArchitecture,
+) -> Result<CompiledBpf> {
+    compile_bpf_internal(program, architecture)
+}
+
+fn compile_bpf_internal(
+    program: &BpfProgram,
+    architecture: TargetArchitecture,
+) -> Result<CompiledBpf> {
     let temp_dir = tempfile::tempdir()?;
 
     let src_path = temp_dir.path().join("probe.c");
@@ -69,7 +170,7 @@ pub fn compile_bpf(program: &BpfProgram) -> Result<CompiledBpf> {
         "-g", // Include BTF debug info
         // Tell bpf_tracing.h which arch we're targeting.
         // -target bpf strips __aarch64__/__x86_64__ so we set it explicitly.
-        BPF_ARCH_FLAG,
+        bpf_arch_flag(architecture),
         "-Wall",
         "-Wno-unused-value",
         "-Wno-pointer-sign",
@@ -101,10 +202,19 @@ pub fn compile_bpf(program: &BpfProgram) -> Result<CompiledBpf> {
     }
 
     let elf_bytes = std::fs::read(&obj_path)?;
+    let elf_size = elf_bytes.len();
 
     Ok(CompiledBpf {
         elf_bytes,
         source_path: src_path,
+        report: BpfCompileReport {
+            compiler: "clang".into(),
+            target_arch: bpf_arch_flag(architecture)
+                .trim_start_matches("-D__TARGET_ARCH_")
+                .into(),
+            source_bytes: program.source.len(),
+            elf_bytes: elf_size,
+        },
         _temp_dir: temp_dir,
     })
 }
@@ -163,6 +273,36 @@ pub fn sanitize_probe_name(metric_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn architecture_compiler_selects_explicit_kernel_abi() {
+        assert_eq!(
+            bpf_arch_flag(TargetArchitecture::X86_64),
+            "-D__TARGET_ARCH_x86"
+        );
+        assert_eq!(
+            bpf_arch_flag(TargetArchitecture::Aarch64),
+            "-D__TARGET_ARCH_arm64"
+        );
+    }
+
+    #[test]
+    fn architecture_compilers_reject_wrong_targets_before_invoking_clang() {
+        let program = BpfProgram {
+            source: "".into(),
+            var_count: 0,
+            captures_goid: false,
+            g_addr_offset: None,
+            goid_offset: None,
+            versioned_envelope: false,
+        };
+        assert!(X86_64BpfCompiler
+            .compile_for_arch(&program, TargetArchitecture::Aarch64)
+            .is_err());
+        assert!(Aarch64BpfCompiler
+            .compile_for_arch(&program, TargetArchitecture::X86_64)
+            .is_err());
+    }
 
     #[test]
     fn sanitize_probe_name_valid_ident() {

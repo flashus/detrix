@@ -8,6 +8,14 @@ repository.workspace = true
 license.workspace = true
 description = "eBPF-based logpoint adapter for Go on Linux — zero-pause variable capture via uprobes"
 
+[features]
+default = []
+# Reserved gate for supplementary `.dwo`/`.dwp` loading.  The provider keeps
+# split-DWARF fail-closed until gimli/object supplementary-section loading and
+# fixture evidence are implemented; enabling this feature today does not
+# silently opt a target into partial support.
+split-dwarf = []
+
 [lints]
 workspace = true
 
@@ -31,6 +39,7 @@ thiserror.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+sha2.workspace = true
 tempfile.workspace = true
 
 # eBPF (Linux-only, optional)

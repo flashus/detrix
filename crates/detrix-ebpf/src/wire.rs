@@ -4,6 +4,46 @@
 use crate::capture_plan::CAPTURE_PLAN_SCHEMA_VERSION;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireCapabilities {
+    pub supported_schema_versions: Vec<u16>,
+    pub supported_profiles: Vec<String>,
+    pub max_payload_bytes: usize,
+}
+
+impl Default for WireCapabilities {
+    fn default() -> Self {
+        Self {
+            supported_schema_versions: vec![CAPTURE_PLAN_SCHEMA_VERSION],
+            supported_profiles: vec!["rust".into()],
+            max_payload_bytes: 4096,
+        }
+    }
+}
+
+impl WireCapabilities {
+    pub fn negotiate(
+        &self,
+        schema_version: u16,
+        profile_id: &str,
+        max_payload_bytes: usize,
+    ) -> Result<(), EnvelopeError> {
+        if !self.supported_schema_versions.contains(&schema_version) {
+            return Err(EnvelopeError::UnknownSchema(schema_version));
+        }
+        if !self.supported_profiles.iter().any(|p| p == profile_id) {
+            return Err(EnvelopeError::UnknownProfile(profile_id.into()));
+        }
+        if max_payload_bytes > self.max_payload_bytes {
+            return Err(EnvelopeError::Oversized {
+                size: max_payload_bytes,
+                limit: self.max_payload_bytes,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventEnvelope {
     pub schema_version: u16,
     pub profile_id: String,
@@ -32,18 +72,31 @@ impl EventEnvelope {
         }
     }
     pub fn validate(&self, max_payload: usize) -> Result<(), EnvelopeError> {
+        self.validate_with_capabilities(&WireCapabilities {
+            max_payload_bytes: max_payload,
+            ..WireCapabilities::default()
+        })
+    }
+
+    /// Validate against the capabilities negotiated for a connection.  The
+    /// legacy `validate` helper remains for callers that use the default Rust
+    /// profile limits, while live adapters can reject a record before profile
+    /// decoding when the peer advertises a narrower ABI.
+    pub fn validate_with_capabilities(
+        &self,
+        capabilities: &WireCapabilities,
+    ) -> Result<(), EnvelopeError> {
         if self.schema_version != CAPTURE_PLAN_SCHEMA_VERSION {
             return Err(EnvelopeError::UnknownSchema(self.schema_version));
         }
         if self.profile_id.is_empty() || self.plan_hash.is_empty() {
             return Err(EnvelopeError::MissingIdentity);
         }
-        if self.payload_len as usize > max_payload {
-            return Err(EnvelopeError::Oversized {
-                size: self.payload_len as usize,
-                limit: max_payload,
-            });
-        }
+        capabilities.negotiate(
+            self.schema_version,
+            &self.profile_id,
+            self.payload_len as usize,
+        )?;
         Ok(())
     }
 
@@ -150,6 +203,8 @@ pub enum EnvelopeError {
     MalformedHeader,
     #[error("event profile or plan identity is not valid UTF-8")]
     InvalidIdentity,
+    #[error("event profile is not supported: {0}")]
+    UnknownProfile(String),
     #[error("event profile or plan identity is too long")]
     IdentityTooLong,
 }
@@ -170,12 +225,70 @@ mod tests {
     }
 
     #[test]
+    fn negotiated_capabilities_reject_unknown_profile_and_payload() {
+        let envelope = EventEnvelope::new("rust", "h", 1, 8);
+        let capabilities = WireCapabilities {
+            supported_schema_versions: vec![CAPTURE_PLAN_SCHEMA_VERSION],
+            supported_profiles: vec!["go".into()],
+            max_payload_bytes: 4,
+        };
+        assert!(matches!(
+            envelope.validate_with_capabilities(&capabilities),
+            Err(EnvelopeError::UnknownProfile(_))
+        ));
+
+        let capabilities = WireCapabilities {
+            supported_schema_versions: vec![CAPTURE_PLAN_SCHEMA_VERSION],
+            supported_profiles: vec!["rust".into()],
+            max_payload_bytes: 4,
+        };
+        assert!(matches!(
+            envelope.validate_with_capabilities(&capabilities),
+            Err(EnvelopeError::Oversized { .. })
+        ));
+    }
+
+    #[test]
     fn round_trips_versioned_live_record() {
         let envelope = EventEnvelope::new("rust", "sha256:plan", 1, 8);
         let record = envelope.encode_record(&42u64.to_le_bytes(), 64).unwrap();
         let (decoded, payload) = EventEnvelope::decode_record(&record, 64).unwrap();
         assert_eq!(decoded, envelope);
         assert_eq!(payload, 42u64.to_le_bytes());
+    }
+
+    #[test]
+    fn schema_one_has_stable_golden_record() {
+        let envelope = EventEnvelope::new("rust", "sha256:plan", 1, 8);
+        let record = envelope.encode_record(&42u64.to_le_bytes(), 64).unwrap();
+        let mut golden = vec![
+            b'D', b'R', b'X', b'1', // magic
+            1, 0, // schema
+            0, 0, // flags
+            4, 0, // profile length
+            1, 0, // field count
+            11, 0, // plan length
+            8, 0, 0, 0, // payload length
+        ];
+        golden.extend_from_slice(b"rustsha256:plan");
+        golden.extend_from_slice(&42u64.to_le_bytes());
+        assert_eq!(record, golden);
+        let (decoded, payload) = EventEnvelope::decode_record(&golden, 64).unwrap();
+        assert_eq!(decoded.schema_version, CAPTURE_PLAN_SCHEMA_VERSION);
+        assert_eq!(payload, 42u64.to_le_bytes());
+    }
+
+    #[test]
+    fn schema_one_golden_record_preserves_partial_unavailable_flags() {
+        let mut envelope = EventEnvelope::new("rust", "sha256:plan", 1, 1);
+        envelope.partial = true;
+        envelope.unavailable = true;
+        let record = envelope.encode_record(&[0], 64).unwrap();
+        assert_eq!(&record[6..8], &[3, 0]);
+        let (decoded, payload) = EventEnvelope::decode_record(&record, 64).unwrap();
+        assert!(decoded.partial);
+        assert!(decoded.unavailable);
+        assert_eq!(payload, vec![0]);
     }
 
     #[test]
@@ -186,6 +299,15 @@ mod tests {
         assert!(matches!(
             EventEnvelope::decode_record(&record, 64),
             Err(EnvelopeError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn negotiation_rejects_unknown_profile_before_decode() {
+        let capabilities = WireCapabilities::default();
+        assert!(matches!(
+            capabilities.negotiate(CAPTURE_PLAN_SCHEMA_VERSION, "go", 8),
+            Err(EnvelopeError::UnknownProfile(_))
         ));
     }
 }

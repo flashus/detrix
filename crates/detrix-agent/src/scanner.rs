@@ -84,22 +84,30 @@ impl ProcScanner {
     /// Apply a scan result to the tracked snapshot.
     ///
     /// Keeping this separate from `/proc` discovery makes the cooldown semantics
-    /// explicit and testable. While the cooldown is active, retain the previous
-    /// snapshot so changes are reported by the first scan after the cooldown.
+    /// explicit and testable. Additions are retained until the cooldown expires,
+    /// while removals are reported immediately so exited targets are detached.
     fn scan_delta_from(&mut self, new_binaries: Vec<BinaryInfo>) -> Option<Vec<BinaryInfo>> {
-        if let Some(last) = self.last_registered_at {
-            if last.elapsed().as_secs() < self.min_reregister_secs {
-                // Cooldown active — do not advance `known`. Advancing it here
-                // would permanently hide processes that appear during the
-                // cooldown from the first eligible re-registration.
-                return None;
-            }
-        }
-
         let new_known: HashMap<(u32, u64), BinaryInfo> = new_binaries
             .iter()
             .map(|b| ((b.pid, b.inode), b.clone()))
             .collect();
+        let removal_detected = self.known.keys().any(|key| !new_known.contains_key(key));
+
+        if let Some(last) = self.last_registered_at {
+            if last.elapsed().as_secs() < self.min_reregister_secs {
+                // Additions are throttled to avoid repeatedly rebuilding
+                // adapters during process churn, but removals are lifecycle
+                // safety events: delaying them leaves probes/forwarders
+                // associated with an exited target. Report a snapshot change
+                // immediately when any tracked process disappeared or its
+                // (pid,inode) identity was replaced.
+                if !removal_detected {
+                    // Do not advance `known`; otherwise an addition observed
+                    // during cooldown would be permanently hidden.
+                    return None;
+                }
+            }
+        }
 
         let changed = new_known.len() != self.known.len()
             || new_known.iter().any(|(k, v)| self.known.get(k) != Some(v));
@@ -107,7 +115,10 @@ impl ProcScanner {
         self.known = new_known;
 
         if changed {
-            self.last_registered_at = Some(Instant::now());
+            // A removal is a cleanup edge, not a registration burst. Leave
+            // the cooldown open so a replacement process can be registered on
+            // the next scan instead of waiting five minutes.
+            self.last_registered_at = (!removal_detected).then(Instant::now);
             Some(new_binaries)
         } else {
             None
@@ -253,6 +264,23 @@ mod tests {
             .scan_delta_from(vec![existing, discovered_during_cooldown.clone()])
             .expect("the post-cooldown scan must report the new process");
         assert_eq!(delta, vec![binary(10, 100), discovered_during_cooldown]);
+    }
+
+    #[test]
+    fn removals_bypass_cooldown_for_target_cleanup() {
+        let mut scanner = ProcScanner::new(&ScannerConfig::default());
+        let existing = binary(7, 11);
+        scanner
+            .known
+            .insert((existing.pid, existing.inode), existing);
+        scanner.last_registered_at = Some(Instant::now());
+
+        assert_eq!(scanner.scan_delta_from(Vec::new()), Some(Vec::new()));
+        assert!(scanner.known.is_empty());
+        assert_eq!(
+            scanner.scan_delta_from(vec![binary(7, 12)]),
+            Some(vec![binary(7, 12)])
+        );
     }
 }
 

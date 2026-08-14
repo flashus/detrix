@@ -1165,8 +1165,10 @@ mod tests {
             is_struct: false,
             is_pointer: false,
             is_map: false,
+            is_enum: false,
             array_element_count: 0,
             element_byte_size: 0,
+            enum_layout: None,
             array_element_type: String::new(),
             slice_element_type: String::new(),
         })
@@ -1337,8 +1339,10 @@ mod tests {
             is_struct: false,
             is_pointer: false,
             is_map: false,
+            is_enum: false,
             array_element_count: 0,
             element_byte_size: 0,
+            enum_layout: None,
             array_element_type: String::new(),
             slice_element_type: String::new(),
         });
@@ -1359,8 +1363,10 @@ mod tests {
             is_struct: false,
             is_pointer: false,
             is_map: false,
+            is_enum: false,
             array_element_count: 0,
             element_byte_size: 0,
+            enum_layout: None,
             array_element_type: String::new(),
             slice_element_type: String::new(),
         });

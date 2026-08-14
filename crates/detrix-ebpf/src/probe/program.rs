@@ -37,7 +37,22 @@ pub struct BpfProgram {
     pub g_addr_offset: Option<i64>,
     /// Byte offset of goid field within runtime.g (from DWARF; None = use #ifndef default).
     pub goid_offset: Option<u64>,
+    /// Whether this program emits the fixed-size DRX1 raw envelope header.
+    pub versioned_envelope: bool,
 }
+
+/// Compact identity used in the fixed-size kernel record header. The full
+/// profile/plan strings remain in the user-space `EventEnvelope`; the kernel
+/// only needs bounded tags for stale-record rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawEnvelopeSpec {
+    pub profile_tag: u32,
+    pub plan_tag: u64,
+}
+
+pub const RAW_ENVELOPE_MAGIC: u32 = u32::from_le_bytes(*b"DRX1");
+pub const RAW_ENVELOPE_SCHEMA: u16 = 1;
+pub const RAW_ENVELOPE_SIZE: usize = 24;
 
 /// Generate a BPF C program that captures the given variables at a uprobe hit.
 ///
@@ -55,6 +70,24 @@ pub fn generate_bpf_program(
     goid_offset: Option<u64>,
     config: &CaptureConfig,
 ) -> Result<BpfProgram> {
+    generate_bpf_program_with_envelope(
+        variables,
+        capture_goid,
+        g_addr_offset,
+        goid_offset,
+        config,
+        None,
+    )
+}
+
+pub fn generate_bpf_program_with_envelope(
+    variables: &[ResolvedVariable],
+    capture_goid: bool,
+    g_addr_offset: Option<i64>,
+    goid_offset: Option<u64>,
+    config: &CaptureConfig,
+    envelope: Option<RawEnvelopeSpec>,
+) -> Result<BpfProgram> {
     if variables.len() > config.max_capture_vars {
         return Err(Error::Ebpf(format!(
             "Too many variables: {} (max {})",
@@ -66,8 +99,8 @@ pub fn generate_bpf_program(
     let var_count = variables.len();
 
     // Build the two dynamic sections, then substitute into the template.
-    let event_fields = build_event_fields(variables, capture_goid, config);
-    let var_reads = build_var_reads(variables, capture_goid, config);
+    let event_fields = build_event_fields(variables, capture_goid, config, envelope);
+    let var_reads = build_var_reads(variables, capture_goid, config, envelope);
 
     let source = PROBE_TEMPLATE
         .replace("/*DETRIX_EVENT_FIELDS*/", &event_fields)
@@ -79,6 +112,7 @@ pub fn generate_bpf_program(
         captures_goid: capture_goid,
         g_addr_offset,
         goid_offset,
+        versioned_envelope: envelope.is_some(),
     })
 }
 
@@ -90,8 +124,18 @@ fn build_event_fields(
     variables: &[ResolvedVariable],
     capture_goid: bool,
     config: &CaptureConfig,
+    envelope: Option<RawEnvelopeSpec>,
 ) -> String {
     let mut out = String::new();
+
+    if envelope.is_some() {
+        out.push_str("    u32 drx_magic;\n");
+        out.push_str("    u16 drx_schema;\n");
+        out.push_str("    u16 drx_field_count;\n");
+        out.push_str("    u32 drx_payload_len;\n");
+        out.push_str("    u32 drx_profile_tag;\n");
+        out.push_str("    u64 drx_plan_tag;\n");
+    }
 
     if capture_goid {
         out.push_str("    u64 goid;\n");
@@ -105,7 +149,7 @@ fn build_event_fields(
         ));
 
         match &var.location {
-            VariableLocation::GoString { .. } => {
+            VariableLocation::GoString { .. } | VariableLocation::StringHeader { .. } => {
                 out.push_str(&format!("    u64 var{i}_len;\n"));
                 // Fixed-size buffer for string content — filled by bpf_probe_read_user.
                 // Capped at 255 to match the verifier hint (_len &= 0xFF) in build_var_reads.
@@ -116,7 +160,7 @@ fn build_event_fields(
                 let buf_size = config.max_string_capture.min(255);
                 out.push_str(&format!("    u8  var{i}_str[{}];\n", buf_size));
             }
-            VariableLocation::GoSlice { .. } => {
+            VariableLocation::GoSlice { .. } | VariableLocation::SliceHeader { .. } => {
                 out.push_str(&format!("    u64 var{i}_len;\n"));
                 out.push_str(&format!("    u64 var{i}_cap;\n"));
             }
@@ -144,8 +188,21 @@ fn build_var_reads(
     variables: &[ResolvedVariable],
     capture_goid: bool,
     config: &CaptureConfig,
+    envelope: Option<RawEnvelopeSpec>,
 ) -> String {
     let mut out = String::new();
+
+    if let Some(envelope) = envelope {
+        out.push_str(&format!(
+            "    event->drx_magic = {:#x};\n    event->drx_schema = {};\n    event->drx_field_count = {};\n    event->drx_payload_len = sizeof(*event) - {};\n    event->drx_profile_tag = {:#x};\n    event->drx_plan_tag = {:#x};\n",
+            RAW_ENVELOPE_MAGIC,
+            RAW_ENVELOPE_SCHEMA,
+            variables.len(),
+            24 + RAW_ENVELOPE_SIZE,
+            envelope.profile_tag,
+            envelope.plan_tag,
+        ));
+    }
 
     if capture_goid {
         out.push_str(GOID_EXTRACT);
@@ -197,7 +254,7 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                 format!("    bpf_probe_read_user(&event->var{idx}, {size}, (void *){address});");
             format!("{zero_fill}\n{read}")
         }
-        VariableLocation::GoString { ptr, len } => {
+        VariableLocation::GoString { ptr, len } | VariableLocation::StringHeader { ptr, len } => {
             // Go string struct {ptr uintptr, len int} lives on the stack.
             // Step 1: read the ptr and len fields from their DWARF locations.
             // Step 2: dereference ptr to read the actual string bytes.
@@ -225,6 +282,15 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                 VariableLocation::Register(reg) => {
                     format!("    event->var{idx} = (u64){};", reg.pt_regs_access())
                 }
+                VariableLocation::FrameOffset { register, offset } => {
+                    let base = register.pt_regs_access();
+                    let address = if *offset >= 0 {
+                        format!("({base} + {offset})")
+                    } else {
+                        format!("({base} - {})", offset.unsigned_abs())
+                    };
+                    format!("    event->var{idx} = 0;\n    bpf_probe_read_user(&event->var{idx}, 8, (void *){address});")
+                }
                 _ => format!("    event->var{idx} = 0;"),
             };
 
@@ -238,6 +304,15 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                 }
                 VariableLocation::Register(reg) => {
                     format!("    event->var{idx}_len = (u64){};", reg.pt_regs_access())
+                }
+                VariableLocation::FrameOffset { register, offset } => {
+                    let base = register.pt_regs_access();
+                    let address = if *offset >= 0 {
+                        format!("({base} + {offset})")
+                    } else {
+                        format!("({base} - {})", offset.unsigned_abs())
+                    };
+                    format!("    event->var{idx}_len = 0;\n    bpf_probe_read_user(&event->var{idx}_len, 8, (void *){address});")
                 }
                 _ => format!("    event->var{idx}_len = 0;"),
             };
@@ -266,7 +341,8 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
 
             format!("{ptr_read}\n{len_read}\n{content_read}")
         }
-        VariableLocation::GoSlice { ptr, len, cap } => {
+        VariableLocation::GoSlice { ptr, len, cap }
+        | VariableLocation::SliceHeader { ptr, len, cap } => {
             // Read ptr, len, cap from their sub-locations.
             let ptr_expr = simple_read_expr(ptr, &format!("var{idx}"));
             let len_expr = simple_read_expr(len, &format!("var{idx}_len"));
@@ -321,8 +397,19 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                             "\n    bpf_probe_read_user(&event->var{idx}_blob[{written}], {piece_size}, (void *)({address}));"
                         ));
                     }
+                    VariableLocation::FrameOffset { register, offset } => {
+                        let base = register.pt_regs_access();
+                        let address = if *offset >= 0 {
+                            format!("{base} + {offset}")
+                        } else {
+                            format!("{base} - {}", offset.unsigned_abs())
+                        };
+                        out.push_str(&format!(
+                            "\n    bpf_probe_read_user(&event->var{idx}_blob[{written}], {piece_size}, (void *)({address}));"
+                        ));
+                    }
                     _ => unreachable!(
-                        "PiecewiseBlob is constructed only from scalar register/stack pieces"
+                        "PiecewiseBlob is constructed only from scalar register/stack/frame pieces"
                     ),
                 }
                 written += piece_size;
@@ -400,6 +487,15 @@ fn simple_read_expr(loc: &VariableLocation, field: &str) -> String {
                 "bpf_probe_read_user(&event->{field}, 8, (void *)(DETRIX_STACK_PTR + ({offset})));"
             )
         }
+        VariableLocation::FrameOffset { register, offset } => {
+            let base = register.pt_regs_access();
+            let address = if *offset >= 0 {
+                format!("({base} + {offset})")
+            } else {
+                format!("({base} - {})", offset.unsigned_abs())
+            };
+            format!("bpf_probe_read_user(&event->{field}, 8, (void *){address});")
+        }
         _ => format!("event->{field} = 0; // unsupported"),
     }
 }
@@ -474,6 +570,30 @@ mod tests {
         assert!(!prog.captures_goid);
         assert!(prog.source.contains("detrix_capture"));
         assert!(prog.source.contains("bpf_ringbuf_submit"));
+    }
+
+    #[test]
+    fn generate_versioned_envelope_program() {
+        let vars = vec![make_var(
+            "amount",
+            VariableLocation::Register(Register::Rax),
+            VariableSize::QWord,
+        )];
+        let prog = generate_bpf_program_with_envelope(
+            &vars,
+            false,
+            None,
+            None,
+            &CaptureConfig::default(),
+            Some(RawEnvelopeSpec {
+                profile_tag: 0x7275,
+                plan_tag: 0x1234,
+            }),
+        )
+        .unwrap();
+        assert!(prog.versioned_envelope);
+        assert!(prog.source.contains("drx_magic"));
+        assert!(prog.source.contains("drx_plan_tag = 0x1234"));
     }
 
     #[test]

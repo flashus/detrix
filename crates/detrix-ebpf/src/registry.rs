@@ -10,7 +10,21 @@ use std::sync::Arc;
 pub trait CaptureBackendFactory: Send + Sync {
     fn id(&self) -> &'static str;
     fn supports(&self, profile: ProfileId) -> bool;
-    fn compiler(&self) -> Box<dyn CaptureCompiler>;
+    /// String-keyed capability seam for registry-provided profiles. Built-in
+    /// backends retain the typed API, while an external backend can override
+    /// this method without extending `ProfileId`.
+    fn supports_profile(&self, profile: &str) -> bool {
+        builtin_profile_id(profile).is_some_and(|id| self.supports(id))
+    }
+    fn compiler(&self, profile: ProfileId) -> Result<Box<dyn CaptureCompiler>, RuntimeError>;
+    fn compiler_for_profile(
+        &self,
+        profile: &str,
+    ) -> Result<Box<dyn CaptureCompiler>, RuntimeError> {
+        builtin_profile_id(profile)
+            .ok_or(RuntimeError::MissingIdentity)
+            .and_then(|id| self.compiler(id))
+    }
     fn create_runtime(
         &self,
         profile: ProfileId,
@@ -20,9 +34,8 @@ pub trait CaptureBackendFactory: Send + Sync {
     ) -> Result<ProfiledCaptureRuntime, RuntimeError>;
 }
 
-/// Capability-only registration for the current uprobe backend. Actual
-/// adapter construction remains in `EbpfAdapterFactory` until the runtime is
-/// fully split from the legacy Go decoder.
+/// Shared uprobe backend. Language-specific lowering is selected by profile;
+/// attachment, lifecycle, and transport remain backend-owned.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GoEbpfBackend;
 
@@ -33,8 +46,11 @@ impl CaptureBackendFactory for GoEbpfBackend {
     fn supports(&self, profile: ProfileId) -> bool {
         profile == ProfileId::Go
     }
-    fn compiler(&self) -> Box<dyn CaptureCompiler> {
-        Box::new(GoBpfCompiler::default())
+    fn compiler(&self, profile: ProfileId) -> Result<Box<dyn CaptureCompiler>, RuntimeError> {
+        match profile {
+            ProfileId::Go => Ok(Box::new(GoBpfCompiler::default())),
+            ProfileId::Rust => Err(RuntimeError::MissingIdentity),
+        }
     }
     fn create_runtime(
         &self,
@@ -43,7 +59,7 @@ impl CaptureBackendFactory for GoEbpfBackend {
         fields: Vec<ScalarFieldSpec>,
         max_payload: usize,
     ) -> Result<ProfiledCaptureRuntime, RuntimeError> {
-        if profile != ProfileId::Go {
+        if !self.supports(profile) {
             return Err(RuntimeError::MissingIdentity);
         }
         ProfiledCaptureRuntime::new("go", plan_hash, fields, max_payload)
@@ -60,8 +76,11 @@ impl CaptureBackendFactory for RustEbpfBackend {
     fn supports(&self, profile: ProfileId) -> bool {
         profile == ProfileId::Rust
     }
-    fn compiler(&self) -> Box<dyn CaptureCompiler> {
-        Box::new(RustBpfCompiler::default())
+    fn compiler(&self, profile: ProfileId) -> Result<Box<dyn CaptureCompiler>, RuntimeError> {
+        if profile != ProfileId::Rust {
+            return Err(RuntimeError::MissingIdentity);
+        }
+        Ok(Box::new(RustBpfCompiler::default()))
     }
     fn create_runtime(
         &self,
@@ -90,7 +109,8 @@ impl ProfileRegistry {
         registry
     }
     pub fn register(&mut self, profile: Arc<dyn LanguageProfile>) {
-        self.profiles.insert(profile.id().as_str().into(), profile);
+        self.profiles
+            .insert(profile.id().to_ascii_lowercase(), profile);
     }
     pub fn get(&self, id: &str) -> Option<Arc<dyn LanguageProfile>> {
         self.profiles.get(&id.to_lowercase()).cloned()
@@ -118,16 +138,103 @@ impl BackendRegistry {
     pub fn get(&self, id: &str) -> Option<Arc<dyn CaptureBackendFactory>> {
         self.backends.get(&id.to_lowercase()).cloned()
     }
+
+    /// Resolve the backend owned by a language profile.  Keeping this mapping
+    /// in the registry makes backend selection an extension seam: adding a
+    /// profile does not require changing adapter construction code.
+    pub fn for_profile(&self, profile: ProfileId) -> Option<Arc<dyn CaptureBackendFactory>> {
+        // Backend ownership is capability-driven. A newly registered profile
+        // only needs a backend that advertises support; construction does not
+        // require another language match here.
+        self.backends
+            .values()
+            .find(|b| b.supports(profile))
+            .cloned()
+    }
+
+    /// Resolve a backend for a registry profile key. This is intentionally
+    /// string-based so adding a profile can be a registration change rather
+    /// than a cross-cutting enum change.
+    pub fn for_profile_name(&self, profile: &str) -> Option<Arc<dyn CaptureBackendFactory>> {
+        self.backends
+            .values()
+            .find(|backend| backend.supports_profile(profile))
+            .cloned()
+    }
+}
+
+fn builtin_profile_id(profile: &str) -> Option<ProfileId> {
+    match profile.trim().to_ascii_lowercase().as_str() {
+        "go" => Some(ProfileId::Go),
+        "rust" => Some(ProfileId::Rust),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dwarf::types::TargetArchitecture;
+
+    #[derive(Debug)]
+    struct TestProfile;
+
+    impl LanguageProfile for TestProfile {
+        fn id(&self) -> &'static str {
+            "test-language"
+        }
+
+        fn architectures(&self) -> &'static [TargetArchitecture] {
+            &[]
+        }
+
+        fn capabilities(&self) -> crate::profile::ProfileCapabilities {
+            crate::profile::ProfileCapabilities {
+                scalar: true,
+                pointer: false,
+                inline_struct: false,
+                fixed_array: false,
+                string: false,
+                borrowed_str: false,
+                vector: false,
+                borrowed_slice: false,
+                slice: false,
+                enumeration: false,
+                niche_enumeration: false,
+                trait_object: false,
+                async_state: false,
+            }
+        }
+
+        fn classify_type(&self, _name: &str, byte_size: usize) -> crate::profile::TypeDescriptor {
+            crate::profile::TypeDescriptor::Scalar { size: byte_size }
+        }
+    }
+
     #[test]
     fn default_profiles_are_plugins() {
         let r = ProfileRegistry::with_defaults();
         assert!(r.get("go").is_some());
         assert!(r.get("rust").is_some());
+    }
+
+    #[test]
+    fn registry_accepts_profile_without_builtin_enum_change() {
+        let mut r = ProfileRegistry::with_defaults();
+        r.register(Arc::new(TestProfile));
+        assert!(r.get("TEST-LANGUAGE").is_some());
+        assert!(r.ids().any(|id| id == "test-language"));
+    }
+
+    #[test]
+    fn backend_registry_exposes_string_profile_lookup() {
+        let r = BackendRegistry::with_defaults();
+        assert_eq!(r.for_profile_name("go").map(|b| b.id()), Some("ebpf"));
+        assert_eq!(
+            r.for_profile_name("rust").map(|b| b.id()),
+            Some("ebpf-rust")
+        );
+        assert!(r.for_profile_name("unregistered").is_none());
     }
     #[test]
     fn backend_capabilities_are_profile_scoped() {
@@ -136,7 +243,8 @@ mod tests {
         assert!(b.supports(ProfileId::Go));
         assert!(!b.supports(ProfileId::Rust));
         assert!(!b
-            .compiler()
+            .compiler(ProfileId::Go)
+            .unwrap()
             .compile(
                 &crate::profile::GoProfile
                     .scalar_plan("n", 1, crate::dwarf::types::Register::Rax,)
@@ -145,9 +253,16 @@ mod tests {
             .unwrap()
             .artifact
             .is_empty());
-        let rust = r.get("ebpf-rust").unwrap();
-        assert!(rust.supports(ProfileId::Rust));
-        assert!(!rust.supports(ProfileId::Go));
+        let rust = r.for_profile(ProfileId::Rust).unwrap();
+        assert!(rust
+            .compiler(ProfileId::Rust)
+            .unwrap()
+            .compile(
+                &crate::profile::RustProfile
+                    .scalar_plan("n", 1, crate::dwarf::types::Register::Rax)
+                    .unwrap()
+            )
+            .is_ok());
         assert!(matches!(
             rust.create_runtime(ProfileId::Rust, "sha256:rust", vec![], 64),
             Err(RuntimeError::EmptyPlan)

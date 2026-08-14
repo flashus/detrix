@@ -8,8 +8,8 @@
 
 use super::typeinfo::{resolve_type_info, TypeInfo};
 use super::types::{
-    ProbePoint, ProgramCounter, Register, ResolvedVariable, TargetArchitecture, VariableLocation,
-    VariablePiece, VariableSize,
+    ProbePcCandidate, ProbePoint, ProbeResolutionDiagnostics, ProgramCounter, Register,
+    ResolvedVariable, TargetArchitecture, VariableLocation, VariablePiece, VariableSize,
 };
 use crate::error::{ErrContext, Error, Result};
 use crate::pc_selection::{select_best, PcCandidate};
@@ -139,6 +139,9 @@ pub struct DwarfInfo {
     binary_path: PathBuf,
     /// Raw binary data (kept alive for gimli references).
     _data: Vec<u8>,
+    /// Optional separate debug image.  The executable remains the source of
+    /// text VMAs/file offsets while gimli reads DWARF/CFI from this image.
+    debug_data: Option<Vec<u8>>,
     /// VMA of the .text section — used to convert DWARF virtual PCs to offsets.
     text_base: u64,
     /// File offset of the .text section — aya uprobe attachment uses file offsets.
@@ -150,16 +153,67 @@ pub struct DwarfInfo {
 }
 
 impl DwarfInfo {
+    /// Path of the debug image used to construct this context.
+    pub fn binary_path(&self) -> &Path {
+        &self.binary_path
+    }
+
     /// Architecture from the ELF machine header, used by profile-specific
     /// frame-base lowering.
     pub fn target_architecture(&self) -> TargetArchitecture {
         self.target_architecture
+    }
+
+    /// Return whether the image contains a parseable DWARF variable DIE with
+    /// a location attribute. Section presence alone is not sufficient: a
+    /// stripped/partial image can retain `.debug_info` while providing no
+    /// usable local locations.
+    pub fn has_usable_variable_dwarf(&self) -> Result<bool> {
+        let obj = object::File::parse(self.dwarf_bytes()).context("Failed to parse ELF")?;
+        let endian = if self.is_little_endian {
+            gimli::RunTimeEndian::Little
+        } else {
+            gimli::RunTimeEndian::Big
+        };
+        let dwarf = load_dwarf(&obj, endian)?;
+        let mut units = dwarf.units();
+        while let Some(header) = units.next().context("variable-DWARF unit iteration")? {
+            let unit = dwarf.unit(header).context("variable-DWARF unit parse")?;
+            let mut entries = unit.entries();
+            while let Some(entry) = entries.next_dfs().context("variable-DWARF DIE traversal")? {
+                if !matches!(
+                    entry.tag(),
+                    gimli::DW_TAG_variable | gimli::DW_TAG_formal_parameter
+                ) {
+                    continue;
+                }
+                let usable = entry
+                    .attr_value(gimli::DW_AT_location)
+                    .map(|attribute| usable_location_attribute(attribute, &unit, &dwarf))
+                    .transpose()?
+                    .unwrap_or(false);
+                if usable {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
     /// Parse a Go ELF binary and extract DWARF debug info.
     ///
     /// The binary must be compiled with `-gcflags=all=-N -l` for stable
     /// DWARF variable locations.
     pub fn parse(binary_path: impl AsRef<Path>) -> Result<Self> {
+        Self::parse_with_debug_path(binary_path, None::<&Path>)
+    }
+
+    /// Parse an executable while sourcing DWARF from an embedded or external
+    /// debug image.  Separate debug files commonly omit `.text`; retaining
+    /// the executable's mapping data keeps uprobe offsets correct.
+    pub fn parse_with_debug_path(
+        binary_path: impl AsRef<Path>,
+        debug_path: Option<impl AsRef<Path>>,
+    ) -> Result<Self> {
         let path = binary_path.as_ref().to_path_buf();
         let data =
             std::fs::read(&path).context(&format!("Failed to read binary {}", path.display()))?;
@@ -189,14 +243,29 @@ impl DwarfInfo {
             }
         };
 
+        let debug_data = debug_path
+            .map(|debug| {
+                let debug_path = debug.as_ref();
+                std::fs::read(debug_path).context(&format!(
+                    "Failed to read debug image {}",
+                    debug_path.display()
+                ))
+            })
+            .transpose()?;
+
         Ok(Self {
             binary_path: path,
             _data: data,
+            debug_data,
             text_base: text_vma,
             text_file_offset,
             is_little_endian,
             target_architecture,
         })
+    }
+
+    fn dwarf_bytes(&self) -> &[u8] {
+        self.debug_data.as_deref().unwrap_or(&self._data)
     }
 
     /// Compute the TLS offset where Go stores the `*g` (goroutine) pointer.
@@ -307,7 +376,7 @@ impl DwarfInfo {
     /// Returns `Some(offset)` when found, `None` on any parse failure (caller falls back
     /// to the `#ifndef GOID_OFFSET` default of 160 in the BPF template).
     pub fn goid_field_offset(&self) -> Option<u64> {
-        let obj = object::File::parse(&*self._data).ok()?;
+        let obj = object::File::parse(self.dwarf_bytes()).ok()?;
         let endian = if self.is_little_endian {
             gimli::RunTimeEndian::Little
         } else {
@@ -394,7 +463,24 @@ impl DwarfInfo {
         requested_vars: &[String],
         max_nested_depth: usize,
     ) -> Result<ProbePoint> {
-        let obj = object::File::parse(&*self._data).context("Failed to parse ELF")?;
+        self.resolve_probe_point_with_diagnostics(file, line, requested_vars, max_nested_depth)
+            .map(|(point, _)| point)
+    }
+
+    /// Resolve a source location and retain exact-PC selection evidence.
+    ///
+    /// The ordinary resolver deliberately keeps its historical `ProbePoint`
+    /// return type.  New callers that need attribution (UI, agent diagnostics,
+    /// or evidence reports) can use this method without reimplementing the
+    /// candidate search.
+    pub fn resolve_probe_point_with_diagnostics(
+        &self,
+        file: &str,
+        line: u32,
+        requested_vars: &[String],
+        max_nested_depth: usize,
+    ) -> Result<(ProbePoint, ProbeResolutionDiagnostics)> {
+        let obj = object::File::parse(self.dwarf_bytes()).context("Failed to parse ELF")?;
 
         let endian = if self.is_little_endian {
             gimli::RunTimeEndian::Little
@@ -410,8 +496,11 @@ impl DwarfInfo {
         // precedes its DWARF location range.
         let candidates = resolve_line_to_pcs(&dwarf, file, line)?;
         let mut resolved_candidates = Vec::with_capacity(candidates.len());
+        let mut diagnostics = Vec::new();
+        let mut candidate_reports = Vec::new();
         for pc in candidates {
             let Ok(function_name) = find_function_at_pc(&dwarf, pc) else {
+                diagnostics.push(format!("PC {pc:#x}: outside a known function"));
                 continue;
             };
             let cfa_base = get_cfa_base(&obj, endian, pc);
@@ -432,6 +521,17 @@ impl DwarfInfo {
                 .iter()
                 .filter(|name| variables.iter().any(|v| &v.name == *name))
                 .count();
+            if available < requested_vars.len() {
+                diagnostics.push(format!(
+                    "PC {pc:#x}: only {available}/{} requested variables have usable locations",
+                    requested_vars.len()
+                ));
+            }
+            candidate_reports.push(ProbePcCandidate {
+                pc,
+                available,
+                requested: requested_vars.len(),
+            });
             resolved_candidates.push(PcCandidate {
                 pc,
                 value: (function_name, variables),
@@ -451,13 +551,19 @@ impl DwarfInfo {
             .text_file_offset
             .saturating_add(pc.saturating_sub(self.text_base));
 
-        Ok(ProbePoint {
+        let point = ProbePoint {
             binary_path: self.binary_path.clone(),
             pc,
             symbol_offset,
             function_name,
             variables,
-        })
+        };
+        let report = ProbeResolutionDiagnostics {
+            selected_pc: pc,
+            candidates: candidate_reports,
+            rejections: diagnostics,
+        };
+        Ok((point, report))
     }
 }
 
@@ -875,6 +981,7 @@ fn resolve_variables_at_pc<R: Reader>(
                 // they have no nested fields and NestedType::Scalar in `_ =>` caused
                 // parse_struct_fields_from_addr to be called with the scalar VALUE as an address.
                 let should_resolve_nested = type_info.is_struct
+                    || type_info.is_enum
                     || type_info.name.contains('.') // Package-qualified names like main.Order
                     || type_info.name.starts_with("map["); // Map types need nested type info for iteration
 
@@ -886,8 +993,8 @@ fn resolve_variables_at_pc<R: Reader>(
                         max_elements: 64,
                     };
                     detrix_logging::debug!(
-                        "[DWARF] Attempting nested type resolution for '{}' (type_name='{}', is_struct={})",
-                        name, type_info.name, type_info.is_struct
+                        "[DWARF] Attempting nested type resolution for '{}' (type_name='{}', is_struct={}, is_enum={})",
+                        name, type_info.name, type_info.is_struct, type_info.is_enum
                     );
                     let result = resolve_nested_type(entry, &unit, dwarf, &config);
                     match &result {
@@ -1034,6 +1141,40 @@ fn resolve_location_attr<R: Reader>(
     }
 }
 
+/// Check that a location attribute contains at least one operation. A DIE can
+/// carry an empty `DW_AT_location` expression (notably for optimized/elided
+/// locals); treating the attribute's mere presence as readiness would make
+/// such binaries appear observation-ready.
+fn usable_location_attribute<R: Reader>(
+    attribute: AttributeValue<R>,
+    unit: &gimli::Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+) -> Result<bool> {
+    match attribute {
+        AttributeValue::Exprloc(expression) => Ok(expression
+            .operations(unit.encoding())
+            .next()
+            .context("location operation")?
+            .is_some()),
+        AttributeValue::LocationListsRef(offset) => {
+            let mut locations = dwarf.locations(unit, offset).context("Location list")?;
+            while let Some(entry) = locations.next().context("Location entry")? {
+                if entry
+                    .data
+                    .operations(unit.encoding())
+                    .next()
+                    .context("location operation")?
+                    .is_some()
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
+}
+
 /// Evaluate a DWARF location expression, collecting all piece locations.
 ///
 /// Supports subset needed for Go with -N -l:
@@ -1054,120 +1195,69 @@ fn evaluate_location_expr<R: Reader>(
     cfa_base: (Option<Register>, i64),
     target_architecture: TargetArchitecture,
 ) -> Result<Option<Vec<VariablePiece>>> {
-    let mut ops = expr.operations(encoding);
-    let mut pieces: Vec<VariablePiece> = Vec::new();
-    let mut pending: Option<VariableLocation> = None;
+    let evaluated =
+        crate::dwarf::evaluator::evaluate_expression(expr, encoding, target_architecture)?;
+    let (cfa_register, cfa_offset) = cfa_base;
 
-    detrix_logging::debug!("[DWARF eval] Starting location expression evaluation");
-
-    loop {
-        match ops.next().context("Op parse")? {
-            None => break,
-            Some(gimli::Operation::Register { register }) => {
-                detrix_logging::debug!("[DWARF eval] Register {:?}", register);
-                if let Some(prev) = pending.take() {
-                    pieces.push(VariablePiece {
-                        location: Some(prev),
-                        byte_size: 0,
-                    });
-                }
-                pending = VariableLocation::from_register_for_arch(register.0, target_architecture);
-            }
-            Some(gimli::Operation::FrameOffset { offset }) => {
-                // DW_OP_fbreg N: variable at CFA + N.
-                // CFA = SP + cfa_sp_delta, so the SP-relative offset is cfa_sp_delta + N.
-                // Example: fbreg -376 with cfa_sp_delta=408 → SP + (408 - 376) = SP + 32.
-                let (cfa_register, cfa_offset) = cfa_base;
-                let location = if let Some(register) = cfa_register {
-                    VariableLocation::FrameOffset {
+    fn atom_to_location(
+        atom: crate::dwarf::evaluator::LocationAtom,
+        cfa_register: Option<Register>,
+        cfa_offset: i64,
+    ) -> Option<VariableLocation> {
+        use crate::dwarf::evaluator::LocationAtom;
+        match atom {
+            LocationAtom::Register(register) => Some(VariableLocation::Register(register)),
+            LocationAtom::RegisterOffset { register, offset } => match register {
+                Register::Rsp | Register::Arm64(31) => Some(VariableLocation::stack(offset)),
+                register => Some(VariableLocation::FrameOffset { register, offset }),
+            },
+            LocationAtom::FrameOffset { offset } | LocationAtom::CfaOffset { offset } => {
+                Some(match cfa_register {
+                    Some(register) => VariableLocation::FrameOffset {
                         register,
-                        offset: cfa_offset + offset,
-                    }
-                } else {
-                    VariableLocation::stack(cfa_offset + offset)
-                };
-                detrix_logging::info!(
-                    "[DWARF eval] FrameOffset fbreg={} + cfa={:?}+{} => {:?}",
-                    offset,
-                    cfa_register,
-                    cfa_offset,
-                    location
-                );
-                if let Some(prev) = pending.take() {
-                    pieces.push(VariablePiece {
-                        location: Some(prev),
-                        byte_size: 0,
-                    });
-                }
-                pending = Some(location);
+                        offset: cfa_offset.saturating_add(offset),
+                    },
+                    None => VariableLocation::stack(cfa_offset.saturating_add(offset)),
+                })
             }
-            Some(gimli::Operation::RegisterOffset { offset, .. }) => {
-                // DW_OP_bregX N: value at address (register_X + offset).
-                // Go emits this for stack-spilled locals:
-                //   x86-64: DW_OP_breg7 N  (RSP = DWARF reg 7)
-                //   ARM64:  DW_OP_breg31 N (SP  = DWARF reg 31)
-                // We model all base-register+offset accesses as StackOffset so
-                // the BPF program can use its architecture-specific stack pointer.
-                // For Go local variables this is
-                // always correct because Go only uses SP/RSP as the base register.
-                detrix_logging::info!("[DWARF eval] RegisterOffset breg7={}", offset);
-                if let Some(prev) = pending.take() {
-                    pieces.push(VariablePiece {
-                        location: Some(prev),
-                        byte_size: 0,
-                    });
-                }
-                pending = Some(VariableLocation::stack(offset));
-            }
-            Some(gimli::Operation::Piece { size_in_bits, .. }) => {
-                detrix_logging::debug!("[DWARF eval] Piece");
-                // DW_OP_piece follows a location op for composite types. Keep
-                // both its byte size and an explicitly undefined location.
-                // Delve's compositeMemory follows the same rule.
-                pieces.push(VariablePiece {
-                    location: pending.take(),
-                    byte_size: (size_in_bits / 8) as usize,
-                });
-            }
-            Some(gimli::Operation::Deref { .. }) => {
-                // DW_OP_deref: treat the pending address as a pointer and dereference.
-                // Go heap-escaped variables: the stack slot holds a pointer to the heap struct.
-                // We convert StackOffset → StackIndirect so the ring buffer parser knows to
-                // read 8 bytes (the pointer) from BPF and dereference them in user-space.
-                detrix_logging::debug!("[DWARF eval] Deref: converting pending to StackIndirect");
-                if let Some(VariableLocation::StackOffset { offset }) = pending.take() {
-                    pending = Some(VariableLocation::StackIndirect {
+            LocationAtom::Dereference(inner) => match *inner {
+                LocationAtom::RegisterOffset { register, offset }
+                    if matches!(register, Register::Rsp | Register::Arm64(31)) =>
+                {
+                    Some(VariableLocation::StackIndirect {
                         offset,
                         byte_size: 0,
-                    });
-                } else {
-                    detrix_logging::debug!("[DWARF eval] Deref on non-StackOffset — discarding");
-                    pending = None;
+                    })
                 }
-            }
-            other => {
-                // Unrecognised operation — discard pending; we can't interpret it.
-                detrix_logging::debug!("[DWARF eval] Unhandled operation: {:?}", other);
-                pending = None;
-            }
+                LocationAtom::FrameOffset { offset } | LocationAtom::CfaOffset { offset } => {
+                    Some(VariableLocation::StackIndirect {
+                        offset: cfa_offset.saturating_add(offset),
+                        byte_size: 0,
+                    })
+                }
+                _ => None,
+            },
+            LocationAtom::Absolute(_)
+            | LocationAtom::Constant(_)
+            | LocationAtom::Unavailable(_) => None,
         }
     }
 
-    // Non-composite case: single location without DW_OP_piece.
-    if let Some(loc) = pending.take() {
-        pieces.push(VariablePiece {
-            location: Some(loc),
-            byte_size: 0,
-        });
-    }
-
-    detrix_logging::debug!("[DWARF eval] Result: {:?} pieces", pieces.len());
-
-    if pieces.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(pieces))
-    }
+    let pieces: Vec<VariablePiece> = evaluated
+        .into_iter()
+        .map(|piece| VariablePiece {
+            // `VariablePiece` predates the generic evaluator's explicit
+            // value-offset field. Until the legacy IR grows that field, do
+            // not compact a non-zero-offset piece into the wrong byte range;
+            // preserve it as unavailable and let the profile fail closed.
+            location: (piece.value_offset == 0)
+                .then(|| piece.atom)
+                .flatten()
+                .and_then(|atom| atom_to_location(atom, cfa_register, cfa_offset)),
+            byte_size: piece.byte_size,
+        })
+        .collect();
+    Ok((!pieces.is_empty()).then_some(pieces))
 }
 
 /// Upgrade raw DWARF piece locations to a compound Go type location.
@@ -1229,15 +1319,18 @@ fn upgrade_location_for_type<L: IntoVariablePiece>(
         let [ptr, len]: [VariablePiece; 2] = locations
             .try_into()
             .unwrap_or_else(|_| unreachable!("len() == 2 guarantees exactly 2 elements"));
-        return Ok(VariableLocation::GoString {
-            ptr: Box::new(
-                ptr.location
-                    .ok_or_else(|| Error::DwarfParse("undefined string pointer piece".into()))?,
-            ),
-            len: Box::new(
-                len.location
-                    .ok_or_else(|| Error::DwarfParse("undefined string length piece".into()))?,
-            ),
+        let ptr = Box::new(
+            ptr.location
+                .ok_or_else(|| Error::DwarfParse("undefined string pointer piece".into()))?,
+        );
+        let len = Box::new(
+            len.location
+                .ok_or_else(|| Error::DwarfParse("undefined string length piece".into()))?,
+        );
+        return Ok(if is_rust_string_type(&type_info.name) {
+            VariableLocation::StringHeader { ptr, len }
+        } else {
+            VariableLocation::GoString { ptr, len }
         });
     }
     if locations.len() == 3 && type_info.is_slice {
@@ -1245,23 +1338,26 @@ fn upgrade_location_for_type<L: IntoVariablePiece>(
         let [ptr, len, cap]: [VariablePiece; 3] = locations
             .try_into()
             .unwrap_or_else(|_| unreachable!("len() == 3 guarantees exactly 3 elements"));
-        return Ok(VariableLocation::GoSlice {
-            ptr: Box::new(
-                ptr.location
-                    .ok_or_else(|| Error::DwarfParse("undefined slice pointer piece".into()))?,
-            ),
-            len: Box::new(
-                len.location
-                    .ok_or_else(|| Error::DwarfParse("undefined slice length piece".into()))?,
-            ),
-            cap: Box::new(
-                cap.location
-                    .ok_or_else(|| Error::DwarfParse("undefined slice capacity piece".into()))?,
-            ),
+        let ptr = Box::new(
+            ptr.location
+                .ok_or_else(|| Error::DwarfParse("undefined slice pointer piece".into()))?,
+        );
+        let len = Box::new(
+            len.location
+                .ok_or_else(|| Error::DwarfParse("undefined slice length piece".into()))?,
+        );
+        let cap = Box::new(
+            cap.location
+                .ok_or_else(|| Error::DwarfParse("undefined slice capacity piece".into()))?,
+        );
+        return Ok(if is_rust_slice_type(&type_info.name) {
+            VariableLocation::SliceHeader { ptr, len, cap }
+        } else {
+            VariableLocation::GoSlice { ptr, len, cap }
         });
     }
     if locations.len() > 1
-        && (type_info.is_array || type_info.is_struct)
+        && (type_info.is_array || type_info.is_struct || type_info.is_enum)
         && type_info.byte_size > 0
         && locations
             .iter()
@@ -1287,22 +1383,78 @@ fn upgrade_location_for_type<L: IntoVariablePiece>(
     );
 
     if type_info.is_string {
-        if let VariableLocation::StackOffset { offset } = location {
-            return Ok(VariableLocation::GoString {
-                ptr: Box::new(VariableLocation::StackOffset { offset }),
-                len: Box::new(VariableLocation::StackOffset { offset: offset + 8 }),
+        if let Some((base, offset)) = header_base_offset(&location) {
+            // Rust's layouts are not Go's flat `{ptr,len}` header.  rustc
+            // describes `String` as `Vec<u8>` (pointer/capacity/length), and
+            // `&str` as a two-word fat pointer.  Keep the existing generic
+            // header IR, but derive the offsets from the canonical DWARF type
+            // name instead of guessing from the byte size.
+            // Rust `String` is `Vec<u8>`.  The DWARF-described `RawVecInner`
+            // layout is `{ cap @ 0, ptr @ 8 }`, followed by `Vec::len @ 16`.
+            // codelldb's formatter reaches the pointer through
+            // `vec.buf.inner.ptr`, which confirms that the first word is
+            // capacity rather than the data address.  Borrowed `&str` keeps
+            // the conventional fat-pointer layout `{ data_ptr @ 0, len @ 8 }`.
+            let (ptr_offset, len_offset) = if is_rust_owned_string(&type_info.name) {
+                (8, 16)
+            } else {
+                (0, 8)
+            };
+            let ptr = Box::new(header_location(&base, offset + ptr_offset));
+            let len = Box::new(header_location(&base, offset + len_offset));
+            return Ok(if is_rust_string_type(&type_info.name) {
+                VariableLocation::StringHeader { ptr, len }
+            } else {
+                VariableLocation::GoString { ptr, len }
             });
         }
         // Register-based string with only one piece — can't reconstruct GoString.
         // Fall through as scalar (captures raw ptr word).
     } else if type_info.is_slice {
-        if let VariableLocation::StackOffset { offset } = location {
-            return Ok(VariableLocation::GoSlice {
-                ptr: Box::new(VariableLocation::StackOffset { offset }),
-                len: Box::new(VariableLocation::StackOffset { offset: offset + 8 }),
-                cap: Box::new(VariableLocation::StackOffset {
-                    offset: offset + 16,
-                }),
+        if let Some((base, offset)) = header_base_offset(&location) {
+            // `Vec<T>` is `{ raw_vec, len }`, while `&[T]` is `{data,len}`.
+            // RawVec's pointer/capacity are the first two words, so a Vec's
+            // length is at +16 and capacity at +8.  For a fat slice there is
+            // no capacity word; retain a zero-valued cap location only for
+            // the legacy decoder's fixed envelope and never read it from the
+            // target for `&[T]`.
+            if is_rust_vec(&type_info.name) {
+                return Ok(VariableLocation::SliceHeader {
+                    // rustc may describe the live stack spill of Vec with the
+                    // data pointer in the first word even though the nominal
+                    // RawVecInner DIE lists `cap` before `ptr`.  The observed
+                    // location is authoritative at the selected PC; preserve
+                    // that compiler-emitted order as ptr/len/cap for the
+                    // neutral header IR and let the decoder remain oblivious
+                    // to the physical Rust wrapper.
+                    ptr: Box::new(header_location(&base, offset)),
+                    len: Box::new(header_location(&base, offset + 16)),
+                    // rustc does not guarantee that the nominal RawVec capacity
+                    // word is live at this PC. Use the live length as a safe
+                    // bounded capacity for the neutral capture envelope; this
+                    // avoids treating an unrelated spill/pointer as capacity.
+                    cap: Box::new(header_location(&base, offset + 16)),
+                });
+            }
+            let cap_offset = if is_rust_borrowed_slice(&type_info.name) {
+                // A borrowed Rust slice (`&[T]`) is a two-word fat pointer:
+                // `{data_ptr, len}`.  It has no capacity word.  Keep the
+                // language-neutral three-word transport shape, but alias the
+                // capacity read to the length word so the generated probe
+                // never dereferences the non-existent third word.  The Rust
+                // profile interprets this as `cap == len` (the only safe
+                // bounded capacity available from the fat pointer).
+                offset + 8
+            } else {
+                offset + 16
+            };
+            let ptr = Box::new(header_location(&base, offset));
+            let len = Box::new(header_location(&base, offset + 8));
+            let cap = Box::new(header_location(&base, cap_offset));
+            return Ok(if is_rust_slice_type(&type_info.name) {
+                VariableLocation::SliceHeader { ptr, len, cap }
+            } else {
+                VariableLocation::GoSlice { ptr, len, cap }
             });
         }
     } else if type_info.is_map || type_info.name.starts_with("map[") {
@@ -1312,7 +1464,9 @@ fn upgrade_location_for_type<L: IntoVariablePiece>(
         return Ok(VariableLocation::GoMap {
             ptr: Box::new(location),
         });
-    } else if (type_info.is_array || type_info.is_struct) && type_info.byte_size > 0 {
+    } else if (type_info.is_array || type_info.is_struct || type_info.is_enum)
+        && type_info.byte_size > 0
+    {
         match location {
             VariableLocation::StackOffset { offset } => {
                 return Ok(VariableLocation::StackBlob {
@@ -1332,6 +1486,54 @@ fn upgrade_location_for_type<L: IntoVariablePiece>(
         }
     }
     Ok(location)
+}
+
+fn is_rust_owned_string(name: &str) -> bool {
+    matches!(
+        name,
+        "String" | "alloc::string::String" | "std::string::String"
+    )
+}
+
+fn is_rust_string_type(name: &str) -> bool {
+    is_rust_owned_string(name) || name.starts_with("&str") || name.starts_with("&mut str")
+}
+
+fn is_rust_vec(name: &str) -> bool {
+    // rustc may render the same type as `Vec<T, A>` after erasing the
+    // nominal `alloc::vec::` path.  Keep all three spellings profile-aware.
+    name.starts_with("Vec<")
+        || name.starts_with("alloc::vec::Vec<")
+        || name.starts_with("std::vec::Vec<")
+}
+
+fn is_rust_borrowed_slice(name: &str) -> bool {
+    name.starts_with("&[") || name.starts_with("&mut [")
+}
+
+fn is_rust_slice_type(name: &str) -> bool {
+    is_rust_vec(name) || is_rust_borrowed_slice(name)
+}
+
+/// Return the address base and offset for a contiguous header. Keeping the
+/// register in `FrameOffset` is essential for DW_OP_breg locations whose base
+/// is a frame register rather than the uprobe stack pointer.
+fn header_base_offset(location: &VariableLocation) -> Option<(Option<Register>, i64)> {
+    match location {
+        VariableLocation::StackOffset { offset } => Some((None, *offset)),
+        VariableLocation::FrameOffset { register, offset } => Some((Some(*register), *offset)),
+        _ => None,
+    }
+}
+
+fn header_location(base: &Option<Register>, offset: i64) -> VariableLocation {
+    match base {
+        Some(register) => VariableLocation::FrameOffset {
+            register: *register,
+            offset,
+        },
+        None => VariableLocation::StackOffset { offset },
+    }
 }
 
 /// Resolve byte size from a variable's DW_AT_byte_size.
@@ -1373,6 +1575,62 @@ mod tests {
             size: VariableSize::QWord,
             byte_size: 24,
             is_pointer: false,
+            is_string: false,
+            is_slice: true,
+            is_array: false,
+            is_struct: false,
+            ..TypeInfo::unknown()
+        }
+    }
+
+    fn rust_string_type() -> TypeInfo {
+        TypeInfo {
+            name: "alloc::string::String".to_string(),
+            size: VariableSize::QWord,
+            byte_size: 24,
+            is_pointer: false,
+            is_string: true,
+            is_slice: false,
+            is_array: false,
+            is_struct: false,
+            ..TypeInfo::unknown()
+        }
+    }
+
+    fn rust_vec_type() -> TypeInfo {
+        TypeInfo {
+            name: "alloc::vec::Vec<u64>".to_string(),
+            size: VariableSize::QWord,
+            byte_size: 24,
+            is_pointer: false,
+            is_string: false,
+            is_slice: true,
+            is_array: false,
+            is_struct: false,
+            ..TypeInfo::unknown()
+        }
+    }
+
+    fn rust_str_type() -> TypeInfo {
+        TypeInfo {
+            name: "&str".to_string(),
+            size: VariableSize::QWord,
+            byte_size: 16,
+            is_pointer: false,
+            is_string: true,
+            is_slice: false,
+            is_array: false,
+            is_struct: false,
+            ..TypeInfo::unknown()
+        }
+    }
+
+    fn rust_slice_type() -> TypeInfo {
+        TypeInfo {
+            name: "&[u64]".to_string(),
+            size: VariableSize::QWord,
+            byte_size: 16,
+            is_pointer: true,
             is_string: false,
             is_slice: true,
             is_array: false,
@@ -1438,6 +1696,67 @@ mod tests {
                 ptr: Box::new(VariableLocation::stack(-64)),
                 len: Box::new(VariableLocation::stack(-56)),
                 cap: Box::new(VariableLocation::stack(-48)),
+            }
+        );
+    }
+
+    #[test]
+    fn upgrade_rust_string_uses_vec_length_word() {
+        let result =
+            upgrade_location_for_type(vec![VariableLocation::stack(-64)], &rust_string_type())
+                .unwrap();
+        assert_eq!(
+            result,
+            VariableLocation::StringHeader {
+                ptr: Box::new(VariableLocation::stack(-56)),
+                len: Box::new(VariableLocation::stack(-48)),
+            }
+        );
+    }
+
+    #[test]
+    fn upgrade_rust_vec_uses_rawvec_capacity_and_vec_length() {
+        let result =
+            upgrade_location_for_type(vec![VariableLocation::stack(-64)], &rust_vec_type())
+                .unwrap();
+        assert_eq!(
+            result,
+            VariableLocation::SliceHeader {
+                ptr: Box::new(VariableLocation::stack(-64)),
+                len: Box::new(VariableLocation::stack(-48)),
+                cap: Box::new(VariableLocation::stack(-48)),
+            }
+        );
+    }
+
+    #[test]
+    fn upgrade_rust_borrowed_slice_does_not_read_third_word() {
+        let result =
+            upgrade_location_for_type(vec![VariableLocation::stack(-32)], &rust_slice_type())
+                .unwrap();
+        assert_eq!(
+            result,
+            VariableLocation::SliceHeader {
+                ptr: Box::new(VariableLocation::stack(-32)),
+                len: Box::new(VariableLocation::stack(-24)),
+                // The wire envelope is three words, but a Rust fat slice only
+                // has pointer + length.  Alias cap to len instead of reading
+                // an out-of-bounds third word.
+                cap: Box::new(VariableLocation::stack(-24)),
+            }
+        );
+    }
+
+    #[test]
+    fn upgrade_rust_str_uses_fat_pointer_length_word() {
+        let result =
+            upgrade_location_for_type(vec![VariableLocation::stack(-32)], &rust_str_type())
+                .unwrap();
+        assert_eq!(
+            result,
+            VariableLocation::StringHeader {
+                ptr: Box::new(VariableLocation::stack(-32)),
+                len: Box::new(VariableLocation::stack(-24)),
             }
         );
     }
@@ -1590,6 +1909,28 @@ mod tests {
             VariableLocation::GoString {
                 ptr: Box::new(VariableLocation::stack(-32)),
                 len: Box::new(VariableLocation::stack(-24)),
+            }
+        );
+    }
+
+    #[test]
+    fn non_stack_register_offset_is_preserved_for_header_fields() {
+        let loc = vec![VariableLocation::FrameOffset {
+            register: Register::Arm64(7),
+            offset: 48,
+        }];
+        let result = upgrade_location_for_type(loc, &string_type()).unwrap();
+        assert_eq!(
+            result,
+            VariableLocation::GoString {
+                ptr: Box::new(VariableLocation::FrameOffset {
+                    register: Register::Arm64(7),
+                    offset: 48,
+                }),
+                len: Box::new(VariableLocation::FrameOffset {
+                    register: Register::Arm64(7),
+                    offset: 56,
+                }),
             }
         );
     }

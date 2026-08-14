@@ -55,22 +55,29 @@ pub mod wire;
 
 pub use adapter::EbpfAdapter;
 pub use compiler::{
-    CaptureCompiler, CompileError, CompiledCapture, GoBpfCompiler, PlanValidatorCompiler,
-    RustBpfCompiler,
+    plan_tag, profile_tag, CaptureCompiler, CompileError, CompiledCapture, GoBpfCompiler,
+    PlanValidatorCompiler, RustBpfCompiler,
 };
 pub use debug_image::{
     DebugImageError, DebugImageMetadata, DebugImageProvider, DebugImageSource,
-    EmbeddedDebugImageProvider, TargetAbi,
+    EmbeddedDebugImageProvider, ExternalDebugImageProvider, TargetAbi,
 };
 pub use decode::{
-    decode_scalar_record, DecodedScalar, ScalarDecodeError, ScalarFieldSpec, ScalarKind,
+    decode_blob_record, decode_composite, decode_enum_variant, decode_scalar_record, BlobFieldSpec,
+    CompositeKind, DecodedBlob, DecodedComposite, DecodedEnum, DecodedScalar, EnumVariantSpec,
+    ScalarDecodeError, ScalarFieldSpec, ScalarKind,
 };
+pub use dwarf::{EnumLayout, EnumVariantLayout, ProbePcCandidate, ProbeResolutionDiagnostics};
 pub use factory::{EbpfAdapterFactory, EbpfGoFactory};
 pub use policy::{resolve_backend, BackendDecision, CaptureBackend, PreflightError};
 pub use probe::types::CaptureConfig;
-pub use profile::{GoProfile, LanguageProfile, ProfileError, ProfileId, RustProfile};
+pub use profile::{
+    GoProfile, LanguageProfile, ProfileCapabilities, ProfileError, ProfileId, RuntimeMetadata,
+    RustProfile,
+};
 pub use registry::{
     BackendRegistry, CaptureBackendFactory, GoEbpfBackend, ProfileRegistry, RustEbpfBackend,
 };
 pub use replay::{ReplayError, ReplayRecord};
 pub use runtime::{ProfiledCaptureRuntime, RuntimeCounters, RuntimeError, RuntimeState};
+pub use wire::{EventEnvelope, WireCapabilities};

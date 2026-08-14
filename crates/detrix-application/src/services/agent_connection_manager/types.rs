@@ -25,6 +25,120 @@ pub struct AgentCapabilities {
     pub dap_python: bool,
     pub dap_go: bool,
     pub dap_rust: bool,
+    pub supported_envelope_schemas: Vec<u32>,
+    pub supported_capture_profiles: Vec<String>,
+    pub max_capture_payload_bytes: u32,
+}
+
+impl AgentCapabilities {
+    /// Validate the negotiated wire contract before a connection is marked
+    /// usable. Legacy agents advertise no envelope/profile fields; that is
+    /// still valid for the legacy Go path, but an explicitly selected Rust
+    /// DRX1 path must prove both sides of the negotiation.
+    pub fn validate_capture_admission(
+        &self,
+        selected_backend: &str,
+        capture_profile: &str,
+        reported_envelope_schemas: &[u32],
+        reported_capture_profiles: &[String],
+        reported_max_payload_bytes: u32,
+    ) -> Result<(), String> {
+        if !selected_backend.eq_ignore_ascii_case("ebpf")
+            || !capture_profile.eq_ignore_ascii_case("rust")
+        {
+            // Go eBPF and DAP retain their pre-negotiation framing.
+            return Ok(());
+        }
+
+        const DRX1_SCHEMA: u32 = 1;
+        const DRX1_MIN_PAYLOAD_BYTES: u32 = 4096;
+
+        let registered_ok = self.supports_rust_drx1(DRX1_SCHEMA, DRX1_MIN_PAYLOAD_BYTES);
+        let reported_ok = reported_envelope_schemas.contains(&DRX1_SCHEMA)
+            && reported_capture_profiles
+                .iter()
+                .any(|profile| profile.eq_ignore_ascii_case("rust"))
+            && reported_max_payload_bytes >= DRX1_MIN_PAYLOAD_BYTES;
+
+        if registered_ok && reported_ok {
+            Ok(())
+        } else if !registered_ok {
+            Err(
+                "agent registration does not advertise Rust DRX1/schema 1 with a 4096-byte payload"
+                    .into(),
+            )
+        } else {
+            Err(
+                "connection update does not confirm Rust DRX1/schema 1 with a 4096-byte payload"
+                    .into(),
+            )
+        }
+    }
+
+    fn supports_rust_drx1(&self, schema: u32, min_payload_bytes: u32) -> bool {
+        self.ebpf
+            && self.supported_envelope_schemas.contains(&schema)
+            && self
+                .supported_capture_profiles
+                .iter()
+                .any(|profile| profile.eq_ignore_ascii_case("rust"))
+            && self.max_capture_payload_bytes >= min_payload_bytes
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::AgentCapabilities;
+
+    fn rust_capabilities() -> AgentCapabilities {
+        AgentCapabilities {
+            ebpf: true,
+            supported_envelope_schemas: vec![1],
+            supported_capture_profiles: vec!["rust".into()],
+            max_capture_payload_bytes: 4096,
+            ..AgentCapabilities::default()
+        }
+    }
+
+    #[test]
+    fn accepts_matching_rust_drx1_advertisement() {
+        let capabilities = rust_capabilities();
+        assert!(capabilities
+            .validate_capture_admission("ebpf", "rust", &[1], &["rust".into()], 4096)
+            .is_ok());
+    }
+
+    #[test]
+    fn rejects_rust_when_registration_is_legacy() {
+        let capabilities = AgentCapabilities {
+            ebpf: true,
+            ..AgentCapabilities::default()
+        };
+        let error = capabilities
+            .validate_capture_admission("ebpf", "rust", &[1], &["rust".into()], 4096)
+            .unwrap_err();
+        assert!(error.contains("registration"));
+    }
+
+    #[test]
+    fn rejects_rust_when_connection_update_is_incomplete() {
+        let capabilities = rust_capabilities();
+        let error = capabilities
+            .validate_capture_admission("ebpf", "rust", &[1], &[], 4096)
+            .unwrap_err();
+        assert!(error.contains("connection update"));
+    }
+
+    #[test]
+    fn preserves_legacy_go_and_dap_paths() {
+        let capabilities = AgentCapabilities::default();
+        assert!(capabilities
+            .validate_capture_admission("ebpf", "go", &[], &[], 0)
+            .is_ok());
+        assert!(capabilities
+            .validate_capture_admission("dap", "rust", &[], &[], 0)
+            .is_ok());
+    }
 }
 
 /// Domain representation of a binary reported by the agent scanner.
@@ -59,6 +173,15 @@ pub enum IncomingAgentMessage {
         connection_id: ConnectionId,
         status: detrix_core::ConnectionStatus,
         error: Option<String>,
+        selected_backend: String,
+        capture_profile: String,
+        backend_reason: String,
+        debug_image_source: String,
+        failure_class: String,
+        supported_envelope_schemas: Vec<u32>,
+        supported_capture_profiles: Vec<String>,
+        max_capture_payload_bytes: u32,
+        target_architecture: String,
     },
     EventBatch {
         connection_id: ConnectionId,
@@ -88,6 +211,10 @@ pub enum IncomingAgentMessage {
     DropCount {
         connection_id: ConnectionId,
         total_events_dropped: u64,
+        kernel_events_dropped: u64,
+        decode_events_dropped: u64,
+        unavailable_fields: u64,
+        events_decoded: u64,
     },
     Heartbeat {
         cpu: f32,
@@ -252,6 +379,11 @@ pub struct AgentConnectionManager {
     /// two hosts exposing the same binary can each observe the other's freshly
     /// persisted Disconnected row as stale before routing ownership is installed.
     pub(super) registration_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes scanner snapshot reconciliation. The gRPC reader dispatches
+    /// messages concurrently; without this lock a removal snapshot and the
+    /// forced full snapshot after target close can observe the same old state
+    /// and overwrite each other's result.
+    pub(super) register_update_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AgentConnectionManager {
@@ -280,6 +412,7 @@ impl AgentConnectionManager {
             liveness_timestamps: Arc::new(DashMap::new()),
             starting_adapters: Arc::new(DashSet::new()),
             registration_lock: Arc::new(tokio::sync::Mutex::new(())),
+            register_update_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }

@@ -49,6 +49,12 @@ message AgentCapabilities {
   bool dap_python = 2;
   bool dap_go     = 3;
   bool dap_rust   = 4;
+  // Additive capture-wire capabilities. Empty values preserve compatibility
+  // with older agents; populated values let the server reject an incompatible
+  // envelope/profile before creating a metric.
+  repeated uint32 supported_envelope_schemas = 5;
+  repeated string supported_capture_profiles = 6;
+  uint32 max_capture_payload_bytes = 7;
 }
 
 message BinaryInfo {
@@ -66,6 +72,19 @@ message AgentConnectionUpdate {
   string           connection_id = 1;
   ConnectionStatus status        = 2;
   string           error_message = 3;
+  // Additive backend-selection diagnostics. Older servers ignore these fields.
+  string           selected_backend = 4;
+  string           capture_profile = 5;
+  string           backend_reason = 6;
+  string           debug_image_source = 7;
+  string           failure_class = 8;
+  // Capture wire capabilities negotiated for this connection. Empty values
+  // preserve compatibility with legacy Go framing.
+  repeated uint32  supported_envelope_schemas = 9;
+  repeated string  supported_capture_profiles = 10;
+  uint32           max_capture_payload_bytes = 11;
+  // Target register ABI selected for this connection (x86_64, aarch64, or unknown).
+  string           target_architecture = 12;
 }
 
 message MetricEventBatch {
@@ -125,6 +144,10 @@ message VariableInfo {
 message DropCountUpdate {
   string connection_id        = 1;
   uint64 total_events_dropped = 2;
+  uint64 kernel_events_dropped = 3;
+  uint64 decode_events_dropped = 4;
+  uint64 unavailable_fields = 5;
+  uint64 events_decoded = 6; // records decoded into MetricEvents before transport
 }
 
 message SetMetricAck {

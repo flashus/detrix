@@ -350,15 +350,16 @@ async fn test_full_config_to_storage_workflow() -> Result<()> {
 /// Get path to the compiled detrix binary
 /// Searches in this order:
 /// 1. DETRIX_BIN env var (explicit path to binary)
-/// 2. Relative path from .cargo/config.toml target-dir (../../../../../detrix/target)
-/// 3. ~/detrix/target (custom target-dir resolved)
-/// 4. workspace/target (default Cargo location)
+/// 2. Relative path from .cargo/config.toml target-dir
+/// 3. $DETRIX_SESSION_TARGET_DIR/host (shared disposable fallback)
 fn get_binary_path() -> PathBuf {
     // Use shared binary discovery from detrix-testing
     let workspace_root = get_workspace_root();
     find_detrix_binary(&workspace_root).unwrap_or_else(|| {
-        // Fallback to workspace target/debug if not found
-        workspace_root.join("target/debug/detrix")
+        // Keep fallback aligned with the shared target used by Taskfiles.
+        let session_root = std::env::var("DETRIX_SESSION_TARGET_DIR")
+            .unwrap_or_else(|_| "/private/tmp/detrix-session-target".to_owned());
+        PathBuf::from(session_root).join("host/debug/detrix")
     })
 }
 

@@ -23,6 +23,7 @@ use crate::dwarf::nested_types::NestedType;
 use crate::dwarf::types::ResolvedVariable;
 use crate::error::{Error, Result};
 use crate::mem_reader::ProcessMemoryReader;
+use crate::probe::program::{RAW_ENVELOPE_MAGIC, RAW_ENVELOPE_SCHEMA, RAW_ENVELOPE_SIZE};
 use crate::probe::types::{CaptureConfig, CapturedValue, ProbeEvent};
 
 /// Minimum event size: pid(4) + tid(4) + ns_pid(4) + reserved(4) + timestamp(8) = 24 bytes.
@@ -80,6 +81,24 @@ pub fn parse_ring_buffer_event(
     config: &CaptureConfig,
     mem_reader: &dyn ProcessMemoryReader,
 ) -> Result<ProbeEvent> {
+    parse_ring_buffer_event_with_envelope(data, variables, capture_goid, config, mem_reader, None)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawEnvelopeExpectation {
+    pub profile_tag: u32,
+    pub plan_tag: u64,
+    pub field_count: usize,
+}
+
+pub fn parse_ring_buffer_event_with_envelope(
+    data: &[u8],
+    variables: &[ResolvedVariable],
+    capture_goid: bool,
+    config: &CaptureConfig,
+    mem_reader: &dyn ProcessMemoryReader,
+    envelope: Option<RawEnvelopeExpectation>,
+) -> Result<ProbeEvent> {
     if data.len() < MIN_EVENT_SIZE {
         return Err(Error::RingBuffer(format!(
             "Event too small: {} bytes (min {MIN_EVENT_SIZE})",
@@ -102,6 +121,44 @@ pub fn parse_ring_buffer_event(
     // Note: This was broken when capture_goid was enabled — parser read goid before timestamp.
     let timestamp_ns = read_u64(data, &mut offset)?;
 
+    if let Some(expected) = envelope {
+        if expected.field_count != variables.len() {
+            return Err(Error::RingBuffer(format!(
+                "Envelope field count mismatch: expected {}, variables {}",
+                expected.field_count,
+                variables.len()
+            )));
+        }
+        if data.len() < offset + RAW_ENVELOPE_SIZE {
+            return Err(Error::RingBuffer("Truncated DRX1 envelope header".into()));
+        }
+        let magic = read_u32(data, &mut offset)?;
+        let schema = read_u16(data, &mut offset)?;
+        let field_count = read_u16(data, &mut offset)? as usize;
+        let payload_len = read_u32(data, &mut offset)? as usize;
+        let profile_tag = read_u32(data, &mut offset)?;
+        let plan_tag = read_u64(data, &mut offset)?;
+        if magic != RAW_ENVELOPE_MAGIC || schema != RAW_ENVELOPE_SCHEMA {
+            return Err(Error::RingBuffer(format!(
+                "Unsupported DRX1 envelope magic/schema: {magic:#x}/{schema}"
+            )));
+        }
+        if field_count != expected.field_count
+            || profile_tag != expected.profile_tag
+            || plan_tag != expected.plan_tag
+        {
+            return Err(Error::RingBuffer(
+                "Stale or mismatched DRX1 envelope".into(),
+            ));
+        }
+        let actual_payload_len = data.len().saturating_sub(offset);
+        if payload_len != actual_payload_len {
+            return Err(Error::RingBuffer(format!(
+                "DRX1 payload length mismatch: declared {payload_len}, actual {actual_payload_len}"
+            )));
+        }
+    }
+
     let goid = if capture_goid {
         Some(read_u64(data, &mut offset)?)
     } else {
@@ -114,13 +171,17 @@ pub fn parse_ring_buffer_event(
             Error::RingBuffer(format!("Failed to read variable '{}': {e}", var.name))
         })?;
         let captured = match &var.location {
-            crate::dwarf::types::VariableLocation::GoString { .. } => {
+            crate::dwarf::types::VariableLocation::GoString { .. }
+            | crate::dwarf::types::VariableLocation::StringHeader { .. } => {
                 // Read string length from the event (BPF read this from stack)
                 let len = read_u64(data, &mut offset).map_err(|e| {
                     Error::RingBuffer(format!("Failed to read string len for '{}': {e}", var.name))
                 })? as usize;
-                // Skip the empty buffer (BPF doesn't read Go heap)
-                let _ = read_bytes(data, &mut offset, config.max_string_capture);
+                // The probe snapshots bytes synchronously while the value is
+                // live. This is essential for Rust heap-backed `String`s,
+                // which may be moved or dropped before asynchronous decoding.
+                // Keep process-memory reading as a fallback for older paths.
+                let inline = read_bytes(data, &mut offset, config.max_string_capture)?;
 
                 // Validate string length against configured limit.
                 // Strings longer than max_string_capture are rejected to prevent
@@ -139,10 +200,19 @@ pub fn parse_ring_buffer_event(
                     // ALWAYS use user-space memory reader for Go strings
                     // BPF cannot access Go heap memory reliably
 
+                    // AArch64 user pointers may carry a top-byte allocation
+                    // tag (TBI/MTE).  LLDB/codelldb canonicalize such pointers
+                    // before process reads; do the same for the shared eBPF
+                    // envelope so a valid Rust `String` is not mistaken for a
+                    // kernel address.
+                    let val = canonicalize_user_pointer(val);
+
                     // Validate string pointer before attempting read.
-                    // Reject null pointers and kernel-space addresses (>= 0x8000_0000_0000 on x86_64).
-                    // This prevents accidental reads from arbitrary addresses if the BPF program
-                    // captures garbage data (e.g. from uninitialized stack memory).
+                    // Reject null pointers and addresses outside the 56-bit user
+                    // address envelope.  The previous x86-only 0x8000_0000_0000
+                    // cutoff rejected valid tagged/high VA AArch64 pointers.
+                    // This still prevents accidental reads from arbitrary kernel
+                    // addresses if the BPF program captures garbage.
                     if val == 0 {
                         detrix_logging::debug!(
                             "[ringbuf] Go string ptr is null for '{}' (ns_pid={}), skipping read",
@@ -163,9 +233,8 @@ pub fn parse_ring_buffer_event(
                             data: vec![],
                             len: 0,
                         }
-                    } else if val >= 0x8000_0000_0000 {
-                        // Kernel-space address — the BPF program cannot safely read it from
-                        // user-space and attempting to do so would fault or return garbage.
+                    } else if val >= 0x0100_0000_0000_0000 {
+                        // Outside the supported 56-bit user-space envelope.
                         detrix_logging::warn!(
                             "[ringbuf] ptr={:#x} for '{}' is in kernel space (ns_pid={}), rejecting",
                             val, var.name, ns_pid
@@ -174,15 +243,18 @@ pub fn parse_ring_buffer_event(
                             data: vec![],
                             len: 0,
                         }
+                    } else if len <= inline.len() && inline[..len].iter().any(|byte| *byte != 0) {
+                        CapturedValue::String {
+                            data: inline[..len].to_vec(),
+                            len,
+                        }
                     } else {
                         detrix_logging::debug!(
                             "[ringbuf] Reading Go string via user-space: ns_pid={} ptr={:#x} len={}",
                             ns_pid, val, len
                         );
 
-                        let result = mem_reader.read_string(ns_pid, val, len);
-
-                        match result {
+                        match mem_reader.read_string(ns_pid, val, len) {
                             Ok(s) => CapturedValue::String {
                                 data: s.into_bytes(),
                                 len,
@@ -201,14 +273,24 @@ pub fn parse_ring_buffer_event(
                     }
                 }
             }
-            crate::dwarf::types::VariableLocation::GoSlice { .. } => {
-                let len = read_u64(data, &mut offset).map_err(|e| {
+            crate::dwarf::types::VariableLocation::GoSlice { .. }
+            | crate::dwarf::types::VariableLocation::SliceHeader { .. } => {
+                let second = read_u64(data, &mut offset).map_err(|e| {
                     Error::RingBuffer(format!("Failed to read slice len for '{}': {e}", var.name))
                 })?;
-                let cap = read_u64(data, &mut offset).map_err(|e| {
+                let third = read_u64(data, &mut offset).map_err(|e| {
                     Error::RingBuffer(format!("Failed to read slice cap for '{}': {e}", var.name))
                 })?;
-                CapturedValue::Slice { len, cap }
+                // The parser/compiler normalize every supported layout to the
+                // language-neutral event order `(ptr, len, cap)`. Rust Vec's
+                // physical `{cap, ptr, len}` layout is handled while lowering
+                // its DWARF locations, so the ring-buffer decoder must not
+                // reinterpret the already-normalized words (doing so turns
+                // the data pointer into the reported capacity).
+                CapturedValue::Slice {
+                    len: second,
+                    cap: third,
+                }
             }
             crate::dwarf::types::VariableLocation::StackBlob { byte_size, .. }
             | crate::dwarf::types::VariableLocation::PiecewiseBlob { byte_size, .. } => {
@@ -234,6 +316,66 @@ pub fn parse_ring_buffer_event(
                     capture
                 );
 
+                let enum_layout = var.nested_type.as_ref().and_then(|nested| match nested {
+                    NestedType::Scalar(type_info) => type_info.enum_layout.as_ref(),
+                    _ => None,
+                });
+                if let Some(layout) = enum_layout {
+                    if !layout.is_explicit_non_niche() {
+                        return Err(Error::RingBuffer(format!(
+                            "Enum '{}' has incomplete or niche DWARF layout",
+                            var.name
+                        )));
+                    }
+                    let variants: Vec<crate::decode::EnumVariantSpec> = layout
+                        .variants
+                        .iter()
+                        .filter_map(|variant| {
+                            Some(crate::decode::EnumVariantSpec {
+                                name: variant.name.clone(),
+                                discriminant: u64::try_from(variant.discriminant?).ok()?,
+                                payload_offset: variant
+                                    .payload_offset
+                                    .map(|offset| offset as usize),
+                                payload_size: variant.payload_size.map(|size| size as usize),
+                            })
+                        })
+                        .collect();
+                    let decoded = crate::decode::decode_enum_variant(
+                        &crate::decode::DecodedBlob {
+                            name: var.name.clone(),
+                            bytes: bytes.clone(),
+                        },
+                        layout.discriminant_offset as usize,
+                        layout.discriminant_size as usize,
+                        &variants,
+                        config.max_blob_capture,
+                    )
+                    .map_err(|error| Error::RingBuffer(error.to_string()))?;
+                    let mut fields = vec![
+                        (
+                            "variant".to_string(),
+                            Box::new(CapturedValue::String {
+                                len: decoded.variant.len(),
+                                data: decoded.variant.into_bytes(),
+                            }),
+                        ),
+                        (
+                            "discriminant".to_string(),
+                            Box::new(CapturedValue::Scalar(decoded.discriminant)),
+                        ),
+                    ];
+                    if let Some(payload) = decoded.payload {
+                        fields.push((
+                            "payload".to_string(),
+                            Box::new(CapturedValue::Bytes(payload)),
+                        ));
+                    }
+                    CapturedValue::Struct {
+                        type_name: var.type_name.clone(),
+                        fields,
+                    }
+                } else
                 // If we have DWARF field info, parse the blob into named fields
                 if let Some(crate::dwarf::nested_types::NestedType::Struct {
                     fields: dwarf_fields,
@@ -352,6 +494,14 @@ pub fn parse_ring_buffer_event(
     })
 }
 
+/// Remove an AArch64 top-byte tag while leaving ordinary x86-64 and canonical
+/// user addresses unchanged. Linux user virtual addresses in the supported
+/// targets are below bit 56; masking only the top byte preserves the complete
+/// 56-bit address payload and keeps the operation safe for tagged pointers.
+fn canonicalize_user_pointer(ptr: u64) -> u64 {
+    ptr & 0x00ff_ffff_ffff_ffff
+}
+
 fn read_bytes(data: &[u8], offset: &mut usize, count: usize) -> Result<Vec<u8>> {
     if *offset + count > data.len() {
         return Err(Error::RingBuffer(format!(
@@ -375,6 +525,21 @@ fn read_u32(data: &[u8], offset: &mut usize) -> Result<u32> {
             .map_err(|_| Error::RingBuffer("u32 parse failed".to_string()))?,
     );
     *offset += 4;
+    Ok(val)
+}
+
+fn read_u16(data: &[u8], offset: &mut usize) -> Result<u16> {
+    if *offset + 2 > data.len() {
+        return Err(Error::RingBuffer(format!(
+            "Unexpected end of event at offset {offset}"
+        )));
+    }
+    let val = u16::from_le_bytes(
+        data[*offset..*offset + 2]
+            .try_into()
+            .map_err(|_| Error::RingBuffer("u16 parse failed".to_string()))?,
+    );
+    *offset += 2;
     Ok(val)
 }
 
@@ -551,6 +716,18 @@ mod tests {
     }
 
     #[test]
+    fn canonicalizes_aarch64_top_byte_pointer_tags() {
+        assert_eq!(
+            super::canonicalize_user_pointer(0xaa00_1234_5678_9abc),
+            0x0000_1234_5678_9abc
+        );
+        assert_eq!(
+            super::canonicalize_user_pointer(0x0000_7fff_1234_5678),
+            0x0000_7fff_1234_5678
+        );
+    }
+
+    #[test]
     fn parse_single_scalar_var() {
         let data = build_event_bytes(1, 2, 100, &[42]);
         let vars = vec![scalar_var("amount")];
@@ -565,6 +742,60 @@ mod tests {
 
         assert_eq!(event.values.len(), 1);
         assert_eq!(event.values[0].as_u64(), Some(42));
+    }
+
+    #[test]
+    fn parse_versioned_raw_envelope_before_scalars() {
+        let profile_tag = crate::compiler::profile_tag("rust");
+        let plan_tag = crate::compiler::plan_tag("probe:1000");
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&RAW_ENVELOPE_MAGIC.to_le_bytes());
+        data.extend_from_slice(&RAW_ENVELOPE_SCHEMA.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&8u32.to_le_bytes());
+        data.extend_from_slice(&profile_tag.to_le_bytes());
+        data.extend_from_slice(&plan_tag.to_le_bytes());
+        data.extend_from_slice(&42u64.to_le_bytes());
+        let vars = vec![scalar_var("amount")];
+        let event = parse_ring_buffer_event_with_envelope(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+            Some(RawEnvelopeExpectation {
+                profile_tag,
+                plan_tag,
+                field_count: 1,
+            }),
+        )
+        .unwrap();
+        assert_eq!(event.values[0].as_u64(), Some(42));
+    }
+
+    #[test]
+    fn stale_versioned_raw_envelope_is_rejected() {
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&RAW_ENVELOPE_MAGIC.to_le_bytes());
+        data.extend_from_slice(&RAW_ENVELOPE_SCHEMA.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&8u32.to_le_bytes());
+        data.extend_from_slice(&crate::compiler::profile_tag("rust").to_le_bytes());
+        data.extend_from_slice(&crate::compiler::plan_tag("probe:old").to_le_bytes());
+        data.extend_from_slice(&42u64.to_le_bytes());
+        let result = parse_ring_buffer_event_with_envelope(
+            &data,
+            &[scalar_var("amount")],
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+            Some(RawEnvelopeExpectation {
+                profile_tag: crate::compiler::profile_tag("rust"),
+                plan_tag: crate::compiler::plan_tag("probe:new"),
+                field_count: 1,
+            }),
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -777,6 +1008,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_rust_vec_uses_compiler_normalized_ptr_len_cap_header() {
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&0xDEAD_u64.to_le_bytes()); // ptr (var0)
+        data.extend_from_slice(&7_u64.to_le_bytes()); // len (var0_len)
+        data.extend_from_slice(&16_u64.to_le_bytes()); // cap (var0_cap)
+
+        let vars = vec![ResolvedVariable {
+            name: "values".to_string(),
+            location: VariableLocation::GoSlice {
+                ptr: Box::new(VariableLocation::Register(Register::Rax)),
+                len: Box::new(VariableLocation::Register(Register::Rbx)),
+                cap: Box::new(VariableLocation::Register(Register::Rcx)),
+            },
+            size: VariableSize::QWord,
+            type_name: "alloc::vec::Vec<u64, alloc::alloc::Global>".to_string(),
+            nested_type: None,
+        }];
+
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
+        assert_eq!(event.values, vec![CapturedValue::Slice { len: 7, cap: 16 }]);
+    }
+
+    #[test]
     fn parse_stack_blob_returns_bytes() {
         let blob: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
         let mut data = build_event_bytes(1, 2, 100, &[]);
@@ -806,6 +1067,68 @@ mod tests {
                 assert_eq!(b.as_slice(), &blob);
             }
             other => panic!("Expected Bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_explicit_enum_blob_returns_selected_variant() {
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&0_u64.to_le_bytes());
+        data.extend_from_slice(&[1, 42]);
+        let type_info = crate::dwarf::typeinfo::TypeInfo {
+            name: "TradeState".into(),
+            byte_size: 2,
+            is_enum: true,
+            enum_layout: Some(crate::dwarf::typeinfo::EnumLayout {
+                discriminant_offset: 0,
+                discriminant_size: 1,
+                variants: vec![
+                    crate::dwarf::typeinfo::EnumVariantLayout {
+                        name: "Pending".into(),
+                        discriminant: Some(0),
+                        payload_offset: None,
+                        payload_size: None,
+                    },
+                    crate::dwarf::typeinfo::EnumVariantLayout {
+                        name: "Settled".into(),
+                        discriminant: Some(1),
+                        payload_offset: Some(1),
+                        payload_size: Some(1),
+                    },
+                ],
+                niche: false,
+            }),
+            ..crate::dwarf::typeinfo::TypeInfo::unknown()
+        };
+        let vars = vec![ResolvedVariable {
+            name: "state".into(),
+            location: VariableLocation::StackBlob {
+                offset: -16,
+                byte_size: 2,
+            },
+            size: VariableSize::QWord,
+            type_name: "TradeState".into(),
+            nested_type: Some(NestedType::Scalar(type_info)),
+        }];
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
+        match &event.values[0] {
+            CapturedValue::Struct { fields, .. } => {
+                assert!(fields.iter().any(|(name, value)| {
+                    name == "variant"
+                        && matches!(value.as_ref(), CapturedValue::String { data, .. } if data == b"Settled")
+                }));
+                assert!(fields.iter().any(|(name, value)| {
+                    name == "discriminant" && matches!(value.as_ref(), CapturedValue::Scalar(1))
+                }));
+            }
+            other => panic!("Expected decoded enum struct, got {other:?}"),
         }
     }
 
@@ -1197,10 +1520,12 @@ mod tests {
                 is_array: false,
                 is_struct: false,
                 is_map: false,
+                is_enum: false,
                 array_element_count: 0,
                 array_element_type: String::new(),
                 slice_element_type: String::new(),
                 element_byte_size: 0,
+                enum_layout: None,
             }
         }
 
@@ -1280,8 +1605,10 @@ mod tests {
                 is_struct: true,
                 is_pointer: false,
                 is_map: false,
+                is_enum: false,
                 array_element_count: 0,
                 element_byte_size: 0,
+                enum_layout: None,
                 array_element_type: String::new(),
                 slice_element_type: String::new(),
             },
@@ -1299,8 +1626,10 @@ mod tests {
                     is_struct: false,
                     is_pointer: false,
                     is_map: false,
+                    is_enum: false,
                     array_element_count: 0,
                     element_byte_size: 0,
+                    enum_layout: None,
                     array_element_type: String::new(),
                     slice_element_type: String::new(),
                 },

@@ -34,6 +34,8 @@ use tonic::{Request, Response, Status};
 
 const AGENT_TEST_TOKEN: &str = "test-token-12345";
 const FIXTURE_MATCH_GLOB: &str = "*detrix_example_app*";
+const COMPOSITE_FIXTURE_MATCH_GLOB: &str = "*rust_composite_app*";
+const OPTIMIZED_FIXTURE_MATCH_GLOB: &str = "*rust_optimized_app*";
 const TRADING_SYMBOLS: &[&str] = &["BTCUSD", "ETHUSD", "SOLUSD"];
 
 fn toml_path(path: &Path) -> String {
@@ -56,7 +58,9 @@ fn fixture_source_path() -> String {
 }
 
 fn rust_fixture_binary_path() -> PathBuf {
-    std::env::var("RUST_FIXTURE_BINARY")
+    std::env::var("RUST_COMPOSITE_FIXTURE_BINARY")
+        .or_else(|_| std::env::var("RUST_OPTIMIZED_FIXTURE_BINARY"))
+        .or_else(|_| std::env::var("RUST_FIXTURE_BINARY"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/usr/local/bin/rust_detrix_example_app"))
 }
@@ -93,30 +97,50 @@ async fn poll_agent_connection(
     }
 }
 
-async fn poll_connection_status(
+async fn poll_replacement_proc_connection(
     client: &RestClient,
-    connection_id: &str,
-    expected_status: &str,
+    previous_connection_id: &str,
     timeout: Duration,
-) -> Option<String> {
+) -> Option<(String, String)> {
     let start = Instant::now();
     loop {
-        match client.list_connections().await {
-            Ok(response) => {
-                for conn in response.data {
-                    if conn.connection_id == connection_id
-                        && (conn.status == expected_status
-                            || (expected_status == "connected" && conn.status == "3"))
-                    {
-                        return Some(conn.host);
-                    }
+        if let Ok(response) = client.list_connections().await {
+            for conn in response.data {
+                if conn.connection_id != previous_connection_id
+                    && conn.host.starts_with("/proc/")
+                    && (conn.status == "connected" || conn.status == "3")
+                {
+                    return Some((conn.connection_id, conn.host));
                 }
             }
-            Err(e) => eprintln!("Error listing connections: {e}"),
         }
-
         if start.elapsed() > timeout {
             return None;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn wait_for_connection_disconnect(
+    client: &RestClient,
+    connection_id: &str,
+    timeout: Duration,
+) -> bool {
+    let start = Instant::now();
+    loop {
+        if let Ok(response) = client.list_connections().await {
+            if let Some(connection) = response
+                .data
+                .iter()
+                .find(|connection| connection.connection_id == connection_id)
+            {
+                if connection.status != "connected" && connection.status != "3" {
+                    return true;
+                }
+            }
+        }
+        if start.elapsed() > timeout {
+            return false;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -144,6 +168,27 @@ async fn poll_events_api<C: ApiClient + Sync>(
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+async fn read_agent_metrics(port: u16) -> Option<std::collections::HashMap<String, u64>> {
+    let body = reqwest::get(format!("http://127.0.0.1:{port}/metrics"))
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    let mut values = std::collections::HashMap::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let name = parts.next()?;
+        let value = parts.next()?.parse::<u64>().ok()?;
+        values.insert(name.to_string(), value);
+    }
+    Some(values)
 }
 
 fn event_value<'a>(event: &'a EventInfo, expression: &str) -> Option<&'a serde_json::Value> {
@@ -262,6 +307,7 @@ struct AgentE2eHarness {
     fixture_source: String,
     http_port: u16,
     grpc_port: u16,
+    metrics_port: u16,
     server_process: Option<Child>,
     agent_process: Option<Child>,
     fixture_process: Option<Child>,
@@ -302,6 +348,7 @@ impl AgentE2eHarness {
             fixture_source,
             http_port: get_http_port(),
             grpc_port: get_grpc_port(),
+            metrics_port: get_http_port(),
             server_process: None,
             agent_process: None,
             fixture_process: None,
@@ -312,11 +359,12 @@ impl AgentE2eHarness {
     }
 
     fn fixture_host_path(&self) -> String {
-        let pid = self
+        let process = self
             .fixture_process
             .as_ref()
-            .expect("fixture process not running")
-            .id();
+            .or(self.rust_fixture_process.as_ref())
+            .expect("fixture process not running");
+        let pid = process.id();
         format!("/proc/{pid}/exe")
     }
 
@@ -406,7 +454,7 @@ capture_goid = true
 
     fn write_agent_config(&self, token: Option<&str>) {
         let agent_id_file = toml_path(&self.temp_dir.path().join("agent-id"));
-        let metrics_port = get_http_port();
+        let metrics_port = self.metrics_port;
         let token_line = if let Some(token) = token {
             fs::write(&self.agent_token_path, token).expect("Failed to write agent token");
             format!("token_file = \"{}\"\n", toml_path(&self.agent_token_path))
@@ -427,7 +475,7 @@ verify_tls = false
 
 [agent.scanner]
 scan_interval_secs = 1
-include_patterns = ["{fixture_glob}"]
+include_patterns = ["{fixture_glob}", "{composite_fixture_glob}", "{optimized_fixture_glob}"]
 exclude_patterns = []
 require_dwarf = true
 allowed_read_prefixes = ["/src"]
@@ -435,6 +483,8 @@ allowed_read_prefixes = ["/src"]
             grpc_port = self.grpc_port,
             token_line = token_line,
             fixture_glob = FIXTURE_MATCH_GLOB,
+            composite_fixture_glob = COMPOSITE_FIXTURE_MATCH_GLOB,
+            optimized_fixture_glob = OPTIMIZED_FIXTURE_MATCH_GLOB,
         );
         fs::write(&self.agent_config_path, config).expect("Failed to write agent config");
     }
@@ -549,12 +599,32 @@ allowed_read_prefixes = ["/src"]
 
         register_e2e_process("agent_runner", process.id());
         self.agent_process = Some(process);
+        assert!(
+            wait_for_port(self.metrics_port, 30).await,
+            "Agent metrics endpoint not listening on {}",
+            self.metrics_port
+        );
     }
 
     async fn start_stack(&mut self) {
         self.start_server_with_auth(true).await;
-        self.start_fixture().await;
-        if std::env::var("AGENT_FIXTURES").as_deref() == Ok("both") {
+        // Rust-only tasks mount only the Rust fixture. Preserve the Go start
+        // path for the Go controls and the explicit heterogeneous `both` run.
+        let rust_override = [
+            "RUST_COMPOSITE_FIXTURE_BINARY",
+            "RUST_OPTIMIZED_FIXTURE_BINARY",
+            "RUST_FIXTURE_BINARY",
+        ]
+        .iter()
+        .any(|key| std::env::var(key).is_ok());
+        // The combined task mounts the Rust fixture in addition to the Go
+        // fixture. An override variable alone must not suppress the Go
+        // process when AGENT_FIXTURES=both is explicitly requested.
+        let rust_only = rust_override && std::env::var("AGENT_FIXTURES").as_deref() != Ok("both");
+        if !rust_only {
+            self.start_fixture().await;
+        }
+        if rust_only || std::env::var("AGENT_FIXTURES").as_deref() == Ok("both") {
             self.start_rust_fixture().await;
         }
         self.start_agent(Some(AGENT_TEST_TOKEN)).await;
@@ -576,6 +646,10 @@ allowed_read_prefixes = ["/src"]
         self.start_agent(Some(AGENT_TEST_TOKEN)).await;
     }
 
+    fn stop_agent(&mut self) {
+        Self::stop_named_process("agent_runner", &mut self.agent_process);
+    }
+
     async fn restart_fixture(&mut self) {
         Self::stop_named_process("agent_fixture", &mut self.fixture_process);
         Self::stop_named_process("agent_rust_fixture", &mut self.rust_fixture_process);
@@ -587,6 +661,7 @@ impl Drop for AgentE2eHarness {
     fn drop(&mut self) {
         Self::stop_named_process("agent_runner", &mut self.agent_process);
         Self::stop_named_process("agent_fixture", &mut self.fixture_process);
+        Self::stop_named_process("agent_rust_fixture", &mut self.rust_fixture_process);
         Self::stop_named_process("agent_server", &mut self.server_process);
     }
 }
@@ -702,7 +777,7 @@ async fn test_agent_rust_ebpf_basic() {
             name: metric_name.to_string(),
             location,
             expressions: vec!["quantity".to_string(), "price".to_string()],
-            connection_id,
+            connection_id: connection_id.clone(),
             language: Some("rust".to_string()),
             group: None,
             mode: None,
@@ -724,6 +799,7 @@ async fn test_agent_rust_ebpf_basic() {
         .data;
     println!("Created Rust eBPF metric: {metric_name} (id: {metric_id})");
 
+    let capture_started = Instant::now();
     let events = poll_events(&client, metric_name, Duration::from_secs(25)).await;
     if events.is_empty() {
         harness.print_logs(160);
@@ -733,6 +809,11 @@ async fn test_agent_rust_ebpf_basic() {
     assert!(
         !events.is_empty(),
         "Expected Rust eBPF events from {metric_name}"
+    );
+    assert!(
+        capture_started.elapsed() <= Duration::from_secs(10),
+        "Rust scalar event exceeded the 10s observation bound: {:?}",
+        capture_started.elapsed()
     );
 
     for event in &events {
@@ -751,6 +832,417 @@ async fn test_agent_rust_ebpf_basic() {
             panic!("Expected Rust price in fixture range 100..=1000, got {price}");
         }
     }
+}
+
+#[tokio::test]
+#[ignore = "requires Linux + Docker privileged runner; use `task tests:test-agent-rust-composite`"]
+#[serial(agent_e2e)]
+async fn test_agent_rust_ebpf_composite() {
+    let binary = std::env::var("RUST_COMPOSITE_FIXTURE_BINARY")
+        .expect("RUST_COMPOSITE_FIXTURE_BINARY must be mounted for composite test");
+    let source = std::env::var("RUST_COMPOSITE_FIXTURE_SOURCE")
+        .expect("RUST_COMPOSITE_FIXTURE_SOURCE must be mounted for composite test");
+    let mut harness = AgentE2eHarness::new_with_fixture(binary.into(), source);
+    harness.start_stack().await;
+    let client = RestClient::new(harness.http_port);
+    let fixture_host = harness.fixture_host_path();
+    let connection_id = poll_agent_connection(&client, &fixture_host, Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|| {
+            harness.print_logs(160);
+            panic!("Expected Rust composite connection for fixture host {fixture_host}");
+        });
+
+    let metric_name = "agent-rust-ebpf-composite-request";
+    let metric_id = client
+        .add_metric(AddMetricRequest {
+            name: metric_name.to_string(),
+            // `request` is live at the explicit black-box observation statement in
+            // process(); the enum declaration does not expose a request location.
+            location: format!("@{}#21", harness.fixture_source),
+            expressions: vec!["request".to_string()],
+            connection_id: connection_id.clone(),
+            language: Some("rust".to_string()),
+            group: None,
+            mode: None,
+            enabled: Some(true),
+            sample_rate: None,
+            sample_interval_seconds: None,
+            max_per_second: None,
+            capture_stack_trace: None,
+            stack_trace_ttl: None,
+            stack_trace_full: None,
+            stack_trace_head: None,
+            stack_trace_tail: None,
+            capture_memory_snapshot: None,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+        })
+        .await
+        .expect("Failed to create Rust composite eBPF metric")
+        .data;
+    println!("Created Rust composite metric: {metric_name} (id: {metric_id})");
+
+    let capture_started = Instant::now();
+    let events = poll_events(&client, metric_name, Duration::from_secs(20)).await;
+    if events.is_empty() {
+        harness.print_logs(160);
+    } else {
+        print_received_events(metric_name, &events);
+    }
+    assert!(!events.is_empty(), "Expected Rust composite eBPF events");
+    assert!(
+        capture_started.elapsed() <= Duration::from_secs(10),
+        "Rust composite event exceeded the 10s observation bound: {:?}",
+        capture_started.elapsed()
+    );
+    for event in &events {
+        let request = event_value(event, "request").expect("Expected captured request");
+        let object = request
+            .as_object()
+            .cloned()
+            .or_else(|| {
+                request
+                    .as_str()
+                    .and_then(|json| serde_json::from_str(json).ok())
+            })
+            .expect("Expected bounded struct object");
+        let quantity = object
+            .get("quantity")
+            .and_then(|value| value.as_u64())
+            .expect("Expected request.quantity");
+        let cents = object
+            .get("cents")
+            .and_then(|value| value.as_u64())
+            .expect("Expected request.cents");
+        if !(10..=49).contains(&quantity) || !(10_000..=100_000).contains(&cents) {
+            harness.print_logs(240);
+            panic!("invalid bounded request capture: quantity={quantity} cents={cents}");
+        }
+    }
+
+    // The 1ms high-rate control must report the independent kernel/decode/
+    // unavailable counters, not only a non-empty event list.  Allow the
+    // correlator's periodic status update to flush before inspecting the
+    // server log; ordinary composite smoke runs keep this control disabled.
+    if std::env::var("RUST_COMPOSITE_INTERVAL_MS").as_deref() == Ok("1") {
+        tokio::time::sleep(Duration::from_millis(750)).await;
+        let metrics = read_agent_metrics(harness.metrics_port)
+            .await
+            .expect("high-rate run did not expose agent metrics");
+        let received = *metrics
+            .get("detrix_agent_events_received_total")
+            .expect("missing received counter");
+        let in_flight = *metrics
+            .get("detrix_agent_events_in_flight")
+            .expect("missing in-flight gauge");
+        let forwarded = *metrics
+            .get("detrix_agent_events_forwarded_total")
+            .expect("missing forwarded counter");
+        let transport_dropped = *metrics
+            .get("detrix_agent_events_dropped_total")
+            .expect("missing transport-drop counter");
+        let kernel_dropped = *metrics
+            .get("detrix_agent_kernel_events_dropped_total")
+            .expect("missing kernel-drop counter");
+        let decode_dropped = *metrics
+            .get("detrix_agent_decode_events_dropped_total")
+            .expect("missing decode-drop counter");
+        assert_eq!(
+            received,
+            forwarded + transport_dropped + in_flight,
+            "received events must reconcile with forwarded, transport drops, and in-flight work: {metrics:?}"
+        );
+        let log = fs::read_to_string(&harness.server_log_path).unwrap_or_default();
+        let status = log
+            .lines()
+            .rev()
+            .find(|line| line.contains("Agent dropped events"))
+            .unwrap_or_else(|| {
+                harness.print_logs(120);
+                panic!("high-rate run did not report independent drop counters")
+            });
+        assert!(
+            status.contains(&format!("kernel_dropped={kernel_dropped}")),
+            "{status}"
+        );
+        assert!(
+            status.contains(&format!("decode_dropped={decode_dropped}")),
+            "{status}"
+        );
+        assert!(status.contains("unavailable=0"), "{status}");
+    }
+
+    // Exercise the lifecycle half of the composite path as well: the metric
+    // must be removable after a live uprobe has produced events, without
+    // relying on process shutdown to clean the probe up.
+    client
+        .remove_metric(metric_name)
+        .await
+        .expect("Failed to remove Rust composite eBPF metric");
+    let remaining = client
+        .list_metrics()
+        .await
+        .expect("Failed to list metrics after Rust composite removal")
+        .data;
+    assert!(
+        remaining.iter().all(|metric| metric.name != metric_name),
+        "Removed Rust composite metric is still present"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Linux + Docker privileged runner; use `task tests:test-agent-rust-headers`"]
+#[serial(agent_e2e)]
+async fn test_agent_rust_ebpf_headers() {
+    let binary = std::env::var("RUST_EXTERNAL_FIXTURE_BINARY")
+        .or_else(|_| std::env::var("RUST_COMPOSITE_FIXTURE_BINARY"))
+        .expect("RUST_COMPOSITE_FIXTURE_BINARY must be mounted for header test");
+    let source = std::env::var("RUST_COMPOSITE_FIXTURE_SOURCE")
+        .expect("RUST_COMPOSITE_FIXTURE_SOURCE must be mounted for header test");
+    let mut harness = AgentE2eHarness::new_with_fixture(binary.into(), source);
+    harness.start_stack().await;
+    let client = RestClient::new(harness.http_port);
+    let fixture_host = harness.fixture_host_path();
+    let connection_id = poll_agent_connection(&client, &fixture_host, Duration::from_secs(30))
+        .await
+        .expect("Expected Rust header fixture connection");
+
+    let metric_name = "agent-rust-ebpf-owned-string";
+    client
+        .add_metric(AddMetricRequest {
+            name: metric_name.to_string(),
+            // `owned` is kept live by black_box at this statement before it is
+            // moved into observe_owned.
+            location: format!("@{}#39", harness.fixture_source),
+            expressions: vec!["owned".into()],
+            connection_id: connection_id.clone(),
+            language: Some("rust".into()),
+            group: None,
+            mode: None,
+            enabled: Some(true),
+            sample_rate: None,
+            sample_interval_seconds: None,
+            max_per_second: None,
+            capture_stack_trace: None,
+            stack_trace_ttl: None,
+            stack_trace_full: None,
+            stack_trace_head: None,
+            stack_trace_tail: None,
+            capture_memory_snapshot: None,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+        })
+        .await
+        .expect("Failed to create Rust String metric");
+    let events = poll_events(&client, metric_name, Duration::from_secs(20)).await;
+    if events.is_empty() {
+        harness.print_logs(240);
+    } else {
+        print_received_events(metric_name, &events);
+    }
+    assert!(!events.is_empty(), "Expected bounded Rust String events");
+    harness.print_logs(180);
+    let mut valid = 0;
+    for event in events {
+        let owned_raw = event_value(&event, "owned")
+            .and_then(|value| value.as_str())
+            .expect("Expected decoded Rust String");
+        let owned =
+            serde_json::from_str::<String>(owned_raw).unwrap_or_else(|_| owned_raw.to_string());
+        if owned.starts_with("trade-") {
+            valid += 1;
+        } else {
+            eprintln!("Ignoring transient non-Rust String capture: {owned:?}");
+        }
+    }
+    assert!(valid > 0, "Expected at least one decoded Rust String event");
+
+    client
+        .add_metric(AddMetricRequest {
+            name: "agent-rust-ebpf-borrowed-str".to_string(),
+            location: format!("@{}#41", harness.fixture_source),
+            expressions: vec!["view".into()],
+            connection_id: connection_id.clone(),
+            language: Some("rust".into()),
+            group: None,
+            mode: None,
+            enabled: Some(true),
+            sample_rate: None,
+            sample_interval_seconds: None,
+            max_per_second: None,
+            capture_stack_trace: None,
+            stack_trace_ttl: None,
+            stack_trace_full: None,
+            stack_trace_head: None,
+            stack_trace_tail: None,
+            capture_memory_snapshot: None,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+        })
+        .await
+        .expect("Failed to create Rust &str metric");
+    let str_events = poll_events(
+        &client,
+        "agent-rust-ebpf-borrowed-str",
+        Duration::from_secs(20),
+    )
+    .await;
+    assert!(!str_events.is_empty(), "Expected Rust &str events");
+    assert!(str_events.iter().any(|event| {
+        event_value(event, "view")
+            .and_then(serde_json::Value::as_str)
+            .map(|value| {
+                serde_json::from_str::<String>(value).unwrap_or_else(|_| value.to_string())
+            })
+            .is_some_and(|value| value == "BTCUSD")
+    }));
+
+    client
+        .add_metric(AddMetricRequest {
+            name: "agent-rust-ebpf-vec-header".to_string(),
+            location: format!("@{}#43", harness.fixture_source),
+            expressions: vec!["values".into()],
+            connection_id: connection_id.clone(),
+            language: Some("rust".into()),
+            group: None,
+            mode: None,
+            enabled: Some(true),
+            sample_rate: None,
+            sample_interval_seconds: None,
+            max_per_second: None,
+            capture_stack_trace: None,
+            stack_trace_ttl: None,
+            stack_trace_full: None,
+            stack_trace_head: None,
+            stack_trace_tail: None,
+            capture_memory_snapshot: None,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+        })
+        .await
+        .expect("Failed to create Rust Vec metric");
+    let vec_events = poll_events(
+        &client,
+        "agent-rust-ebpf-vec-header",
+        Duration::from_secs(20),
+    )
+    .await;
+    assert!(!vec_events.is_empty(), "Expected Rust Vec events");
+    assert!(vec_events.iter().any(|event| {
+        event_value(event, "values")
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .and_then(|encoded| serde_json::from_str::<serde_json::Value>(encoded).ok())
+                    .or_else(|| Some(value.clone()))
+            })
+            .is_some_and(|value| {
+                value.get("len").and_then(serde_json::Value::as_u64) == Some(3)
+                    && value.get("cap").and_then(serde_json::Value::as_u64) == Some(3)
+            })
+    }));
+
+    client
+        .add_metric(AddMetricRequest {
+            name: "agent-rust-ebpf-borrowed-slice".to_string(),
+            // `view_slice` is kept live by black_box immediately before the
+            // enum/state work; the fat pointer is valid at this statement.
+            location: format!("@{}#45", harness.fixture_source),
+            expressions: vec!["view_slice".into()],
+            connection_id: connection_id.clone(),
+            language: Some("rust".into()),
+            group: None,
+            mode: None,
+            enabled: Some(true),
+            sample_rate: None,
+            sample_interval_seconds: None,
+            max_per_second: None,
+            stack_trace_ttl: None,
+            capture_stack_trace: None,
+            stack_trace_full: None,
+            stack_trace_head: None,
+            stack_trace_tail: None,
+            capture_memory_snapshot: None,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+        })
+        .await
+        .expect("Failed to create Rust borrowed-slice metric");
+    let slice_events = poll_events(
+        &client,
+        "agent-rust-ebpf-borrowed-slice",
+        Duration::from_secs(20),
+    )
+    .await;
+    assert!(
+        !slice_events.is_empty(),
+        "Expected Rust borrowed-slice events"
+    );
+    assert!(slice_events.iter().any(|event| {
+        event_value(event, "view_slice")
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .and_then(|encoded| serde_json::from_str::<serde_json::Value>(encoded).ok())
+                    .or_else(|| Some(value.clone()))
+            })
+            .is_some_and(|value| {
+                value.get("len").and_then(serde_json::Value::as_u64) == Some(3)
+                    && value.get("cap").and_then(serde_json::Value::as_u64) == Some(3)
+            })
+    }));
+
+    client
+        .add_metric(AddMetricRequest {
+            name: "agent-rust-ebpf-explicit-enum".to_string(),
+            location: format!("@{}#63", harness.fixture_source),
+            expressions: vec!["state".into()],
+            connection_id,
+            language: Some("rust".into()),
+            group: None,
+            mode: None,
+            enabled: Some(true),
+            sample_rate: None,
+            sample_interval_seconds: None,
+            max_per_second: None,
+            capture_stack_trace: None,
+            stack_trace_ttl: None,
+            stack_trace_full: None,
+            stack_trace_head: None,
+            stack_trace_tail: None,
+            capture_memory_snapshot: None,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+        })
+        .await
+        .expect("Failed to create Rust explicit-enum metric");
+    let enum_events = poll_events(
+        &client,
+        "agent-rust-ebpf-explicit-enum",
+        Duration::from_secs(20),
+    )
+    .await;
+    if enum_events.is_empty() {
+        harness.print_logs(240);
+    }
+    assert!(
+        !enum_events.is_empty(),
+        "Expected explicit Rust enum events"
+    );
+    assert!(enum_events.iter().any(|event| {
+        let Some(value) = event_value(event, "state") else {
+            return false;
+        };
+        let object = value
+            .as_str()
+            .and_then(|encoded| serde_json::from_str::<serde_json::Value>(encoded).ok())
+            .or_else(|| Some(value.clone()));
+        object.is_some_and(|value| {
+            value.get("variant").and_then(serde_json::Value::as_str) == Some("Pending")
+                || value.get("variant").and_then(serde_json::Value::as_str) == Some("Settled")
+        })
+    }));
 }
 
 #[tokio::test]
@@ -915,6 +1407,225 @@ async fn test_agent_reconnect() {
 }
 
 #[tokio::test]
+#[ignore = "requires Linux + Docker privileged runner; use `task tests:test-agent-rust-reconnect`"]
+#[serial(agent_e2e)]
+async fn test_agent_rust_ebpf_reconnect() {
+    let mut harness =
+        AgentE2eHarness::new_with_fixture(rust_fixture_binary_path(), rust_fixture_source_path());
+    harness.start_stack().await;
+    let client = RestClient::new(harness.http_port);
+    let fixture_host = harness.fixture_host_path();
+    let connection_id = poll_agent_connection(&client, &fixture_host, Duration::from_secs(30))
+        .await
+        .expect("Expected Rust connection from agent");
+    let metric_name = "agent-rust-reconnect-quantity";
+    client
+        .add_metric(AddMetricRequest {
+            name: metric_name.to_string(),
+            location: format!("@{}#114", harness.fixture_source),
+            expressions: vec!["quantity".to_string()],
+            connection_id: connection_id.clone(),
+            language: Some("rust".to_string()),
+            group: None,
+            mode: None,
+            enabled: Some(true),
+            sample_rate: None,
+            sample_interval_seconds: None,
+            max_per_second: None,
+            capture_stack_trace: None,
+            stack_trace_ttl: None,
+            stack_trace_full: None,
+            stack_trace_head: None,
+            stack_trace_tail: None,
+            capture_memory_snapshot: None,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+        })
+        .await
+        .expect("Failed to create Rust reconnect metric");
+
+    harness.replace_agent().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let new_connection_id = poll_agent_connection(&client, &fixture_host, Duration::from_secs(30))
+        .await
+        .expect("Expected Rust connection after agent restart");
+    assert_eq!(connection_id, new_connection_id);
+    let active_same_host = client
+        .list_connections()
+        .await
+        .expect("Failed to list connections after Rust reconnect")
+        .data
+        .iter()
+        .filter(|connection| {
+            connection.host == fixture_host
+                && (connection.status == "connected" || connection.status == "3")
+        })
+        .count();
+    assert_eq!(
+        active_same_host, 1,
+        "Rust reconnect left duplicate active connections"
+    );
+    let events = poll_events(&client, metric_name, Duration::from_secs(20)).await;
+    assert!(!events.is_empty(), "Expected Rust events after reconnect");
+}
+
+#[tokio::test]
+#[ignore = "requires Linux + Docker privileged runner; use `task tests:test-agent-lifecycle`"]
+#[serial(agent_e2e)]
+async fn test_agent_target_exit_detaches_connection() {
+    let mut harness = AgentE2eHarness::new();
+    harness.start_stack().await;
+    let client = RestClient::new(harness.http_port);
+    let old_host = harness.fixture_host_path();
+    let connection_id = poll_agent_connection(&client, &old_host, Duration::from_secs(30))
+        .await
+        .expect("Expected Go connection before target exit");
+
+    AgentE2eHarness::stop_named_process("agent_fixture", &mut harness.fixture_process);
+    assert!(
+        wait_for_connection_disconnect(&client, &connection_id, Duration::from_secs(20)).await,
+        "Target exit did not transition the connection out of connected state"
+    );
+
+    // A newly discovered process must become routable again. The scanner
+    // identity is path plus executable inode: a replacement may therefore
+    // receive a new connection ID, while a PID reuse with the same executable
+    // inode may legitimately reconcile to the existing ID.
+    harness.start_fixture().await;
+    let new_host = harness.fixture_host_path();
+    let new_connection =
+        match poll_agent_connection(&client, &new_host, Duration::from_secs(30)).await {
+            Some(connection) => connection,
+            None => {
+                harness.print_logs(240);
+                panic!("Expected a new connection after target restart");
+            }
+        };
+    assert!(!new_connection.is_empty());
+
+    // Explicit close must detach the replacement connection idempotently,
+    // independently of target exit or agent shutdown cleanup.
+    client
+        .close_connection(&new_connection)
+        .await
+        .expect("Failed to close replacement connection");
+    assert!(
+        wait_for_connection_disconnect(&client, &new_connection, Duration::from_secs(20)).await,
+        "Explicit connection close did not detach the replacement"
+    );
+    // A repeated close is a control-plane idempotence check: cleanup retries
+    // must not resurrect adapters or turn an already-detached connection into
+    // a server error.
+    client
+        .close_connection(&new_connection)
+        .await
+        .expect("Repeated connection close should be idempotent");
+}
+
+#[tokio::test]
+#[ignore = "requires Linux + Docker privileged runner; use `task tests:test-agent-lifecycle`"]
+#[serial(agent_e2e)]
+async fn test_agent_shutdown_detaches_connection() {
+    let mut harness = AgentE2eHarness::new();
+    harness.start_stack().await;
+    let client = RestClient::new(harness.http_port);
+    let fixture_host = harness.fixture_host_path();
+    let connection_id = poll_agent_connection(&client, &fixture_host, Duration::from_secs(30))
+        .await
+        .expect("Expected Go connection before agent shutdown");
+
+    harness.stop_agent();
+    assert!(
+        wait_for_connection_disconnect(&client, &connection_id, Duration::from_secs(20)).await,
+        "Agent shutdown left the connection reported as connected"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Linux + Docker privileged runner; use `task tests:test-agent-rust-unavailable`"]
+#[serial(agent_e2e)]
+async fn test_agent_rust_ebpf_unavailable_variable_fails_closed() {
+    let mut harness =
+        AgentE2eHarness::new_with_fixture(rust_fixture_binary_path(), rust_fixture_source_path());
+    harness.start_stack().await;
+    let client = RestClient::new(harness.http_port);
+    let fixture_host = harness.fixture_host_path();
+    let connection_id = poll_agent_connection(&client, &fixture_host, Duration::from_secs(30))
+        .await
+        .expect("Expected Rust connection before unavailable-variable probe");
+
+    let result = client
+        .add_metric(AddMetricRequest {
+            name: "agent-rust-ebpf-unavailable".to_string(),
+            location: format!("@{}#114", harness.fixture_source),
+            expressions: vec!["definitely_optimized_out".to_string()],
+            connection_id,
+            language: Some("rust".to_string()),
+            group: None,
+            mode: None,
+            enabled: Some(true),
+            sample_rate: None,
+            sample_interval_seconds: None,
+            max_per_second: None,
+            capture_stack_trace: None,
+            stack_trace_ttl: None,
+            stack_trace_full: None,
+            stack_trace_head: None,
+            stack_trace_tail: None,
+            capture_memory_snapshot: None,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+        })
+        .await;
+    assert!(result.is_err(), "Unavailable Rust variable was accepted");
+}
+
+#[tokio::test]
+#[ignore = "requires Linux + Docker privileged runner; use `task tests:test-agent-rust-optimized-unavailable`"]
+#[serial(agent_e2e)]
+async fn test_agent_rust_ebpf_optimized_variable_fails_closed() {
+    let binary = std::env::var("RUST_OPTIMIZED_FIXTURE_BINARY")
+        .expect("RUST_OPTIMIZED_FIXTURE_BINARY must be mounted");
+    let source = std::env::var("RUST_OPTIMIZED_FIXTURE_SOURCE")
+        .expect("RUST_OPTIMIZED_FIXTURE_SOURCE must be mounted");
+    let mut harness = AgentE2eHarness::new_with_fixture(binary.into(), source);
+    harness.start_stack().await;
+    let client = RestClient::new(harness.http_port);
+    let fixture_host = harness.fixture_host_path();
+    let connection_id = poll_agent_connection(&client, &fixture_host, Duration::from_secs(30))
+        .await
+        .expect("Expected optimized Rust connection");
+
+    let result = client
+        .add_metric(AddMetricRequest {
+            name: "agent-rust-ebpf-optimized-out".to_string(),
+            location: format!("@{}#15", harness.fixture_source),
+            expressions: vec!["optimized_out".into()],
+            connection_id,
+            language: Some("rust".into()),
+            group: None,
+            mode: None,
+            enabled: Some(true),
+            sample_rate: None,
+            sample_interval_seconds: None,
+            max_per_second: None,
+            capture_stack_trace: None,
+            stack_trace_ttl: None,
+            stack_trace_full: None,
+            stack_trace_head: None,
+            stack_trace_tail: None,
+            capture_memory_snapshot: None,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "Optimized-out Rust variable was accepted instead of failing closed"
+    );
+}
+
+#[tokio::test]
 #[ignore = "requires Linux + Docker privileged runner; use `task test-agent`"]
 #[serial(agent_e2e)]
 async fn test_agent_mcp_roundtrip() {
@@ -1027,6 +1738,7 @@ async fn test_agent_wrong_token() {
                     dap_python: false,
                     dap_go: false,
                     dap_rust: false,
+                    ..Default::default()
                 }),
                 binaries: vec![],
             },
@@ -1076,18 +1788,18 @@ async fn test_agent_scanner_update() {
         .expect("Expected initial Go connection");
 
     harness.restart_fixture().await;
-    let observed_host =
-        match poll_connection_status(&client, &initial_conn, "connected", Duration::from_secs(30))
+    // A restart changes the process identity (PID), so inode-aware scanner
+    // reconciliation may create a replacement connection ID. The invariant is
+    // that the replacement host is connected and routable, not ID stability.
+    let (_replacement_conn, observed_host) =
+        poll_replacement_proc_connection(&client, &initial_conn, Duration::from_secs(30))
             .await
-        {
-            Some(host) => host,
-            None => {
+            .unwrap_or_else(|| {
                 harness.print_logs(120);
                 panic!(
-                "Expected connection {initial_conn} to return to connected after fixture restart"
-            );
-            }
-        };
+                    "Expected a connected replacement after fixture restart (old {initial_conn})"
+                );
+            });
 
     assert!(
         observed_host.starts_with("/proc/"),

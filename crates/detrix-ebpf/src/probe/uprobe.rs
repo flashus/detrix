@@ -21,6 +21,8 @@
 //! ```
 
 use crate::dwarf::types::ProbePoint;
+#[cfg(target_os = "linux")]
+use crate::dwarf::types::{Register, VariableLocation};
 #[allow(unused_imports)] // used inside #[cfg(target_os = "linux")] blocks
 use crate::error::ErrContext;
 use crate::error::{Error, Result};
@@ -30,6 +32,54 @@ use crate::profile::ProfileId;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
+
+#[cfg(target_os = "linux")]
+fn rust_frame_probe_point(point: &ProbePoint) -> ProbePoint {
+    let register = if point.variables.iter().any(|v| {
+        matches!(
+            v.location,
+            VariableLocation::Register(crate::dwarf::types::Register::Arm64(_))
+        )
+    }) || cfg!(target_arch = "aarch64")
+    {
+        crate::dwarf::types::Register::Arm64(29)
+    } else {
+        crate::dwarf::types::Register::Rbp
+    };
+    let mut out = point.clone();
+    for variable in &mut out.variables {
+        variable.location = rust_frame_location(variable.location.clone(), register);
+    }
+    out
+}
+
+#[cfg(target_os = "linux")]
+fn rust_frame_location(
+    location: VariableLocation,
+    register: crate::dwarf::types::Register,
+) -> VariableLocation {
+    match location {
+        // Rust DWARF stack locations are normally relative to the selected
+        // LLVM frame register (RBP on x86-64, X29 on AArch64), not the uprobe
+        // SP. Preserve that semantic boundary in the location passed to the
+        // CapturePlan compiler; treating it as a plain StackOffset reads the
+        // wrong activation record under optimized frame-pointer builds.
+        VariableLocation::StackOffset { offset } => {
+            VariableLocation::FrameOffset { register, offset }
+        }
+        // Header locations are emitted by rustc as a compact stack layout;
+        // their pointer words are already normalized for the uprobe SP by the
+        // parser. Do not reinterpret those words as frame-relative scalar
+        // locals (doing so corrupts lengths/pointers for String and slices).
+        VariableLocation::GoString { ptr, len } => VariableLocation::GoString { ptr, len },
+        VariableLocation::StringHeader { ptr, len } => VariableLocation::StringHeader { ptr, len },
+        VariableLocation::GoSlice { ptr, len, cap } => VariableLocation::GoSlice { ptr, len, cap },
+        VariableLocation::SliceHeader { ptr, len, cap } => {
+            VariableLocation::SliceHeader { ptr, len, cap }
+        }
+        other => other,
+    }
+}
 
 /// Manages active uprobe attachments for a single target binary.
 ///
@@ -181,6 +231,30 @@ impl UprobeManager {
         goid_offset: Option<u64>,
         profile: ProfileId,
     ) -> Result<()> {
+        // Rust probes always carry a validated CapturePlan identity. Keep the
+        // legacy no-plan API for Go compatibility, but do not let a direct
+        // Rust caller silently bypass the plan compiler.
+        let plan_hash = (profile == ProfileId::Rust).then(|| format!("probe:{:x}", probe_point.pc));
+        self.attach_for_profile_with_plan(
+            metric_name,
+            probe_point,
+            g_addr_offset,
+            goid_offset,
+            profile,
+            plan_hash.as_deref(),
+        )
+    }
+
+    #[allow(unused_variables)]
+    pub fn attach_for_profile_with_plan(
+        &mut self,
+        metric_name: &str,
+        probe_point: &ProbePoint,
+        g_addr_offset: Option<i64>,
+        goid_offset: Option<u64>,
+        profile: ProfileId,
+        plan_hash: Option<&str>,
+    ) -> Result<()> {
         #[allow(unused_variables)]
         // g_addr_offset/goid_offset are only used on Linux for TLS-based goid capture
         let _ = (g_addr_offset, goid_offset);
@@ -204,6 +278,7 @@ impl UprobeManager {
             g_addr_offset,
             goid_offset,
             profile,
+            plan_hash,
         )?;
 
         let probe = AttachedProbe {
@@ -290,25 +365,92 @@ impl UprobeManager {
         g_addr_offset: Option<i64>,
         goid_offset: Option<u64>,
         profile: ProfileId,
+        plan_hash: Option<&str>,
     ) -> Result<AyaHandles> {
-        use crate::compiler::{GoBpfCompiler, RustBpfCompiler};
-        use crate::probe::loader::compile_bpf;
+        use crate::compiler::{CaptureCompiler, GoBpfCompiler, RustBpfCompiler};
+        use crate::probe::loader::compile_bpf_for_arch;
+        use crate::probe::program::BpfProgram;
         use aya::programs::uprobe::UProbeLink;
         use aya::programs::UProbe;
 
+        let compile_point = if profile == ProfileId::Rust {
+            rust_frame_probe_point(probe_point)
+        } else {
+            probe_point.clone()
+        };
+        if profile == ProfileId::Rust {
+            detrix_logging::debug!(
+                "[uprobe] Rust compile locations: {:?}",
+                compile_point
+                    .variables
+                    .iter()
+                    .map(|v| (&v.name, &v.location))
+                    .collect::<Vec<_>>()
+            );
+        }
+
         // Step 1: Generate BPF C source from variable locations
         let bpf_program = match profile {
-            ProfileId::Go => GoBpfCompiler {
-                config: self.capture_config.clone(),
-                capture_goid: self.capture_config.capture_goid,
-                g_addr_offset,
-                goid_offset,
+            ProfileId::Go => {
+                let compiler = GoBpfCompiler {
+                    config: self.capture_config.clone(),
+                    capture_goid: self.capture_config.capture_goid,
+                    g_addr_offset,
+                    goid_offset,
+                };
+                // Every Go location form must enter through the validated
+                // CapturePlan boundary. The existing Go generator remains the
+                // compatibility renderer behind `CaptureCompiler::compile`,
+                // but an unrepresentable layout now fails closed instead of
+                // silently bypassing plan validation.
+                let plan = GoBpfCompiler::plan_from_probe(
+                    probe_point,
+                    format!("probe:{:x}", probe_point.pc),
+                )
+                .map_err(|error| {
+                    detrix_logging::warn!(
+                        "[uprobe] Go CapturePlan rejected '{}': {}",
+                        metric_name,
+                        error
+                    );
+                    Error::Ebpf(error.to_string())
+                })?;
+                compiler
+                    .compile(&plan)
+                    .and_then(|compiled| {
+                        String::from_utf8(compiled.artifact)
+                            .map(|source| BpfProgram {
+                                source,
+                                var_count: probe_point.variables.len(),
+                                captures_goid: self.capture_config.capture_goid,
+                                g_addr_offset,
+                                goid_offset,
+                                versioned_envelope: false,
+                            })
+                            .map_err(|error| {
+                                crate::compiler::CompileError::Backend(error.to_string())
+                            })
+                    })
+                    .map_err(|error| Error::Ebpf(error.to_string()))?
             }
-            .compile_variables(&probe_point.variables)?,
-            ProfileId::Rust => RustBpfCompiler {
-                config: self.capture_config.clone(),
+            ProfileId::Rust => {
+                let compiler = RustBpfCompiler {
+                    config: self.capture_config.clone(),
+                };
+                if let Some(plan_hash) = plan_hash {
+                    // All Rust live generation now enters through CapturePlan,
+                    // including bounded String/Vec/slice headers. This keeps
+                    // the envelope identity and profile-specific layout
+                    // policy in one validated IR path.
+                    let plan = RustBpfCompiler::plan_from_probe(&compile_point, plan_hash)
+                        .map_err(|error| Error::Ebpf(error.to_string()))?;
+                    compiler
+                        .compile_plan_to_program(&plan)
+                        .map_err(|error| Error::Ebpf(error.to_string()))?
+                } else {
+                    compiler.compile_variables(&compile_point.variables)?
+                }
             }
-            .compile_variables(&probe_point.variables)?,
         };
 
         // Debug: log generated BPF source
@@ -318,8 +460,31 @@ impl UprobeManager {
             bpf_program.source
         );
 
-        // Step 2: Compile C → ELF via clang
-        let compiled = compile_bpf(&bpf_program)?;
+        // Step 2: Compile C → ELF via clang. Select the target from the
+        // resolved DWARF probe, not from the Detrix build host; this is what
+        // keeps x86-64 and AArch64 plans from silently sharing register ABI.
+        let architecture = probe_point
+            .variables
+            .iter()
+            .find_map(|variable| match variable.location {
+                VariableLocation::Register(Register::Arm64(_))
+                | VariableLocation::FrameOffset {
+                    register: Register::Arm64(_),
+                    ..
+                } => Some(crate::dwarf::types::TargetArchitecture::Aarch64),
+                VariableLocation::Register(_) | VariableLocation::FrameOffset { .. } => {
+                    Some(crate::dwarf::types::TargetArchitecture::X86_64)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                if cfg!(target_arch = "aarch64") {
+                    crate::dwarf::types::TargetArchitecture::Aarch64
+                } else {
+                    crate::dwarf::types::TargetArchitecture::X86_64
+                }
+            });
+        let compiled = compile_bpf_for_arch(&bpf_program, architecture)?;
 
         // Step 3: Load the ELF object with aya
         let mut ebpf = aya::Ebpf::load(&compiled.elf_bytes).context("aya load failed")?;
@@ -345,7 +510,9 @@ impl UprobeManager {
                 .try_into()
                 .context("Not a uprobe program")?;
 
-            program.load().context("BPF verifier rejected")?;
+            program
+                .load()
+                .map_err(|error| Error::VerifierRejected(error.to_string()))?;
 
             // Attach at symbol_offset in the target binary.
             // fn_name=None + offset=symbol_offset → mid-function attachment.
@@ -356,7 +523,7 @@ impl UprobeManager {
                     binary_path_str,
                     None, // namespace (cgroups)
                 )
-                .context("uprobe attach failed")?;
+                .map_err(|error| Error::AttachFailed(error.to_string()))?;
 
             program.take_link(link_id).context("take_link failed")?
             // &mut UProbe borrow released here

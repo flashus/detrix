@@ -1,4 +1,5 @@
 **target**
+!scripts/clean-session-target.sh
 .cargo/
 .claude/settings.local.json
 logs/
@@ -15,3 +16,5 @@ fixtures/go/go
 assets/raw/detrix_demo.mov
 assets/detrix_demo.mp4
 .spe/
+experiments/geth-spam/
+out/

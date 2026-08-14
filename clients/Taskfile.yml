@@ -8,6 +8,8 @@ version: "3"
 vars:
   SPEC_FILE: "specs/client-control-plane.openapi.yaml"
   GENERATED_DIR: ".generated"
+  SESSION_TARGET_DIR:
+    sh: "{{.ROOT_DIR}}/scripts/session-root-dir.sh"
 
 tasks:
   # ============================================================================
@@ -180,13 +182,13 @@ tasks:
     desc: Run Go client tests
     dir: go
     cmds:
-      - go test ./...
+      - GOCACHE={{.SESSION_TARGET_DIR}}/go-build GOMODCACHE={{.SESSION_TARGET_DIR}}/go-mod go test ./...
 
   go-build:
     desc: Build Go client
     dir: go
     cmds:
-      - go build ./...
+      - GOCACHE={{.SESSION_TARGET_DIR}}/go-build GOMODCACHE={{.SESSION_TARGET_DIR}}/go-mod go build ./...
 
   go-lint:
     desc: Lint Go client code
@@ -224,20 +226,20 @@ tasks:
     desc: Build Rust client
     dir: rust
     cmds:
-      - cargo build
+      - CARGO_TARGET_DIR={{.SESSION_TARGET_DIR}}/host/clients-rust cargo build
 
   rust-test:
     desc: Run Rust client tests
     dir: rust
     cmds:
-      - cargo test
+      - CARGO_TARGET_DIR={{.SESSION_TARGET_DIR}}/host/clients-rust cargo test
 
   rust-lint:
     desc: Lint Rust client code
     dir: rust
     cmds:
       # - cargo clippy --all -- -D warnings
-      - cargo clippy --all
+      - CARGO_TARGET_DIR={{.SESSION_TARGET_DIR}}/host/clients-rust cargo clippy --all
 
   rust-fmt:
     desc: Format Rust client code

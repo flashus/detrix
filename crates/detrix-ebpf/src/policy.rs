@@ -67,9 +67,25 @@ pub fn resolve_backend(
         });
     }
     if !ebpf_available {
+        if requested == CaptureBackend::Auto {
+            return Ok(BackendDecision {
+                requested,
+                selected: CaptureBackend::Dap,
+                profile,
+                reason: "eBPF unavailable; auto fell back to DAP".into(),
+            });
+        }
         return Err(PreflightError::UnsupportedPlatform);
     }
     if !debug_info_available {
+        if requested == CaptureBackend::Auto {
+            return Ok(BackendDecision {
+                requested,
+                selected: CaptureBackend::Dap,
+                profile,
+                reason: "usable variable DWARF unavailable; auto fell back to DAP".into(),
+            });
+        }
         return Err(PreflightError::MissingDebugInfo(
             "usable variable DWARF is required".into(),
         ));
@@ -100,6 +116,27 @@ mod tests {
         assert!(matches!(
             resolve_backend(CaptureBackend::Ebpf, ProfileId::Go, true, false),
             Err(PreflightError::MissingDebugInfo(_))
+        ));
+    }
+
+    #[test]
+    fn auto_falls_back_to_dap_when_ebpf_is_unavailable() {
+        let decision = resolve_backend(CaptureBackend::Auto, ProfileId::Go, false, true).unwrap();
+        assert_eq!(decision.selected, CaptureBackend::Dap);
+    }
+
+    #[test]
+    fn auto_falls_back_to_dap_when_variable_dwarf_is_missing() {
+        let decision = resolve_backend(CaptureBackend::Auto, ProfileId::Go, true, false)
+            .expect("auto must preserve a usable DAP fallback");
+        assert_eq!(decision.selected, CaptureBackend::Dap);
+    }
+
+    #[test]
+    fn explicit_ebpf_rejects_unavailable_platform() {
+        assert!(matches!(
+            resolve_backend(CaptureBackend::Ebpf, ProfileId::Go, false, true),
+            Err(PreflightError::UnsupportedPlatform)
         ));
     }
 }

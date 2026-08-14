@@ -931,10 +931,12 @@ fn infer_nested_from_map_name(type_name: &str, component: usize) -> NestedType {
         is_array: false,
         is_struct: name.contains('.') && !name.starts_with('*') && !name.starts_with("[]"),
         is_map: name.starts_with("map["),
+        is_enum: false,
         array_element_count: 0,
         array_element_type: String::new(),
         slice_element_type: String::new(),
         element_byte_size: 0,
+        enum_layout: None,
     })
 }
 

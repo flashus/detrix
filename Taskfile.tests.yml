@@ -6,6 +6,10 @@ version: "3"
 # Base images — single source of truth: fixtures/docker/images.env
 # (dotenv is not supported in included Taskfiles, so we read it via sh vars)
 vars:
+  SESSION_TARGET_DIR:
+    sh: "{{.ROOT_DIR}}/scripts/session-root-dir.sh"
+  HOST_TARGET_DIR:
+    sh: "{{.ROOT_DIR}}/scripts/session-root-dir.sh host"
   RUST_IMAGE:
     sh: grep '^RUST_IMAGE=' fixtures/docker/images.env | cut -d= -f2
   GO_IMAGE:
@@ -16,7 +20,6 @@ vars:
     sh: grep '^PYTHON_IMAGE=' fixtures/docker/images.env | cut -d= -f2
   RUNTIME_IMAGE:
     sh: grep '^RUNTIME_IMAGE=' fixtures/docker/images.env | cut -d= -f2
-
 tasks:
   check-orphans:
     desc: Check for orphaned or zombie test processes (detrix_example_app, lldb-dap, debugpy, dlv, detrix serve)
@@ -129,6 +132,11 @@ tasks:
     cmds:
       - cargo test -p detrix-dap --test rust_tests
 
+  test-dap-rust-semantic-control:
+    desc: Run the Rust DAP semantic workflow control used alongside eBPF evidence
+    cmds:
+      - RUSTC_WRAPPER= cargo test --package detrix-testing --test unified_e2e test_dap_rust_workflow -- --nocapture --test-threads=1
+
   # E2E Tests (skip gracefully when debuggers unavailable)
   e2e:
     desc: Run ALL unified E2E tests
@@ -222,11 +230,12 @@ tasks:
   #   detrix-ebpf-builder     — compiler: rust:bookworm + protobuf-compiler
   #                             (extracted from Dockerfile.ebpf-test rust-deps stage)
   #
-  # Named Docker volumes persist cargo/go caches between builds:
+  # Named Docker volumes persist Cargo/Go download caches between builds:
   #   ebpf-cargo-home    — Rust registry (CARGO_HOME); survives --rm; avoids re-downloading crates
-  #   ebpf-cargo-target  — Rust incremental build cache (avoids full recompile)
   #   ebpf-go-mod        — Go module download cache
   #   ebpf-go-build      — Go build cache
+  # All Rust target artifacts use SESSION_TARGET_DIR, shared with host checks and
+  # removable with scripts/clean-session-target.sh.
   #
   # Compiled binaries land in ./out/:
   #   out/detrix                — detrix daemon (Linux ELF)
@@ -259,11 +268,12 @@ tasks:
       # Ensure base images are available (registry pulls can fail transiently → retry)
       - |
         for img in {{.RUST_IMAGE}} {{.GO_IMAGE}}; do
-          for i in 1 2 3; do
+          docker image inspect "$img" > /dev/null 2>&1 && continue
+          for i in 1 2 3 4 5; do
             docker pull "$img" > /dev/null 2>&1 && break
-            echo "docker pull $img failed (attempt $i/3), retrying in 5s..."
+            echo "docker pull $img failed (attempt $i/5), retrying in 5s..."
             sleep 5
-            [ "$i" -eq 3 ] && { echo "docker pull $img failed after 3 attempts"; exit 1; }
+            [ "$i" -eq 5 ] && { echo "docker pull $img failed after 5 attempts"; exit 1; }
           done
         done
       # Extract the rust-deps stage — it has protobuf-compiler installed and
@@ -275,35 +285,41 @@ tasks:
     desc: "Compile shared eBPF artifacts used by inject-style tests (daemon + Go/Rust fixtures)"
     vars:
       BUILDER: detrix-ebpf-builder
-      OUT: "{{.ROOT_DIR}}/out"
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
     deps: [build-ebpf-builder]
     cmds:
-      - mkdir -p {{.OUT}}
+      # Remove stale directory placeholders that Docker can create when a
+      # file bind-mount is attempted before the artifact exists. These paths
+      # are generated outputs inside the disposable session target only.
+      - mkdir -p {{.OUT}} {{.SESSION_TARGET_DIR}}/docker && rm -rf {{.OUT}}/agent_e2e_test
       # Ensure the Go toolchain image is available (registry pulls can fail transiently → retry)
       - |
-        for i in 1 2 3; do
+        docker image inspect {{.GO_IMAGE}} > /dev/null 2>&1 || for i in 1 2 3 4 5; do
           docker pull {{.GO_IMAGE}} > /dev/null 2>&1 && break
-          echo "docker pull {{.GO_IMAGE}} failed (attempt $i/3), retrying in 5s..."
+          echo "docker pull {{.GO_IMAGE}} failed (attempt $i/5), retrying in 5s..."
           sleep 5
-          [ "$i" -eq 3 ] && { echo "docker pull {{.GO_IMAGE}} failed after 3 attempts"; exit 1; }
+          [ "$i" -eq 5 ] && { echo "docker pull {{.GO_IMAGE}} failed after 5 attempts"; exit 1; }
         done
       - |
         docker run --rm \
           -v "{{.ROOT_DIR}}:/src" \
           -v "ebpf-cargo-home:/usr/local/cargo" \
-          -v "ebpf-cargo-target:/build/target" \
+          -v "{{.SESSION_TARGET_DIR}}/docker:/build/target" \
+          -v "{{.SESSION_TARGET_DIR}}/out:/out" \
           -w /src \
           {{.BUILDER}} \
           sh -c "
+            mkdir -p /out /build/target &&
             CARGO_TARGET_DIR=/build/target cargo build --release --locked --bin detrix &&
-            cp -p /build/target/release/detrix /src/out/detrix.tmp &&
-            mv -f /src/out/detrix.tmp /src/out/detrix
+            cat /build/target/release/detrix > /out/detrix.tmp &&
+            chmod 755 /out/detrix.tmp &&
+            mv -f /out/detrix.tmp /out/detrix
           "
       - |
         docker run --rm \
           -v "{{.ROOT_DIR}}/fixtures/go/string_capture:/src/fixtures/go/string_capture:ro" \
           -v "{{.ROOT_DIR}}/clients/go:/src/clients/go:ro" \
-          -v "{{.ROOT_DIR}}/out:/out" \
+          -v "{{.SESSION_TARGET_DIR}}/out:/out" \
           -v "ebpf-go-mod:/go/pkg/mod" \
           -v "ebpf-go-build:/root/.cache/go-build" \
           -w /src/fixtures/go/string_capture \
@@ -320,15 +336,60 @@ tasks:
         docker run --rm \
           -v "{{.ROOT_DIR}}:/src" \
           -v "ebpf-cargo-home:/usr/local/cargo" \
-          -v "ebpf-cargo-target:/build/target" \
+          -v "{{.SESSION_TARGET_DIR}}/docker:/build/target" \
+          -v "{{.SESSION_TARGET_DIR}}/out:/out" \
           -w /src \
           {{.BUILDER}} \
           sh -c '
-            cargo build --release --locked \
+            mkdir -p /out /build/target &&
+            RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release --locked \
               --manifest-path fixtures/rust/Cargo.toml \
               --target-dir /build/target/fixture-rust && \
-            install -m 755 /build/target/fixture-rust/release/detrix_example_app \
-              /src/out/rust_detrix_example_app
+            cat /build/target/fixture-rust/release/detrix_example_app > \
+              /out/rust_detrix_example_app.tmp && \
+            chmod 755 /out/rust_detrix_example_app.tmp && \
+            mv -f /out/rust_detrix_example_app.tmp /out/rust_detrix_example_app && \
+            cat /build/target/fixture-rust/release/detrix_composite_app > \
+              /out/rust_composite_app.tmp && \
+            chmod 755 /out/rust_composite_app.tmp && \
+            mv -f /out/rust_composite_app.tmp /out/rust_composite_app && \
+            RUSTFLAGS="-C force-frame-pointers=yes" cargo rustc --release --locked \
+              --manifest-path fixtures/rust/Cargo.toml \
+              --target-dir /build/target/fixture-rust \
+              --bin detrix_optimized_app -- -C opt-level=3 -C debuginfo=2 && \
+            cat /build/target/fixture-rust/release/detrix_optimized_app > \
+              /out/rust_optimized_app.tmp && \
+            chmod 755 /out/rust_optimized_app.tmp && \
+            mv -f /out/rust_optimized_app.tmp /out/rust_optimized_app
+          '
+      - |
+        {
+          echo "source_revision=$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+          echo "fixture_flags=RUSTFLAGS=-C force-frame-pointers=yes; profile.release.debug=2; profile.release.strip=none; regular-opt-level=0; optimized-fixture=-C opt-level=3"
+          echo "rust_example_sha256=$(shasum -a 256 {{.OUT}}/rust_detrix_example_app | awk '{print $1}')"
+          echo "rust_composite_sha256=$(shasum -a 256 {{.OUT}}/rust_composite_app | awk '{print $1}')"
+          echo "rust_optimized_sha256=$(shasum -a 256 {{.OUT}}/rust_optimized_app | awk '{print $1}')"
+          docker run --rm -v "ebpf-cargo-home:/usr/local/cargo" {{.BUILDER}} rustc -Vv
+        } > {{.OUT}}/rust-ebpf-build-metadata.txt
+
+  build-rust-external-debug:
+    desc: "Create stripped Rust composite executable plus GNU debuglink image"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
+    deps: [build-ebpf-playground, build-agent-bins]
+    cmds:
+      - |
+        docker run --rm \
+          -v "{{.OUT}}:/out" \
+          {{.PLAYGROUND}} \
+          sh -c '
+            set -eu
+            cp /out/rust_composite_app /out/rust_composite_app.stripped
+            llvm-objcopy --only-keep-debug /out/rust_composite_app /out/rust_composite_app.debug
+            llvm-objcopy --strip-debug /out/rust_composite_app.stripped
+            llvm-objcopy --add-gnu-debuglink=/out/rust_composite_app.debug /out/rust_composite_app.stripped
+            chmod 755 /out/rust_composite_app.stripped
           '
 
   build-ebpf-bins:
@@ -336,17 +397,18 @@ tasks:
     deps: [build-ebpf-shared-bins]
     vars:
       BUILDER: detrix-ebpf-builder
-      OUT: "{{.ROOT_DIR}}/out"
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
     cmds:
-      - mkdir -p {{.OUT}}
+      - mkdir -p {{.OUT}} {{.SESSION_TARGET_DIR}}/docker
       # Ensure Go toolchain images are available (registry pulls can fail transiently → retry)
       - |
         for img in {{.GO_IMAGE}} {{.GO_CLASSIC_IMAGE}}; do
-          for i in 1 2 3; do
+          docker image inspect "$img" > /dev/null 2>&1 && continue
+          for i in 1 2 3 4 5; do
             docker pull "$img" > /dev/null 2>&1 && break
-            echo "docker pull $img failed (attempt $i/3), retrying in 5s..."
+            echo "docker pull $img failed (attempt $i/5), retrying in 5s..."
             sleep 5
-            [ "$i" -eq 3 ] && { echo "docker pull $img failed after 3 attempts"; exit 1; }
+            [ "$i" -eq 5 ] && { echo "docker pull $img failed after 5 attempts"; exit 1; }
           done
         done
       # ── Rust: daemon + test binary ──────────────────────────────────────────
@@ -354,30 +416,32 @@ tasks:
       # Named volumes persist caches across runs:
       #   ebpf-cargo-home   — CARGO_HOME registry; Docker initialises from image on first use,
       #                        then caches any newly-downloaded crates so --rm never loses them.
-      #   ebpf-cargo-target — incremental build artefacts (avoids full recompile).
+      #   SESSION_TARGET_DIR — shared Rust target artefacts (cleanable in one step).
       - |
         docker run --rm \
           -v "{{.ROOT_DIR}}:/src" \
           -v "ebpf-cargo-home:/usr/local/cargo" \
-          -v "ebpf-cargo-target:/build/target" \
+          -v "{{.SESSION_TARGET_DIR}}/docker:/build/target" \
+          -v "{{.SESSION_TARGET_DIR}}/out:/out" \
           -w /src \
           {{.BUILDER}} \
           sh -c "
+            mkdir -p /out /build/target &&
             CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
               --package detrix-testing --test ebpf_e2e &&
             CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
               --package detrix-testing --test ebpf_nested_types_e2e &&
             find /build/target/debug/deps -maxdepth 1 -type f -perm -111 -name 'ebpf_e2e-*' -printf '%T@ %p\n' \
-              | sort -nr | head -1 | cut -d' ' -f2- | xargs -I{} cp -p {} /src/out/ebpf_e2e_test &&
+              | sort -nr | head -1 | cut -d' ' -f2- | xargs -I{} cp -p {} /out/ebpf_e2e_test &&
             find /build/target/debug/deps -maxdepth 1 -type f -perm -111 -name 'ebpf_nested_types_e2e-*' -printf '%T@ %p\n' \
-              | sort -nr | head -1 | cut -d' ' -f2- | xargs -I{} cp -p {} /src/out/ebpf_nested_types_e2e_test
+              | sort -nr | head -1 | cut -d' ' -f2- | xargs -I{} cp -p {} /out/ebpf_nested_types_e2e_test
           "
       # Build nested_types fixture (nested struct capture tests)
       - |
         docker run --rm \
           -v "{{.ROOT_DIR}}/fixtures/go/nested_types:/src/fixtures/go/nested_types:ro" \
           -v "{{.ROOT_DIR}}/clients/go:/src/clients/go:ro" \
-          -v "{{.ROOT_DIR}}/out:/out" \
+          -v "{{.SESSION_TARGET_DIR}}/out:/out" \
           -v "ebpf-go-mod:/go/pkg/mod" \
           -v "ebpf-go-build:/root/.cache/go-build" \
           -w /src/fixtures/go/nested_types \
@@ -394,7 +458,7 @@ tasks:
         docker run --rm \
           -v "{{.ROOT_DIR}}/fixtures/go/classic_map:/src/fixtures/go/classic_map:ro" \
           -v "{{.ROOT_DIR}}/clients/go:/src/clients/go:ro" \
-          -v "{{.ROOT_DIR}}/out:/out" \
+          -v "{{.SESSION_TARGET_DIR}}/out:/out" \
           -v "ebpf-go-mod:/go/pkg/mod" \
           -v "ebpf-go-build:/root/.cache/go-build" \
           -w /src/fixtures/go/classic_map \
@@ -408,21 +472,22 @@ tasks:
         docker run --rm \
           -v "{{.ROOT_DIR}}:/src" \
           -v "ebpf-cargo-home:/usr/local/cargo" \
-          -v "ebpf-cargo-target:/build/target" \
+          -v "{{.SESSION_TARGET_DIR}}/docker:/build/target" \
+          -v "{{.SESSION_TARGET_DIR}}/out:/out" \
           -w /src \
           {{.BUILDER}} \
           sh -c "
             CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
               --package detrix-testing --test ebpf_classic_map_e2e &&
             find /build/target/debug/deps -maxdepth 1 -type f -perm -111 -name 'ebpf_classic_map_e2e-*' -printf '%T@ %p\n' \
-              | sort -nr | head -1 | cut -d' ' -f2- | xargs -I{} cp -p {} /src/out/ebpf_classic_map_e2e_test
+              | sort -nr | head -1 | cut -d' ' -f2- | xargs -I{} cp -p {} /out/ebpf_classic_map_e2e_test
           "
 
   test-ebpf-inject:
     desc: "Run eBPF tests: compile binaries then mount into playground (fastest iteration)"
     vars:
       PLAYGROUND: detrix-ebpf-playground
-      OUT: "{{.ROOT_DIR}}/out"
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
     deps: [build-ebpf-bins]
     cmds:
       - |
@@ -447,7 +512,7 @@ tasks:
     desc: "Run eBPF nested types test: mount pre-built binaries into playground"
     vars:
       PLAYGROUND: detrix-ebpf-playground
-      OUT: "{{.ROOT_DIR}}/out"
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
     deps: [build-ebpf-bins]
     cmds:
       - |
@@ -468,7 +533,7 @@ tasks:
     desc: "Run eBPF classic map test (Go < 1.24): mount pre-built binaries into playground"
     vars:
       PLAYGROUND: detrix-ebpf-playground
-      OUT: "{{.ROOT_DIR}}/out"
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
     deps: [build-ebpf-bins]
     cmds:
       - |
@@ -587,7 +652,7 @@ tasks:
             exit 1
           fi
       TARGET_DIR:
-        sh: printf '%s\n' "${DETRIX_TEST_TARGET_DIR:-/private/tmp/detrix-cloud-target}"
+        sh: "{{.ROOT_DIR}}/scripts/session-root-dir.sh host"
     cmds:
       - |
         RUSTC_WRAPPER= CARGO_TARGET_DIR="{{.TARGET_DIR}}" cargo build --release --bin detrix
@@ -623,23 +688,26 @@ tasks:
     deps: [build-ebpf-shared-bins]
     vars:
       BUILDER: detrix-ebpf-builder
-      OUT: "{{.ROOT_DIR}}/out"
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
     cmds:
-      - mkdir -p {{.OUT}}
+      - mkdir -p {{.OUT}} {{.SESSION_TARGET_DIR}}/docker && rm -rf {{.OUT}}/agent_e2e_test
       - |
         docker run --rm \
           -v "{{.ROOT_DIR}}:/src" \
           -v "ebpf-cargo-home:/usr/local/cargo" \
-          -v "ebpf-cargo-target:/build/target" \
+          -v "{{.SESSION_TARGET_DIR}}/docker:/build/target" \
+          -v "{{.SESSION_TARGET_DIR}}/out:/out" \
           -w /src \
           {{.BUILDER}} \
           sh -c "
+            mkdir -p /out /build/target &&
             CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
               --package detrix-testing --test agent_e2e &&
             TEST_BIN=\$(find /build/target/debug/deps -maxdepth 1 -type f -perm -111 -name 'agent_e2e-*' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-) &&
-            rm -f /src/out/agent_e2e_test /src/out/agent_e2e_test.tmp &&
-            install -m 755 \"\$TEST_BIN\" /src/out/agent_e2e_test.tmp &&
-            mv -f /src/out/agent_e2e_test.tmp /src/out/agent_e2e_test
+            rm -f /out/agent_e2e_test /out/agent_e2e_test.tmp &&
+            cat \"\$TEST_BIN\" > /out/agent_e2e_test.tmp &&
+            chmod 755 /out/agent_e2e_test.tmp &&
+            mv -f /out/agent_e2e_test.tmp /out/agent_e2e_test
           "
 
   # Agent Mode E2E Tests
@@ -647,7 +715,7 @@ tasks:
     desc: "Run agent mode E2E tests in the shared eBPF playground runner"
     vars:
       PLAYGROUND: detrix-ebpf-playground
-      OUT: "{{.ROOT_DIR}}/out"
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
     deps: [build-ebpf-playground, build-agent-bins]
     cmds:
       - |
@@ -655,22 +723,24 @@ tasks:
           -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
           -v "{{.OUT}}/detrix_example_app:/usr/local/bin/detrix_example_app:ro" \
           -v "{{.OUT}}/agent_e2e_test:/usr/local/bin/agent_e2e_test:ro" \
-          -v "{{.OUT}}/rust_detrix_example_app:/usr/local/bin/rust_detrix_example_app:ro" \
           -v "{{.ROOT_DIR}}/fixtures/go/string_capture:/src/fixtures/go/string_capture:ro" \
-          -v "{{.ROOT_DIR}}/fixtures/rust:/src/fixtures/rust:ro" \
           -e DETRIX_BIN=/usr/local/bin/detrix \
           -e AGENT_FIXTURE_BINARY=/usr/local/bin/detrix_example_app \
           -e AGENT_FIXTURE_SOURCE=/src/fixtures/go/string_capture/main.go \
-          -e RUST_FIXTURE_BINARY=/usr/local/bin/rust_detrix_example_app \
-          -e RUST_FIXTURE_SOURCE=/src/fixtures/rust/src/main.rs \
           {{.PLAYGROUND}} \
-          /usr/local/bin/agent_e2e_test --ignored --nocapture --test-threads=1
+          sh -c '
+            /usr/local/bin/agent_e2e_test test_agent_go_ebpf_basic --ignored --nocapture --test-threads=1 &&
+            /usr/local/bin/agent_e2e_test test_agent_reconnect --ignored --nocapture --test-threads=1 &&
+            /usr/local/bin/agent_e2e_test test_agent_mcp_roundtrip --ignored --nocapture --test-threads=1 &&
+            /usr/local/bin/agent_e2e_test test_agent_wrong_token --ignored --nocapture --test-threads=1 &&
+            /usr/local/bin/agent_e2e_test test_agent_scanner_update --ignored --nocapture --test-threads=1
+          '
 
   test-agent-rust:
     desc: "Run the explicit Rust eBPF agent smoke test in the shared privileged playground"
     vars:
       PLAYGROUND: detrix-ebpf-playground
-      OUT: "{{.ROOT_DIR}}/out"
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
     deps: [build-ebpf-playground, build-agent-bins]
     cmds:
       - |
@@ -686,11 +756,191 @@ tasks:
           {{.PLAYGROUND}} \
           /usr/local/bin/agent_e2e_test test_agent_rust_ebpf_basic --ignored --nocapture --test-threads=1
 
+  test-agent-rust-composite:
+    desc: "Run the bounded Rust struct/array eBPF smoke test in the shared privileged playground"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
+    deps: [build-ebpf-playground, build-agent-bins]
+    cmds:
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/rust_composite_app:/usr/local/bin/rust_composite_app:ro" \
+          -v "{{.OUT}}/agent_e2e_test:/usr/local/bin/agent_e2e_test:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/rust:/src/fixtures/rust:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e RUST_COMPOSITE_FIXTURE_BINARY=/usr/local/bin/rust_composite_app \
+          -e RUST_COMPOSITE_FIXTURE_SOURCE=/src/fixtures/rust/src/composite.rs \
+          -e DETRIX_AGENT_RUST_EBPF=1 \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/agent_e2e_test test_agent_rust_ebpf_composite --ignored --nocapture --test-threads=1
+
+  test-agent-rust-headers:
+    desc: "Run live Rust String, &str, Vec, slice, and explicit-enum header controls"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
+    deps: [build-ebpf-playground, build-agent-bins]
+    cmds:
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/rust_composite_app:/usr/local/bin/rust_composite_app:ro" \
+          -v "{{.OUT}}/agent_e2e_test:/usr/local/bin/agent_e2e_test:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/rust:/src/fixtures/rust:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e RUST_COMPOSITE_FIXTURE_BINARY=/usr/local/bin/rust_composite_app \
+          -e RUST_COMPOSITE_FIXTURE_SOURCE=/src/fixtures/rust/src/composite.rs \
+          -e DETRIX_AGENT_RUST_EBPF=1 \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/agent_e2e_test test_agent_rust_ebpf_headers --ignored --nocapture --test-threads=1
+
+  test-agent-rust-external-debug:
+    desc: "Run Rust header capture against a stripped executable with external GNU debuglink DWARF"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
+    deps: [build-rust-external-debug]
+    cmds:
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/rust_composite_app.stripped:/usr/local/bin/rust_composite_app:ro" \
+          -v "{{.OUT}}/rust_composite_app.debug:/usr/local/bin/rust_composite_app.debug:ro" \
+          -v "{{.OUT}}/agent_e2e_test:/usr/local/bin/agent_e2e_test:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/rust:/src/fixtures/rust:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e RUST_EXTERNAL_FIXTURE_BINARY=/usr/local/bin/rust_composite_app \
+          -e RUST_COMPOSITE_FIXTURE_SOURCE=/src/fixtures/rust/src/composite.rs \
+          -e DETRIX_AGENT_RUST_EBPF=1 \
+          -e DETRIX_AGENT_DEBUG_INFO_PATH=/usr/local/bin/rust_composite_app.debug \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/agent_e2e_test test_agent_rust_ebpf_headers --ignored --nocapture --test-threads=1
+
+  test-rust-external-debug-provider:
+    desc: "Run the host GNU debuglink provider gate against shared Rust artifacts"
+    vars:
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
+      TARGET_DIR: "{{.HOST_TARGET_DIR}}"
+    cmds:
+      - test -f "{{.OUT}}/rust_composite_app.stripped"
+      - test -f "{{.OUT}}/rust_composite_app.debug"
+      - |
+        DETRIX_EXTERNAL_DEBUG_BINARY="{{.OUT}}/rust_composite_app.stripped" \
+        DETRIX_EXTERNAL_DEBUG_IMAGE="{{.OUT}}/rust_composite_app.debug" \
+        CARGO_TARGET_DIR="{{.TARGET_DIR}}" \
+        cargo --config 'build.rustc-wrapper=""' test -p detrix-ebpf \
+          external_provider_selects_gnu_debuglink_image --offline -j 2 -- --ignored --nocapture
+
+  test-agent-rust-composite-high-rate:
+    desc: "Run the Rust composite capture control at high target activity"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
+    deps: [build-ebpf-playground, build-agent-bins]
+    cmds:
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/rust_composite_app:/usr/local/bin/rust_composite_app:ro" \
+          -v "{{.OUT}}/agent_e2e_test:/usr/local/bin/agent_e2e_test:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/rust:/src/fixtures/rust:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e RUST_COMPOSITE_FIXTURE_BINARY=/usr/local/bin/rust_composite_app \
+          -e RUST_COMPOSITE_FIXTURE_SOURCE=/src/fixtures/rust/src/composite.rs \
+          -e RUST_COMPOSITE_INTERVAL_MS=1 \
+          -e DETRIX_AGENT_RUST_EBPF=1 \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/agent_e2e_test test_agent_rust_ebpf_composite --ignored --nocapture --test-threads=1
+
+  test-agent-rust-reconnect:
+    desc: "Run the Rust eBPF reconnect and metric-restoration control"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
+    deps: [build-ebpf-playground, build-agent-bins]
+    cmds:
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/rust_detrix_example_app:/usr/local/bin/rust_detrix_example_app:ro" \
+          -v "{{.OUT}}/agent_e2e_test:/usr/local/bin/agent_e2e_test:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/rust:/src/fixtures/rust:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e RUST_FIXTURE_BINARY=/usr/local/bin/rust_detrix_example_app \
+          -e RUST_FIXTURE_SOURCE=/src/fixtures/rust/src/main.rs \
+          -e DETRIX_AGENT_RUST_EBPF=1 \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/agent_e2e_test test_agent_rust_ebpf_reconnect --ignored --nocapture --test-threads=1
+
+  test-agent-lifecycle:
+    desc: "Run privileged target-exit and agent-shutdown cleanup controls"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
+    deps: [build-ebpf-playground, build-agent-bins]
+    cmds:
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/detrix_example_app:/usr/local/bin/detrix_example_app:ro" \
+          -v "{{.OUT}}/agent_e2e_test:/usr/local/bin/agent_e2e_test:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/go/string_capture:/src/fixtures/go/string_capture:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e AGENT_FIXTURE_BINARY=/usr/local/bin/detrix_example_app \
+          -e AGENT_FIXTURE_SOURCE=/src/fixtures/go/string_capture/main.go \
+          -e DETRIX_AGENT_RUST_EBPF=1 \
+          {{.PLAYGROUND}} sh -c '
+            /usr/local/bin/agent_e2e_test test_agent_target_exit_detaches_connection --ignored --nocapture --test-threads=1 &&
+            /usr/local/bin/agent_e2e_test test_agent_shutdown_detaches_connection --ignored --nocapture --test-threads=1
+          '
+
+  test-agent-rust-unavailable:
+    desc: "Verify unsupported Rust variables fail closed before probe installation"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
+    deps: [build-ebpf-playground, build-agent-bins]
+    cmds:
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/rust_detrix_example_app:/usr/local/bin/rust_detrix_example_app:ro" \
+          -v "{{.OUT}}/agent_e2e_test:/usr/local/bin/agent_e2e_test:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/rust:/src/fixtures/rust:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e RUST_FIXTURE_BINARY=/usr/local/bin/rust_detrix_example_app \
+          -e RUST_FIXTURE_SOURCE=/src/fixtures/rust/src/main.rs \
+          -e DETRIX_AGENT_RUST_EBPF=1 \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/agent_e2e_test test_agent_rust_ebpf_unavailable_variable_fails_closed --ignored --nocapture --test-threads=1
+
+  test-agent-rust-optimized-unavailable:
+    desc: "Verify optimized-out Rust DWARF locals fail closed before probe installation"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
+    deps: [build-ebpf-playground, build-agent-bins]
+    cmds:
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/rust_optimized_app:/usr/local/bin/rust_optimized_app:ro" \
+          -v "{{.OUT}}/agent_e2e_test:/usr/local/bin/agent_e2e_test:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/rust:/src/fixtures/rust:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e RUST_OPTIMIZED_FIXTURE_BINARY=/usr/local/bin/rust_optimized_app \
+          -e RUST_OPTIMIZED_FIXTURE_SOURCE=/src/fixtures/rust/src/optimized.rs \
+          -e DETRIX_AGENT_RUST_EBPF=1 \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/agent_e2e_test test_agent_rust_ebpf_optimized_variable_fails_closed --ignored --nocapture --test-threads=1
+
   test-agent-both:
     desc: "Run Go and Rust eBPF services together under one Detrix agent"
     vars:
       PLAYGROUND: detrix-ebpf-playground
-      OUT: "{{.ROOT_DIR}}/out"
+      OUT: "{{.SESSION_TARGET_DIR}}/out"
     deps: [build-ebpf-playground, build-agent-bins]
     cmds:
       - |
@@ -716,4 +966,5 @@ tasks:
   docker-clean:
     desc: Delete Docker volumes that cache Cargo/Go build artefacts for agent-mode tests (forces a full rebuild next run)
     cmds:
-      - docker volume rm -f ebpf-cargo-home ebpf-cargo-target ebpf-go-mod ebpf-go-build
+      - docker volume rm -f ebpf-cargo-home ebpf-go-mod ebpf-go-build
+      - ./scripts/clean-session-target.sh

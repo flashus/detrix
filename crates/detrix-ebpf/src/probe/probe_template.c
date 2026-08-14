@@ -15,6 +15,7 @@
 
 // linux/types.h (via linux/bpf.h) defines __u32/__u64 but NOT u32/u64 in userspace.
 typedef __u8 u8;
+typedef __u16 u16;
 typedef __u32 u32;
 typedef __u64 u64;
 

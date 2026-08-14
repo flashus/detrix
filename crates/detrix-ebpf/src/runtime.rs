@@ -20,9 +20,53 @@ pub enum RuntimeState {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeCounters {
+    /// Every record handed to the decoder, including malformed records.
+    pub records_seen: u64,
     pub records_decoded: u64,
     pub decode_drops: u64,
     pub unavailable_fields: u64,
+    /// Drops reported by the kernel ring buffer for this capture plan.
+    pub kernel_drops: u64,
+    /// Drops between the adapter and the Agent/server transport.
+    pub transport_drops: u64,
+}
+
+impl RuntimeCounters {
+    /// Number of records accounted for by decode success or decode failure.
+    pub fn input_records(&self) -> u64 {
+        self.records_seen
+    }
+
+    /// Validate the local accounting invariant before exporting diagnostics.
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        if self.records_seen != self.records_decoded.saturating_add(self.decode_drops) {
+            return Err(RuntimeError::CounterInvariant {
+                decoded: self.records_decoded,
+                dropped: self.decode_drops,
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate the second accounting boundary after the Agent forwarder has
+    /// observed the runtime. Kernel drops are intentionally excluded: they
+    /// occur before a record reaches this runtime and are reported separately.
+    pub fn validate_reconciliation(
+        &self,
+        forwarded: u64,
+        transport_drops: u64,
+    ) -> Result<(), RuntimeError> {
+        self.validate()?;
+        let accounted = forwarded.saturating_add(transport_drops);
+        if self.records_decoded != accounted {
+            return Err(RuntimeError::ForwardingInvariant {
+                decoded: self.records_decoded,
+                forwarded,
+                transport_drops,
+            });
+        }
+        Ok(())
+    }
 }
 
 pub struct ProfiledCaptureRuntime {
@@ -64,6 +108,31 @@ impl ProfiledCaptureRuntime {
     }
     pub fn counters(&self) -> RuntimeCounters {
         self.counters
+    }
+
+    pub fn validate_counters(&self) -> Result<(), RuntimeError> {
+        self.counters.validate()
+    }
+
+    pub fn validate_reconciliation(
+        &self,
+        forwarded: u64,
+        transport_drops: u64,
+    ) -> Result<(), RuntimeError> {
+        self.counters
+            .validate_reconciliation(forwarded, transport_drops)
+    }
+
+    pub fn record_kernel_drops(&mut self, count: u64) {
+        self.counters.kernel_drops = self.counters.kernel_drops.saturating_add(count);
+    }
+
+    pub fn record_transport_drops(&mut self, count: u64) {
+        self.counters.transport_drops = self.counters.transport_drops.saturating_add(count);
+    }
+
+    pub fn record_unavailable_fields(&mut self, count: u64) {
+        self.counters.unavailable_fields = self.counters.unavailable_fields.saturating_add(count);
     }
 
     /// Build the versioned record that the live decoder consumes. The Linux
@@ -118,6 +187,7 @@ impl ProfiledCaptureRuntime {
         if self.state != RuntimeState::Active {
             return Err(RuntimeError::NotActive(self.state));
         }
+        self.counters.records_seen = self.counters.records_seen.saturating_add(1);
         let result = self.decode_record(record);
         match result {
             Ok(values) => {
@@ -192,6 +262,14 @@ pub enum RuntimeError {
     Envelope(#[from] EnvelopeError),
     #[error("scalar decode error: {0}")]
     Decode(#[from] crate::decode::ScalarDecodeError),
+    #[error("runtime counter invariant failed: decoded={decoded}, dropped={dropped}")]
+    CounterInvariant { decoded: u64, dropped: u64 },
+    #[error("runtime forwarding invariant failed: decoded={decoded}, forwarded={forwarded}, transport_drops={transport_drops}")]
+    ForwardingInvariant {
+        decoded: u64,
+        forwarded: u64,
+        transport_drops: u64,
+    },
 }
 
 #[cfg(test)]
@@ -240,5 +318,56 @@ mod tests {
             Err(RuntimeError::StalePlan { .. })
         ));
         assert_eq!(runtime.counters().decode_drops, 1);
+        assert_eq!(runtime.counters().records_seen, 1);
+        runtime.validate_counters().unwrap();
+    }
+
+    #[test]
+    fn drop_dimensions_are_recorded_independently() {
+        let mut runtime = runtime();
+        runtime.record_kernel_drops(3);
+        runtime.record_transport_drops(2);
+        runtime.record_unavailable_fields(1);
+        let counters = runtime.counters();
+        assert_eq!(counters.kernel_drops, 3);
+        assert_eq!(counters.transport_drops, 2);
+        assert_eq!(counters.unavailable_fields, 1);
+        assert_eq!(counters.decode_drops, 0);
+    }
+
+    #[test]
+    fn forwarding_reconciliation_distinguishes_transport_loss() {
+        let mut runtime = runtime();
+        runtime.prepare().unwrap();
+        runtime.attach().unwrap();
+        runtime.activate().unwrap();
+        for value in [1u64, 2, 3] {
+            let envelope = EventEnvelope::new("rust", "sha256:plan", 1, 8);
+            let record = envelope.encode_record(&value.to_le_bytes(), 64).unwrap();
+            runtime.ingest(&record).unwrap();
+        }
+        assert!(runtime.validate_reconciliation(2, 1).is_ok());
+        assert!(matches!(
+            runtime.validate_reconciliation(1, 1),
+            Err(RuntimeError::ForwardingInvariant { .. })
+        ));
+    }
+
+    #[test]
+    fn no_target_control_rejects_records_after_detach() {
+        let mut runtime = runtime();
+        runtime.prepare().unwrap();
+        runtime.attach().unwrap();
+        runtime.activate().unwrap();
+        runtime.detach().unwrap();
+        let envelope = EventEnvelope::new("rust", "sha256:plan", 1, 8);
+        let record = envelope.encode_record(&1u64.to_le_bytes(), 64).unwrap();
+        assert!(matches!(
+            runtime.ingest(&record),
+            Err(RuntimeError::NotActive(RuntimeState::Detached))
+        ));
+        assert_eq!(runtime.counters().records_decoded, 0);
+        assert_eq!(runtime.counters().records_seen, 0);
+        runtime.validate_counters().unwrap();
     }
 }

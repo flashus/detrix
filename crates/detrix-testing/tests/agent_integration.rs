@@ -177,6 +177,10 @@ fn test_incoming_agent_message_variants() {
     let drop_count = IncomingAgentMessage::DropCount {
         connection_id: ConnectionId("conn-1".to_string()),
         total_events_dropped: 42,
+        kernel_events_dropped: 0,
+        decode_events_dropped: 0,
+        unavailable_fields: 0,
+        events_decoded: 0,
     };
     assert!(matches!(drop_count, IncomingAgentMessage::DropCount { .. }));
 }
@@ -205,6 +209,7 @@ fn test_agent_capabilities_from_proto() {
         dap_python: false,
         dap_go: true,
         dap_rust: false,
+        ..Default::default()
     };
 
     let caps = AgentCapabilities {
@@ -236,6 +241,7 @@ fn test_binary_info_equality() {
         build_info: String::new(),
         has_dwarf: true,
         exported_functions: Vec::new(),
+        language: "go".into(),
     };
 
     let b2 = BinaryInfo {
@@ -245,6 +251,7 @@ fn test_binary_info_equality() {
         build_info: String::new(),
         has_dwarf: true,
         exported_functions: Vec::new(),
+        language: "go".into(),
     };
 
     assert_eq!(b1, b2);
@@ -257,6 +264,7 @@ fn test_binary_info_equality() {
         build_info: String::new(),
         has_dwarf: true,
         exported_functions: Vec::new(),
+        language: "go".into(),
     };
 
     assert_ne!(b1, b3);
@@ -305,6 +313,10 @@ fn test_drop_count_update() {
         msg: Some(Msg::DropCount(DropCountUpdate {
             connection_id: "conn-1".to_string(),
             total_events_dropped: 42,
+            kernel_events_dropped: 0,
+            decode_events_dropped: 0,
+            unavailable_fields: 0,
+            events_decoded: 0,
         })),
     };
 

@@ -19,20 +19,22 @@ impl<T> PcCandidate<T> {
 }
 
 /// Select a complete candidate when possible, otherwise retain the candidate
-/// with the largest supported subset. Ties preserve input order.
+/// with the largest supported subset. When several rows expose the same
+/// fields, prefer the earliest PC on the requested line. This avoids probing
+/// after a compiler has moved a local into a call argument or teardown slot;
+/// location validity alone does not guarantee the value remains initialized.
 pub fn select_best<T>(
     candidates: impl IntoIterator<Item = PcCandidate<T>>,
 ) -> Option<PcCandidate<T>> {
     let mut best = None;
     for candidate in candidates {
         let replace = best.as_ref().is_none_or(|current: &PcCandidate<T>| {
-            candidate.available > current.available || (candidate.complete() && !current.complete())
+            candidate.available > current.available
+                || (candidate.complete() && !current.complete())
+                || (candidate.available == current.available && candidate.pc < current.pc)
         });
         if replace {
             best = Some(candidate);
-        }
-        if best.as_ref().is_some_and(PcCandidate::complete) {
-            break;
         }
     }
     best
@@ -80,5 +82,25 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(selected.pc, 0x10);
+    }
+
+    #[test]
+    fn equal_complete_candidates_prefer_earlier_live_statement() {
+        let selected = select_best([
+            PcCandidate {
+                pc: 0x30,
+                value: "late",
+                available: 1,
+                requested: 1,
+            },
+            PcCandidate {
+                pc: 0x20,
+                value: "early",
+                available: 1,
+                requested: 1,
+            },
+        ])
+        .unwrap();
+        assert_eq!((selected.pc, selected.value), (0x20, "early"));
     }
 }
