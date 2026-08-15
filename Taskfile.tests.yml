@@ -483,8 +483,10 @@ tasks:
           sh -c "
             CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
               --package detrix-testing --test ebpf_classic_map_e2e &&
-            find /build/target/debug/deps -maxdepth 1 -type f -perm -111 -name 'ebpf_classic_map_e2e-*' -printf '%T@ %p\n' \
-              | sort -nr | head -1 | cut -d' ' -f2- | xargs -I{} cp -p {} /out/ebpf_classic_map_e2e_test
+            find /build/target/debug/deps -maxdepth 1 -type f -perm -111 \
+              -name 'ebpf_classic_map_e2e-*' -printf '%T@ %p\n' \
+              | sort -nr | head -1 | cut -d' ' -f2- \
+              | xargs -I{} sh -c 'cat "{}" > /out/ebpf_classic_map_e2e_test.tmp && chmod 755 /out/ebpf_classic_map_e2e_test.tmp && mv -f /out/ebpf_classic_map_e2e_test.tmp /out/ebpf_classic_map_e2e_test'
           "
 
   test-ebpf-inject:
