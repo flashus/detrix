@@ -7,6 +7,7 @@
 use detrix_config::ScannerConfig;
 use detrix_logging::warn;
 use glob::Pattern;
+use object::{Object, ObjectSection};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
@@ -34,6 +35,7 @@ pub struct ProcScanner {
     #[allow(dead_code)]
     exclude_patterns: Vec<Pattern>,
     require_dwarf: bool,
+    language_override: Option<String>,
     /// Key is (pid, exe_inode). Same PID + new inode = PID was reused.
     known: HashMap<(u32, u64), BinaryInfo>,
     last_registered_at: Option<Instant>,
@@ -57,6 +59,9 @@ impl ProcScanner {
             include_patterns,
             exclude_patterns,
             require_dwarf: config.require_dwarf,
+            language_override: std::env::var("DETRIX_SCANNER_LANGUAGE")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
             known: HashMap::new(),
             last_registered_at: None,
             min_reregister_secs: 300, // 5 minutes cooldown
@@ -184,7 +189,10 @@ impl ProcScanner {
             } else {
                 true
             };
-            let language = detect_language(&binary_path_str);
+            let language = self
+                .language_override
+                .clone()
+                .unwrap_or_else(|| detect_language(&binary_path_str));
             binaries.push(BinaryInfo {
                 binary_path: binary_path_str,
                 pid,
@@ -215,11 +223,36 @@ fn detect_language(path: &str) -> String {
     {
         return "rust".to_string();
     }
-    let Ok(bytes) = fs::read(path) else {
+    // In a shared PID namespace `/proc/<pid>/exe` may resolve to a path that
+    // exists only in the target process' mount namespace.  Reading the proc
+    // symlink itself still gives us the ELF bytes, so try the original path
+    // before falling back to the resolved target.
+    let Ok(bytes) = fs::read(path).or_else(|_| fs::read(&target)) else {
         return "go".to_string();
     };
-    let sample = &bytes[..bytes.len().min(8 * 1024 * 1024)];
-    if sample.windows(5).any(|w| w == b"rustc") {
+    // Rust producer strings are often in DWARF sections well beyond the first
+    // few megabytes of a large statically linked binary (Reth is a typical
+    // example).  Inspect the compact producer/debug sections instead of a
+    // fixed prefix, while retaining the byte-prefix fallback for malformed
+    // or unusual ELF files.
+    let rust_marker = |data: &[u8]| data.windows(5).any(|w| w == b"rustc");
+    let is_rust = object::File::parse(bytes.as_slice())
+        .ok()
+        .map(|file| {
+            file.sections().any(|section| {
+                let name = section.name().unwrap_or_default();
+                matches!(
+                    name,
+                    ".comment" | ".debug_str" | ".debug_line_str" | ".debug_info"
+                ) && section
+                    .data()
+                    .map(rust_marker)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+        || rust_marker(&bytes[..bytes.len().min(8 * 1024 * 1024)]);
+    if is_rust {
         "rust".to_string()
     } else {
         "go".to_string()
@@ -229,6 +262,17 @@ fn detect_language(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_rust_producer_from_debug_sections() {
+        let rustc = std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .map(|dir| dir.join("rustc"))
+            .find(|path| path.is_file())
+            .expect("rustc must be available for the agent test toolchain");
+        assert_eq!(detect_language(&rustc.to_string_lossy()), "rust");
+    }
 
     fn binary(pid: u32, inode: u64) -> BinaryInfo {
         BinaryInfo {

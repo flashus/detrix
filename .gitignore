@@ -16,5 +16,5 @@ fixtures/go/go
 assets/raw/detrix_demo.mov
 assets/detrix_demo.mp4
 .spe/
-experiments/geth-spam/
+experiments/
 out/
