@@ -316,82 +316,173 @@ pub fn parse_ring_buffer_event_with_envelope(
                     capture
                 );
 
-                let enum_layout = var.nested_type.as_ref().and_then(|nested| match nested {
-                    NestedType::Scalar(type_info) => type_info.enum_layout.as_ref(),
-                    _ => None,
-                });
-                if let Some(layout) = enum_layout {
-                    if !layout.is_explicit_non_niche() {
-                        return Err(Error::RingBuffer(format!(
-                            "Enum '{}' has incomplete or niche DWARF layout",
-                            var.name
-                        )));
-                    }
-                    let variants: Vec<crate::decode::EnumVariantSpec> = layout
-                        .variants
-                        .iter()
-                        .filter_map(|variant| {
-                            Some(crate::decode::EnumVariantSpec {
-                                name: variant.name.clone(),
-                                discriminant: u64::try_from(variant.discriminant?).ok()?,
-                                payload_offset: variant
-                                    .payload_offset
-                                    .map(|offset| offset as usize),
-                                payload_size: variant.payload_size.map(|size| size as usize),
+                // Rust-specific bounded ABI contracts.  These are address/state
+                // observations only: no target code is called and no arbitrary
+                // heap graph is traversed.  If the type name does not prove one
+                // of the contracts, retain the existing nested/blob decoder.
+                let special_value = if is_probably_rust_type(&var.type_name) {
+                    match crate::rust_layout::infer(&var.type_name, *byte_size as usize) {
+                        Some(crate::rust_layout::RustLayoutContract::NicheOption {
+                            pointer_offset,
+                            word_size,
+                        }) => {
+                            let pointer = read_layout_word(&bytes, pointer_offset, word_size)
+                                .ok_or_else(|| {
+                                    Error::RingBuffer(format!(
+                                        "Rust niche Option '{}' is truncated",
+                                        var.name
+                                    ))
+                                })?;
+                            let variant = if pointer == 0 { "None" } else { "Some" };
+                            Some(CapturedValue::Struct {
+                                type_name: var.type_name.clone(),
+                                fields: vec![
+                                    (
+                                        "variant".into(),
+                                        Box::new(CapturedValue::String {
+                                            data: variant.as_bytes().to_vec(),
+                                            len: variant.len(),
+                                        }),
+                                    ),
+                                    ("pointer".into(), Box::new(CapturedValue::Scalar(pointer))),
+                                ],
                             })
-                        })
-                        .collect();
-                    let decoded = crate::decode::decode_enum_variant(
-                        &crate::decode::DecodedBlob {
-                            name: var.name.clone(),
-                            bytes: bytes.clone(),
-                        },
-                        layout.discriminant_offset as usize,
-                        layout.discriminant_size as usize,
-                        &variants,
-                        config.max_blob_capture,
-                    )
-                    .map_err(|error| Error::RingBuffer(error.to_string()))?;
-                    let mut fields = vec![
-                        (
-                            "variant".to_string(),
-                            Box::new(CapturedValue::String {
-                                len: decoded.variant.len(),
-                                data: decoded.variant.into_bytes(),
-                            }),
-                        ),
-                        (
-                            "discriminant".to_string(),
-                            Box::new(CapturedValue::Scalar(decoded.discriminant)),
-                        ),
-                    ];
-                    if let Some(payload) = decoded.payload {
-                        fields.push((
-                            "payload".to_string(),
-                            Box::new(CapturedValue::Bytes(payload)),
-                        ));
+                        }
+                        Some(crate::rust_layout::RustLayoutContract::TraitObject {
+                            data_offset,
+                            vtable_offset,
+                            word_size,
+                        }) => {
+                            let data_ptr = read_layout_word(&bytes, data_offset, word_size)
+                                .ok_or_else(|| {
+                                    Error::RingBuffer(format!(
+                                        "Rust trait object '{}' data pointer is truncated",
+                                        var.name
+                                    ))
+                                })?;
+                            let vtable_ptr = read_layout_word(&bytes, vtable_offset, word_size)
+                                .ok_or_else(|| {
+                                    Error::RingBuffer(format!(
+                                        "Rust trait object '{}' vtable pointer is truncated",
+                                        var.name
+                                    ))
+                                })?;
+                            Some(CapturedValue::Struct {
+                                type_name: var.type_name.clone(),
+                                fields: vec![
+                                    ("data_ptr".into(), Box::new(CapturedValue::Scalar(data_ptr))),
+                                    (
+                                        "vtable_ptr".into(),
+                                        Box::new(CapturedValue::Scalar(vtable_ptr)),
+                                    ),
+                                ],
+                            })
+                        }
+                        Some(crate::rust_layout::RustLayoutContract::AsyncState {
+                            state_offset,
+                            state_size,
+                        }) => {
+                            let state = read_layout_word(&bytes, state_offset, state_size)
+                                .ok_or_else(|| {
+                                    Error::RingBuffer(format!(
+                                        "Rust async state '{}' is truncated",
+                                        var.name
+                                    ))
+                                })?;
+                            Some(CapturedValue::Struct {
+                                type_name: var.type_name.clone(),
+                                fields: vec![(
+                                    "state".into(),
+                                    Box::new(CapturedValue::Scalar(state)),
+                                )],
+                            })
+                        }
+                        None => None,
                     }
-                    CapturedValue::Struct {
-                        type_name: var.type_name.clone(),
-                        fields,
-                    }
-                } else
-                // If we have DWARF field info, parse the blob into named fields
-                if let Some(crate::dwarf::nested_types::NestedType::Struct {
-                    fields: dwarf_fields,
-                    ..
-                }) = &var.nested_type
-                {
-                    parse_struct_fields_from_blob(
-                        &bytes,
-                        &var.type_name,
-                        dwarf_fields,
-                        config,
-                        mem_reader,
-                        ns_pid,
-                    )
                 } else {
-                    CapturedValue::Bytes(bytes)
+                    None
+                };
+
+                if let Some(special_value) = special_value {
+                    special_value
+                } else {
+                    let enum_layout = var.nested_type.as_ref().and_then(|nested| match nested {
+                        NestedType::Scalar(type_info) => type_info.enum_layout.as_ref(),
+                        _ => None,
+                    });
+                    if let Some(layout) = enum_layout {
+                        if !layout.is_explicit_non_niche() {
+                            return Err(Error::RingBuffer(format!(
+                                "Enum '{}' has incomplete or niche DWARF layout",
+                                var.name
+                            )));
+                        }
+                        let variants: Vec<crate::decode::EnumVariantSpec> = layout
+                            .variants
+                            .iter()
+                            .filter_map(|variant| {
+                                Some(crate::decode::EnumVariantSpec {
+                                    name: variant.name.clone(),
+                                    discriminant: u64::try_from(variant.discriminant?).ok()?,
+                                    payload_offset: variant
+                                        .payload_offset
+                                        .map(|offset| offset as usize),
+                                    payload_size: variant.payload_size.map(|size| size as usize),
+                                })
+                            })
+                            .collect();
+                        let decoded = crate::decode::decode_enum_variant(
+                            &crate::decode::DecodedBlob {
+                                name: var.name.clone(),
+                                bytes: bytes.clone(),
+                            },
+                            layout.discriminant_offset as usize,
+                            layout.discriminant_size as usize,
+                            &variants,
+                            config.max_blob_capture,
+                        )
+                        .map_err(|error| Error::RingBuffer(error.to_string()))?;
+                        let mut fields = vec![
+                            (
+                                "variant".to_string(),
+                                Box::new(CapturedValue::String {
+                                    len: decoded.variant.len(),
+                                    data: decoded.variant.into_bytes(),
+                                }),
+                            ),
+                            (
+                                "discriminant".to_string(),
+                                Box::new(CapturedValue::Scalar(decoded.discriminant)),
+                            ),
+                        ];
+                        if let Some(payload) = decoded.payload {
+                            fields.push((
+                                "payload".to_string(),
+                                Box::new(CapturedValue::Bytes(payload)),
+                            ));
+                        }
+                        CapturedValue::Struct {
+                            type_name: var.type_name.clone(),
+                            fields,
+                        }
+                    } else
+                    // If we have DWARF field info, parse the blob into named fields
+                    if let Some(crate::dwarf::nested_types::NestedType::Struct {
+                        fields: dwarf_fields,
+                        ..
+                    }) = &var.nested_type
+                    {
+                        parse_struct_fields_from_blob(
+                            &bytes,
+                            &var.type_name,
+                            dwarf_fields,
+                            config,
+                            mem_reader,
+                            ns_pid,
+                        )
+                    } else {
+                        CapturedValue::Bytes(bytes)
+                    }
                 }
             }
             crate::dwarf::types::VariableLocation::StackIndirect { byte_size, .. } => {
@@ -451,9 +542,7 @@ pub fn parse_ring_buffer_event_with_envelope(
                     _ => (None, None),
                 };
 
-                super::map_iter::read_go_map(
-                    val, key_nested, val_nested, config, mem_reader, ns_pid,
-                )
+                super::map_iter::read_map(val, key_nested, val_nested, config, mem_reader, ns_pid)
             }
             crate::dwarf::types::VariableLocation::Register(_)
             | crate::dwarf::types::VariableLocation::StackOffset { .. }
@@ -1068,6 +1157,63 @@ mod tests {
             }
             other => panic!("Expected Bytes, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_rust_niche_option_as_variant_and_address() {
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&0_u64.to_le_bytes());
+        data.extend_from_slice(&0x1234_u64.to_le_bytes());
+        let vars = vec![ResolvedVariable {
+            name: "maybe".into(),
+            location: VariableLocation::StackBlob {
+                offset: -8,
+                byte_size: 8,
+            },
+            size: VariableSize::QWord,
+            type_name: "Option<&u64>".into(),
+            nested_type: None,
+        }];
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
+        assert!(matches!(event.values[0], CapturedValue::Struct { .. }));
+        assert!(event.values[0]
+            .to_json_value(VariableSize::QWord)
+            .contains("Some"));
+    }
+
+    #[test]
+    fn parse_rust_trait_object_preserves_data_and_vtable_addresses() {
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&0_u64.to_le_bytes());
+        data.extend_from_slice(&0x1111_u64.to_le_bytes());
+        data.extend_from_slice(&0x2222_u64.to_le_bytes());
+        let vars = vec![ResolvedVariable {
+            name: "object".into(),
+            location: VariableLocation::StackBlob {
+                offset: -16,
+                byte_size: 16,
+            },
+            size: VariableSize::QWord,
+            type_name: "&dyn Display".into(),
+            nested_type: None,
+        }];
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
+        let json = event.values[0].to_json_value(VariableSize::QWord);
+        assert!(json.contains("data_ptr") && json.contains("vtable_ptr"));
     }
 
     #[test]
@@ -2410,7 +2556,7 @@ pub fn parse_struct_fields_from_addr(
                             }) => (Some(key_type.as_ref()), Some(value_type.as_ref())),
                             _ => (None, None),
                         };
-                        super::map_iter::read_go_map(
+                        super::map_iter::read_map(
                             map_ptr, key_nested, val_nested, config, mem_reader, pid,
                         )
                     }
@@ -2746,7 +2892,7 @@ fn parse_struct_fields_from_blob(
                                 (None, None)
                             }
                         };
-                        super::map_iter::read_go_map(
+                        super::map_iter::read_map(
                             map_ptr, key_nested, val_nested, config, mem_reader, pid,
                         )
                     }
@@ -2971,4 +3117,25 @@ fn format_unix_timestamp(unix_secs: i64) -> String {
         Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
         None => format!("{unix_secs} (invalid timestamp)"),
     }
+}
+
+fn is_probably_rust_type(type_name: &str) -> bool {
+    let name = type_name.trim();
+    name.starts_with("Option<")
+        || name.starts_with("core::option::Option<")
+        || name.starts_with("std::option::Option<")
+        || name.contains("dyn ")
+        || name.contains("DetrixAsyncState")
+        || name.contains("detrix::AsyncState")
+}
+
+fn read_layout_word(bytes: &[u8], offset: usize, size: usize) -> Option<u64> {
+    if !matches!(size, 1 | 2 | 4 | 8) {
+        return None;
+    }
+    let end = offset.checked_add(size)?;
+    let source = bytes.get(offset..end)?;
+    let mut word = [0u8; 8];
+    word[..size].copy_from_slice(source);
+    Some(u64::from_le_bytes(word))
 }

@@ -18,6 +18,10 @@ path = "src/composite.rs"
 name = "detrix_optimized_app"
 path = "src/optimized.rs"
 
+[[bin]]
+name = "detrix_special_layout_app"
+path = "src/special_layout.rs"
+
 [features]
 default = []
 # Enable detrix-rs integration (for client E2E tests)

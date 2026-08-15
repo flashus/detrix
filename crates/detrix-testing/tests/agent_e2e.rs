@@ -36,6 +36,7 @@ const AGENT_TEST_TOKEN: &str = "test-token-12345";
 const FIXTURE_MATCH_GLOB: &str = "*detrix_example_app*";
 const COMPOSITE_FIXTURE_MATCH_GLOB: &str = "*rust_composite_app*";
 const OPTIMIZED_FIXTURE_MATCH_GLOB: &str = "*rust_optimized_app*";
+const SPECIAL_FIXTURE_MATCH_GLOB: &str = "*rust_special_layout_app*";
 const TRADING_SYMBOLS: &[&str] = &["BTCUSD", "ETHUSD", "SOLUSD"];
 
 fn toml_path(path: &Path) -> String {
@@ -58,7 +59,8 @@ fn fixture_source_path() -> String {
 }
 
 fn rust_fixture_binary_path() -> PathBuf {
-    std::env::var("RUST_COMPOSITE_FIXTURE_BINARY")
+    std::env::var("RUST_SPECIAL_FIXTURE_BINARY")
+        .or_else(|_| std::env::var("RUST_COMPOSITE_FIXTURE_BINARY"))
         .or_else(|_| std::env::var("RUST_OPTIMIZED_FIXTURE_BINARY"))
         .or_else(|_| std::env::var("RUST_FIXTURE_BINARY"))
         .map(PathBuf::from)
@@ -66,7 +68,8 @@ fn rust_fixture_binary_path() -> PathBuf {
 }
 
 fn rust_fixture_source_path() -> String {
-    std::env::var("RUST_FIXTURE_SOURCE")
+    std::env::var("RUST_SPECIAL_FIXTURE_SOURCE")
+        .or_else(|_| std::env::var("RUST_FIXTURE_SOURCE"))
         .unwrap_or_else(|_| "/src/fixtures/rust/src/main.rs".to_string())
 }
 
@@ -369,10 +372,12 @@ impl AgentE2eHarness {
     }
 
     fn print_logs(&self, last_n_lines: usize) {
+        let rust_fixture_log = self.temp_dir.path().join("rust-fixture.log");
         for (label, path) in [
             ("SERVER", &self.server_log_path),
             ("AGENT", &self.agent_log_path),
             ("FIXTURE", &self.fixture_log_path),
+            ("RUST_FIXTURE", &rust_fixture_log),
         ] {
             eprintln!("\n=== {label} LOG (last {last_n_lines} lines) ===");
             match fs::read_to_string(path) {
@@ -475,7 +480,7 @@ verify_tls = false
 
 [agent.scanner]
 scan_interval_secs = 1
-include_patterns = ["{fixture_glob}", "{composite_fixture_glob}", "{optimized_fixture_glob}"]
+include_patterns = ["{fixture_glob}", "{composite_fixture_glob}", "{optimized_fixture_glob}", "{special_fixture_glob}"]
 exclude_patterns = []
 require_dwarf = true
 allowed_read_prefixes = ["/src"]
@@ -485,6 +490,7 @@ allowed_read_prefixes = ["/src"]
             fixture_glob = FIXTURE_MATCH_GLOB,
             composite_fixture_glob = COMPOSITE_FIXTURE_MATCH_GLOB,
             optimized_fixture_glob = OPTIMIZED_FIXTURE_MATCH_GLOB,
+            special_fixture_glob = SPECIAL_FIXTURE_MATCH_GLOB,
         );
         fs::write(&self.agent_config_path, config).expect("Failed to write agent config");
     }
@@ -611,6 +617,7 @@ allowed_read_prefixes = ["/src"]
         // Rust-only tasks mount only the Rust fixture. Preserve the Go start
         // path for the Go controls and the explicit heterogeneous `both` run.
         let rust_override = [
+            "RUST_SPECIAL_FIXTURE_BINARY",
             "RUST_COMPOSITE_FIXTURE_BINARY",
             "RUST_OPTIMIZED_FIXTURE_BINARY",
             "RUST_FIXTURE_BINARY",
@@ -832,6 +839,88 @@ async fn test_agent_rust_ebpf_basic() {
             panic!("Expected Rust price in fixture range 100..=1000, got {price}");
         }
     }
+}
+
+#[tokio::test]
+#[ignore = "requires Linux + Docker privileged runner; use `task tests:test-agent-rust-special-layout`"]
+#[serial(agent_e2e)]
+async fn test_agent_rust_ebpf_special_layouts() {
+    let binary = std::env::var("RUST_SPECIAL_FIXTURE_BINARY")
+        .expect("RUST_SPECIAL_FIXTURE_BINARY must be mounted for special-layout test");
+    let source = std::env::var("RUST_SPECIAL_FIXTURE_SOURCE")
+        .expect("RUST_SPECIAL_FIXTURE_SOURCE must be mounted for special-layout test");
+    let mut harness = AgentE2eHarness::new_with_fixture(binary.into(), source);
+    harness.start_stack().await;
+    let client = RestClient::new(harness.http_port);
+    let fixture_host = harness.fixture_host_path();
+    let connection_id = poll_agent_connection(&client, &fixture_host, Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|| {
+            harness.print_logs(200);
+            panic!("Expected Rust special-layout connection for {fixture_host}");
+        });
+
+    let metric_name = "agent-rust-ebpf-special-layouts";
+    client
+        .add_metric(AddMetricRequest {
+            name: metric_name.into(),
+            // The tuple locals are consumed by println! at this stable point.
+            location: format!("@{}#34", harness.fixture_source),
+            expressions: vec!["maybe".into(), "object".into(), "state".into()],
+            connection_id,
+            language: Some("rust".into()),
+            group: None,
+            mode: None,
+            enabled: Some(true),
+            sample_rate: None,
+            sample_interval_seconds: None,
+            max_per_second: None,
+            capture_stack_trace: None,
+            stack_trace_ttl: None,
+            stack_trace_full: None,
+            stack_trace_head: None,
+            stack_trace_tail: None,
+            capture_memory_snapshot: None,
+            snapshot_scope: None,
+            snapshot_ttl: None,
+        })
+        .await
+        .expect("Failed to create Rust special-layout metric");
+
+    let events = poll_events(&client, metric_name, Duration::from_secs(20)).await;
+    if events.is_empty() {
+        harness.print_logs(240);
+    } else {
+        print_received_events(metric_name, &events);
+    }
+    assert!(!events.is_empty(), "Expected Rust special-layout events");
+    let event = &events[0];
+    let maybe = event_value(event, "maybe").expect("missing niche Option capture");
+    let object = event_value(event, "object").expect("missing trait-object capture");
+    let state = event_value(event, "state").expect("missing async-state capture");
+    assert!(
+        maybe.to_string().contains("Some"),
+        "unexpected Option value: {maybe}"
+    );
+    assert!(
+        object.to_string().contains("data_ptr"),
+        "unexpected trait-object value: {object}"
+    );
+    let state_object = state
+        .as_object()
+        .cloned()
+        .or_else(|| {
+            state
+                .as_str()
+                .and_then(|json| serde_json::from_str(json).ok())
+        })
+        .expect("async-state capture must be a structured value");
+    assert_eq!(
+        state_object
+            .get("state")
+            .and_then(serde_json::Value::as_u64),
+        Some(3)
+    );
 }
 
 #[tokio::test]

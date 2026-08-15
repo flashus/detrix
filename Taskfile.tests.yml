@@ -357,6 +357,10 @@ tasks:
               /out/rust_composite_app.tmp && \
             chmod 755 /out/rust_composite_app.tmp && \
             mv -f /out/rust_composite_app.tmp /out/rust_composite_app && \
+            cat /build/target/fixture-rust/release/detrix_special_layout_app > \
+              /out/rust_special_layout_app.tmp && \
+            chmod 755 /out/rust_special_layout_app.tmp && \
+            mv -f /out/rust_special_layout_app.tmp /out/rust_special_layout_app && \
             RUSTFLAGS="-C force-frame-pointers=yes" cargo rustc --release --locked \
               --manifest-path fixtures/rust/Cargo.toml \
               --target-dir /build/target/fixture-rust \
@@ -372,6 +376,7 @@ tasks:
           echo "fixture_flags=RUSTFLAGS=-C force-frame-pointers=yes; profile.release.debug=2; profile.release.strip=none; regular-opt-level=0; optimized-fixture=-C opt-level=3"
           echo "rust_example_sha256=$(shasum -a 256 {{.OUT_DIR}}/rust_detrix_example_app | awk '{print $1}')"
           echo "rust_composite_sha256=$(shasum -a 256 {{.OUT_DIR}}/rust_composite_app | awk '{print $1}')"
+          echo "rust_special_layout_sha256=$(shasum -a 256 {{.OUT_DIR}}/rust_special_layout_app | awk '{print $1}')"
           echo "rust_optimized_sha256=$(shasum -a 256 {{.OUT_DIR}}/rust_optimized_app | awk '{print $1}')"
           docker run --rm -v "ebpf-cargo-home:/usr/local/cargo" {{.BUILDER}} rustc -Vv
         } > "{{.OUT_DIR}}/rust-ebpf-build-metadata.txt"
@@ -714,6 +719,86 @@ tasks:
             mv -f /out/agent_e2e_test.tmp /out/agent_e2e_test
           "
 
+  build-rust-split-dwarf:
+    desc: "Build Linux Rust split-DWARF (.dwo and packed .dwp) fixtures"
+    vars:
+      BUILDER: '{{.EBPF_BUILDER_IMAGE}}'
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.OUT_DIR}}"
+    deps: [build-ebpf-playground]
+    cmds:
+      - mkdir -p {{.OUT}} {{.DOCKER_TARGET_DIR}}/split-dwarf && rm -rf {{.DOCKER_TARGET_DIR}}/split-dwarf/*
+      - |
+        docker run --rm \
+          -v "{{.ROOT_DIR}}:/src" \
+          -v "ebpf-cargo-home:/usr/local/cargo" \
+          -v "{{.DOCKER_TARGET_DIR}}:/build/target" \
+          -w /src \
+          {{.BUILDER}} \
+          sh -c '
+            set -eu
+            RUSTFLAGS="-C split-debuginfo=unpacked -C force-frame-pointers=yes" \
+              cargo build --release --locked \
+                --manifest-path fixtures/rust/Cargo.toml \
+                --target-dir /build/target/split-dwarf
+            cp /build/target/split-dwarf/release/detrix_special_layout_app \
+              /build/target/split-dwarf/rust_split_unpacked_app
+            find /build/target/split-dwarf/release/deps \
+              -name "detrix_special_layout_app-*.dwo" -type f -print -quit \
+              | xargs -r -I{} cp {} /build/target/split-dwarf/rust_split_unpacked_app.dwo
+            CARGO_INCREMENTAL=0 cargo test --no-run --locked \
+              --package detrix-ebpf --test split_dwarf \
+              --target-dir /build/target/split-dwarf-tests
+            TEST_BIN=$(find /build/target/split-dwarf-tests/debug/deps \
+              -maxdepth 1 -type f -perm -111 -name "split_dwarf-*" -print -quit)
+            test -n "$TEST_BIN"
+            cp "$TEST_BIN" /build/target/split-dwarf/rust_split_dwarf_test
+          '
+      - |
+        docker run --rm \
+          -v "{{.DOCKER_TARGET_DIR}}/split-dwarf:/build/split-dwarf" \
+          {{.PLAYGROUND}} \
+          sh -c '
+            set -eu
+            test -s /build/split-dwarf/rust_split_unpacked_app
+            test -s /build/split-dwarf/rust_split_unpacked_app.dwo
+            llvm-dwp -o /build/split-dwarf/rust_split_unpacked_app.dwp \
+              /build/split-dwarf/release/deps/*.dwo
+          '
+      - |
+        cp "{{.DOCKER_TARGET_DIR}}/split-dwarf/rust_split_unpacked_app" "{{.OUT}}/rust_split_unpacked_app"
+        cp "{{.DOCKER_TARGET_DIR}}/split-dwarf/rust_split_unpacked_app.dwo" "{{.OUT}}/rust_split_unpacked_app.dwo"
+        cp "{{.DOCKER_TARGET_DIR}}/split-dwarf/rust_split_unpacked_app.dwp" "{{.OUT}}/rust_split_unpacked_app.dwp"
+        cp "{{.DOCKER_TARGET_DIR}}/split-dwarf/rust_split_dwarf_test" "{{.OUT}}/rust_split_dwarf_test"
+        chmod 755 "{{.OUT}}/rust_split_unpacked_app"
+        chmod 755 "{{.OUT}}/rust_split_dwarf_test"
+        {
+          echo "split_dwarf_flags=RUSTFLAGS=-C split-debuginfo=unpacked -C force-frame-pointers=yes"
+          echo "split_dwarf_binary_sha256=$(shasum -a 256 "{{.OUT}}/rust_split_unpacked_app" | awk '{print $1}')"
+          echo "split_dwarf_dwo_sha256=$(shasum -a 256 "{{.OUT}}/rust_split_unpacked_app.dwo" | awk '{print $1}')"
+          echo "split_dwarf_dwp_sha256=$(shasum -a 256 "{{.OUT}}/rust_split_unpacked_app.dwp" | awk '{print $1}')"
+        } > "{{.OUT}}/rust-split-dwarf-build-metadata.txt"
+
+  test-ebpf-split-dwarf:
+    desc: "Validate Rust .dwo and .dwp loading in the Linux eBPF playground"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.OUT_DIR}}"
+    deps: [build-ebpf-playground, build-rust-split-dwarf]
+    cmds:
+      - |
+        docker run --rm \
+          -v "{{.ROOT_DIR}}:/src:ro" \
+          -v "{{.OUT}}/rust_split_unpacked_app:/usr/local/bin/rust_split_unpacked_app:ro" \
+          -v "{{.OUT}}/rust_split_unpacked_app.dwo:/usr/local/bin/rust_split_unpacked_app.dwo:ro" \
+          -v "{{.OUT}}/rust_split_unpacked_app.dwp:/usr/local/bin/rust_split_unpacked_app.dwp:ro" \
+          -v "{{.OUT}}/rust_split_dwarf_test:/usr/local/bin/rust_split_dwarf_test:ro" \
+          -e DETRIX_SPLIT_DWARF_BINARY=/usr/local/bin/rust_split_unpacked_app \
+          -e DETRIX_SPLIT_DWARF_DWO=/usr/local/bin/rust_split_unpacked_app.dwo \
+          -e DETRIX_SPLIT_DWARF_DWP=/usr/local/bin/rust_split_unpacked_app.dwp \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/rust_split_dwarf_test --nocapture
+
   # Agent Mode E2E Tests
   test-agent:
     desc: "Run agent mode E2E tests in the shared eBPF playground runner"
@@ -759,6 +844,27 @@ tasks:
           -e DETRIX_AGENT_RUST_EBPF=1 \
           {{.PLAYGROUND}} \
           /usr/local/bin/agent_e2e_test test_agent_rust_ebpf_basic --ignored --nocapture --test-threads=1
+
+  test-agent-rust-special-layout:
+    desc: "Run Rust niche-Option, trait-object, and explicit async-state eBPF fixture control"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.OUT_DIR}}"
+    deps: [build-ebpf-playground, build-agent-bins]
+    cmds:
+      - test -x "{{.OUT}}/rust_special_layout_app"
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/rust_special_layout_app:/usr/local/bin/rust_special_layout_app:ro" \
+          -v "{{.OUT}}/agent_e2e_test:/usr/local/bin/agent_e2e_test:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/rust:/src/fixtures/rust:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e RUST_SPECIAL_FIXTURE_BINARY=/usr/local/bin/rust_special_layout_app \
+          -e RUST_SPECIAL_FIXTURE_SOURCE=/src/fixtures/rust/src/special_layout.rs \
+          -e DETRIX_AGENT_RUST_EBPF=1 \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/agent_e2e_test test_agent_rust_ebpf_special_layouts --ignored --nocapture --test-threads=1
 
   test-agent-rust-composite:
     desc: "Run the bounded Rust struct/array eBPF smoke test in the shared privileged playground"

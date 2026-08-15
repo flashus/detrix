@@ -164,4 +164,45 @@ mod tests {
         assert_eq!(decoded.variant, "Settled");
         assert_eq!(decoded.payload, Some(vec![42]));
     }
+
+    #[test]
+    fn rust_special_layout_fixture_preserves_addresses_and_state() {
+        // This is the ABI fixture emitted by fixtures/rust/src/special_layout.rs:
+        // a niche Option pointer, a trait-object data/vtable pair, and an
+        // explicit state byte.  Replay intentionally does not dereference
+        // either pointer, matching the live decoder's safety contract.
+        let option_bytes = 0x1234_u64.to_le_bytes();
+        let trait_bytes = [0x1111_u64.to_le_bytes(), 0x2222_u64.to_le_bytes()].concat();
+        assert_eq!(
+            crate::rust_layout::infer("Option<&u64>", 8),
+            Some(crate::rust_layout::RustLayoutContract::NicheOption {
+                pointer_offset: 0,
+                word_size: 8
+            })
+        );
+        assert_eq!(
+            crate::rust_layout::infer("&dyn Display", 16),
+            Some(crate::rust_layout::RustLayoutContract::TraitObject {
+                data_offset: 0,
+                vtable_offset: 8,
+                word_size: 8
+            })
+        );
+        assert_eq!(
+            crate::rust_layout::infer("DetrixAsyncState", 8),
+            Some(crate::rust_layout::RustLayoutContract::AsyncState {
+                state_offset: 0,
+                state_size: 1
+            })
+        );
+        assert_eq!(u64::from_le_bytes(option_bytes), 0x1234);
+        assert_eq!(
+            u64::from_le_bytes(trait_bytes[0..8].try_into().unwrap()),
+            0x1111
+        );
+        assert_eq!(
+            u64::from_le_bytes(trait_bytes[8..16].try_into().unwrap()),
+            0x2222
+        );
+    }
 }
