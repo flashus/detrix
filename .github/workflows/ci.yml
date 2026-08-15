@@ -254,6 +254,76 @@ jobs:
       - name: Agent mode E2E
         run: task tests:test-agent
 
+  # Rust eBPF release gate.  Keep this on a native x86-64 Linux runner: the
+  # macOS/OrbStack ARM64 playground is valuable evidence, but cannot establish
+  # the x86 perf_event/uprobe capability required by the rollout plan.
+  test-agent-rust-ebpf:
+    needs: changes
+    if: needs.changes.outputs.agent == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      DETRIX_SESSION_TARGET_DIR: ${{ runner.temp }}/detrix-session-target
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-task@v2
+      - uses: ./.github/actions/setup-rust
+      - name: Install LLDB 21 for DAP parity control
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | \
+            sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          . /etc/os-release
+          CODENAME=${VERSION_CODENAME:-noble}
+          echo "deb http://apt.llvm.org/$CODENAME/ llvm-toolchain-$CODENAME-21 main" | \
+            sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update
+          sudo apt-get install -y lldb-21
+      - name: Go compatibility eBPF gates
+        run: |
+          task tests:test-ebpf-inject
+          task tests:test-ebpf-nested-inject
+          task tests:test-ebpf-classic-inject
+      - name: Rust DAP semantic fallback control
+        run: task tests:test-dap-rust-semantic-control
+      - name: Rust eBPF scalar and composite gates
+        run: |
+          task tests:test-agent-rust
+          task tests:test-agent-rust-composite
+          task tests:test-agent-rust-headers
+          task tests:test-agent-rust-external-debug
+          task tests:test-rust-external-debug-provider
+      - name: Rust eBPF lifecycle and fail-closed gates
+        run: |
+          task tests:test-agent-rust-reconnect
+          task tests:test-agent-rust-unavailable
+          task tests:test-agent-rust-optimized-unavailable
+          task tests:test-agent-lifecycle
+      - name: Rust eBPF sustained accounting and mixed-agent gate
+        run: |
+          task tests:test-agent-rust-composite-sustained
+          task tests:test-agent-both
+      - name: Capture runner provenance
+        if: always()
+        run: |
+          mkdir -p "${DETRIX_SESSION_TARGET_DIR}/host/out"
+          {
+            echo "revision=$(git rev-parse HEAD)"
+            echo "architecture=$(uname -m)"
+            echo "kernel=$(uname -srv)"
+            rustc -Vv
+            docker version || true
+          } > "${DETRIX_SESSION_TARGET_DIR}/host/out/rust-ebpf-release-gate-provenance.txt" 2>&1
+      - name: Preserve eBPF release-gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-ebpf-release-gate-evidence
+          if-no-files-found: warn
+          path: |
+            ${{ env.DETRIX_SESSION_TARGET_DIR }}/host/out/rust-ebpf-build-metadata.txt
+            ${{ env.DETRIX_SESSION_TARGET_DIR }}/host/out/*.log
+            ${{ env.DETRIX_SESSION_TARGET_DIR }}/host/logs/**
+
   # ── Core: E2E — Rust / lldb-dap ───────────────────────────────────────────
   test-e2e-rust:
     needs: [changes, test-unit]

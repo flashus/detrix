@@ -3,6 +3,8 @@ set -euo pipefail
 
 # Single source for the disposable build/test target root. Taskfiles and
 # runtime test helpers may override it without editing task definitions.
+# GitHub Actions supplies RUNNER_TEMP outside /private/tmp; that exact
+# disposable subtree is allowed for the native Linux release gate.
 DEFAULT_TARGET_DIR="/private/tmp/detrix-session-target"
 TARGET_DIR="${DETRIX_SESSION_TARGET_DIR:-${DEFAULT_TARGET_DIR}}"
 
@@ -16,10 +18,14 @@ case "${TARGET_DIR}" in
     echo "refusing unsafe session target: ${TARGET_DIR}" >&2
     exit 1
     ;;
-  /private/tmp/*) ;;
+  /private/tmp/*|/tmp/*) ;;
   *)
-    echo "refusing session target outside /private/tmp: ${TARGET_DIR}" >&2
-    exit 1
+    RUNNER_TEMP_ROOT="${RUNNER_TEMP:-}"
+    if [[ -z "${RUNNER_TEMP_ROOT}" || "${RUNNER_TEMP_ROOT}" == "/" ||
+          "${TARGET_DIR}" != "${RUNNER_TEMP_ROOT}"/* ]]; then
+      echo "refusing session target outside approved disposable roots: ${TARGET_DIR}" >&2
+      exit 1
+    fi
     ;;
 esac
 
