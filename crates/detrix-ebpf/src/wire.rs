@@ -1,7 +1,9 @@
 //! Versioned raw event envelope. Public MetricEvent compatibility is separate
 //! from this private transport ABI.
 
-use crate::capture_plan::CAPTURE_PLAN_SCHEMA_VERSION;
+use crate::capture_plan::{
+    CAPTURE_PLAN_SCHEMA_VERSION, MAX_CAPTURE_FIELDS, MAX_CAPTURE_PAYLOAD_BYTES,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireCapabilities {
@@ -14,7 +16,9 @@ impl Default for WireCapabilities {
     fn default() -> Self {
         Self {
             supported_schema_versions: vec![CAPTURE_PLAN_SCHEMA_VERSION],
-            supported_profiles: vec!["rust".into()],
+            // DRX1 is shared by the built-in profiles; profile-specific
+            // lowering and decoding remain outside this transport layer.
+            supported_profiles: vec!["go".into(), "rust".into()],
             max_payload_bytes: 4096,
         }
     }
@@ -91,6 +95,20 @@ impl EventEnvelope {
         }
         if self.profile_id.is_empty() || self.plan_hash.is_empty() {
             return Err(EnvelopeError::MissingIdentity);
+        }
+        if self.field_count == 0 || usize::from(self.field_count) > MAX_CAPTURE_FIELDS {
+            return Err(EnvelopeError::InvalidFieldCount {
+                count: usize::from(self.field_count),
+                limit: MAX_CAPTURE_FIELDS,
+            });
+        }
+        // Negotiated peers may advertise a narrower limit, but never a wider
+        // one: the CapturePlan bound is the transport-wide safety ceiling.
+        if self.payload_len as usize > MAX_CAPTURE_PAYLOAD_BYTES {
+            return Err(EnvelopeError::Oversized {
+                size: self.payload_len as usize,
+                limit: MAX_CAPTURE_PAYLOAD_BYTES,
+            });
         }
         capabilities.negotiate(
             self.schema_version,
@@ -207,6 +225,8 @@ pub enum EnvelopeError {
     UnknownProfile(String),
     #[error("event profile or plan identity is too long")]
     IdentityTooLong,
+    #[error("event field count {count} is outside the supported range (limit {limit})")]
+    InvalidFieldCount { count: usize, limit: usize },
 }
 
 #[cfg(test)]
@@ -237,6 +257,7 @@ mod tests {
             Err(EnvelopeError::UnknownProfile(_))
         ));
 
+        let envelope = EventEnvelope::new("rust", "h", 1, 8);
         let capabilities = WireCapabilities {
             supported_schema_versions: vec![CAPTURE_PLAN_SCHEMA_VERSION],
             supported_profiles: vec!["rust".into()],
@@ -306,8 +327,45 @@ mod tests {
     fn negotiation_rejects_unknown_profile_before_decode() {
         let capabilities = WireCapabilities::default();
         assert!(matches!(
-            capabilities.negotiate(CAPTURE_PLAN_SCHEMA_VERSION, "go", 8),
+            capabilities.negotiate(CAPTURE_PLAN_SCHEMA_VERSION, "python", 8),
             Err(EnvelopeError::UnknownProfile(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_or_oversized_field_count() {
+        let zero = EventEnvelope::new("rust", "sha256:plan", 0, 8);
+        assert!(matches!(
+            zero.validate(64),
+            Err(EnvelopeError::InvalidFieldCount { count: 0, .. })
+        ));
+
+        let oversized = EventEnvelope::new(
+            "rust",
+            "sha256:plan",
+            (MAX_CAPTURE_FIELDS as u16).saturating_add(1),
+            8,
+        );
+        assert!(matches!(
+            oversized.validate(64),
+            Err(EnvelopeError::InvalidFieldCount { .. })
+        ));
+    }
+
+    #[test]
+    fn negotiated_limit_cannot_exceed_capture_plan_safety_ceiling() {
+        let envelope = EventEnvelope::new("rust", "sha256:plan", 1, MAX_CAPTURE_PAYLOAD_BYTES + 1);
+        let capabilities = WireCapabilities {
+            supported_schema_versions: vec![CAPTURE_PLAN_SCHEMA_VERSION],
+            supported_profiles: vec!["rust".into()],
+            max_payload_bytes: MAX_CAPTURE_PAYLOAD_BYTES + 4096,
+        };
+        assert!(matches!(
+            envelope.validate_with_capabilities(&capabilities),
+            Err(EnvelopeError::Oversized {
+                limit: MAX_CAPTURE_PAYLOAD_BYTES,
+                ..
+            })
         ));
     }
 }
