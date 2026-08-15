@@ -60,6 +60,10 @@ pub struct EbpfAdapter {
     /// anchored to `binary_path` for uprobe attachment.
     dwarf_path: PathBuf,
     profile_id: ProfileId,
+    /// Language profile strategy.  The typed `profile_id` remains only for
+    /// compatibility with the existing uprobe attachment API; all profile
+    /// metadata decisions flow through this object.
+    profile: Arc<dyn LanguageProfile>,
     /// Parsed DWARF info (populated on start).
     dwarf: RwLock<Option<DwarfInfo>>,
     /// Uprobe manager — owns the BPF programs and ring buffer pollers.
@@ -161,6 +165,29 @@ impl EbpfAdapter {
         profile_id: ProfileId,
         debug_path: Option<impl AsRef<Path>>,
     ) -> Result<Self> {
+        let profile: Arc<dyn LanguageProfile> = match profile_id {
+            ProfileId::Go => Arc::new(GoProfile),
+            ProfileId::Rust => Arc::new(RustProfile),
+        };
+        Self::new_with_profile_object_and_debug_path(
+            binary_path,
+            capture_config,
+            profile_id,
+            profile,
+            debug_path,
+        )
+    }
+
+    /// Construct an adapter with a registry-owned profile object.  Built-in
+    /// profiles use the compatibility `ProfileId`; third-party backends can
+    /// provide their own adapter through `CaptureBackendFactory::create_adapter`.
+    pub fn new_with_profile_object_and_debug_path(
+        binary_path: impl AsRef<Path>,
+        capture_config: CaptureConfig,
+        profile_id: ProfileId,
+        profile: Arc<dyn LanguageProfile>,
+        debug_path: Option<impl AsRef<Path>>,
+    ) -> Result<Self> {
         let path = binary_path.as_ref().to_path_buf();
         let dwarf_path = debug_path
             .map(|path| path.as_ref().to_path_buf())
@@ -187,6 +214,7 @@ impl EbpfAdapter {
             binary_path: path.clone(),
             dwarf_path,
             profile_id,
+            profile,
             dwarf: RwLock::new(None),
             uprobe_manager: RwLock::new(UprobeManager::new_with_config(
                 &path,
@@ -415,12 +443,9 @@ impl DapAdapter for EbpfAdapter {
         // Compute TLS-based goid offset when goid capture is enabled.
         // This offset tells the BPF program where to find the G pointer
         // in the thread's TLS block (via fs_base on x86_64).
-        let runtime_metadata = match self.profile_id {
-            ProfileId::Go => GoProfile.runtime_metadata(&dwarf, self.capture_config.capture_goid),
-            ProfileId::Rust => {
-                RustProfile.runtime_metadata(&dwarf, self.capture_config.capture_goid)
-            }
-        };
+        let runtime_metadata = self
+            .profile
+            .runtime_metadata(&dwarf, self.capture_config.capture_goid);
         let g_addr_offset = runtime_metadata.g_addr_offset;
         let goid_offset = runtime_metadata.goid_offset;
         detrix_logging::debug!(
@@ -437,17 +462,13 @@ impl DapAdapter for EbpfAdapter {
         // negotiated it, while the parser still accepts legacy records for
         // older agents.
         let runtime_plan_hash = Some(format!("probe:{:x}", probe_point.pc));
-        let raw_envelope = runtime_plan_hash.as_deref().map(|plan_hash| {
-            let profile = match self.profile_id {
-                ProfileId::Go => "go",
-                ProfileId::Rust => "rust",
-            };
-            RawEnvelopeExpectation {
-                profile_tag: crate::compiler::profile_tag(profile),
+        let raw_envelope = runtime_plan_hash
+            .as_deref()
+            .map(|plan_hash| RawEnvelopeExpectation {
+                profile_tag: crate::compiler::profile_tag(self.profile.id()),
                 plan_tag: crate::compiler::plan_tag(plan_hash),
                 field_count: probe_point.variables.len(),
-            }
-        });
+            });
         let runtime = if self.profile_id == ProfileId::Rust {
             match rust_scalar_fields(&probe_point.variables) {
                 Ok(fields) => {

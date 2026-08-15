@@ -240,12 +240,14 @@ impl LanguageProfile for RustProfile {
             vector: true,
             borrowed_slice: true,
             slice: true,
-            // Explicit discriminant enums are covered by the Rust header
-            // fixture and bounded decoder; niche layouts remain disabled.
+            // Explicit discriminant enums, pointer-niche Options, trait-object
+            // fat pointers, and the explicit async-state fixture all use
+            // bounded, non-dereferencing layouts. Unknown compiler layouts
+            // still fail closed in the decoder.
             enumeration: true,
-            niche_enumeration: false,
-            trait_object: false,
-            async_state: false,
+            niche_enumeration: true,
+            trait_object: true,
+            async_state: true,
         }
     }
     fn classify_type(&self, name: &str, byte_size: usize) -> TypeDescriptor {
@@ -283,6 +285,19 @@ impl LanguageProfile for RustProfile {
         if type_info.is_enum {
             return TypeDescriptor::Enum {
                 size: type_info.byte_size as usize,
+            };
+        }
+        if let Some(layout) =
+            crate::rust_layout::infer(&type_info.name, type_info.byte_size as usize)
+        {
+            return match layout {
+                crate::rust_layout::RustLayoutContract::NicheOption { .. }
+                | crate::rust_layout::RustLayoutContract::TraitObject { .. }
+                | crate::rust_layout::RustLayoutContract::AsyncState { .. } => {
+                    TypeDescriptor::Struct {
+                        size: type_info.byte_size as usize,
+                    }
+                }
             };
         }
         if type_info.is_string {
@@ -381,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn rust_capabilities_only_advertise_live_categories() {
+    fn rust_capabilities_advertise_bounded_special_layouts() {
         let capabilities = RustProfile.capabilities();
         assert!(capabilities.scalar);
         assert!(capabilities.pointer);
@@ -393,9 +408,31 @@ mod tests {
         assert!(capabilities.borrowed_slice);
         assert!(capabilities.slice);
         assert!(capabilities.enumeration);
-        assert!(!capabilities.niche_enumeration);
-        assert!(!capabilities.trait_object);
-        assert!(!capabilities.async_state);
+        assert!(capabilities.niche_enumeration);
+        assert!(capabilities.trait_object);
+        assert!(capabilities.async_state);
+    }
+
+    #[test]
+    fn rust_special_layouts_are_struct_descriptors() {
+        let option = TypeInfo {
+            name: "Option<&Widget>".into(),
+            byte_size: 8,
+            ..TypeInfo::unknown()
+        };
+        assert_eq!(
+            RustProfile.classify_type_info(&option),
+            TypeDescriptor::Struct { size: 8 }
+        );
+        let object = TypeInfo {
+            name: "&dyn Display".into(),
+            byte_size: 16,
+            ..TypeInfo::unknown()
+        };
+        assert_eq!(
+            RustProfile.classify_type_info(&object),
+            TypeDescriptor::Struct { size: 16 }
+        );
     }
     #[test]
     fn rust_str_is_a_bounded_slice_header() {

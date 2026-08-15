@@ -10,10 +10,9 @@ description = "eBPF-based logpoint adapter for Go on Linux — zero-pause variab
 
 [features]
 default = []
-# Reserved gate for supplementary `.dwo`/`.dwp` loading.  The provider keeps
-# split-DWARF fail-closed until gimli/object supplementary-section loading and
-# fixture evidence are implemented; enabling this feature today does not
-# silently opt a target into partial support.
+# Capability marker for supplementary `.dwo`/`.dwp` loading. The loader is
+# still explicitly exercised by the Docker fixture gate; this feature does
+# not silently enable Rust `auto` routing or weaken missing-sidecar failures.
 split-dwarf = []
 
 [lints]

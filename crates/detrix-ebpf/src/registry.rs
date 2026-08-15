@@ -1,5 +1,6 @@
 //! Registries are the extension seam for adding languages and backends.
 
+use crate::adapter::EbpfAdapter;
 use crate::compiler::{CaptureCompiler, GoBpfCompiler, RustBpfCompiler};
 use crate::probe::types::CaptureConfig;
 use crate::profile::{GoProfile, LanguageProfile, ProfileId, RustProfile};
@@ -13,14 +14,20 @@ use std::sync::Arc;
 
 pub trait CaptureBackendFactory: Send + Sync {
     fn id(&self) -> &'static str;
-    fn supports(&self, profile: ProfileId) -> bool;
+    /// Compatibility lookup for built-in profiles. External profiles should
+    /// implement `supports_profile` instead and do not need a new enum value.
+    fn supports(&self, _profile: ProfileId) -> bool {
+        false
+    }
     /// String-keyed capability seam for registry-provided profiles. Built-in
     /// backends retain the typed API, while an external backend can override
     /// this method without extending `ProfileId`.
     fn supports_profile(&self, profile: &str) -> bool {
         builtin_profile_id(profile).is_some_and(|id| self.supports(id))
     }
-    fn compiler(&self, profile: ProfileId) -> Result<Box<dyn CaptureCompiler>, RuntimeError>;
+    fn compiler(&self, _profile: ProfileId) -> Result<Box<dyn CaptureCompiler>, RuntimeError> {
+        Err(RuntimeError::MissingIdentity)
+    }
     fn compiler_for_profile(
         &self,
         profile: &str,
@@ -31,11 +38,13 @@ pub trait CaptureBackendFactory: Send + Sync {
     }
     fn create_runtime(
         &self,
-        profile: ProfileId,
-        plan_hash: &str,
-        fields: Vec<ScalarFieldSpec>,
-        max_payload: usize,
-    ) -> Result<ProfiledCaptureRuntime, RuntimeError>;
+        _profile: ProfileId,
+        _plan_hash: &str,
+        _fields: Vec<ScalarFieldSpec>,
+        _max_payload: usize,
+    ) -> Result<ProfiledCaptureRuntime, RuntimeError> {
+        Err(RuntimeError::MissingIdentity)
+    }
 
     /// Construct a runtime adapter for a registry profile key.
     ///
@@ -55,6 +64,49 @@ pub trait CaptureBackendFactory: Send + Sync {
         Err(crate::error::Error::Adapter(
             "backend has no dynamic adapter constructor".into(),
         ))
+    }
+
+    /// Construct an adapter with the registry-owned profile object.  This is
+    /// the primary string-keyed runtime seam; the legacy `create_adapter`
+    /// hook remains for backends that own a completely different adapter.
+    fn create_adapter_with_profile(
+        &self,
+        profile_name: &str,
+        profile: Arc<dyn LanguageProfile>,
+        binary_path: &Path,
+        base_path: &Path,
+        capture_config: &CaptureConfig,
+    ) -> crate::error::Result<DapAdapterRef> {
+        let _ = (
+            profile_name,
+            profile,
+            binary_path,
+            base_path,
+            capture_config,
+        );
+        self.create_adapter(profile_name, binary_path, base_path, capture_config)
+    }
+
+    /// Variant carrying an optional external DWARF image.  The default keeps
+    /// third-party backends source-compatible while built-in uprobe backends
+    /// can preserve their debug-image selection transactionally.
+    fn create_adapter_with_profile_and_debug_path(
+        &self,
+        profile_name: &str,
+        profile: Arc<dyn LanguageProfile>,
+        binary_path: &Path,
+        base_path: &Path,
+        capture_config: &CaptureConfig,
+        debug_path: Option<&Path>,
+    ) -> crate::error::Result<DapAdapterRef> {
+        let _ = debug_path;
+        self.create_adapter_with_profile(
+            profile_name,
+            profile,
+            binary_path,
+            base_path,
+            capture_config,
+        )
     }
 }
 
@@ -88,6 +140,53 @@ impl CaptureBackendFactory for GoEbpfBackend {
         }
         ProfiledCaptureRuntime::new("go", plan_hash, fields, max_payload)
     }
+
+    fn create_adapter_with_profile(
+        &self,
+        profile_name: &str,
+        profile: Arc<dyn LanguageProfile>,
+        binary_path: &Path,
+        _base_path: &Path,
+        capture_config: &CaptureConfig,
+    ) -> crate::error::Result<DapAdapterRef> {
+        if !profile_name.eq_ignore_ascii_case("go") {
+            return Err(crate::error::Error::Adapter(format!(
+                "ebpf backend does not support profile {profile_name}"
+            )));
+        }
+        let adapter = EbpfAdapter::new_with_profile_object_and_debug_path(
+            binary_path,
+            capture_config.clone(),
+            ProfileId::Go,
+            profile,
+            None::<&Path>,
+        )?;
+        Ok(Arc::new(adapter) as DapAdapterRef)
+    }
+
+    fn create_adapter_with_profile_and_debug_path(
+        &self,
+        profile_name: &str,
+        profile: Arc<dyn LanguageProfile>,
+        binary_path: &Path,
+        _base_path: &Path,
+        capture_config: &CaptureConfig,
+        debug_path: Option<&Path>,
+    ) -> crate::error::Result<DapAdapterRef> {
+        if !profile_name.eq_ignore_ascii_case("go") {
+            return Err(crate::error::Error::Adapter(format!(
+                "ebpf backend does not support profile {profile_name}"
+            )));
+        }
+        let adapter = EbpfAdapter::new_with_profile_object_and_debug_path(
+            binary_path,
+            capture_config.clone(),
+            ProfileId::Go,
+            profile,
+            debug_path,
+        )?;
+        Ok(Arc::new(adapter) as DapAdapterRef)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -117,6 +216,53 @@ impl CaptureBackendFactory for RustEbpfBackend {
             return Err(RuntimeError::MissingIdentity);
         }
         ProfiledCaptureRuntime::new("rust", plan_hash, fields, max_payload)
+    }
+
+    fn create_adapter_with_profile(
+        &self,
+        profile_name: &str,
+        profile: Arc<dyn LanguageProfile>,
+        binary_path: &Path,
+        _base_path: &Path,
+        capture_config: &CaptureConfig,
+    ) -> crate::error::Result<DapAdapterRef> {
+        if !profile_name.eq_ignore_ascii_case("rust") {
+            return Err(crate::error::Error::Adapter(format!(
+                "ebpf-rust backend does not support profile {profile_name}"
+            )));
+        }
+        let adapter = EbpfAdapter::new_with_profile_object_and_debug_path(
+            binary_path,
+            capture_config.clone(),
+            ProfileId::Rust,
+            profile,
+            None::<&Path>,
+        )?;
+        Ok(Arc::new(adapter) as DapAdapterRef)
+    }
+
+    fn create_adapter_with_profile_and_debug_path(
+        &self,
+        profile_name: &str,
+        profile: Arc<dyn LanguageProfile>,
+        binary_path: &Path,
+        _base_path: &Path,
+        capture_config: &CaptureConfig,
+        debug_path: Option<&Path>,
+    ) -> crate::error::Result<DapAdapterRef> {
+        if !profile_name.eq_ignore_ascii_case("rust") {
+            return Err(crate::error::Error::Adapter(format!(
+                "ebpf-rust backend does not support profile {profile_name}"
+            )));
+        }
+        let adapter = EbpfAdapter::new_with_profile_object_and_debug_path(
+            binary_path,
+            capture_config.clone(),
+            ProfileId::Rust,
+            profile,
+            debug_path,
+        )?;
+        Ok(Arc::new(adapter) as DapAdapterRef)
     }
 }
 

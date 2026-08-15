@@ -51,6 +51,7 @@ pub mod profile;
 pub mod registry;
 pub mod replay;
 pub mod runtime;
+pub mod rust_layout;
 pub mod wire;
 
 pub use adapter::EbpfAdapter;
@@ -69,7 +70,10 @@ pub use decode::{
 };
 pub use dwarf::{EnumLayout, EnumVariantLayout, ProbePcCandidate, ProbeResolutionDiagnostics};
 pub use factory::{EbpfAdapterFactory, EbpfGoFactory};
-pub use policy::{resolve_backend, BackendDecision, CaptureBackend, PreflightError};
+pub use policy::{
+    resolve_backend, resolve_backend_with_rust_auto, BackendDecision, CaptureBackend,
+    PreflightError,
+};
 pub use probe::types::CaptureConfig;
 pub use profile::{
     GoProfile, LanguageProfile, ProfileCapabilities, ProfileError, ProfileId, RuntimeMetadata,

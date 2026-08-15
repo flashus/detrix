@@ -24,7 +24,10 @@ impl CaptureBackend {
 pub struct BackendDecision {
     pub requested: CaptureBackend,
     pub selected: CaptureBackend,
-    pub profile: ProfileId,
+    /// Built-in identity when the profile is one of Detrix's compatibility
+    /// profiles. Dynamic registry profiles intentionally leave this unset;
+    /// `profile_name` is the authoritative identity for them.
+    pub profile: Option<ProfileId>,
     /// Registry key used for diagnostics and dynamic profiles. Built-in
     /// callers keep `profile` for compatibility with typed policy rules.
     pub profile_name: String,
@@ -51,24 +54,42 @@ pub fn resolve_backend(
     ebpf_available: bool,
     debug_info_available: bool,
 ) -> Result<BackendDecision, PreflightError> {
+    resolve_backend_with_rust_auto(
+        requested,
+        profile,
+        ebpf_available,
+        debug_info_available,
+        false,
+    )
+}
+
+/// Resolve backend selection with an explicit Rust auto-selection release gate.
+/// The gate is deliberately separate from platform/DWARF preflight so a
+/// deployment can enable Rust `auto` only after its native privileged matrix
+/// has passed. Explicit `capture_backend=ebpf` is unaffected.
+pub fn resolve_backend_with_rust_auto(
+    requested: CaptureBackend,
+    profile: ProfileId,
+    ebpf_available: bool,
+    debug_info_available: bool,
+    rust_auto_enabled: bool,
+) -> Result<BackendDecision, PreflightError> {
     if matches!(requested, CaptureBackend::Dap) {
         return Ok(BackendDecision {
             requested,
             selected: CaptureBackend::Dap,
-            profile,
+            profile: Some(profile),
             profile_name: profile.as_str().into(),
             reason: "explicit dap".into(),
         });
     }
-    // Go auto behavior is compatibility-sensitive. Rust auto remains DAP until
-    // its privileged live gate is complete; explicit ebpf remains opt-in.
-    if profile == ProfileId::Rust && requested == CaptureBackend::Auto {
+    if profile == ProfileId::Rust && requested == CaptureBackend::Auto && !rust_auto_enabled {
         return Ok(BackendDecision {
             requested,
             selected: CaptureBackend::Dap,
-            profile,
+            profile: Some(profile),
             profile_name: profile.as_str().into(),
-            reason: "rust eBPF remains opt-in until live gate".into(),
+            reason: "rust eBPF auto-selection release gate is disabled".into(),
         });
     }
     if !ebpf_available {
@@ -76,7 +97,7 @@ pub fn resolve_backend(
             return Ok(BackendDecision {
                 requested,
                 selected: CaptureBackend::Dap,
-                profile,
+                profile: Some(profile),
                 profile_name: profile.as_str().into(),
                 reason: "eBPF unavailable; auto fell back to DAP".into(),
             });
@@ -88,7 +109,7 @@ pub fn resolve_backend(
             return Ok(BackendDecision {
                 requested,
                 selected: CaptureBackend::Dap,
-                profile,
+                profile: Some(profile),
                 profile_name: profile.as_str().into(),
                 reason: "usable variable DWARF unavailable; auto fell back to DAP".into(),
             });
@@ -100,7 +121,7 @@ pub fn resolve_backend(
     Ok(BackendDecision {
         requested,
         selected: CaptureBackend::Ebpf,
-        profile,
+        profile: Some(profile),
         profile_name: profile.as_str().into(),
         reason: "eBPF capability preflight passed".into(),
     })
@@ -110,9 +131,17 @@ pub fn resolve_backend(
 mod tests {
     use super::*;
     #[test]
-    fn rust_auto_is_dap() {
+    fn rust_auto_remains_dap_until_release_gate() {
         let d = resolve_backend(CaptureBackend::Auto, ProfileId::Rust, true, true).unwrap();
         assert_eq!(d.selected, CaptureBackend::Dap);
+    }
+
+    #[test]
+    fn rust_auto_selects_ebpf_when_release_gate_is_enabled() {
+        let d =
+            resolve_backend_with_rust_auto(CaptureBackend::Auto, ProfileId::Rust, true, true, true)
+                .unwrap();
+        assert_eq!(d.selected, CaptureBackend::Ebpf);
     }
     #[test]
     fn explicit_dap_wins() {

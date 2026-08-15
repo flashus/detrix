@@ -776,11 +776,11 @@ fn header_location(base: VariableLocation, kind: HeaderKind) -> VariableLocation
             ptr: Box::new(base.clone()),
             len: Box::new(shift_location(base, 8)),
         },
-        HeaderKind::RustString => VariableLocation::GoString {
+        HeaderKind::RustString => VariableLocation::StringHeader {
             ptr: Box::new(shift_location(base.clone(), 8)),
             len: Box::new(shift_location(base, 16)),
         },
-        HeaderKind::BorrowedStr => VariableLocation::GoString {
+        HeaderKind::BorrowedStr => VariableLocation::StringHeader {
             ptr: Box::new(base.clone()),
             len: Box::new(shift_location(base, 8)),
         },
@@ -789,7 +789,7 @@ fn header_location(base: VariableLocation, kind: HeaderKind) -> VariableLocation
             len: Box::new(shift_location(base.clone(), 8)),
             cap: Box::new(shift_location(base, 16)),
         },
-        HeaderKind::RustVec => VariableLocation::GoSlice {
+        HeaderKind::RustVec => VariableLocation::SliceHeader {
             ptr: Box::new(base.clone()),
             len: Box::new(shift_location(base.clone(), 16)),
             // rustc may spill the nominal RawVec capacity slot as an
@@ -797,7 +797,7 @@ fn header_location(base: VariableLocation, kind: HeaderKind) -> VariableLocation
             // bounded and semantically safe by aliasing capacity to length.
             cap: Box::new(shift_location(base, 16)),
         },
-        HeaderKind::BorrowedSlice => VariableLocation::GoSlice {
+        HeaderKind::BorrowedSlice => VariableLocation::SliceHeader {
             ptr: Box::new(base.clone()),
             len: Box::new(shift_location(base.clone(), 8)),
             cap: Box::new(shift_location(base, 8)),

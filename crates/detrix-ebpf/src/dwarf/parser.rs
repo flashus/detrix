@@ -170,12 +170,13 @@ impl DwarfInfo {
     /// usable local locations.
     pub fn has_usable_variable_dwarf(&self) -> Result<bool> {
         let obj = object::File::parse(self.dwarf_bytes()).context("Failed to parse ELF")?;
+        let parent = object::File::parse(&*self._data).context("Failed to parse executable ELF")?;
         let endian = if self.is_little_endian {
             gimli::RunTimeEndian::Little
         } else {
             gimli::RunTimeEndian::Big
         };
-        let dwarf = load_dwarf(&obj, endian)?;
+        let dwarf = load_dwarf_for_image(&parent, &obj, endian)?;
         let mut units = dwarf.units();
         while let Some(header) = units.next().context("variable-DWARF unit iteration")? {
             let unit = dwarf.unit(header).context("variable-DWARF unit parse")?;
@@ -382,7 +383,8 @@ impl DwarfInfo {
         } else {
             gimli::RunTimeEndian::Big
         };
-        let dwarf = load_dwarf(&obj, endian).ok()?;
+        let parent = object::File::parse(&*self._data).ok()?;
+        let dwarf = load_dwarf_for_image(&parent, &obj, endian).ok()?;
 
         let mut units = dwarf.units();
         while let Ok(Some(header)) = units.next() {
@@ -481,6 +483,8 @@ impl DwarfInfo {
         max_nested_depth: usize,
     ) -> Result<(ProbePoint, ProbeResolutionDiagnostics)> {
         let obj = object::File::parse(self.dwarf_bytes()).context("Failed to parse ELF")?;
+        let executable =
+            object::File::parse(&*self._data).context("Failed to parse executable ELF")?;
 
         let endian = if self.is_little_endian {
             gimli::RunTimeEndian::Little
@@ -488,7 +492,7 @@ impl DwarfInfo {
             gimli::RunTimeEndian::Big
         };
 
-        let dwarf = load_dwarf(&obj, endian)?;
+        let dwarf = load_dwarf_for_image(&executable, &obj, endian)?;
 
         // Step 1: Resolve file:line → all candidate PCs via .debug_line. A
         // source line can map to several statement-boundary PCs; try each one
@@ -503,7 +507,7 @@ impl DwarfInfo {
                 diagnostics.push(format!("PC {pc:#x}: outside a known function"));
                 continue;
             };
-            let cfa_base = get_cfa_base(&obj, endian, pc);
+            let cfa_base = get_cfa_base(&executable, endian, pc);
             let variables = resolve_variables_at_pc(
                 &dwarf,
                 pc,
@@ -600,14 +604,105 @@ fn load_dwarf<'a>(
         EndianSlice<'a, gimli::RunTimeEndian>,
         gimli::Error,
     > {
-        let data = obj
-            .section_by_name(id.name())
-            .and_then(|s| s.data().ok())
-            .unwrap_or(&[]);
+        // Split DWARF objects use `.debug_*.dwo` (and packed `.dwp` files
+        // expose the same contribution names).  Prefer the ordinary section
+        // for executables, then the split suffixes.  This keeps one gimli
+        // loader for embedded, unpacked, and packed debug images.
+        let data = [
+            id.name(),
+            &format!("{}.dwo", id.name()),
+            &format!("{}.dwp", id.name()),
+        ]
+        .iter()
+        .find_map(|name| obj.section_by_name(name).and_then(|s| s.data().ok()))
+        .unwrap_or(&[]);
         Ok(EndianSlice::new(data, endian))
     };
 
     gimli::Dwarf::load(load_section).context("Load DWARF")
+}
+
+/// Load DWARF from the selected image and, for a `.dwo`/`.dwp` image, merge
+/// the executable's address/range tables into the split unit using gimli's
+/// `make_dwo` contract.  The returned readers borrow only the section bytes,
+/// so the local object wrappers may be dropped safely.
+fn load_dwarf_for_image<'a>(
+    executable: &'a object::File<'a>,
+    image: &'a object::File<'a>,
+    endian: gimli::RunTimeEndian,
+) -> Result<gimli::Dwarf<EndianSlice<'a, gimli::RunTimeEndian>>> {
+    // A packed Rust split-DWARF image is a DWARF package, not an ordinary
+    // concatenated `.debug_info.dwo` stream.  Use gimli's package index to
+    // select the CU contribution matching the executable skeleton.  Treating
+    // the package as an ordinary Dwarf would read contribution offsets as
+    // global offsets and can silently resolve the wrong unit.
+    if image.section_by_name(".debug_cu_index").is_some()
+        || image.section_by_name(".debug_cu_index.dwo").is_some()
+    {
+        return load_dwp_first_cu(executable, image, endian);
+    }
+    let mut dwarf = load_dwarf(image, endian)?;
+    let split_name = image
+        .section_by_name(".debug_info.dwo")
+        .or_else(|| image.section_by_name(".debug_info.dwp"));
+    if split_name.is_some() {
+        let parent = load_dwarf(executable, endian)?;
+        dwarf.file_type = gimli::DwarfFileType::Dwo;
+        dwarf.make_dwo(&parent);
+    }
+    Ok(dwarf)
+}
+
+fn load_dwp_first_cu<'a>(
+    executable: &'a object::File<'a>,
+    package_image: &'a object::File<'a>,
+    endian: gimli::RunTimeEndian,
+) -> Result<gimli::Dwarf<EndianSlice<'a, gimli::RunTimeEndian>>> {
+    let parent = load_dwarf(executable, endian)?;
+    let load_section = |id: gimli::SectionId| -> std::result::Result<
+        EndianSlice<'a, gimli::RunTimeEndian>,
+        gimli::Error,
+    > {
+        let Some(name) = id.dwo_name() else {
+            return Ok(EndianSlice::new(&[], endian));
+        };
+        let data = package_image
+            .section_by_name(name)
+            .and_then(|section| section.data().ok())
+            .unwrap_or(&[]);
+        Ok(EndianSlice::new(data, endian))
+    };
+    let empty = EndianSlice::new(&[], endian);
+    let package = gimli::DwarfPackage::load(load_section, empty)
+        .context("Load packed split-DWARF package")?;
+
+    let mut units = parent.units();
+    while let Some(header) = units
+        .next()
+        .context("packed split-DWARF parent unit iteration")?
+    {
+        // Rust's Linux `-C split-debuginfo=unpacked` commonly emits the GNU
+        // DWARF4 extension: the CU header remains `Compilation` and carries
+        // `DW_AT_GNU_dwo_id` on its root DIE. `gimli::Unit::new` normalizes
+        // both that form and DWARF5 skeleton/split headers into `dwo_id`.
+        let parent_unit = parent
+            .unit(header)
+            .context("parse packed split-DWARF parent unit")?;
+        let Some(dwo_id) = parent_unit.dwo_id else {
+            continue;
+        };
+        if let Some(mut dwo) = package
+            .find_cu(dwo_id, &parent)
+            .context("find packed split-DWARF compilation unit")?
+        {
+            dwo.make_dwo(&parent);
+            return Ok(dwo);
+        }
+    }
+
+    Err(Error::DwarfParse(
+        "packed split-DWARF image has no CU matching executable skeleton".into(),
+    ))
 }
 
 /// Parse `.debug_frame` to find CFA = SP + N at the given PC.

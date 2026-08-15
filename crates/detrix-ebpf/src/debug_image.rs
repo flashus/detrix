@@ -1,8 +1,8 @@
 //! Debug-image discovery independent of any source language.
 //!
-//! This is intentionally small: embedded DWARF is the first provider.  The
-//! same metadata contract can later be backed by GNU debuglink/build-id or
-//! split-DWARF providers without changing profiles or probe runtimes.
+//! Embedded DWARF, GNU debuglink/build-id files, and Rust `.dwo`/`.dwp`
+//! split-debuginfo sidecars share one metadata contract. The parser uses the
+//! same gimli loader for ordinary and split section names.
 
 use crate::dwarf::DwarfInfo;
 use object::{BinaryFormat, Object};
@@ -64,15 +64,26 @@ impl DebugImageProvider for EmbeddedDebugImageProvider {
             object::Architecture::Aarch64 => TargetAbi::Aarch64,
             _ => TargetAbi::Unknown,
         };
-        let has_sections = file.section_by_name(".debug_info").is_some()
-            || file.section_by_name(".zdebug_info").is_some();
+        let has_sections = [
+            ".debug_info",
+            ".zdebug_info",
+            ".debug_info.dwo",
+            ".debug_info.dwp",
+        ]
+        .iter()
+        .any(|name| file.section_by_name(name).is_some());
         let split = file.section_by_name(".gnu_debugaltlink").is_some()
             || file.section_by_name(".debug_sup").is_some();
         let has_variable_dwarf = has_sections
             && DwarfInfo::parse(path)
                 .and_then(|info| info.has_usable_variable_dwarf())
                 .unwrap_or(false);
-        let source = if has_variable_dwarf {
+        let source = if matches!(
+            path.extension().and_then(|s| s.to_str()),
+            Some("dwo" | "dwp")
+        ) {
+            DebugImageSource::Split
+        } else if has_variable_dwarf {
             DebugImageSource::Embedded
         } else if split {
             DebugImageSource::Split
@@ -141,6 +152,21 @@ impl ExternalDebugImageProvider {
                 }
             }
         }
+        // Rust unpacked split-debuginfo commonly places a `.dwo` beside the
+        // executable; packed mode uses a `.dwp` sibling. These candidates are
+        // also useful when DW_AT_GNU_dwo_name was remapped during compilation.
+        if let Some(parent) = path.parent() {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                candidates.push(parent.join(format!("{stem}.dwo")));
+                candidates.push(parent.join(format!("{stem}.dwp")));
+            }
+        }
+        for root in &self.search_paths {
+            if let Some(name) = path.file_name() {
+                candidates.push(root.join(name).with_extension("dwo"));
+                candidates.push(root.join(name).with_extension("dwp"));
+            }
+        }
         if let Ok(Some(build_id)) = file.build_id() {
             if build_id.len() >= 2 {
                 let hex = build_id
@@ -188,9 +214,17 @@ impl DebugImageProvider for ExternalDebugImageProvider {
         for candidate in self.candidates(path, &file) {
             if let Ok(metadata) = EmbeddedDebugImageProvider.load(&candidate) {
                 if metadata.has_variable_dwarf {
+                    let source = if matches!(
+                        candidate.extension().and_then(|s| s.to_str()),
+                        Some("dwo" | "dwp")
+                    ) {
+                        DebugImageSource::Split
+                    } else {
+                        DebugImageSource::External
+                    };
                     return Ok(DebugImageMetadata {
                         path: path.to_path_buf(),
-                        source: DebugImageSource::External,
+                        source,
                         debug_path: candidate,
                         ..metadata
                     });

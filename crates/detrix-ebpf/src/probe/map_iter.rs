@@ -47,7 +47,9 @@ const HASH_MIN_TOPHASH_GO111: u64 = 4;
 const HASH_TOPHASH_EMPTY_ONE_GO112: u64 = 1;
 const HASH_MIN_TOPHASH_GO112: u64 = 5;
 
-/// Read entries from a Go map at `map_ptr`, auto-detecting classic vs Swiss Table.
+/// Read entries from a runtime map at `map_ptr`, auto-detecting the supported
+/// classic and Swiss-table layouts. The current layout implementations are
+/// Go-compatible; the decoder boundary is intentionally language-neutral.
 ///
 /// Detection heuristic:
 /// - Swiss Table (Go 1.24+): 32-byte header with `used` (uint64), `dirPtr` (uint64), `dirLen` (int64)
@@ -57,7 +59,7 @@ const HASH_MIN_TOPHASH_GO112: u64 = 5;
 /// We detect by checking if bytes 8-16 (seed in Swiss, flags+B+noverflow+hash0 in classic) look
 /// like a valid Swiss Table header. If `dirLen` (bytes 24-32) is a reasonable value (>= -1 and <= 64),
 /// we treat it as Swiss Table. Otherwise, classic.
-pub fn read_go_map(
+pub fn read_map(
     map_ptr: u64,
     key_nested: Option<&NestedType>,
     val_nested: Option<&NestedType>,
@@ -323,6 +325,20 @@ pub fn read_go_map(
         entries,
         reason: String::new(),
     }
+}
+
+/// Compatibility spelling for callers that still identify this reader by the
+/// original Go implementation. New profile code should call [`read_map`].
+#[deprecated(note = "use read_map; the reader is behind the generic map seam")]
+pub fn read_go_map(
+    map_ptr: u64,
+    key_nested: Option<&NestedType>,
+    val_nested: Option<&NestedType>,
+    config: &CaptureConfig,
+    mem_reader: &dyn ProcessMemoryReader,
+    pid: u32,
+) -> CapturedValue {
+    read_map(map_ptr, key_nested, val_nested, config, mem_reader, pid)
 }
 
 fn read_swiss_map_inner(
@@ -1177,7 +1193,7 @@ mod tests {
     #[test]
     fn classic_map_nil_map_returns_empty() {
         let reader = MockMemReader::new();
-        let result = read_go_map(
+        let result = read_map(
             0, // nil map pointer
             None,
             None,
@@ -1209,7 +1225,7 @@ mod tests {
 
         // We can't fully test Swiss Table without proper group data,
         // but we can verify the detection logic doesn't panic
-        let _result = read_go_map(0x5000, None, None, &CaptureConfig::default(), &reader, 1234);
+        let _result = read_map(0x5000, None, None, &CaptureConfig::default(), &reader, 1234);
         // Should not panic, returns whatever it can read
     }
 
@@ -1227,7 +1243,7 @@ mod tests {
         reader.put(0x6000, classic_header);
 
         // Should detect as classic (dirLen > 64) and attempt classic iteration
-        let _result = read_go_map(0x6000, None, None, &CaptureConfig::default(), &reader, 1234);
+        let _result = read_map(0x6000, None, None, &CaptureConfig::default(), &reader, 1234);
     }
 
     #[test]
@@ -1249,7 +1265,7 @@ mod tests {
 
         // Should be detected as classic (flags=0 < 16 AND B=1 < 32)
         // and attempt classic iteration (won't find entries without bucket data, but won't panic)
-        let _result = read_go_map(0x7000, None, None, &CaptureConfig::default(), &reader, 1234);
+        let _result = read_map(0x7000, None, None, &CaptureConfig::default(), &reader, 1234);
         // Key assertion: it should not panic and should not attempt Swiss Table group parsing
     }
 
@@ -1287,7 +1303,7 @@ mod tests {
         reader.put(0x9000, group);
 
         let string_nested = string_nested_type();
-        let result = read_go_map(
+        let result = read_map(
             0x8000,
             Some(&string_nested),
             Some(&string_nested),

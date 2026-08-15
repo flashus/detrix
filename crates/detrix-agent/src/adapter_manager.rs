@@ -17,8 +17,8 @@ use detrix_api::generated::detrix::v1::{
 use detrix_core::{ConnectionId, Location, Metric, MetricEvent, ParseLanguageExt, SourceLanguage};
 use detrix_dap::{GoAdapter, PythonAdapter, RustAdapter};
 use detrix_ebpf::{
-    resolve_backend, BackendDecision, CaptureBackend, CaptureBackendFactory, CaptureConfig,
-    EbpfAdapterFactory, LanguageProfile, ProfileId,
+    resolve_backend_with_rust_auto, BackendDecision, CaptureBackend, CaptureBackendFactory,
+    CaptureConfig, EbpfAdapterFactory, LanguageProfile, ProfileId,
 };
 use detrix_logging::{debug, info, warn};
 use detrix_ports::DapAdapterRef;
@@ -126,7 +126,9 @@ impl AdapterManager {
     /// Create a new connection — dispatches by language.
     ///
     /// For Go connections, uses eBPF uprobes.
-    /// DAP remains the default for Python/Rust unless Rust explicitly requests eBPF.
+    /// DAP remains the fallback for unsupported/non-Linux targets; Rust eBPF
+    /// is selected by `auto` only after the same transactional capability and
+    /// usable-DWARF preflight as Go.
     pub async fn create_connection(&self, msg: AgentCreateConnection) {
         let connection_id = msg.connection_id.clone();
         let language = msg.language.to_lowercase();
@@ -206,11 +208,20 @@ impl AdapterManager {
             };
             self.connection_debug_sources
                 .insert(connection_id.clone(), debug_source);
-            match resolve_backend(
+            let rust_auto_enabled = std::env::var("DETRIX_RUST_EBPF_AUTO")
+                .map(|value| {
+                    matches!(
+                        value.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes"
+                    )
+                })
+                .unwrap_or(false);
+            match resolve_backend_with_rust_auto(
                 requested_backend,
                 requested_profile,
                 EbpfAdapterFactory::is_available(),
                 debug_ready,
+                rust_auto_enabled,
             ) {
                 Ok(decision) => decision,
                 Err(error) => {
@@ -236,7 +247,7 @@ impl AdapterManager {
             BackendDecision {
                 requested: requested_backend,
                 selected: CaptureBackend::Dap,
-                profile: requested_profile,
+                profile: Some(requested_profile),
                 profile_name: requested_profile.as_str().into(),
                 reason: "language has no registered eBPF profile".into(),
             }
@@ -273,8 +284,8 @@ impl AdapterManager {
             let binary_path = PathBuf::from(&msg.binary_path);
             let debug_path = (!msg.debug_info_path.trim().is_empty())
                 .then(|| PathBuf::from(&msg.debug_info_path));
-            let adapter_result = self.ebpf_factory.create_adapter_with_debug_path(
-                requested_profile,
+            let adapter_result = self.ebpf_factory.create_registered_adapter_with_debug_path(
+                requested_profile.as_str(),
                 &binary_path,
                 debug_path.as_deref(),
             );
@@ -360,8 +371,8 @@ impl AdapterManager {
                             let debug_path = (!msg.debug_info_path.trim().is_empty())
                                 .then(|| PathBuf::from(&msg.debug_info_path));
                             self.ebpf_factory
-                                .create_adapter_with_debug_path(
-                                    requested_profile,
+                                .create_registered_adapter_with_debug_path(
+                                    requested_profile.as_str(),
                                     &binary_path,
                                     debug_path.as_deref(),
                                 )
@@ -555,9 +566,9 @@ impl AdapterManager {
             BackendDecision {
                 requested: CaptureBackend::Ebpf,
                 selected: CaptureBackend::Ebpf,
-                // Dynamic backends own their profile identity; this typed
-                // value is retained only for compatibility with policy data.
-                profile: ProfileId::Go,
+                // Dynamic backends own their profile identity; there is no
+                // built-in enum value for an external profile.
+                profile: None,
                 profile_name: profile_name.clone(),
                 reason: "registry-provided eBPF profile".into(),
             },
@@ -565,10 +576,11 @@ impl AdapterManager {
         self.connection_drop_counts
             .insert(connection_id.clone(), Arc::new(AtomicU64::new(0)));
 
-        let adapter = match self
-            .ebpf_factory
-            .create_registered_adapter(&profile_name, PathBuf::from(&msg.binary_path))
-        {
+        let adapter = match self.ebpf_factory.create_registered_adapter_with_debug_path(
+            &profile_name,
+            PathBuf::from(&msg.binary_path),
+            (!msg.debug_info_path.trim().is_empty()).then(|| PathBuf::from(&msg.debug_info_path)),
+        ) {
             Ok(adapter) => adapter,
             Err(error) => {
                 self.send_connection_update(
@@ -1223,7 +1235,7 @@ mod tests {
         let decision = BackendDecision {
             requested: CaptureBackend::Auto,
             selected: CaptureBackend::Dap,
-            profile: ProfileId::Rust,
+            profile: Some(ProfileId::Rust),
             profile_name: "rust".into(),
             reason: "fallback".into(),
         };
@@ -1238,7 +1250,7 @@ mod tests {
         let decision = BackendDecision {
             requested: CaptureBackend::Ebpf,
             selected: CaptureBackend::Ebpf,
-            profile: ProfileId::Rust,
+            profile: Some(ProfileId::Rust),
             profile_name: "rust".into(),
             reason: "explicit".into(),
         };

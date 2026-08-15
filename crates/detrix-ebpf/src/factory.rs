@@ -84,31 +84,61 @@ impl EbpfAdapterFactory {
         profile: &str,
         binary_path: impl AsRef<Path>,
     ) -> Result<DapAdapterRef> {
+        self.create_registered_adapter_with_debug_path(profile, binary_path, None::<&Path>)
+    }
+
+    /// String-keyed construction with an optional external DWARF image. This
+    /// is the manager-facing path for built-in and third-party profiles alike.
+    pub fn create_registered_adapter_with_debug_path(
+        &self,
+        profile: &str,
+        binary_path: impl AsRef<Path>,
+        debug_path: Option<impl AsRef<Path>>,
+    ) -> Result<DapAdapterRef> {
         let profile = profile.trim().to_ascii_lowercase();
-        match profile.as_str() {
-            "go" => self.create_go_adapter(binary_path),
-            "rust" => self.create_rust_adapter(binary_path),
-            other if self.has_registered_profile(other) => {
-                let backend = self.backends.for_profile_name(other).ok_or_else(|| {
-                    Error::Adapter(format!("No registered eBPF backend for {other}"))
-                })?;
-                let path = if binary_path.as_ref().is_absolute() {
-                    binary_path.as_ref().to_path_buf()
-                } else {
-                    self.base_path.join(binary_path)
-                };
-                if !path.exists() {
-                    return Err(Error::Adapter(format!(
-                        "Binary not found: {}",
-                        path.display()
-                    )));
-                }
-                backend.create_adapter(other, &path, &self.base_path, &self.capture_config)
-            }
-            other => Err(Error::Adapter(format!(
-                "No registered eBPF profile for {other}"
-            ))),
+        let profile_impl = self
+            .profiles
+            .get(&profile)
+            .ok_or_else(|| Error::Adapter(format!("No registered eBPF profile for {profile}")))?;
+        let backend = self
+            .backends
+            .for_profile_name(&profile)
+            .ok_or_else(|| Error::Adapter(format!("No registered eBPF backend for {profile}")))?;
+        let path = if binary_path.as_ref().is_absolute() {
+            binary_path.as_ref().to_path_buf()
+        } else {
+            self.base_path.join(binary_path)
+        };
+        if !path.exists() {
+            return Err(Error::Adapter(format!(
+                "Binary not found: {}",
+                path.display()
+            )));
         }
+        let debug_path = debug_path.map(|candidate| {
+            let candidate = candidate.as_ref();
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                self.base_path.join(candidate)
+            }
+        });
+        if let Some(debug_path) = &debug_path {
+            if !debug_path.exists() {
+                return Err(Error::Adapter(format!(
+                    "Debug image not found: {}",
+                    debug_path.display()
+                )));
+            }
+        }
+        backend.create_adapter_with_profile_and_debug_path(
+            &profile,
+            profile_impl,
+            &path,
+            &self.base_path,
+            &self.capture_config,
+            debug_path.as_deref(),
+        )
     }
 
     /// Create an eBPF adapter for a Go or Rust ELF binary.
@@ -261,10 +291,17 @@ impl EbpfAdapterFactory {
                 )));
             }
         }
-        let adapter = EbpfAdapter::new_with_profile_and_debug_path(
+        let profile_impl = self.profiles.get(profile.as_str()).ok_or_else(|| {
+            Error::Adapter(format!(
+                "No registered eBPF profile for {}",
+                profile.as_str()
+            ))
+        })?;
+        let adapter = EbpfAdapter::new_with_profile_object_and_debug_path(
             path,
             self.capture_config.clone(),
             profile,
+            profile_impl,
             debug_path,
         )
         .map_err(|e: crate::error::Error| Error::Adapter(e.to_string()))?;
