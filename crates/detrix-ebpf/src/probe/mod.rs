@@ -42,4 +42,4 @@ pub use ringbuf::{
     parse_ring_buffer_event, parse_ring_buffer_event_with_envelope, RawEnvelopeExpectation,
 };
 pub use types::{CapturedValue, ProbeConfig, ProbeEvent};
-pub use uprobe::UprobeManager;
+pub use uprobe::{UprobeManager, RAW_EVENT_CHANNEL_CAPACITY};

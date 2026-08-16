@@ -31,7 +31,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::probe::ringbuf::RawEnvelopeExpectation;
 use crate::probe::types::{CaptureConfig, CapturedValue};
-use crate::probe::UprobeManager;
+use crate::probe::{UprobeManager, RAW_EVENT_CHANNEL_CAPACITY};
 use crate::profile::{GoProfile, LanguageProfile, ProfileId, RustProfile};
 use crate::runtime::ProfiledCaptureRuntime;
 
@@ -47,7 +47,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 /// Raw event channel receiver type — used for the placeholder channel.
-type RawEventRx = mpsc::UnboundedReceiver<(String, Vec<u8>)>;
+type RawEventRx = mpsc::Receiver<(String, Vec<u8>)>;
 
 /// eBPF-based adapter for Go logpoints on Linux.
 ///
@@ -85,6 +85,10 @@ pub struct EbpfAdapter {
     decoded_events: Arc<AtomicU64>,
     /// Whether the adapter is started. AtomicBool for lock-free check-and-set in start().
     started: AtomicBool,
+    /// Serializes start/stop so a concurrent restart cannot install resources
+    /// after shutdown has begun. The atomic above remains the cheap status
+    /// query used by `is_connected()`.
+    lifecycle: Mutex<()>,
     /// Placeholder raw event receiver — keeps the pre-start channel open so ring
     /// buffer pollers don't see a broken channel if set_metric() is called before start().
     /// Dropped (set to None) in start() when the real correlator channel is created.
@@ -101,6 +105,7 @@ pub struct EbpfAdapter {
 ///
 /// Fields are read by `run_event_correlator` (Linux-only).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone)]
 struct ActiveMetric {
     metric: Metric,
     probe_point: ProbePoint,
@@ -209,7 +214,7 @@ impl EbpfAdapter {
         // Create a placeholder raw-event channel so ring buffer pollers don't see a
         // broken sender if set_metric() is called before start(). start() replaces
         // this with a fresh channel and drops the placeholder receiver.
-        let (placeholder_tx, placeholder_rx) = mpsc::unbounded_channel();
+        let (placeholder_tx, placeholder_rx) = mpsc::channel(RAW_EVENT_CHANNEL_CAPACITY);
         Ok(Self {
             binary_path: path.clone(),
             dwarf_path,
@@ -228,6 +233,7 @@ impl EbpfAdapter {
             unavailable_fields: Arc::new(AtomicU64::new(0)),
             decoded_events: Arc::new(AtomicU64::new(0)),
             started: AtomicBool::new(false),
+            lifecycle: Mutex::new(()),
             _placeholder_raw_rx: RwLock::new(Some(placeholder_rx)),
             capture_config,
             #[cfg(target_os = "linux")]
@@ -302,6 +308,7 @@ impl EbpfAdapter {
 #[async_trait]
 impl DapAdapter for EbpfAdapter {
     async fn start(&self) -> detrix_core::Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
         // Atomic check-and-set: only one concurrent caller proceeds.
         if self
             .started
@@ -321,7 +328,7 @@ impl DapAdapter for EbpfAdapter {
             // UprobeManager; newly attached probes will use the new sender.
             #[cfg(target_os = "linux")]
             {
-                let (raw_tx, raw_rx) = mpsc::unbounded_channel();
+                let (raw_tx, raw_rx) = mpsc::channel(RAW_EVENT_CHANNEL_CAPACITY);
                 self.uprobe_manager.write().await.set_raw_tx(raw_tx);
                 // Drop the placeholder receiver now that the real channel is active.
                 *self._placeholder_raw_rx.write().await = None;
@@ -356,7 +363,14 @@ impl DapAdapter for EbpfAdapter {
     }
 
     async fn stop(&self) -> detrix_core::Result<()> {
-        self.uprobe_manager.write().await.detach_all();
+        let _lifecycle = self.lifecycle.lock().await;
+        let mut uprobe_manager = self.uprobe_manager.write().await;
+        uprobe_manager.detach_all();
+        // Drop the manager's final raw sender after pollers are detached so
+        // the correlator receiver can observe closure and terminate.
+        #[cfg(target_os = "linux")]
+        uprobe_manager.clear_raw_tx();
+        drop(uprobe_manager);
         self.active_metrics.write().await.clear();
 
         // Gracefully shut down the correlator task by dropping raw_event_rx
@@ -650,7 +664,7 @@ impl Drop for EbpfAdapter {
 /// resulting `MetricEvent` to `event_tx`.
 #[cfg(target_os = "linux")]
 async fn run_event_correlator(
-    mut raw_rx: mpsc::UnboundedReceiver<(String, Vec<u8>)>,
+    mut raw_rx: mpsc::Receiver<(String, Vec<u8>)>,
     active_metrics: Arc<RwLock<HashMap<String, ActiveMetric>>>,
     event_tx: mpsc::Sender<MetricEvent>,
     capture_config: CaptureConfig,
@@ -662,8 +676,14 @@ async fn run_event_correlator(
     use crate::probe::ringbuf::parse_ring_buffer_event_with_envelope;
 
     while let Some((probe_key, raw_bytes)) = raw_rx.recv().await {
-        let guard = active_metrics.read().await;
-        let Some(active) = guard.get(&probe_key) else {
+        // Clone the immutable metric context before doing any async runtime or
+        // transport work. Holding the RwLock read guard across `.await` would
+        // starve set/remove/stop writers whenever the event channel is slow.
+        let active = {
+            let guard = active_metrics.read().await;
+            guard.get(&probe_key).cloned()
+        };
+        let Some(active) = active else {
             continue;
         };
 
@@ -689,14 +709,23 @@ async fn run_event_correlator(
                 );
                 decoded_events.fetch_add(1, Ordering::Relaxed);
                 if let Some(runtime) = &active.runtime {
-                    let payload =
+                    let (payload, partial) =
                         scalar_payload(&probe_event.values, &active.probe_point.variables);
                     let mut runtime = runtime.lock().await;
-                    if let Ok(record) = runtime.encode_payload(&payload, false) {
-                        if let Err(error) = runtime.ingest(&record) {
+                    match runtime.encode_payload(&payload, partial) {
+                        Ok(record) => {
+                            if let Err(error) = runtime.ingest(&record) {
+                                decode_drops.fetch_add(1, Ordering::Relaxed);
+                                detrix_logging::warn!(
+                                    "Rust profile runtime rejected event for '{}': {error}",
+                                    active.metric.name
+                                );
+                            }
+                        }
+                        Err(error) => {
                             decode_drops.fetch_add(1, Ordering::Relaxed);
                             detrix_logging::warn!(
-                                "Rust profile runtime rejected event for '{}': {error}",
+                                "Rust profile runtime could not encode event for '{}': {error}",
                                 active.metric.name
                             );
                         }
@@ -765,19 +794,59 @@ fn rust_scalar_fields(variables: &[ResolvedVariable]) -> detrix_core::Result<Vec
     Ok(fields)
 }
 
-#[cfg(target_os = "linux")]
-fn scalar_payload(values: &[CapturedValue], variables: &[ResolvedVariable]) -> Vec<u8> {
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn scalar_payload(values: &[CapturedValue], variables: &[ResolvedVariable]) -> (Vec<u8>, bool) {
     let mut payload = Vec::new();
-    for (value, variable) in values.iter().zip(variables) {
+    let mut partial = values.len() != variables.len();
+    for (index, variable) in variables.iter().enumerate() {
         let size = variable.size.bytes();
+        let value = values.get(index);
         let raw = match value {
-            CapturedValue::Scalar(value) => value.to_le_bytes().to_vec(),
-            CapturedValue::Float(value) => value.to_bits().to_le_bytes().to_vec(),
-            _ => vec![0; size],
+            Some(CapturedValue::Error(_)) | None => {
+                partial = true;
+                vec![0; size]
+            }
+            Some(CapturedValue::Scalar(value)) => value.to_le_bytes().to_vec(),
+            Some(CapturedValue::Float(value)) => value.to_bits().to_le_bytes().to_vec(),
+            Some(_) => {
+                partial = true;
+                vec![0; size]
+            }
         };
         payload.extend_from_slice(&raw[..size.min(raw.len())]);
     }
-    payload
+    (payload, partial)
+}
+
+#[cfg(test)]
+mod scalar_payload_tests {
+    use super::*;
+    use crate::dwarf::types::Register;
+
+    #[test]
+    fn scalar_payload_preserves_field_count_when_value_is_missing() {
+        let variables = vec![
+            ResolvedVariable {
+                name: "a".into(),
+                type_name: "u64".into(),
+                size: VariableSize::QWord,
+                location: VariableLocation::Register(Register::Rax),
+                nested_type: None,
+            },
+            ResolvedVariable {
+                name: "b".into(),
+                type_name: "u64".into(),
+                size: VariableSize::QWord,
+                location: VariableLocation::Register(Register::Rbx),
+                nested_type: None,
+            },
+        ];
+        let (payload, partial) = scalar_payload(&[CapturedValue::Scalar(7)], &variables);
+        assert_eq!(payload.len(), 16);
+        assert_eq!(&payload[..8], &7u64.to_le_bytes());
+        assert_eq!(&payload[8..], &[0; 8]);
+        assert!(partial);
+    }
 }
 
 #[cfg(test)]

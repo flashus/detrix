@@ -5,6 +5,11 @@ use crate::capture_plan::{
     CAPTURE_PLAN_SCHEMA_VERSION, MAX_CAPTURE_FIELDS, MAX_CAPTURE_PAYLOAD_BYTES,
 };
 
+/// Bound identity fields independently from the payload. Normal profile and
+/// plan identifiers are tiny; keeping this cap explicit prevents malformed
+/// records from turning the decoder into an allocation sink.
+pub const MAX_IDENTITY_BYTES: usize = 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireCapabilities {
     pub supported_schema_versions: Vec<u16>,
@@ -96,6 +101,9 @@ impl EventEnvelope {
         if self.profile_id.is_empty() || self.plan_hash.is_empty() {
             return Err(EnvelopeError::MissingIdentity);
         }
+        if self.profile_id.len() > MAX_IDENTITY_BYTES || self.plan_hash.len() > MAX_IDENTITY_BYTES {
+            return Err(EnvelopeError::IdentityTooLong);
+        }
         if self.field_count == 0 || usize::from(self.field_count) > MAX_CAPTURE_FIELDS {
             return Err(EnvelopeError::InvalidFieldCount {
                 count: usize::from(self.field_count),
@@ -136,7 +144,7 @@ impl EventEnvelope {
         self.validate(max_payload)?;
         let profile = self.profile_id.as_bytes();
         let plan = self.plan_hash.as_bytes();
-        if profile.len() > u16::MAX as usize || plan.len() > u16::MAX as usize {
+        if profile.len() > MAX_IDENTITY_BYTES || plan.len() > MAX_IDENTITY_BYTES {
             return Err(EnvelopeError::IdentityTooLong);
         }
         let mut out = Vec::with_capacity(16 + profile.len() + plan.len() + payload.len());
@@ -171,10 +179,19 @@ impl EventEnvelope {
         }
         let schema_version = u16::from_le_bytes(record[4..6].try_into().unwrap());
         let flags = u16::from_le_bytes(record[6..8].try_into().unwrap());
+        if flags & !0x3 != 0 {
+            return Err(EnvelopeError::UnknownFlags(flags));
+        }
         let profile_len = u16::from_le_bytes(record[8..10].try_into().unwrap()) as usize;
         let field_count = u16::from_le_bytes(record[10..12].try_into().unwrap());
         let plan_len = u16::from_le_bytes(record[12..14].try_into().unwrap()) as usize;
         let payload_len = u32::from_le_bytes(record[14..18].try_into().unwrap()) as usize;
+        if profile_len == 0 || plan_len == 0 {
+            return Err(EnvelopeError::MissingIdentity);
+        }
+        if profile_len > MAX_IDENTITY_BYTES || plan_len > MAX_IDENTITY_BYTES {
+            return Err(EnvelopeError::IdentityTooLong);
+        }
         let identity_end = HEADER
             .checked_add(profile_len)
             .and_then(|n| n.checked_add(plan_len))
@@ -227,6 +244,8 @@ pub enum EnvelopeError {
     IdentityTooLong,
     #[error("event field count {count} is outside the supported range (limit {limit})")]
     InvalidFieldCount { count: usize, limit: usize },
+    #[error("event envelope contains unknown flags {0:#x}")]
+    UnknownFlags(u16),
 }
 
 #[cfg(test)]
@@ -242,6 +261,25 @@ mod tests {
             EventEnvelope::new("rust", "h", 1, 9).validate(8),
             Err(EnvelopeError::Oversized { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_oversized_identity_before_allocating_strings() {
+        let mut record = vec![
+            b'D', b'R', b'X', b'1', // magic
+            1, 0, // schema
+            0, 0, // flags
+            0x01, 0x04, // profile length: 1025
+            1, 0, // field count
+            1, 0, // plan length
+            0, 0, 0, 0, // payload length
+        ];
+        record.extend(std::iter::repeat(b'r').take(1025));
+        record.push(b'h');
+        assert_eq!(
+            EventEnvelope::decode_record(&record, 64),
+            Err(EnvelopeError::IdentityTooLong)
+        );
     }
 
     #[test]
@@ -276,6 +314,17 @@ mod tests {
         let (decoded, payload) = EventEnvelope::decode_record(&record, 64).unwrap();
         assert_eq!(decoded, envelope);
         assert_eq!(payload, 42u64.to_le_bytes());
+    }
+
+    #[test]
+    fn rejects_unknown_flags_before_payload_decode() {
+        let envelope = EventEnvelope::new("rust", "sha256:plan", 1, 8);
+        let mut record = envelope.encode_record(&42u64.to_le_bytes(), 64).unwrap();
+        record[6..8].copy_from_slice(&0x8000u16.to_le_bytes());
+        assert_eq!(
+            EventEnvelope::decode_record(&record, 64),
+            Err(EnvelopeError::UnknownFlags(0x8000))
+        );
     }
 
     #[test]

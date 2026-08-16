@@ -330,7 +330,7 @@ pub fn decode_scalar_record(
         .collect()
 }
 
-fn decode_scalar(kind: ScalarKind, bytes: &[u8]) -> Option<CapturedValue> {
+pub(crate) fn decode_scalar(kind: ScalarKind, bytes: &[u8]) -> Option<CapturedValue> {
     match (kind, bytes.len()) {
         (ScalarKind::Unsigned | ScalarKind::Address, 1) => {
             Some(CapturedValue::Scalar(bytes[0] as u64))

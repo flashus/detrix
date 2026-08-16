@@ -33,6 +33,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
+/// Bound the userspace handoff between ring-buffer pollers and the correlator.
+///
+/// The kernel ring buffer already has its own bounded storage and drop counter;
+/// keeping this queue bounded prevents a slow DWARF decoder or subscriber from
+/// turning a burst into unbounded host-memory growth. A full queue drops the
+/// userspace copy and is reported by the poller, distinct from kernel drops.
+pub const RAW_EVENT_CHANNEL_CAPACITY: usize = 4096;
+
 #[cfg(target_os = "linux")]
 fn rust_frame_probe_point(point: &ProbePoint) -> ProbePoint {
     let register = if point.variables.iter().any(|v| {
@@ -95,7 +103,7 @@ pub struct UprobeManager {
     /// On Linux, each probe's ring buffer polling task sends events here.
     /// Unused on non-Linux (the field exists to keep the API uniform).
     #[allow(dead_code)]
-    raw_event_tx: Option<mpsc::UnboundedSender<(String, Vec<u8>)>>,
+    raw_event_tx: Option<mpsc::Sender<(String, Vec<u8>)>>,
     /// Capture limits — used when generating per-metric BPF programs (Linux only).
     #[allow(dead_code)]
     capture_config: CaptureConfig,
@@ -156,7 +164,7 @@ impl UprobeManager {
     /// `(metric_name, raw_bytes)` tuples for correlation by the adapter.
     pub fn new_with_events(
         binary_path: impl Into<PathBuf>,
-        tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
+        tx: mpsc::Sender<(String, Vec<u8>)>,
     ) -> Self {
         Self {
             _binary_path: binary_path.into(),
@@ -169,7 +177,7 @@ impl UprobeManager {
     /// Create a manager with custom capture limits.
     pub fn new_with_config(
         binary_path: impl Into<PathBuf>,
-        tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
+        tx: mpsc::Sender<(String, Vec<u8>)>,
         capture_config: CaptureConfig,
     ) -> Self {
         Self {
@@ -185,8 +193,17 @@ impl UprobeManager {
     /// Called by `EbpfAdapter::start()` on each restart to supply a fresh channel.
     /// Previously attached probes that still send on the old sender will have their
     /// events dropped; this is acceptable since probes are detached on `stop()`.
-    pub fn set_raw_tx(&mut self, tx: mpsc::UnboundedSender<(String, Vec<u8>)>) {
+    pub fn set_raw_tx(&mut self, tx: mpsc::Sender<(String, Vec<u8>)>) {
         self.raw_event_tx = Some(tx);
+    }
+
+    /// Close the adapter-owned raw-event sender during shutdown.
+    ///
+    /// Probe pollers clone the sender, but their handles are detached first by
+    /// `detach_all()`. Clearing this final owner lets the correlator observe
+    /// channel closure and finish its shutdown instead of waiting forever.
+    pub fn clear_raw_tx(&mut self) {
+        self.raw_event_tx = None;
     }
 
     /// Number of active probes.
@@ -581,6 +598,7 @@ impl UprobeManager {
                 let mut idle_polls = 0u32;
                 let mut drop_check_polls = 0u32;
                 let mut last_drop_total: u64 = 0;
+                let mut userspace_drops: u64 = 0;
                 const IDLE_THRESHOLD: u32 = 10; // Back off after 10 idle polls
                                                 // Check drop counter approximately every 100 slow polls (~1 second)
                 const DROP_CHECK_INTERVAL: u32 = 100;
@@ -590,8 +608,26 @@ impl UprobeManager {
                 loop {
                     while let Some(item) = ring_buf.next() {
                         idle_polls = 0; // Reset backoff on event
-                        if tx.send((name.clone(), item.to_vec())).is_err() {
-                            return; // Receiver dropped — stop polling
+                        match tx.try_send((name.clone(), item.to_vec())) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                // The kernel-side drop counter cannot account for
+                                // userspace backpressure. Keep polling so one full
+                                // burst does not permanently disable the probe.
+                                userspace_drops = userspace_drops.saturating_add(1);
+                                // Avoid turning a sustained overload into a log
+                                // amplification loop while retaining evidence of
+                                // the first loss and periodic progress.
+                                if userspace_drops == 1 || userspace_drops.is_multiple_of(1024) {
+                                    detrix_logging::warn!(
+                                        dropped = userspace_drops,
+                                        "eBPF userspace event queue full — events dropped"
+                                    );
+                                }
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                return; // Receiver dropped — stop polling
+                            }
                         }
                     }
                     // Adaptive sleep: fast when active, slow when idle
@@ -732,9 +768,20 @@ mod tests {
 
     #[test]
     fn new_with_events_stores_sender() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(RAW_EVENT_CHANNEL_CAPACITY);
         let mgr = UprobeManager::new_with_events("/test/binary", tx);
         assert!(mgr.raw_event_tx.is_some());
+    }
+
+    #[test]
+    fn raw_event_channel_is_bounded() {
+        let (tx, mut rx) = mpsc::channel::<(String, Vec<u8>)>(RAW_EVENT_CHANNEL_CAPACITY);
+        for index in 0..RAW_EVENT_CHANNEL_CAPACITY {
+            tx.try_send(("metric".into(), vec![index as u8]))
+                .expect("capacity should accept exactly the configured bound");
+        }
+        assert!(tx.try_send(("metric".into(), vec![0])).is_err());
+        assert_eq!(rx.try_recv().unwrap().1, vec![0]);
     }
 
     #[test]
@@ -773,6 +820,15 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("No probe attached"));
+    }
+
+    #[test]
+    fn clear_raw_tx_releases_manager_sender() {
+        let (tx, _rx) = mpsc::channel(RAW_EVENT_CHANNEL_CAPACITY);
+        let mut mgr = UprobeManager::new_with_events("/test/binary", tx);
+        assert!(mgr.raw_event_tx.is_some());
+        mgr.clear_raw_tx();
+        assert!(mgr.raw_event_tx.is_none());
     }
 
     #[test]
@@ -820,7 +876,7 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "linux"))]
     fn attach_with_events_records_probe() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(RAW_EVENT_CHANNEL_CAPACITY);
         let mut mgr = UprobeManager::new_with_events("/test/binary", tx);
         let point = test_probe_point();
 

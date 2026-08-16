@@ -4,6 +4,7 @@
 //! validation are shared. This prevents Rust support from duplicating the Go
 //! adapter's state and from accepting records for a stale plan.
 
+use crate::capture_plan::{MAX_CAPTURE_FIELDS, MAX_CAPTURE_PAYLOAD_BYTES};
 use crate::decode::{decode_scalar_record, DecodedScalar, ScalarFieldSpec};
 use crate::wire::{EnvelopeError, EventEnvelope};
 
@@ -93,6 +94,49 @@ impl ProfiledCaptureRuntime {
         if fields.is_empty() {
             return Err(RuntimeError::EmptyPlan);
         }
+        if fields.len() > MAX_CAPTURE_FIELDS
+            || max_payload == 0
+            || max_payload > MAX_CAPTURE_PAYLOAD_BYTES
+        {
+            return Err(RuntimeError::InvalidPlan(
+                "capture bounds exceed the negotiated limit".into(),
+            ));
+        }
+        let mut ranges = Vec::with_capacity(fields.len());
+        for field in &fields {
+            if field.name.trim().is_empty() || field.size == 0 {
+                return Err(RuntimeError::InvalidPlan(format!(
+                    "invalid scalar field '{}': empty name or size",
+                    field.name
+                )));
+            }
+            let end = field
+                .offset
+                .checked_add(field.size)
+                .ok_or_else(|| RuntimeError::InvalidPlan("field offset overflow".into()))?;
+            if end > max_payload {
+                return Err(RuntimeError::InvalidPlan(format!(
+                    "field '{}' exceeds payload limit",
+                    field.name
+                )));
+            }
+            if crate::decode::decode_scalar(field.kind, &vec![0; field.size]).is_none() {
+                return Err(RuntimeError::InvalidPlan(format!(
+                    "field '{}' has unsupported scalar width {}",
+                    field.name, field.size
+                )));
+            }
+            if ranges
+                .iter()
+                .any(|(start, previous_end)| field.offset < *previous_end && *start < end)
+            {
+                return Err(RuntimeError::InvalidPlan(format!(
+                    "field '{}' overlaps another field",
+                    field.name
+                )));
+            }
+            ranges.push((field.offset, end));
+        }
         Ok(Self {
             profile_id,
             plan_hash,
@@ -139,6 +183,19 @@ impl ProfiledCaptureRuntime {
     /// legacy Go ring-buffer path can use this bridge while Rust migrates to
     /// the envelope-native probe template.
     pub fn encode_payload(&self, payload: &[u8], partial: bool) -> Result<Vec<u8>, RuntimeError> {
+        let required_len = self
+            .fields
+            .iter()
+            .map(|field| field.offset.saturating_add(field.size))
+            .max()
+            .unwrap_or(0);
+        if payload.len() < required_len || payload.len() > self.max_payload {
+            return Err(RuntimeError::InvalidPayload {
+                actual: payload.len(),
+                required: required_len,
+                limit: self.max_payload,
+            });
+        }
         let mut envelope = EventEnvelope::new(
             self.profile_id.clone(),
             self.plan_hash.clone(),
@@ -244,6 +301,16 @@ pub enum RuntimeError {
     MissingIdentity,
     #[error("runtime capture plan has no fields")]
     EmptyPlan,
+    #[error("invalid runtime capture plan: {0}")]
+    InvalidPlan(String),
+    #[error(
+        "invalid runtime payload length {actual}; required at least {required}, limit {limit}"
+    )]
+    InvalidPayload {
+        actual: usize,
+        required: usize,
+        limit: usize,
+    },
     #[error("invalid runtime transition from {from:?} to {to:?}")]
     InvalidTransition {
         from: RuntimeState,
@@ -369,5 +436,62 @@ mod tests {
         assert_eq!(runtime.counters().records_decoded, 0);
         assert_eq!(runtime.counters().records_seen, 0);
         runtime.validate_counters().unwrap();
+    }
+
+    #[test]
+    fn constructor_rejects_overlapping_or_oversized_layouts() {
+        let overlapping = vec![
+            ScalarFieldSpec {
+                name: "a".into(),
+                offset: 0,
+                size: 4,
+                kind: ScalarKind::Unsigned,
+            },
+            ScalarFieldSpec {
+                name: "b".into(),
+                offset: 2,
+                size: 4,
+                kind: ScalarKind::Unsigned,
+            },
+        ];
+        assert!(matches!(
+            ProfiledCaptureRuntime::new("rust", "sha256:plan", overlapping, 8),
+            Err(RuntimeError::InvalidPlan(message)) if message.contains("overlaps")
+        ));
+
+        let oversized = vec![ScalarFieldSpec {
+            name: "a".into(),
+            offset: 8,
+            size: 1,
+            kind: ScalarKind::Unsigned,
+        }];
+        assert!(matches!(
+            ProfiledCaptureRuntime::new("go", "sha256:plan", oversized, 8),
+            Err(RuntimeError::InvalidPlan(message)) if message.contains("exceeds")
+        ));
+
+        let unsupported = vec![ScalarFieldSpec {
+            name: "wide".into(),
+            offset: 0,
+            size: 3,
+            kind: ScalarKind::Unsigned,
+        }];
+        assert!(matches!(
+            ProfiledCaptureRuntime::new("rust", "sha256:plan", unsupported, 8),
+            Err(RuntimeError::InvalidPlan(message)) if message.contains("unsupported scalar width")
+        ));
+    }
+
+    #[test]
+    fn encode_rejects_payload_shorter_than_declared_fields() {
+        let runtime = runtime();
+        assert_eq!(
+            runtime.encode_payload(&[1, 2, 3], false),
+            Err(RuntimeError::InvalidPayload {
+                actual: 3,
+                required: 8,
+                limit: 64,
+            })
+        );
     }
 }

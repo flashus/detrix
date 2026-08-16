@@ -72,6 +72,41 @@ pub struct AdapterManager {
     allowed_read_prefixes: Vec<PathBuf>,
 }
 
+/// Abort-safe ownership for the Agent's in-flight event gauge.
+///
+/// The forwarder task is intentionally cancellable during connection teardown.
+/// A plain increment/decrement pair can leak the gauge when cancellation drops
+/// a partially filled batch, so the batch owns its count until it is released
+/// after forwarding or dropped by Tokio.
+struct InFlightBatch {
+    counter: Arc<AtomicU64>,
+    count: u64,
+}
+
+impl InFlightBatch {
+    fn new(counter: Arc<AtomicU64>) -> Self {
+        Self { counter, count: 0 }
+    }
+
+    fn add_one(&mut self) {
+        self.counter.fetch_add(1, Ordering::Relaxed);
+        self.count = self.count.saturating_add(1);
+    }
+
+    fn release_all(&mut self) {
+        if self.count != 0 {
+            self.counter.fetch_sub(self.count, Ordering::Relaxed);
+            self.count = 0;
+        }
+    }
+}
+
+impl Drop for InFlightBatch {
+    fn drop(&mut self) {
+        self.release_all();
+    }
+}
+
 impl AdapterManager {
     pub fn new(
         ctrl_tx: mpsc::UnboundedSender<AgentMessage>,
@@ -932,6 +967,10 @@ impl AdapterManager {
             let mut last_decoded_events = 0u64;
             let mut last_drop_report = tokio::time::Instant::now();
             loop {
+                // This guard owns the accounting for the current batch. If
+                // close_connection aborts this task while it is waiting for
+                // more events, Drop still reconciles the global gauge.
+                let mut in_flight = InFlightBatch::new(Arc::clone(&events_in_flight));
                 let deadline = tokio::time::sleep(Duration::from_millis(100));
                 tokio::pin!(deadline);
 
@@ -946,7 +985,7 @@ impl AdapterManager {
                             }
                             Some(e) => {
                                 events_received.fetch_add(1, Ordering::Relaxed);
-                                events_in_flight.fetch_add(1, Ordering::Relaxed);
+                                in_flight.add_one();
                                 batch.push(e);
                                 if batch.len() >= 64 {
                                     batch_ready = true;
@@ -967,11 +1006,11 @@ impl AdapterManager {
                         &drop_counter,
                         &global_dropped,
                         &events_forwarded,
-                        &events_in_flight,
                         &connection_id_clone,
                         events,
                     )
                     .await;
+                    in_flight.release_all();
                 }
 
                 if last_drop_report.elapsed() >= Duration::from_secs(1) {
@@ -1029,7 +1068,6 @@ impl AdapterManager {
         drop_counter: &Arc<AtomicU64>,
         global_dropped: &Arc<AtomicU64>,
         events_forwarded: &Arc<AtomicU64>,
-        events_in_flight: &Arc<AtomicU64>,
         connection_id: &str,
         events: Vec<MetricEvent>,
     ) {
@@ -1074,7 +1112,6 @@ impl AdapterManager {
                 })),
             });
         }
-        events_in_flight.fetch_sub(event_count, Ordering::Relaxed);
     }
 
     async fn send_connection_update(
@@ -1099,9 +1136,15 @@ impl AdapterManager {
             .get(connection_id)
             .map(|value| value.clone())
             .unwrap_or_default();
-        let decision = self.connection_decisions.get(connection_id);
+        // Clone the decision before the failure cleanup below. Holding a
+        // DashMap read guard while removing the same key would deadlock the
+        // failure path and strand the agent task forever.
+        let decision = self
+            .connection_decisions
+            .get(connection_id)
+            .map(|value| value.clone());
         let (supported_envelope_schemas, supported_capture_profiles, max_capture_payload_bytes) =
-            supported_capture_capabilities(decision.as_deref(), &capture_profile);
+            supported_capture_capabilities(decision.as_ref(), &capture_profile);
         let _ = self.ctrl_tx.send(AgentMessage {
             msg: Some(agent_message::Msg::ConnectionUpdate(
                 AgentConnectionUpdate {
@@ -1120,6 +1163,16 @@ impl AdapterManager {
                 },
             )),
         });
+        // Failed admissions must not leave a half-created connection visible
+        // to later SetMetric/RemoveMetric calls or retain per-connection
+        // counters forever. Keep the decision long enough to describe the
+        // failure above, then make the failure terminal and retry-safe.
+        if matches!(status, ConnectionStatus::Failed) {
+            self.connection_languages.remove(connection_id);
+            self.connection_decisions.remove(connection_id);
+            self.connection_debug_sources.remove(connection_id);
+            self.connection_drop_counts.remove(connection_id);
+        }
     }
 }
 
@@ -1219,6 +1272,18 @@ mod tests {
     use detrix_dap::NullAdapter;
     use std::sync::atomic::{AtomicU32, AtomicU64};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn in_flight_batch_reconciles_when_dropped() {
+        let counter = Arc::new(AtomicU64::new(0));
+        {
+            let mut batch = InFlightBatch::new(Arc::clone(&counter));
+            batch.add_one();
+            batch.add_one();
+            assert_eq!(counter.load(Ordering::Relaxed), 2);
+        }
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn read_file_accepts_prefix_that_appears_after_manager_creation() {
@@ -1323,6 +1388,54 @@ mod tests {
         manager.forwarder_handles.insert("duplicate".into(), handle);
         manager.replace_connection("duplicate").await;
         assert!(manager.forwarder_handles.get("duplicate").is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_connection_update_clears_partial_registration_state() {
+        let (ctrl_tx, _ctrl_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let manager = AdapterManager::new(
+            ctrl_tx,
+            event_tx,
+            Arc::new(AtomicU64::new(0)),
+            CaptureConfig::default(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU32::new(0)),
+            Vec::new(),
+        );
+        manager
+            .connection_languages
+            .insert("failed".into(), "rust".into());
+        manager.connection_decisions.insert(
+            "failed".into(),
+            BackendDecision {
+                requested: CaptureBackend::Ebpf,
+                selected: CaptureBackend::Ebpf,
+                profile: Some(ProfileId::Rust),
+                profile_name: "rust".into(),
+                reason: "test".into(),
+            },
+        );
+        manager
+            .connection_drop_counts
+            .insert("failed".into(), Arc::new(AtomicU64::new(0)));
+        manager
+            .connection_debug_sources
+            .insert("failed".into(), "embedded".into());
+
+        manager
+            .send_connection_update("failed", ConnectionStatus::Failed, Some("test failure"))
+            .await;
+
+        assert!(manager.connection_languages.get("failed").is_none());
+        assert!(manager.connection_decisions.get("failed").is_none());
+        assert!(manager.connection_drop_counts.get("failed").is_none());
+        assert!(manager.connection_debug_sources.get("failed").is_none());
     }
 
     #[tokio::test]

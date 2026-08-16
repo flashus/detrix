@@ -262,13 +262,23 @@ fn validate_op(
         ReadOp::Stack { size, .. }
         | ReadOp::Frame { size, .. }
         | ReadOp::Blob { size, .. }
-        | ReadOp::Indirect { size, .. }
         | ReadOp::Cfa { size, .. } => {
             if *size == 0 || *size > MAX_CAPTURE_OP_BYTES {
                 return Err(PlanError::InvalidField(format!(
                     "read size {size} exceeds limit"
                 )));
             }
+        }
+        ReadOp::Indirect { base, size } => {
+            if *size == 0 || *size > MAX_CAPTURE_OP_BYTES {
+                return Err(PlanError::InvalidField(format!(
+                    "read size {size} exceeds limit"
+                )));
+            }
+            // The base is executable capture IR too. Validate it recursively
+            // so an attacker cannot hide an unbounded/invalid operation below
+            // an otherwise bounded pointer read.
+            validate_op(base, field_count, depth + 1, field_size)?;
         }
         ReadOp::Constant { bytes } => {
             if bytes.is_empty() || bytes.len() > MAX_CAPTURE_OP_BYTES {
@@ -448,5 +458,24 @@ mod tests {
             p.validate(),
             Err(PlanError::InvalidField(message)) if message.contains("beyond field")
         ));
+    }
+
+    #[test]
+    fn rejects_invalid_nested_indirect_base() {
+        let mut p = plan();
+        let mut op = ReadOp::Register {
+            register: Register::Rax,
+            semantics: ValueSemantics::Value,
+        };
+        for _ in 0..(MAX_CAPTURE_OP_DEPTH + 1) {
+            op = ReadOp::Indirect {
+                base: Box::new(op),
+                size: 1,
+            };
+        }
+        p.fields[0].op = op;
+        assert!(
+            matches!(p.validate(), Err(PlanError::InvalidField(message)) if message.contains("nesting"))
+        );
     }
 }
