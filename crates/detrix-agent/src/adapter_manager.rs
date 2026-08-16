@@ -23,7 +23,7 @@ use detrix_ebpf::{
 use detrix_logging::{debug, info, warn};
 use detrix_ports::DapAdapterRef;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -59,6 +59,10 @@ pub struct AdapterManager {
     pub events_decoded: Arc<AtomicU64>,
     pub kernel_events_dropped: Arc<AtomicU64>,
     pub decode_events_dropped: Arc<AtomicU64>,
+    /// Number of adapters currently installed on this agent. This is wired to
+    /// the Prometheus gauge so connection health reflects the actual local
+    /// adapter registry rather than remaining at its initialization value.
+    active_connections: Arc<AtomicU32>,
     /// Requests an immediate full scanner snapshot after the server closes a
     /// target connection. This closes the race where a replacement process is
     /// born between two delta scans and would otherwise remain undiscovered.
@@ -80,6 +84,7 @@ impl AdapterManager {
         events_decoded: Arc<AtomicU64>,
         kernel_events_dropped: Arc<AtomicU64>,
         decode_events_dropped: Arc<AtomicU64>,
+        active_connections: Arc<AtomicU32>,
         allowed_read_prefixes: Vec<PathBuf>,
     ) -> Self {
         // Retain configured prefixes even when they do not exist yet. A target
@@ -103,9 +108,25 @@ impl AdapterManager {
             events_decoded,
             kernel_events_dropped,
             decode_events_dropped,
+            active_connections,
             scan_refresh_requested: Arc::new(AtomicBool::new(false)),
             allowed_read_prefixes,
         }
+    }
+
+    fn insert_adapter(&self, connection_id: String, adapter: DapAdapterRef) {
+        self.adapters.insert(connection_id, adapter);
+        self.active_connections.store(
+            self.adapters.len().min(u32::MAX as usize) as u32,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn refresh_active_connections(&self) {
+        self.active_connections.store(
+            self.adapters.len().min(u32::MAX as usize) as u32,
+            Ordering::Relaxed,
+        );
     }
 
     pub fn scan_refresh_signal(&self) -> Arc<AtomicBool> {
@@ -304,7 +325,7 @@ impl AdapterManager {
                     match adapter.subscribe_events().await {
                         Ok(event_rx) => {
                             let forward_adapter = adapter.clone();
-                            self.adapters.insert(connection_id.clone(), adapter);
+                            self.insert_adapter(connection_id.clone(), adapter);
                             self.spawn_event_forwarder(
                                 connection_id.clone(),
                                 event_rx,
@@ -397,7 +418,7 @@ impl AdapterManager {
                         match adapter.subscribe_events().await {
                             Ok(event_rx) => {
                                 let forward_adapter = adapter.clone();
-                                self.adapters.insert(connection_id.clone(), adapter);
+                                self.insert_adapter(connection_id.clone(), adapter);
                                 self.spawn_event_forwarder(
                                     connection_id.clone(),
                                     event_rx,
@@ -462,7 +483,7 @@ impl AdapterManager {
                 match adapter.subscribe_events().await {
                     Ok(event_rx) => {
                         let forward_adapter = adapter.clone();
-                        self.adapters.insert(connection_id.clone(), adapter);
+                        self.insert_adapter(connection_id.clone(), adapter);
                         self.spawn_event_forwarder(
                             connection_id.clone(),
                             event_rx,
@@ -516,7 +537,7 @@ impl AdapterManager {
                 match adapter.subscribe_events().await {
                     Ok(event_rx) => {
                         let forward_adapter = adapter.clone();
-                        self.adapters.insert(connection_id.clone(), adapter);
+                        self.insert_adapter(connection_id.clone(), adapter);
                         self.spawn_event_forwarder(
                             connection_id.clone(),
                             event_rx,
@@ -604,7 +625,7 @@ impl AdapterManager {
         match adapter.subscribe_events().await {
             Ok(event_rx) => {
                 let forward_adapter = adapter.clone();
-                self.adapters.insert(connection_id.clone(), adapter);
+                self.insert_adapter(connection_id.clone(), adapter);
                 self.spawn_event_forwarder(connection_id.clone(), event_rx, forward_adapter);
                 self.send_connection_update(&connection_id, ConnectionStatus::Connected, None)
                     .await;
@@ -630,6 +651,7 @@ impl AdapterManager {
         }
         if let Some((_, adapter)) = self.adapters.remove(connection_id) {
             let _ = adapter.stop().await;
+            self.refresh_active_connections();
         }
     }
 
@@ -804,6 +826,7 @@ impl AdapterManager {
         }
         if let Some((_, adapter)) = self.adapters.remove(connection_id) {
             let _ = adapter.stop().await;
+            self.refresh_active_connections();
         }
         self.connection_languages.remove(connection_id);
         self.connection_decisions.remove(connection_id);
@@ -831,6 +854,7 @@ impl AdapterManager {
                 let _ = adapter.stop().await;
             }
         }
+        self.refresh_active_connections();
         self.connection_languages.clear();
         self.connection_decisions.clear();
         self.connection_debug_sources.clear();
@@ -1192,7 +1216,8 @@ fn classify_failure(error: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU64;
+    use detrix_dap::NullAdapter;
+    use std::sync::atomic::{AtomicU32, AtomicU64};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1217,6 +1242,7 @@ mod tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU32::new(0)),
             vec![prefix],
         );
 
@@ -1288,6 +1314,7 @@ mod tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU32::new(0)),
             Vec::new(),
         );
         let handle = tokio::spawn(async {
@@ -1296,5 +1323,33 @@ mod tests {
         manager.forwarder_handles.insert("duplicate".into(), handle);
         manager.replace_connection("duplicate").await;
         assert!(manager.forwarder_handles.get("duplicate").is_none());
+    }
+
+    #[tokio::test]
+    async fn active_connection_gauge_tracks_adapter_registry() {
+        let (ctrl_tx, _ctrl_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let active = Arc::new(AtomicU32::new(0));
+        let manager = AdapterManager::new(
+            ctrl_tx,
+            event_tx,
+            Arc::new(AtomicU64::new(0)),
+            CaptureConfig::default(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::clone(&active),
+            Vec::new(),
+        );
+
+        let adapter: DapAdapterRef = Arc::new(NullAdapter::new());
+        manager.insert_adapter("gauge-test".to_string(), adapter);
+        assert_eq!(active.load(Ordering::Relaxed), 1);
+
+        manager.replace_connection("gauge-test").await;
+        assert_eq!(active.load(Ordering::Relaxed), 0);
     }
 }

@@ -503,11 +503,21 @@ impl DwarfInfo {
         let mut diagnostics = Vec::new();
         let mut candidate_reports = Vec::new();
         for pc in candidates {
-            let Ok(function_name) = find_function_at_pc(&dwarf, pc) else {
-                diagnostics.push(format!("PC {pc:#x}: outside a known function"));
-                continue;
+            // Rust's optimized DWARF can associate a valid line-table row
+            // with an inline/range DIE that is not itself a concrete
+            // DW_TAG_subprogram.  The line PC and variable locations are
+            // still usable for a uprobe, so keep the candidate and retain a
+            // diagnostic instead of discarding it solely for a missing name.
+            let function_name = match find_function_at_pc(&dwarf, pc) {
+                Ok(name) => name,
+                Err(error) => {
+                    diagnostics.push(format!(
+                        "PC {pc:#x}: no containing subprogram ({error}); using unknown name"
+                    ));
+                    "<unknown>".to_string()
+                }
             };
-            let cfa_base = get_cfa_base(&executable, endian, pc);
+            let cfa_base = get_cfa_base(&executable, endian, pc, self.target_architecture);
             let variables = resolve_variables_at_pc(
                 &dwarf,
                 pc,
@@ -722,6 +732,7 @@ fn get_cfa_base(
     obj: &object::File<'_>,
     endian: gimli::RunTimeEndian,
     pc: u64,
+    target_architecture: TargetArchitecture,
 ) -> (Option<Register>, i64) {
     use gimli::{BaseAddresses, CfaRule, DebugFrame, EndianSlice, UnwindSection};
 
@@ -751,7 +762,7 @@ fn get_cfa_base(
     match row {
         Ok(row) => match row.cfa() {
             CfaRule::RegisterAndOffset { register, offset } => {
-                let base = Register::from_dwarf_for_arch(register.0, TargetArchitecture::X86_64);
+                let base = Register::from_dwarf_for_arch(register.0, target_architecture);
                 detrix_logging::info!("[DWARF CFI] PC={:#x} CFA = {:?} + {}", pc, base, offset);
                 (base, *offset)
             }
@@ -759,13 +770,28 @@ fn get_cfa_base(
                 // LLVM emits the common x86-64 frame-base expression as
                 // DW_OP_breg6 (RBP)+16. Preserve that explicit base register;
                 // the expression is section-relative after row decoding.
-                detrix_logging::info!(
-                    "[DWARF CFI] PC={:#x} CFA expression offset={} length={} (assuming RBP+16)",
-                    pc,
-                    expression.offset,
-                    expression.length
-                );
-                (Some(Register::Rbp), 16)
+                if target_architecture == TargetArchitecture::X86_64 {
+                    detrix_logging::info!(
+                        "[DWARF CFI] PC={:#x} CFA expression offset={} length={} (assuming RBP+16)",
+                        pc,
+                        expression.offset,
+                        expression.length
+                    );
+                    (Some(Register::Rbp), 16)
+                } else {
+                    // Do not reinterpret an architecture-specific expression as
+                    // an x86 frame base. A wrong CFA silently corrupts every
+                    // stack-relative capture, so ARM expressions remain fail-closed
+                    // until their DWARF operations are evaluated explicitly.
+                    detrix_logging::warn!(
+                        "[DWARF CFI] PC={:#x} unsupported CFA expression for {:?} (offset={}, length={})",
+                        pc,
+                        target_architecture,
+                        expression.offset,
+                        expression.length
+                    );
+                    (None, 0)
+                }
             }
         },
         Err(e) => {
@@ -2119,6 +2145,30 @@ mod tests {
             )
             .expect("resolve probe point");
         assert_eq!(point.function_name, "main.tradeTick");
+        assert!(!point.variables.is_empty());
+        assert!(point.symbol_offset > 0);
+    }
+
+    /// Regression fixture for optimized Rust binaries where the line table
+    /// contains executable PCs but the containing subprogram is represented
+    /// through an inline/range DIE shape that the resolver must still accept.
+    #[test]
+    #[ignore = "requires a source-built Reth binary with full DWARF"]
+    fn resolve_probe_point_reth_pending_scalar() {
+        let binary_path = std::env::var_os("DETRIX_RETH_FIXTURE")
+            .map(PathBuf::from)
+            .expect("DETRIX_RETH_FIXTURE must point to a Reth ELF");
+        let info = DwarfInfo::parse(&binary_path).unwrap_or_else(|error| {
+            panic!("parse Reth fixture {}: {error}", binary_path.display())
+        });
+        let result = info.resolve_probe_point_with_diagnostics(
+            "/src/reth/crates/transaction-pool/src/pool/pending.rs",
+            299,
+            &["submission_id".to_string(), "priority".to_string()],
+            2,
+        );
+        let (point, _diagnostics) = result.expect("resolve Reth pending scalar probe");
+        assert!(!point.function_name.is_empty());
         assert!(!point.variables.is_empty());
         assert!(point.symbol_offset > 0);
     }

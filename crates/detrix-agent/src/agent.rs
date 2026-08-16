@@ -169,6 +169,7 @@ impl Agent {
                 Arc::clone(&metrics_state.events_decoded),
                 Arc::clone(&metrics_state.kernel_events_dropped),
                 Arc::clone(&metrics_state.decode_events_dropped),
+                Arc::clone(&metrics_state.active_connections),
                 self.config.scanner.allowed_read_prefixes.clone(),
             ));
 

@@ -804,6 +804,33 @@ impl ConnectionService {
             // Restoring them here races with startup and can attach the daemon to a stale
             // /proc/<pid>/exe path before the agent has rebuilt the routing table.
             if conn.is_agent_managed() {
+                // Agent-managed rows cannot be restored by the daemon itself.  A daemon
+                // restart can nevertheless leave their last persisted status as Connected
+                // because the agent was terminated before it could report disconnect.  Mark
+                // those rows disconnected so the next agent registration can reconcile and
+                // remove them through the normal stale-connection path.
+                if matches!(
+                    conn.status,
+                    ConnectionStatus::Connected
+                        | ConnectionStatus::Connecting
+                        | ConnectionStatus::Reconnecting
+                ) {
+                    if let Err(error) = self
+                        .connection_repo
+                        .update_status(&conn_id, ConnectionStatus::Disconnected)
+                        .await
+                    {
+                        warn!(
+                            "Failed to mark stale agent-managed connection {} disconnected: {}",
+                            conn_id.0, error
+                        );
+                    } else {
+                        debug!(
+                            "Marked stale agent-managed connection {} disconnected for agent reconciliation",
+                            conn_id.0
+                        );
+                    }
+                }
                 debug!(
                     "Skipping startup restore for agent-managed connection {} at {}",
                     conn_id.0, addr
