@@ -34,7 +34,7 @@ pub trait CaptureCompiler: Send + Sync {
 /// heap-indirect locations are represented explicitly in `CapturePlan`; the
 /// generator remains the compatibility renderer for their established wire
 /// semantics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GoBpfCompiler {
     pub config: CaptureConfig,
     pub capture_goid: bool,
@@ -198,7 +198,7 @@ impl RustBpfCompiler {
         &self,
         variables: &[ResolvedVariable],
         envelope: Option<RawEnvelopeSpec>,
-        architecture: TargetArchitecture,
+        _architecture: TargetArchitecture,
     ) -> EbpfResult<BpfProgram> {
         if variables
             .iter()
@@ -208,15 +208,11 @@ impl RustBpfCompiler {
                 "Rust eBPF compiler currently supports scalar variables only".into(),
             ));
         }
-        let frame_register = match architecture {
-            TargetArchitecture::Aarch64 => Register::Arm64(29),
-            TargetArchitecture::X86_64 => Register::Rbp,
-        };
         let framed = variables
             .iter()
             .cloned()
             .map(|mut variable| {
-                variable.location = frame_location(variable.location, frame_register);
+                variable.location = frame_location(variable.location);
                 variable
             })
             .collect::<Vec<_>>();
@@ -273,20 +269,20 @@ fn infer_architecture(variables: &[ResolvedVariable]) -> TargetArchitecture {
     }
 }
 
-fn frame_location(location: VariableLocation, register: Register) -> VariableLocation {
+fn frame_location(location: VariableLocation) -> VariableLocation {
     match location {
         VariableLocation::StackOffset { offset } => VariableLocation::StackOffset { offset },
         VariableLocation::GoString { ptr, len } | VariableLocation::StringHeader { ptr, len } => {
             VariableLocation::StringHeader {
-                ptr: Box::new(frame_location(*ptr, register)),
-                len: Box::new(frame_location(*len, register)),
+                ptr: Box::new(frame_location(*ptr)),
+                len: Box::new(frame_location(*len)),
             }
         }
         VariableLocation::GoSlice { ptr, len, cap }
         | VariableLocation::SliceHeader { ptr, len, cap } => VariableLocation::SliceHeader {
-            ptr: Box::new(frame_location(*ptr, register)),
-            len: Box::new(frame_location(*len, register)),
-            cap: Box::new(frame_location(*cap, register)),
+            ptr: Box::new(frame_location(*ptr)),
+            len: Box::new(frame_location(*len)),
+            cap: Box::new(frame_location(*cap)),
         },
         other => other,
     }
@@ -384,17 +380,6 @@ impl CaptureCompiler for RustBpfCompiler {
             architecture: plan.architecture,
             artifact: program.source.into_bytes(),
         })
-    }
-}
-
-impl Default for GoBpfCompiler {
-    fn default() -> Self {
-        Self {
-            config: CaptureConfig::default(),
-            capture_goid: false,
-            g_addr_offset: None,
-            goid_offset: None,
-        }
     }
 }
 

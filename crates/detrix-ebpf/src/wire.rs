@@ -177,15 +177,39 @@ impl EventEnvelope {
         if record.len() < HEADER || &record[..4] != b"DRX1" {
             return Err(EnvelopeError::MalformedHeader);
         }
-        let schema_version = u16::from_le_bytes(record[4..6].try_into().unwrap());
-        let flags = u16::from_le_bytes(record[6..8].try_into().unwrap());
+        let schema_version = record
+            .get(4..6)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u16::from_le_bytes)
+            .ok_or(EnvelopeError::MalformedHeader)?;
+        let flags = record
+            .get(6..8)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u16::from_le_bytes)
+            .ok_or(EnvelopeError::MalformedHeader)?;
         if flags & !0x3 != 0 {
             return Err(EnvelopeError::UnknownFlags(flags));
         }
-        let profile_len = u16::from_le_bytes(record[8..10].try_into().unwrap()) as usize;
-        let field_count = u16::from_le_bytes(record[10..12].try_into().unwrap());
-        let plan_len = u16::from_le_bytes(record[12..14].try_into().unwrap()) as usize;
-        let payload_len = u32::from_le_bytes(record[14..18].try_into().unwrap()) as usize;
+        let profile_len = record
+            .get(8..10)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u16::from_le_bytes)
+            .ok_or(EnvelopeError::MalformedHeader)? as usize;
+        let field_count = record
+            .get(10..12)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u16::from_le_bytes)
+            .ok_or(EnvelopeError::MalformedHeader)?;
+        let plan_len = record
+            .get(12..14)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u16::from_le_bytes)
+            .ok_or(EnvelopeError::MalformedHeader)? as usize;
+        let payload_len = record
+            .get(14..18)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or(EnvelopeError::MalformedHeader)? as usize;
         if profile_len == 0 || plan_len == 0 {
             return Err(EnvelopeError::MissingIdentity);
         }
@@ -274,7 +298,7 @@ mod tests {
             1, 0, // plan length
             0, 0, 0, 0, // payload length
         ];
-        record.extend(std::iter::repeat(b'r').take(1025));
+        record.extend(std::iter::repeat_n(b'r', 1025));
         record.push(b'h');
         assert_eq!(
             EventEnvelope::decode_record(&record, 64),

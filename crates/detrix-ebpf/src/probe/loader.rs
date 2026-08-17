@@ -39,7 +39,7 @@ fn bpf_arch_flag(architecture: TargetArchitecture) -> &'static str {
 fn host_target_architecture() -> TargetArchitecture {
     #[cfg(target_arch = "aarch64")]
     {
-        return TargetArchitecture::Aarch64;
+        TargetArchitecture::Aarch64
     }
     #[cfg(not(target_arch = "aarch64"))]
     {

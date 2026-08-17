@@ -180,7 +180,7 @@ impl AgentService for AgentServiceImpl {
                     Ok(Some(msg)) => {
                         tracing::debug!(
                             agent_id = %agent_id_clone,
-                            kind = ?msg.msg.as_ref().map(|m| std::mem::discriminant(m)),
+                            kind = ?msg.msg.as_ref().map(std::mem::discriminant),
                             "Agent message received on stream"
                         );
                         if let Some(domain_msg) = proto_to_domain(msg) {

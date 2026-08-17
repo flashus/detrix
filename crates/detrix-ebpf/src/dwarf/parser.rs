@@ -1342,14 +1342,13 @@ fn evaluate_location_expr<R: Reader>(
                 })
             }
             LocationAtom::Dereference(inner) => match *inner {
-                LocationAtom::RegisterOffset { register, offset }
-                    if matches!(register, Register::Rsp | Register::Arm64(31)) =>
-                {
-                    Some(VariableLocation::StackIndirect {
-                        offset,
-                        byte_size: 0,
-                    })
-                }
+                LocationAtom::RegisterOffset {
+                    register: Register::Rsp | Register::Arm64(31),
+                    offset,
+                } => Some(VariableLocation::StackIndirect {
+                    offset,
+                    byte_size: 0,
+                }),
                 LocationAtom::FrameOffset { offset } | LocationAtom::CfaOffset { offset } => {
                     Some(VariableLocation::StackIndirect {
                         offset: cfa_offset.saturating_add(offset),
@@ -1372,7 +1371,7 @@ fn evaluate_location_expr<R: Reader>(
             // not compact a non-zero-offset piece into the wrong byte range;
             // preserve it as unavailable and let the profile fail closed.
             location: (piece.value_offset == 0)
-                .then(|| piece.atom)
+                .then_some(piece.atom)
                 .flatten()
                 .and_then(|atom| atom_to_location(atom, cfa_register, cfa_offset)),
             byte_size: piece.byte_size,

@@ -63,7 +63,7 @@ impl ClientProcessTester {
         };
 
         // Build spawn command and environment
-        let (cmd, args) = config.build_spawn_args(&fixture_full_path);
+        let (mut cmd, args) = config.build_spawn_args(&fixture_full_path);
         let env_vars = config.build_env_vars(daemon_url, actual_port);
 
         // Get working directory
@@ -112,6 +112,45 @@ impl ClientProcessTester {
                     build_cmd,
                     build_args.join(" ")
                 ));
+            }
+
+            // Cargo places Rust artifacts in its resolved target directory
+            // (normally the shared DETRIX session target), not beside the
+            // fixture manifest.  The config intentionally uses a relative
+            // binary name for the direct-launch path; resolve it after the
+            // build so the launcher works with both shared and custom target
+            // directories.
+            if config.language == super::config::ClientLanguage::Rust {
+                let binary_name = config
+                    .compiled_binary
+                    .as_deref()
+                    .ok_or_else(|| "Rust client has no compiled binary name".to_string())?;
+                let metadata = Command::new("cargo")
+                    .args(["metadata", "--format-version", "1", "--no-deps"])
+                    .current_dir(&working_dir)
+                    .output()
+                    .map_err(|e| format!("Failed to resolve Rust target directory: {}", e))?;
+                if !metadata.status.success() {
+                    return Err(format!(
+                        "cargo metadata failed while resolving Rust client binary: {}",
+                        String::from_utf8_lossy(&metadata.stderr)
+                    ));
+                }
+                let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout)
+                    .map_err(|e| format!("Invalid cargo metadata for Rust client: {}", e))?;
+                let target_dir = metadata["target_directory"].as_str().ok_or_else(|| {
+                    "cargo metadata did not report a Rust target directory".to_string()
+                })?;
+                let binary = std::path::Path::new(target_dir)
+                    .join("debug")
+                    .join(binary_name);
+                if !binary.is_file() {
+                    return Err(format!(
+                        "Rust client binary not found after pre-build: {}",
+                        binary.display()
+                    ));
+                }
+                cmd = binary.to_string_lossy().into_owned();
             }
         }
 

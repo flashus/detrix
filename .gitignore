@@ -18,3 +18,5 @@ assets/detrix_demo.mp4
 .spe/
 experiments/
 out/
+fixtures/go/string_capture/detrix_example_app
+fixtures/go/string_capture/main

@@ -1139,8 +1139,10 @@ mod tests {
             fields,
             max_payload_bytes: 92,
         };
-        let mut config = CaptureConfig::default();
-        config.max_capture_vars = 16;
+        let config = CaptureConfig {
+            max_capture_vars: 16,
+            ..CaptureConfig::default()
+        };
         let source = generate_bpf_program_from_plan(
             &plan,
             false,

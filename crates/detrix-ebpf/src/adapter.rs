@@ -459,7 +459,7 @@ impl DapAdapter for EbpfAdapter {
         // in the thread's TLS block (via fs_base on x86_64).
         let runtime_metadata = self
             .profile
-            .runtime_metadata(&dwarf, self.capture_config.capture_goid);
+            .runtime_metadata(dwarf, self.capture_config.capture_goid);
         let g_addr_offset = runtime_metadata.g_addr_offset;
         let goid_offset = runtime_metadata.goid_offset;
         detrix_logging::debug!(
@@ -475,20 +475,18 @@ impl DapAdapter for EbpfAdapter {
         // DRX1 first; Go now uses the same envelope when the connection has
         // negotiated it, while the parser still accepts legacy records for
         // older agents.
-        let runtime_plan_hash = Some(format!("probe:{:x}", probe_point.pc));
-        let raw_envelope = runtime_plan_hash
-            .as_deref()
-            .map(|plan_hash| RawEnvelopeExpectation {
-                profile_tag: crate::compiler::profile_tag(self.profile.id()),
-                plan_tag: crate::compiler::plan_tag(plan_hash),
-                field_count: probe_point.variables.len(),
-            });
+        let runtime_plan_hash = format!("probe:{:x}", probe_point.pc);
+        let raw_envelope = Some(RawEnvelopeExpectation {
+            profile_tag: crate::compiler::profile_tag(self.profile.id()),
+            plan_tag: crate::compiler::plan_tag(&runtime_plan_hash),
+            field_count: probe_point.variables.len(),
+        });
         let runtime = if self.profile_id == ProfileId::Rust {
             match rust_scalar_fields(&probe_point.variables) {
                 Ok(fields) => {
                     let mut runtime = ProfiledCaptureRuntime::new(
                         "rust",
-                        runtime_plan_hash.clone().expect("Rust runtime plan hash"),
+                        runtime_plan_hash.clone(),
                         fields,
                         self.capture_config.max_blob_capture.max(64),
                     )
@@ -523,11 +521,7 @@ impl DapAdapter for EbpfAdapter {
             None
         };
 
-        let attach_point = if self.profile_id == ProfileId::Rust {
-            probe_point.clone()
-        } else {
-            probe_point.clone()
-        };
+        let attach_point = probe_point.clone();
         self.uprobe_manager
             .write()
             .await
@@ -537,7 +531,7 @@ impl DapAdapter for EbpfAdapter {
                 g_addr_offset,
                 goid_offset,
                 self.profile_id,
-                runtime_plan_hash.as_deref(),
+                Some(&runtime_plan_hash),
             )
             .map_err(|e| {
                 detrix_logging::error!(

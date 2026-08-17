@@ -108,6 +108,10 @@ impl Drop for InFlightBatch {
 }
 
 impl AdapterManager {
+    // The constructor receives the independently owned channels and counters
+    // that make up the agent/adapter boundary. Keep this explicit wiring at
+    // the seam instead of hiding ownership in a global or builder.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctrl_tx: mpsc::UnboundedSender<AgentMessage>,
         event_tx: mpsc::Sender<AgentMessage>,

@@ -321,7 +321,7 @@ pub fn parse_ring_buffer_event_with_envelope(
                 // heap graph is traversed.  If the type name does not prove one
                 // of the contracts, retain the existing nested/blob decoder.
                 let special_value = if is_probably_rust_type(&var.type_name) {
-                    match crate::rust_layout::infer(&var.type_name, *byte_size as usize) {
+                    match crate::rust_layout::infer(&var.type_name, *byte_size) {
                         Some(crate::rust_layout::RustLayoutContract::NicheOption {
                             pointer_offset,
                             word_size,

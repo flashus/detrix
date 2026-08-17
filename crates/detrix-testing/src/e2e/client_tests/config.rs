@@ -140,12 +140,17 @@ impl ClientTestConfig {
             fixture_path: PathBuf::from("fixtures/rust/Cargo.toml"),
             // Working dir is fixtures/rust for cargo commands
             working_dir: PathBuf::from("fixtures/rust"),
-            spawn_args_before: vec!["run".to_string(), "--manifest-path".to_string()],
+            // `cargo run` is ambiguous in this multi-binary fixture (main,
+            // composite, optimized, and special-layout targets).  Build once
+            // and execute the selected binary directly so the client can
+            // expose its control plane for the test harness.
+            // spawn_args are unused when compiled_binary is set.
+            spawn_args_before: vec![],
             // Enable the "client" feature to compile Detrix client code
             spawn_args_after: vec!["--features".to_string(), "client".to_string()],
             env_vars,
             test_name: "Rust Client".to_string(),
-            compiled_binary: None,
+            compiled_binary: Some("detrix_example_app".to_string()),
         }
     }
 
@@ -264,5 +269,20 @@ mod tests {
         let config = ClientTestConfig::go();
         assert_eq!(config.language, ClientLanguage::Go);
         assert!(config.env_vars.contains_key("DETRIX_CLIENT_ENABLED"));
+    }
+
+    #[test]
+    fn test_rust_config_runs_the_selected_binary() {
+        let config = ClientTestConfig::rust();
+        assert_eq!(config.language, ClientLanguage::Rust);
+        assert_eq!(
+            config.compiled_binary.as_deref(),
+            Some("detrix_example_app")
+        );
+
+        let (command, args) =
+            config.build_spawn_args(std::path::Path::new("/workspace/fixtures/rust/Cargo.toml"));
+        assert_eq!(command, "./detrix_example_app");
+        assert!(args.is_empty());
     }
 }

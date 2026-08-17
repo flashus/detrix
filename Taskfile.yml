@@ -97,6 +97,11 @@ tasks:
     cmds:
       - task: tests:e2e
 
+  test-agent-all:
+    desc: Run the complete Go and Rust Agent/eBPF validation suite
+    cmds:
+      - task: tests:test-agent-all
+
   release:
     desc: "Tag and publish current Cargo.toml version (errors if tag already exists)"
     cmds:

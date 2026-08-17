@@ -206,7 +206,14 @@ tasks:
           sleep 5
         done
       - defer: docker compose --env-file fixtures/docker/images.env -f {{.COMPOSE_FILE}} -p {{.PROJECT}} down -v
-      - cargo test -p detrix-testing --test 'keycloak_*_e2e' -- --ignored --nocapture --test-threads=1
+      # The Keycloak daemon runs in Docker, but the MCP bridge is a host-side
+      # `detrix mcp` subprocess. Build and pass that binary explicitly so the
+      # bridge does not depend on a stale/default workspace target directory.
+      - |
+        RUSTC_WRAPPER= CARGO_TARGET_DIR="{{.HOST_TARGET_DIR}}" cargo build --release --bin detrix
+        DETRIX_BIN="{{.HOST_TARGET_DIR}}/release/detrix" \
+          RUSTC_WRAPPER= CARGO_TARGET_DIR="{{.HOST_TARGET_DIR}}" \
+          cargo test -p detrix-testing --test 'keycloak_*_e2e' -- --ignored --nocapture --test-threads=1
       - task: check-orphans
 
   # All Docker-based E2E tests (JWT + Keycloak + Cloud)
@@ -1091,6 +1098,26 @@ tasks:
           -e DETRIX_AGENT_RUST_EBPF=1 \
           {{.PLAYGROUND}} \
           /usr/local/bin/agent_e2e_test test_agent_go_and_rust_ebpf_same_agent --ignored --nocapture --test-threads=1
+
+  test-agent-all:
+    desc: "Run the complete Go and Rust Agent/eBPF validation suite sequentially"
+    cmds:
+      # Keep each scenario isolated: every child task owns its fixture process,
+      # daemon, and privileged playground container, while Task deduplicates
+      # the shared image/binary build dependencies.
+      - task: test-agent
+      - task: test-agent-rust
+      - task: test-agent-rust-special-layout
+      - task: test-agent-rust-composite
+      - task: test-agent-rust-headers
+      - task: test-agent-rust-external-debug
+      - task: test-agent-rust-composite-high-rate
+      - task: test-agent-rust-composite-sustained
+      - task: test-agent-rust-reconnect
+      - task: test-agent-lifecycle
+      - task: test-agent-rust-unavailable
+      - task: test-agent-rust-optimized-unavailable
+      - task: test-agent-both
 
   # ── Cache cleanup ──────────────────────────────────────────────────────────────
 

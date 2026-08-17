@@ -244,10 +244,7 @@ fn detect_language(path: &str) -> String {
                 matches!(
                     name,
                     ".comment" | ".debug_str" | ".debug_line_str" | ".debug_info"
-                ) && section
-                    .data()
-                    .map(rust_marker)
-                    .unwrap_or(false)
+                ) && section.data().map(rust_marker).unwrap_or(false)
             })
         })
         .unwrap_or(false)

@@ -773,12 +773,11 @@ fn extract_rust_enum_layout<R: Reader>(
     let mut children = root.children();
     while let Ok(Some(child)) = children.next() {
         let variant_part = child.entry();
-        if variant_part.tag() == gimli::DW_TAG_member {
-            if is_discriminant_member(variant_part, dwarf) {
-                discriminant_offset =
-                    read_unsigned_attr(variant_part, gimli::constants::DW_AT_data_member_location);
-                discriminant_size = member_byte_size(variant_part, unit, dwarf).unwrap_or(1);
-            }
+        if variant_part.tag() == gimli::DW_TAG_member && is_discriminant_member(variant_part, dwarf)
+        {
+            discriminant_offset =
+                read_unsigned_attr(variant_part, gimli::constants::DW_AT_data_member_location);
+            discriminant_size = member_byte_size(variant_part, unit, dwarf).unwrap_or(1);
         }
         if variant_part.tag() != gimli::DW_TAG_variant_part {
             continue;
