@@ -262,12 +262,12 @@ jobs:
     if: needs.changes.outputs.agent == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    env:
-      DETRIX_SESSION_TARGET_DIR: ${{ runner.temp }}/detrix-session-target
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-task@v2
       - uses: ./.github/actions/setup-rust
+      - name: Configure shared session target
+        run: echo "DETRIX_SESSION_TARGET_DIR=${RUNNER_TEMP}/detrix-session-target" >> "$GITHUB_ENV"
       - name: Install LLDB 21 for DAP parity control
         run: |
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | \
@@ -320,9 +320,9 @@ jobs:
           name: rust-ebpf-release-gate-evidence
           if-no-files-found: warn
           path: |
-            ${{ env.DETRIX_SESSION_TARGET_DIR }}/host/out/rust-ebpf-build-metadata.txt
-            ${{ env.DETRIX_SESSION_TARGET_DIR }}/host/out/*.log
-            ${{ env.DETRIX_SESSION_TARGET_DIR }}/host/logs/**
+            ${{ runner.temp }}/detrix-session-target/host/out/rust-ebpf-build-metadata.txt
+            ${{ runner.temp }}/detrix-session-target/host/out/*.log
+            ${{ runner.temp }}/detrix-session-target/host/logs/**
 
   # ── Core: E2E — Rust / lldb-dap ───────────────────────────────────────────
   test-e2e-rust:
