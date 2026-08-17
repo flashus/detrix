@@ -1126,3 +1126,64 @@ tasks:
     cmds:
       - docker volume rm -f ebpf-cargo-home ebpf-go-mod ebpf-go-build
       - ./scripts/clean-session-target.sh
+
+  docker-clean-e2e:
+    desc: Remove local cloud/agent E2E resources and Docker build cache (preserves downloaded base images)
+    cmds:
+      - |
+        set -eu
+
+        # Tear down named Compose projects first. This removes their containers,
+        # networks, and project-scoped volumes without touching unrelated stacks.
+        docker compose --env-file fixtures/docker/images.env \
+          -f fixtures/docker/docker-compose.yml -p detrix-cloud-test \
+          down -v --remove-orphans || true
+        docker compose --env-file fixtures/docker/images.env \
+          -f fixtures/docker/docker-compose.keycloak.yml -p detrix-keycloak-test \
+          down -v --remove-orphans || true
+        docker compose --env-file fixtures/docker/images.env \
+          -f fixtures/docker/docker-compose.agent-e2e.yml -p detrix-agent-e2e-test \
+          down -v --remove-orphans || true
+
+        # Remove only explicitly named local test images. Do not use
+        # `docker image prune`, which can remove unrelated dangling images;
+        # downloaded base images (rust, golang, python, debian, etc.) remain.
+        for image in \
+          detrix-ebpf-playground \
+          detrix-ebpf-builder \
+          detrix-ebpf-test \
+          detrix-cloud-test-detrix \
+          detrix-cloud-test-detrix-jwt \
+          detrix-cloud-test-mock-jwks \
+          detrix-cloud-test-test-app-go \
+          detrix-cloud-test-test-app-python \
+          detrix-cloud-test-test-app-rust \
+          detrix-keycloak-test-detrix-keycloak \
+          detrix-keycloak-test-test-app-go \
+          detrix-agent-e2e-test-detrix-agent-server \
+          detrix-agent-e2e-test-go-fixture \
+          detrix-agent-e2e-test-detrix-agent; do
+          if docker image inspect "$image" >/dev/null 2>&1; then
+            echo "Removing local E2E image: $image"
+            docker image rm -f "$image"
+          fi
+        done
+
+        # Remove known cache volumes used by direct privileged agent runs and
+        # any remaining volumes owned by the three scoped Compose projects.
+        for volume in ebpf-cargo-home ebpf-go-mod ebpf-go-build; do
+          if docker volume inspect "$volume" >/dev/null 2>&1; then
+            docker volume rm -f "$volume"
+          fi
+        done
+        docker volume ls -q | while IFS= read -r volume; do
+          case "$volume" in
+            detrix-cloud-test_*|detrix-keycloak-test_*|detrix-agent-e2e-test_*)
+              echo "Removing scoped E2E volume: $volume"
+              docker volume rm -f "$volume" || true
+              ;;
+          esac
+        done
+
+        # Clear unused BuildKit layers/cache only. Images are not pruned here.
+        docker builder prune --all --force

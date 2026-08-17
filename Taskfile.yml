@@ -102,6 +102,11 @@ tasks:
     cmds:
       - task: tests:test-agent-all
 
+  docker-clean-e2e:
+    desc: Remove local cloud/agent E2E resources and Docker build cache
+    cmds:
+      - task: tests:docker-clean-e2e
+
   release:
     desc: "Tag and publish current Cargo.toml version (errors if tag already exists)"
     cmds:
