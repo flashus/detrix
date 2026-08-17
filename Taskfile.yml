@@ -75,6 +75,8 @@ tasks:
       - task: clients:generate-all
       - task: format
       - task: clients:format
+      - task: format-check
+      - task: clients:format-check
       - task: lint
       - task: clients:lint
       - task: tests:test

@@ -61,8 +61,12 @@ tasks:
       - task: check-orphans
 
   test-unit:
-    desc: Run unit tests only (lib tests, no external tools needed)
+    desc: Run unit tests only (builds the daemon binary required by discovery harness tests)
     cmds:
+      # daemon_discovery and shared MCP helpers are compiled into detrix-testing's
+      # library tests, but exercise a real daemon subprocess. Build the binary
+      # first so local runs have the same prerequisite as the CI unit job.
+      - cargo build --bin detrix
       - cargo test --lib --all
 
   test-integration:
@@ -381,10 +385,11 @@ tasks:
         {
           echo "source_revision=$(git rev-parse HEAD 2>/dev/null || echo unknown)"
           echo "fixture_flags=RUSTFLAGS=-C force-frame-pointers=yes; profile.release.debug=2; profile.release.strip=none; regular-opt-level=0; optimized-fixture=-C opt-level=3"
-          echo "rust_example_sha256=$(shasum -a 256 {{.OUT_DIR}}/rust_detrix_example_app | awk '{print $1}')"
-          echo "rust_composite_sha256=$(shasum -a 256 {{.OUT_DIR}}/rust_composite_app | awk '{print $1}')"
-          echo "rust_special_layout_sha256=$(shasum -a 256 {{.OUT_DIR}}/rust_special_layout_app | awk '{print $1}')"
-          echo "rust_optimized_sha256=$(shasum -a 256 {{.OUT_DIR}}/rust_optimized_app | awk '{print $1}')"
+          hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'; }
+          echo "rust_example_sha256=$(hash_file {{.OUT_DIR}}/rust_detrix_example_app)"
+          echo "rust_composite_sha256=$(hash_file {{.OUT_DIR}}/rust_composite_app)"
+          echo "rust_special_layout_sha256=$(hash_file {{.OUT_DIR}}/rust_special_layout_app)"
+          echo "rust_optimized_sha256=$(hash_file {{.OUT_DIR}}/rust_optimized_app)"
           docker run --rm -v "ebpf-cargo-home:/usr/local/cargo" {{.BUILDER}} rustc -Vv
         } > "{{.OUT_DIR}}/rust-ebpf-build-metadata.txt"
 
@@ -781,9 +786,10 @@ tasks:
         chmod 755 "{{.OUT}}/rust_split_dwarf_test"
         {
           echo "split_dwarf_flags=RUSTFLAGS=-C split-debuginfo=unpacked -C force-frame-pointers=yes"
-          echo "split_dwarf_binary_sha256=$(shasum -a 256 "{{.OUT}}/rust_split_unpacked_app" | awk '{print $1}')"
-          echo "split_dwarf_dwo_sha256=$(shasum -a 256 "{{.OUT}}/rust_split_unpacked_app.dwo" | awk '{print $1}')"
-          echo "split_dwarf_dwp_sha256=$(shasum -a 256 "{{.OUT}}/rust_split_unpacked_app.dwp" | awk '{print $1}')"
+          hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'; }
+          echo "split_dwarf_binary_sha256=$(hash_file "{{.OUT}}/rust_split_unpacked_app")"
+          echo "split_dwarf_dwo_sha256=$(hash_file "{{.OUT}}/rust_split_unpacked_app.dwo")"
+          echo "split_dwarf_dwp_sha256=$(hash_file "{{.OUT}}/rust_split_unpacked_app.dwp")"
         } > "{{.OUT}}/rust-split-dwarf-build-metadata.txt"
 
   test-ebpf-split-dwarf:
