@@ -498,7 +498,7 @@ impl UprobeManager {
                 }
                 _ => None,
             })
-            .unwrap_or_else(|| {
+            .unwrap_or({
                 if cfg!(target_arch = "aarch64") {
                     crate::dwarf::types::TargetArchitecture::Aarch64
                 } else {

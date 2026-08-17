@@ -506,7 +506,7 @@ tasks:
     vars:
       PLAYGROUND: detrix-ebpf-playground
       OUT: "{{.OUT_DIR}}"
-    deps: [build-ebpf-bins]
+    deps: [build-ebpf-playground, build-ebpf-bins]
     cmds:
       - |
         docker run --privileged --rm \
@@ -531,7 +531,7 @@ tasks:
     vars:
       PLAYGROUND: detrix-ebpf-playground
       OUT: "{{.OUT_DIR}}"
-    deps: [build-ebpf-bins]
+    deps: [build-ebpf-playground, build-ebpf-bins]
     cmds:
       - |
         docker run --privileged --rm \
@@ -552,7 +552,7 @@ tasks:
     vars:
       PLAYGROUND: detrix-ebpf-playground
       OUT: "{{.OUT_DIR}}"
-    deps: [build-ebpf-bins]
+    deps: [build-ebpf-playground, build-ebpf-bins]
     cmds:
       - |
         docker run --privileged --rm \
