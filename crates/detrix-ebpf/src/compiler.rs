@@ -85,7 +85,10 @@ impl RustBpfCompiler {
         let mut offset = 0usize;
         let mut fields = Vec::with_capacity(probe_point.variables.len());
         for variable in &probe_point.variables {
-            let is_blob = matches!(&variable.location, VariableLocation::StackBlob { .. });
+            let is_blob = matches!(
+                &variable.location,
+                VariableLocation::StackBlob { .. } | VariableLocation::PiecewiseBlob { .. }
+            );
             let header = matches!(
                 &variable.location,
                 VariableLocation::GoString { .. }
@@ -102,7 +105,8 @@ impl RustBpfCompiler {
                 )));
             }
             let size = match &variable.location {
-                VariableLocation::StackBlob { byte_size, .. } => *byte_size,
+                VariableLocation::StackBlob { byte_size, .. }
+                | VariableLocation::PiecewiseBlob { byte_size, .. } => *byte_size,
                 VariableLocation::GoString { .. } | VariableLocation::StringHeader { .. } => 16,
                 VariableLocation::GoSlice { .. } | VariableLocation::SliceHeader { .. } => 24,
                 _ => variable.size.bytes(),
@@ -122,10 +126,39 @@ impl RustBpfCompiler {
                     name: variable.name.clone(),
                     offset,
                     size,
-                    op: ReadOp::Header {
-                        base: Box::new(base),
-                        size,
-                        kind,
+                    op: if kind == HeaderKind::RustString {
+                        let (ptr, len) = match &variable.location {
+                            VariableLocation::StringHeader { ptr, len: _ }
+                            | VariableLocation::GoString { ptr, len: _ } => {
+                                // Rust's optimized String spill retains the
+                                // three-word Vec payload: capacity, pointer,
+                                // length. The nominal DWARF String/Vec DIE can
+                                // describe the same words with different
+                                // pieces, so derive the live header from the
+                                // selected stack base rather than treating
+                                // the first word as a pointer.
+                                let compact_ptr = shift_location((**ptr).clone(), 8);
+                                let compact_len = shift_location((**ptr).clone(), 16);
+                                (
+                                    location_to_read_op(&compact_ptr)?,
+                                    location_to_read_op(&compact_len)?,
+                                )
+                            }
+                            _ => unreachable!(),
+                        };
+                        ReadOp::HeaderExplicit {
+                            ptr: Box::new(ptr),
+                            len: Box::new(len),
+                            cap: None,
+                            size,
+                            kind,
+                        }
+                    } else {
+                        ReadOp::Header {
+                            base: Box::new(base),
+                            size,
+                            kind,
+                        }
                     },
                 });
                 offset = offset.saturating_add(size);
@@ -152,11 +185,23 @@ impl RustBpfCompiler {
                     size: *byte_size,
                     semantics: ValueSemantics::Value,
                 },
-                VariableLocation::PiecewiseBlob { .. } => {
-                    return Err(CompileError::UnsupportedLocation(format!(
-                        "Rust variable '{}' has unsupported piecewise composite location",
-                        variable.name
-                    )))
+                VariableLocation::PiecewiseBlob { pieces, .. } => {
+                    let mut cursor = 0usize;
+                    let mut lowered = Vec::with_capacity(pieces.len());
+                    for piece in pieces {
+                        let op = piece
+                            .location
+                            .as_ref()
+                            .map(location_to_read_op)
+                            .transpose()?;
+                        lowered.push(CapturePiece {
+                            offset: cursor,
+                            size: piece.byte_size,
+                            op,
+                        });
+                        cursor = cursor.saturating_add(piece.byte_size);
+                    }
+                    ReadOp::Piecewise { pieces: lowered }
                 }
                 _ => unreachable!("is_scalar checked above"),
             };
@@ -237,7 +282,7 @@ impl RustBpfCompiler {
         &self,
         plan: &CapturePlan,
     ) -> std::result::Result<BpfProgram, CompileError> {
-        generate_bpf_program_from_plan(
+        let program = generate_bpf_program_from_plan(
             plan,
             false,
             None,
@@ -248,7 +293,28 @@ impl RustBpfCompiler {
                 plan_tag: plan_tag(&plan.plan_hash),
             }),
         )
-        .map_err(|error| CompileError::Backend(error.to_string()))
+        .map_err(|error| CompileError::Backend(error.to_string()))?;
+        detrix_logging::debug!(
+            "[rust-compiler] rendered plan fields={} first_size={} first_op={:?} blob_limit={} has_blob_decl={}",
+            plan.fields.len(),
+            plan.fields.first().map_or(0, |field| field.size),
+            plan.fields.first().map(|field| &field.op),
+            self.config.max_blob_capture,
+            program.source.contains("var0_blob[")
+        );
+        detrix_logging::warn!(
+            "[rust-compiler] Rust event layout: source_bytes={} first_size={} first_op={:?} blob_limit={} blob_decl={}",
+            program.source.len(),
+            plan.fields.first().map_or(0, |field| field.size),
+            plan.fields.first().map(|field| &field.op),
+            self.config.max_blob_capture,
+            program
+                .source
+                .lines()
+                .find(|line| line.contains("var0_blob["))
+                .unwrap_or("<none>")
+        );
+        Ok(program)
     }
 }
 
@@ -570,6 +636,44 @@ fn plan_field_to_go_variable(
             return Ok(ResolvedVariable {
                 name: field.name.clone(),
                 location: header_location(base, *kind),
+                size: VariableSize::QWord,
+                type_name: header_type_name(*kind).into(),
+                nested_type: None,
+            });
+        }
+        ReadOp::HeaderExplicit {
+            ptr,
+            len,
+            cap,
+            kind,
+            ..
+        } => {
+            let ptr = read_op_to_location(ptr)?;
+            let len = read_op_to_location(len)?;
+            let location = match kind {
+                HeaderKind::RustString | HeaderKind::BorrowedStr => {
+                    VariableLocation::StringHeader {
+                        ptr: Box::new(ptr),
+                        len: Box::new(len),
+                    }
+                }
+                HeaderKind::RustVec | HeaderKind::BorrowedSlice | HeaderKind::Slice => {
+                    VariableLocation::SliceHeader {
+                        ptr: Box::new(ptr),
+                        len: Box::new(len),
+                        cap: Box::new(read_op_to_location(cap.as_ref().ok_or_else(|| {
+                            CompileError::UnsupportedLocation("header cap missing".into())
+                        })?)?),
+                    }
+                }
+                HeaderKind::String => VariableLocation::GoString {
+                    ptr: Box::new(ptr),
+                    len: Box::new(len),
+                },
+            };
+            return Ok(ResolvedVariable {
+                name: field.name.clone(),
+                location,
                 size: VariableSize::QWord,
                 type_name: header_type_name(*kind).into(),
                 nested_type: None,
@@ -1117,6 +1221,76 @@ mod tests {
     }
 
     #[test]
+    fn rust_probe_lowering_renders_stack_blob_in_event_layout() {
+        let probe = ProbePoint {
+            binary_path: std::path::PathBuf::from("/tmp/rust"),
+            pc: 0x4321,
+            symbol_offset: 0x20,
+            function_name: "main".into(),
+            variables: vec![ResolvedVariable {
+                name: "snapshot".into(),
+                location: VariableLocation::StackBlob {
+                    offset: -64,
+                    byte_size: 392,
+                },
+                // DWARF's scalar register-sized value is not the aggregate
+                // wire size; StackBlob.byte_size is authoritative here.
+                size: VariableSize::QWord,
+                type_name: "Snapshot".into(),
+                nested_type: None,
+            }],
+        };
+        let plan = RustBpfCompiler::plan_from_probe(&probe, "probe:4321").unwrap();
+        assert_eq!(plan.fields[0].size, 392);
+        assert!(matches!(plan.fields[0].op, ReadOp::Blob { size: 392, .. }));
+        let source = RustBpfCompiler {
+            config: CaptureConfig {
+                max_blob_capture: 512,
+                ..CaptureConfig::default()
+            },
+        }
+        .compile_plan_to_program(&plan)
+        .unwrap()
+        .source;
+        assert!(source.contains("var0_blob[392]"), "missing aggregate blob");
+        assert!(source.contains("event->var0 = (u64)(DETRIX_STACK_PTR - 64)"));
+        assert!(source.contains("bpf_ringbuf_reserve(&DETRIX_EVENTS, 448, 0)"));
+    }
+
+    #[test]
+    fn rust_plan_keeps_goid_config_out_of_rust_wire_layout() {
+        let probe = ProbePoint {
+            binary_path: std::path::PathBuf::from("/tmp/rust"),
+            pc: 0x4321,
+            symbol_offset: 0x20,
+            function_name: "main".into(),
+            variables: vec![ResolvedVariable {
+                name: "snapshot".into(),
+                location: VariableLocation::StackBlob {
+                    offset: -64,
+                    byte_size: 392,
+                },
+                size: VariableSize::QWord,
+                type_name: "Snapshot".into(),
+                nested_type: None,
+            }],
+        };
+        let plan = RustBpfCompiler::plan_from_probe(&probe, "probe:4321").unwrap();
+        let source = RustBpfCompiler {
+            config: CaptureConfig {
+                max_blob_capture: 512,
+                capture_goid: true,
+                ..CaptureConfig::default()
+            },
+        }
+        .compile_plan_to_program(&plan)
+        .unwrap()
+        .source;
+        assert!(!source.contains("u64 goid;"));
+        assert!(source.contains("bpf_ringbuf_reserve(&DETRIX_EVENTS, 448, 0)"));
+    }
+
+    #[test]
     fn rust_plan_uses_declared_aarch64_frame_register_on_non_arm_hosts() {
         let plan = CapturePlan {
             schema_version: CAPTURE_PLAN_SCHEMA_VERSION,
@@ -1177,6 +1351,41 @@ mod tests {
     }
 
     #[test]
+    fn rust_compiler_renders_piecewise_blob_plan() {
+        let plan = CapturePlan {
+            schema_version: CAPTURE_PLAN_SCHEMA_VERSION,
+            architecture: TargetArchitecture::Aarch64,
+            profile_id: "rust".into(),
+            plan_hash: "probe:piecewise".into(),
+            probe_pc: 0x1234,
+            fields: vec![CaptureField {
+                name: "snapshot".into(),
+                offset: 0,
+                size: 16,
+                op: ReadOp::Piecewise {
+                    pieces: vec![CapturePiece {
+                        offset: 0,
+                        size: 16,
+                        op: Some(ReadOp::Frame {
+                            register: Register::Arm64(29),
+                            offset: 0,
+                            size: 16,
+                            semantics: ValueSemantics::Value,
+                        }),
+                    }],
+                },
+            }],
+            max_payload_bytes: 16,
+        };
+        let source = RustBpfCompiler::default()
+            .compile_plan_to_program(&plan)
+            .unwrap()
+            .source;
+        assert!(source.contains("var0_blob[16]"));
+        assert!(source.contains("event->var0_blob[0]"));
+    }
+
+    #[test]
     fn rust_plan_header_lowers_through_same_compiler_boundary() {
         let plan = CapturePlan {
             schema_version: CAPTURE_PLAN_SCHEMA_VERSION,
@@ -1210,5 +1419,46 @@ mod tests {
         assert!(source.contains("var0_cap"));
         assert!(source.contains("ctx->rbp - 32"));
         assert_eq!(source.matches("ctx->rbp - 16").count(), 2);
+    }
+
+    #[test]
+    fn rust_plan_preserves_non_adjacent_string_locations() {
+        let plan = CapturePlan {
+            schema_version: CAPTURE_PLAN_SCHEMA_VERSION,
+            architecture: TargetArchitecture::X86_64,
+            profile_id: "rust".into(),
+            plan_hash: "header:rust-string-explicit".into(),
+            probe_pc: 7,
+            fields: vec![CaptureField {
+                name: "owned".into(),
+                offset: 0,
+                size: 16,
+                op: ReadOp::HeaderExplicit {
+                    ptr: Box::new(ReadOp::Stack {
+                        offset: 96,
+                        size: 8,
+                        semantics: ValueSemantics::Value,
+                    }),
+                    len: Box::new(ReadOp::Stack {
+                        offset: 112,
+                        size: 8,
+                        semantics: ValueSemantics::Value,
+                    }),
+                    cap: None,
+                    size: 16,
+                    kind: HeaderKind::RustString,
+                },
+            }],
+            max_payload_bytes: 16,
+        };
+        let source = String::from_utf8(
+            RustBpfCompiler::default()
+                .compile(&plan)
+                .expect("explicit Rust String header should compile")
+                .artifact,
+        )
+        .unwrap();
+        assert!(source.contains("DETRIX_STACK_PTR + 96"));
+        assert!(source.contains("DETRIX_STACK_PTR + 112"));
     }
 }

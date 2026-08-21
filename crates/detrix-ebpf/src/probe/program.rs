@@ -102,10 +102,12 @@ pub fn generate_bpf_program_with_envelope(
     // Build the two dynamic sections, then substitute into the template.
     let event_fields = build_event_fields(variables, capture_goid, config, envelope);
     let var_reads = build_var_reads(variables, capture_goid, config, envelope);
+    let event_size = legacy_event_size(variables, capture_goid, config, envelope);
 
     let source = PROBE_TEMPLATE
         .replace("/*DETRIX_EVENT_FIELDS*/", &event_fields)
-        .replace("/*DETRIX_VAR_READS*/", &var_reads);
+        .replace("/*DETRIX_VAR_READS*/", &var_reads)
+        .replace("/*DETRIX_EVENT_SIZE*/", &event_size.to_string());
 
     Ok(BpfProgram {
         source,
@@ -115,6 +117,30 @@ pub fn generate_bpf_program_with_envelope(
         goid_offset,
         versioned_envelope: envelope.is_some(),
     })
+}
+
+fn legacy_event_size(
+    variables: &[ResolvedVariable],
+    capture_goid: bool,
+    config: &CaptureConfig,
+    envelope: Option<RawEnvelopeSpec>,
+) -> usize {
+    let mut size = 24 + envelope.map_or(0, |_| 24) + usize::from(capture_goid) * 8;
+    for variable in variables {
+        size += 8;
+        size += match &variable.location {
+            VariableLocation::GoString { .. } | VariableLocation::StringHeader { .. } => {
+                8 + config.max_string_capture.min(255)
+            }
+            VariableLocation::GoSlice { .. } | VariableLocation::SliceHeader { .. } => 16,
+            VariableLocation::StackBlob { byte_size, .. }
+            | VariableLocation::PiecewiseBlob { byte_size, .. } => {
+                (*byte_size).min(config.max_blob_capture)
+            }
+            _ => 0,
+        };
+    }
+    (size + 7) & !7
 }
 
 /// Generate a BPF program directly from the validated language-neutral plan.
@@ -143,9 +169,11 @@ pub fn generate_bpf_program_from_plan(
 
     let event_fields = build_plan_event_fields(&plan.fields, capture_goid, config, envelope);
     let var_reads = build_plan_var_reads(&plan.fields, capture_goid, config, envelope)?;
+    let event_size = plan_event_size(&plan.fields, capture_goid, config, envelope);
     let source = PROBE_TEMPLATE
         .replace("/*DETRIX_EVENT_FIELDS*/", &event_fields)
-        .replace("/*DETRIX_VAR_READS*/", &var_reads);
+        .replace("/*DETRIX_VAR_READS*/", &var_reads)
+        .replace("/*DETRIX_EVENT_SIZE*/", &event_size.to_string());
 
     Ok(BpfProgram {
         source,
@@ -155,6 +183,37 @@ pub fn generate_bpf_program_from_plan(
         goid_offset,
         versioned_envelope: envelope.is_some(),
     })
+}
+
+fn plan_event_size(
+    fields: &[CaptureField],
+    capture_goid: bool,
+    config: &CaptureConfig,
+    envelope: Option<RawEnvelopeSpec>,
+) -> usize {
+    let mut size = 24 + envelope.map_or(0, |_| 24) + usize::from(capture_goid) * 8;
+    for field in fields {
+        size += 8;
+        size += match &field.op {
+            ReadOp::Header { kind, .. } | ReadOp::HeaderExplicit { kind, .. } => match kind {
+                HeaderKind::String | HeaderKind::RustString | HeaderKind::BorrowedStr => {
+                    8 + config.max_string_capture.min(255)
+                }
+                HeaderKind::Slice | HeaderKind::RustVec | HeaderKind::BorrowedSlice => 16,
+            },
+            ReadOp::Blob { size, .. } => (*size).min(config.max_blob_capture),
+            ReadOp::Piecewise { .. } | ReadOp::Piece { .. } => {
+                field.size.min(config.max_blob_capture)
+            }
+            ReadOp::Register { .. } | ReadOp::Stack { .. } | ReadOp::Frame { .. }
+                if field.size > 8 =>
+            {
+                field.size.min(config.max_blob_capture)
+            }
+            _ => 0,
+        };
+    }
+    (size + 7) & !7
 }
 
 fn build_plan_event_fields(
@@ -178,7 +237,7 @@ fn build_plan_event_fields(
     for (index, field) in fields.iter().enumerate() {
         out.push_str(&format!("    u64 var{index}; // {}: plan-op\n", field.name));
         match &field.op {
-            ReadOp::Header { kind, .. } => match kind {
+            ReadOp::Header { kind, .. } | ReadOp::HeaderExplicit { kind, .. } => match kind {
                 HeaderKind::String | HeaderKind::RustString | HeaderKind::BorrowedStr => {
                     out.push_str(&format!("    u64 var{index}_len;\n"));
                     let size = config.max_string_capture.min(255);
@@ -198,6 +257,20 @@ fn build_plan_event_fields(
                 out.push_str(&format!("    u8 var{index}_blob[{size}];\n"));
             }
             ReadOp::Piece { .. } => {
+                let size = field.size.min(config.max_blob_capture);
+                out.push_str(&format!("    u8 var{index}_blob[{size}];\n"));
+            }
+            // Defensive layout rule: a composite-sized scalar op must still
+            // receive a bounded byte buffer. This protects the wire contract
+            // if a language lowering loses its composite marker while
+            // retaining the DWARF byte size.
+            ReadOp::Register { .. } | ReadOp::Stack { .. } | ReadOp::Frame { .. }
+                if field.size > 8 =>
+            {
+                let size = field.size.min(config.max_blob_capture);
+                out.push_str(&format!("    u8 var{index}_blob[{size}];\n"));
+            }
+            _ if field.size > 8 => {
                 let size = field.size.min(config.max_blob_capture);
                 out.push_str(&format!("    u8 var{index}_blob[{size}];\n"));
             }
@@ -246,12 +319,31 @@ fn generate_plan_read_expr(
 ) -> Result<String> {
     let value = format!("event->var{index}");
     match op {
+        ReadOp::Register { register, .. } if field_size > 8 => {
+            let size = field_size.min(config.max_blob_capture);
+            Ok(format!(
+                "    bpf_probe_read_user(event->var{index}_blob, {size}, (void *){});",
+                register.pt_regs_access()
+            ))
+        }
         ReadOp::Register { register, .. } => {
             Ok(format!("    {value} = (u64){};", register.pt_regs_access()))
         }
+        ReadOp::Stack { offset, .. } if field_size > 8 => Ok(format!(
+            "    bpf_probe_read_user(event->var{index}_blob, {}, (void *){});",
+            field_size.min(config.max_blob_capture),
+            plan_address("DETRIX_STACK_PTR", *offset)
+        )),
         ReadOp::Stack { offset, size, .. } => {
             Ok(plan_memory_read(&value, "DETRIX_STACK_PTR", *offset, *size))
         }
+        ReadOp::Frame {
+            register, offset, ..
+        } if field_size > 8 => Ok(format!(
+            "    bpf_probe_read_user(event->var{index}_blob, {}, (void *)({}));",
+            field_size.min(config.max_blob_capture),
+            plan_address(&register.pt_regs_access(), *offset)
+        )),
         ReadOp::Frame {
             register,
             offset,
@@ -266,7 +358,8 @@ fn generate_plan_read_expr(
         ReadOp::Blob { offset, size, .. } => {
             let size = (*size).min(config.max_blob_capture);
             Ok(format!(
-                "    bpf_probe_read_user(event->var{index}_blob, {size}, (void *){});",
+                "    event->var{index} = (u64){};\n    bpf_probe_read_user(event->var{index}_blob, {size}, (void *){});",
+                plan_address("DETRIX_STACK_PTR", *offset),
                 plan_address("DETRIX_STACK_PTR", *offset)
             ))
         }
@@ -300,6 +393,30 @@ fn generate_plan_read_expr(
                 out.push_str(&generate_plan_read_into(
                     &shift_plan_op(base, cap_delta),
                     &cap,
+                    8,
+                )?);
+            } else {
+                let max = config.max_string_capture.min(255);
+                out.push_str(&format!(
+                    "\n    __builtin_memset(event->var{index}_str, 0, {max});\n    {{\n        u32 _len{index} = (u32)event->var{index}_len;\n        _len{index} &= 0xFF;\n        if (event->var{index} && _len{index} > 0 && _len{index} <= {max}) {{\n            bpf_probe_read_user(event->var{index}_str, _len{index}, (void *)event->var{index});\n        }}\n    }}"
+                ));
+            }
+            Ok(out)
+        }
+        ReadOp::HeaderExplicit { ptr, len, cap, .. } => {
+            let mut out = String::new();
+            out.push_str(&generate_plan_read_into(ptr, &value, 8)?);
+            out.push('\n');
+            out.push_str(&generate_plan_read_into(
+                len,
+                &format!("event->var{index}_len"),
+                8,
+            )?);
+            if let Some(cap) = cap {
+                out.push('\n');
+                out.push_str(&generate_plan_read_into(
+                    cap,
+                    &format!("event->var{index}_cap"),
                     8,
                 )?);
             } else {
@@ -660,10 +777,11 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
             // var{idx} (u64) is left as 0; actual data goes in var{idx}_blob[N].
             let capture = (*byte_size).min(config.max_blob_capture);
             if *offset >= 0 {
-                format!("    bpf_probe_read_user(event->var{idx}_blob, {capture}, (void *)(DETRIX_STACK_PTR + {offset}));")
+                format!("    event->var{idx} = (u64)(DETRIX_STACK_PTR + {offset});\n    bpf_probe_read_user(event->var{idx}_blob, {capture}, (void *)(DETRIX_STACK_PTR + {offset}));")
             } else {
                 format!(
-                    "    bpf_probe_read_user(event->var{idx}_blob, {capture}, (void *)(DETRIX_STACK_PTR - {}));",
+                    "    event->var{idx} = (u64)(DETRIX_STACK_PTR - {});\n    bpf_probe_read_user(event->var{idx}_blob, {capture}, (void *)(DETRIX_STACK_PTR - {}));",
+                    offset.unsigned_abs(),
                     offset.unsigned_abs()
                 )
             }

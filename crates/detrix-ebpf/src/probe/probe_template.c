@@ -95,7 +95,7 @@ struct {
 SEC("uprobe")
 int detrix_capture(struct pt_regs *ctx) {
     struct probe_event *event;
-    event = bpf_ringbuf_reserve(&DETRIX_EVENTS, sizeof(*event), 0);
+    event = bpf_ringbuf_reserve(&DETRIX_EVENTS, /*DETRIX_EVENT_SIZE*/, 0);
     if (!event) {
         // Ring buffer full — increment drop counter and exit.
         __u32 key = 0;

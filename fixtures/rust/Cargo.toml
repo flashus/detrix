@@ -22,6 +22,10 @@ path = "src/optimized.rs"
 name = "detrix_special_layout_app"
 path = "src/special_layout.rs"
 
+[[bin]]
+name = "detrix_nested_types_app"
+path = "src/nested_types.rs"
+
 [features]
 default = []
 # Enable detrix-rs integration (for client E2E tests)

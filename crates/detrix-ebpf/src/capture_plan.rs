@@ -81,6 +81,16 @@ pub enum ReadOp {
         size: usize,
         kind: HeaderKind,
     },
+    /// Header whose component words come from explicit DWARF locations.
+    /// Rust/LLVM may describe `String`/`Vec` fields with non-adjacent stack
+    /// slots, so deriving them from one synthetic base is not sound.
+    HeaderExplicit {
+        ptr: Box<ReadOp>,
+        len: Box<ReadOp>,
+        cap: Option<Box<ReadOp>>,
+        size: usize,
+        kind: HeaderKind,
+    },
     Cfa {
         offset: i64,
         size: usize,
@@ -349,6 +359,24 @@ fn validate_op(
                 )));
             }
             validate_op(base, field_count, depth + 1, *size)?;
+        }
+        ReadOp::HeaderExplicit {
+            ptr,
+            len,
+            cap,
+            size,
+            ..
+        } => {
+            if *size == 0 || *size > MAX_CAPTURE_OP_BYTES {
+                return Err(PlanError::InvalidField(format!(
+                    "read size {size} exceeds limit"
+                )));
+            }
+            validate_op(ptr, field_count, depth + 1, 8)?;
+            validate_op(len, field_count, depth + 1, 8)?;
+            if let Some(cap) = cap {
+                validate_op(cap, field_count, depth + 1, 8)?;
+            }
         }
         ReadOp::Map { base } => validate_op(base, field_count, depth + 1, field_size)?,
         ReadOp::Register { .. } | ReadOp::Unavailable { .. } => {}

@@ -133,7 +133,11 @@ RUN --mount=type=cache,target=/build/target \
         | head -1 | xargs -I{} cp {} /out/ebpf_e2e_test && \
     cargo build --release --locked --manifest-path fixtures/rust/Cargo.toml \
         --target-dir /build/target/fixture-rust && \
-    cp /build/target/fixture-rust/release/detrix_example_app /out/rust_detrix_example_app
+    cp /build/target/fixture-rust/release/detrix_example_app /out/rust_detrix_example_app && \
+    cp /build/target/fixture-rust/release/detrix_nested_types_app /out/rust_nested_types_app && \
+    cargo test --no-run --locked --package detrix-testing --test ebpf_rust_nested_types_e2e && \
+    find /build/target/debug/deps/ -maxdepth 1 -name "ebpf_rust_nested_types_e2e-*" ! -name "*.d" \
+        | head -1 | xargs -I{} cp {} /out/ebpf_rust_nested_types_e2e_test
 
 # ---------- Stage 4: Test runner — inherits from pre-built playground ----------
 # detrix-ebpf-playground already has clang/llvm/libbpf/linux-headers installed.
@@ -160,10 +164,12 @@ COPY --from=go-builder /build/string_capture /usr/local/bin/string_capture
 COPY --from=go-builder /build/nested_types /usr/local/bin/nested_types
 # Rust fixture — built with DWARF and kept in the same runner as Go fixtures.
 COPY --from=rust-builder /out/rust_detrix_example_app /usr/local/bin/rust_detrix_example_app
+COPY --from=rust-builder /out/rust_nested_types_app /usr/local/bin/rust_nested_types_app
 # Detrix daemon — started as a subprocess by the test
 COPY --from=rust-builder /out/detrix /usr/local/bin/detrix
 # eBPF integration test binary
 COPY --from=rust-builder /out/ebpf_e2e_test /usr/local/bin/ebpf_e2e_test
+COPY --from=rust-builder /out/ebpf_rust_nested_types_e2e_test /usr/local/bin/ebpf_rust_nested_types_e2e_test
 
 # DETRIX_BIN is read by find_detrix_binary() in executor.rs.
 ENV DETRIX_BIN=/usr/local/bin/detrix

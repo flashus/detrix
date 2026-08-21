@@ -2551,6 +2551,7 @@ enable_ast_analysis = false
 
 [ebpf]
 max_capture_depth = 10
+blob_capture_bytes = 512
 capture_goid = true
 "#,
             workspace_path_str,

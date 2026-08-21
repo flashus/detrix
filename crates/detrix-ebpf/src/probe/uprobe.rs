@@ -75,16 +75,27 @@ fn rust_frame_location(
         VariableLocation::StackOffset { offset } => {
             VariableLocation::FrameOffset { register, offset }
         }
-        // Header locations are emitted by rustc as a compact stack layout;
-        // their pointer words are already normalized for the uprobe SP by the
-        // parser. Do not reinterpret those words as frame-relative scalar
-        // locals (doing so corrupts lengths/pointers for String and slices).
+        // Header locations are emitted by rustc as compact SP-relative spills;
+        // retain those locations. The selected PC's live spill can differ from
+        // the nominal nested DIE offsets.
         VariableLocation::GoString { ptr, len } => VariableLocation::GoString { ptr, len },
         VariableLocation::StringHeader { ptr, len } => VariableLocation::StringHeader { ptr, len },
         VariableLocation::GoSlice { ptr, len, cap } => VariableLocation::GoSlice { ptr, len, cap },
         VariableLocation::SliceHeader { ptr, len, cap } => {
             VariableLocation::SliceHeader { ptr, len, cap }
         }
+        VariableLocation::PiecewiseBlob { pieces, byte_size } => VariableLocation::PiecewiseBlob {
+            pieces: pieces
+                .into_iter()
+                .map(|mut piece| {
+                    piece.location = piece
+                        .location
+                        .map(|location| rust_frame_location(location, register));
+                    piece
+                })
+                .collect(),
+            byte_size,
+        },
         other => other,
     }
 }
@@ -237,8 +248,8 @@ impl UprobeManager {
         )
     }
 
-    /// Attach using a language profile. Go remains the compatibility default;
-    /// Rust currently shares only the bounded scalar renderer.
+    /// Attach using a language profile. Go and Rust both use the validated
+    /// CapturePlan renderer; the legacy no-plan API remains for compatibility.
     #[allow(unused_variables)]
     pub fn attach_for_profile(
         &mut self,
@@ -459,10 +470,6 @@ impl UprobeManager {
                     config: self.capture_config.clone(),
                 };
                 if let Some(plan_hash) = plan_hash {
-                    // All Rust live generation now enters through CapturePlan,
-                    // including bounded String/Vec/slice headers. This keeps
-                    // the envelope identity and profile-specific layout
-                    // policy in one validated IR path.
                     let plan = RustBpfCompiler::plan_from_probe(&compile_point, plan_hash)
                         .map_err(|error| Error::Ebpf(error.to_string()))?;
                     compiler
@@ -474,13 +481,51 @@ impl UprobeManager {
             }
         };
 
+        if profile == ProfileId::Rust {
+            for (index, variable) in compile_point.variables.iter().enumerate() {
+                let aggregate_size = match &variable.location {
+                    VariableLocation::StackBlob { byte_size, .. }
+                    | VariableLocation::PiecewiseBlob { byte_size, .. } => {
+                        Some((*byte_size).min(self.capture_config.max_blob_capture))
+                    }
+                    _ => None,
+                };
+                if let Some(aggregate_size) = aggregate_size {
+                    let declaration = format!("var{index}_blob[{aggregate_size}]");
+                    if !bpf_program.source.contains(&declaration) {
+                        return Err(Error::Ebpf(format!(
+                            "Rust aggregate field '{}' is missing generated declaration '{}'",
+                            variable.name, declaration
+                        )));
+                    }
+                } else if variable.size.bytes() > 8
+                    && !bpf_program.source.contains(&format!("var{index}_blob["))
+                {
+                    return Err(Error::Ebpf(format!(
+                        "Rust aggregate field '{}' ({} bytes) has no blob in generated event layout",
+                        variable.name,
+                        variable.size.bytes()
+                    )));
+                }
+            }
+            detrix_logging::debug!(
+                "[uprobe] Rust generated layout: bytes={} has_var0_blob={} declaration={}",
+                bpf_program.source.len(),
+                bpf_program.source.contains("var0_blob["),
+                bpf_program
+                    .source
+                    .lines()
+                    .find(|line| line.contains("var0_blob["))
+                    .unwrap_or("<none>")
+            );
+        }
+
         // Debug: log generated BPF source
         detrix_logging::debug!(
             "[uprobe] Generated BPF for '{}':\n{}",
             metric_name,
             bpf_program.source
         );
-
         // Step 2: Compile C → ELF via clang. Select the target from the
         // resolved DWARF probe, not from the Detrix build host; this is what
         // keeps x86-64 and AArch64 plans from silently sharing register ABI.

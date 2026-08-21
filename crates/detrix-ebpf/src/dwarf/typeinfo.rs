@@ -427,15 +427,28 @@ fn resolve_type_at_offset<R: Reader>(
         // Go DWARF includes DW_AT_byte_size on the array type itself.
         // Element count is in DW_TAG_subrange_type child with DW_AT_count.
         gimli::DW_TAG_array_type => {
-            let byte_size = match entry.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0)) {
+            let dwarf_byte_size = match entry.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0))
+            {
                 Some(AttributeValue::Udata(n)) => n,
-                _ => 0, // Unknown size — will be treated as zero-byte blob
+                _ => 0,
             };
             // Use resolve_typedef_target to handle cross-unit element type references
             let elem_info = resolve_typedef_target(entry, unit, dwarf, depth)?;
 
             // Get element count from DW_TAG_subrange_type child
             let element_count = get_array_element_count(entry, unit, dwarf)?;
+            // Some Go toolchains omit DW_AT_byte_size on array DIEs even
+            // though the element DIE and subrange are complete.  A zero size
+            // makes the capture planner fall through to a scalar/register
+            // read, which turns the first float/int bits into a fake pointer
+            // during nested decoding.  Derive the inline size from the type
+            // graph before exposing TypeInfo to the capture planner.
+            let byte_size = infer_array_byte_size(
+                dwarf_byte_size,
+                element_count,
+                elem_info.byte_size,
+                elem_info.size,
+            );
             let name = format!("[{}]{}", element_count, elem_info.name);
 
             Ok(TypeInfo {
@@ -464,6 +477,22 @@ fn resolve_type_at_offset<R: Reader>(
 
         _ => Ok(TypeInfo::unknown()),
     }
+}
+
+/// Return the inline size of an array, preferring the authoritative DIE size
+/// and deriving it from the element type when a compiler omits that attribute.
+fn infer_array_byte_size(
+    dwarf_byte_size: u64,
+    element_count: u64,
+    element_byte_size: u64,
+    element_size: VariableSize,
+) -> u64 {
+    if dwarf_byte_size != 0 {
+        return dwarf_byte_size;
+    }
+    element_count
+        .checked_mul(element_byte_size.max(element_size.bytes() as u64))
+        .unwrap_or(0)
 }
 
 /// Resolve a DW_TAG_base_type DIE (int, float, bool, etc.).
@@ -726,7 +755,8 @@ fn resolve_struct_type<R: Reader>(
     let is_slice = (byte_size == 24 && !is_string && !is_time)
         || (is_rust_slice_name(&name) && !is_string && (byte_size == 16 || byte_size == 24));
     // Everything else is a user-defined struct (captured as blob)
-    let is_struct = !is_string && !is_slice && !is_time && !is_enum;
+    let is_map = is_rust_hash_map_name(&name);
+    let is_struct = !is_string && !is_slice && !is_time && !is_enum && !is_map;
 
     // For slices, try to extract element type info from DWARF
     let (slice_element_type, element_byte_size) = if is_slice {
@@ -747,7 +777,7 @@ fn resolve_struct_type<R: Reader>(
         is_slice,
         is_array: false,
         is_struct,
-        is_map: false,
+        is_map,
         is_enum,
         array_element_count: 0,
         array_element_type: String::new(),
@@ -757,11 +787,18 @@ fn resolve_struct_type<R: Reader>(
     })
 }
 
+/// Rust's `HashMap` is represented by a hashbrown struct in DWARF, but must
+/// remain a semantic map for nested capture planning.  Keep this deliberately
+/// narrow so ordinary user structs containing the word "Map" are unaffected.
+fn is_rust_hash_map_name(name: &str) -> bool {
+    name.contains("HashMap<") || name.contains("hash::map::HashMap<")
+}
+
 /// Extract the explicit, non-niche enum representation rustc emits as a
 /// `DW_TAG_variant_part`.  codelldb uses richer synthetic metadata for niche
 /// enums; without a real discriminant member and explicit values we return
 /// `None` so the capture path cannot invent a tag or payload offset.
-fn extract_rust_enum_layout<R: Reader>(
+pub(crate) fn extract_rust_enum_layout<R: Reader>(
     entry: &DebuggingInformationEntry<R>,
     unit: &gimli::Unit<R>,
     dwarf: &gimli::Dwarf<R>,
@@ -1346,6 +1383,25 @@ mod tests {
         assert!(info.is_array);
         assert_eq!(info.byte_size, 40);
         assert_eq!(info.array_element_count, 5);
+    }
+
+    #[test]
+    fn array_size_prefers_dwarf_attribute() {
+        assert_eq!(infer_array_byte_size(40, 5, 8, VariableSize::QWord), 40);
+    }
+
+    #[test]
+    fn array_size_derives_missing_dwarf_attribute() {
+        assert_eq!(infer_array_byte_size(0, 5, 8, VariableSize::QWord), 40);
+        assert_eq!(infer_array_byte_size(0, 3, 0, VariableSize::DWord), 12);
+    }
+
+    #[test]
+    fn array_size_fails_closed_on_overflow() {
+        assert_eq!(
+            infer_array_byte_size(0, u64::MAX, 8, VariableSize::QWord),
+            0
+        );
     }
 
     #[test]

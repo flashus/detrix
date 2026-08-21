@@ -94,6 +94,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DETRIX_SKIP_FRESHNESS_CHECK: "1"
+      # daemon_discovery library tests spawn a real daemon. The release build
+      # is copied to this stable path instead of the workspace target because
+      # CI uses the shared target-dir configuration.
+      DETRIX_BIN: /tmp/detrix-bin/detrix
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
@@ -251,6 +255,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-task@v2
+      - name: Configure shared session target
+        run: echo "DETRIX_SESSION_TARGET_DIR=${RUNNER_TEMP}/detrix-session-target" >> "$GITHUB_ENV"
       - name: Agent mode E2E
         run: task tests:test-agent
 

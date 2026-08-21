@@ -239,6 +239,13 @@ fn classify_type<R: Reader>(
         return resolve_array_type(entry, unit, dwarf, type_info, config, depth);
     }
 
+    // Rust HashMap is a struct at the ABI level, but semantically it is a map.
+    // Classify it before the generic struct path, otherwise callers see
+    // hashbrown's implementation fields (hash_builder/table/ctrl) as user data.
+    if is_rust_hash_map_name(&type_info.name) || type_info.name.starts_with("map[") {
+        return resolve_map_type(entry, unit, dwarf, type_info, config, depth);
+    }
+
     if type_info.is_struct {
         // Follow DW_AT_type typedef chain AND resolve fields in one step, keeping
         // the correct unit in scope. Using get_struct_type_entry then resolve_struct_fields
@@ -562,44 +569,63 @@ fn resolve_slice_type<R: Reader>(
     //
     // The 'entry' here is the DW_TAG_member field entry, not the slice struct type.
     // We need to follow the DW_AT_type attribute to get to the slice struct type entry.
-    let slice_struct_entry = match entry.attr_value(DwAt(gimli::constants::DW_AT_type.0)) {
-        Some(type_attr) => {
-            // Follow the type reference to get the slice struct type
-            match type_attr {
-                AttributeValue::UnitRef(offset) => {
-                    let mut cursor = unit.entries_at_offset(offset)?;
-                    cursor.next_dfs()?.cloned()
+    // Keep the unit paired with the referenced DIE.  Rust's standard-library
+    // container definitions are commonly emitted in another DWARF unit; using
+    // the caller's unit for that DIE makes template parameters disappear and
+    // leaves Vec/slice elements as `unknown`.
+    let mut element_nested_type = match entry.attr_value(DwAt(gimli::constants::DW_AT_type.0)) {
+        Some(AttributeValue::UnitRef(offset)) => {
+            let mut cursor = unit.entries_at_offset(offset)?;
+            match cursor.next_dfs()?.cloned() {
+                Some(slice_entry) => {
+                    resolve_slice_element_type(&slice_entry, unit, dwarf, config, depth + 1)?
                 }
-                AttributeValue::DebugInfoRef(debug_info_offset) => {
-                    // Cross-unit reference - find the unit and get the entry
-                    let target_offset = debug_info_offset.0;
-                    let mut units = dwarf.units();
-                    let mut result = None;
-                    while let Some(header) = units.next()? {
-                        let unit_start = header.offset().0;
-                        let unit_end = unit_start + header.unit_length();
-                        if target_offset >= unit_start && target_offset < unit_end {
-                            let target_unit = dwarf.unit(header)?;
-                            let local_offset = gimli::UnitOffset(target_offset - unit_start);
-                            let mut cursor = target_unit.entries_at_offset(local_offset)?;
-                            result = cursor.next_dfs()?.cloned();
-                            break;
-                        }
-                    }
-                    result
-                }
-                _ => None,
+                None => NestedType::Scalar(TypeInfo::unknown()),
             }
         }
-        None => None,
+        Some(AttributeValue::DebugInfoRef(debug_info_offset)) => {
+            let target_offset = debug_info_offset.0;
+            let mut units = dwarf.units();
+            let mut resolved = NestedType::Scalar(TypeInfo::unknown());
+            while let Some(header) = units.next()? {
+                let unit_start = header.offset().0;
+                let unit_end = unit_start + header.unit_length();
+                if target_offset >= unit_start && target_offset < unit_end {
+                    let target_unit = dwarf.unit(header)?;
+                    let local_offset = gimli::UnitOffset(target_offset - unit_start);
+                    let mut cursor = target_unit.entries_at_offset(local_offset)?;
+                    if let Some(slice_entry) = cursor.next_dfs()?.cloned() {
+                        resolved = resolve_slice_element_type(
+                            &slice_entry,
+                            &target_unit,
+                            dwarf,
+                            config,
+                            depth + 1,
+                        )?;
+                    }
+                    break;
+                }
+            }
+            resolved
+        }
+        _ => NestedType::Scalar(TypeInfo::unknown()),
     };
 
-    let element_nested_type = if let Some(slice_entry) = slice_struct_entry {
-        resolve_slice_element_type(&slice_entry, unit, dwarf, config, depth + 1)?
-    } else {
-        // Fallback: return unknown type
-        NestedType::Scalar(TypeInfo::unknown())
-    };
+    // Some rustc CUs omit the Vec/slice template DIE from the field's type
+    // chain. Recover the element from the printed container name and the
+    // authoritative type DIE instead of falling back to raw pointer words.
+    if element_nested_type.type_info().name == "unknown" {
+        detrix_logging::warn!(
+            "[nested_types] element resolution fallback for container type '{}'",
+            type_info.name
+        );
+        if let Some(element_name) = rust_container_element_name(&type_info.name) {
+            if let Some(resolved) = resolve_named_rust_type(&element_name, dwarf, config, depth + 1)
+            {
+                element_nested_type = resolved;
+            }
+        }
+    }
 
     Ok(NestedType::Array {
         type_info,
@@ -655,9 +681,236 @@ fn resolve_slice_element_type<R: Reader>(
         }
     }
 
+    // Rust Vec<T> has no Go-style `array` member.  rustc emits the element as
+    // a DW_TAG_template_type_parameter named `T`; use that authoritative type
+    // instead of manufacturing an `unknown` element and later decoding raw
+    // pointer words as values.
+    let mut tree = unit.entries_tree(Some(entry.offset()))?;
+    let root = tree.root()?;
+    let mut children = root.children();
+    while let Some(child_node) = children.next()? {
+        let child = child_node.entry();
+        if child.tag() != gimli::DW_TAG_template_type_parameter {
+            continue;
+        }
+        let name = read_die_name_string(child, dwarf);
+        if name.as_deref() != Some("T") {
+            continue;
+        }
+        if let Some(type_attr) = child.attr_value(DwAt(gimli::constants::DW_AT_type.0)) {
+            let element = resolve_nested_from_attr_value(type_attr, unit, dwarf, config, depth)?;
+            if element.type_info().name != "unknown" {
+                detrix_logging::debug!(
+                    "[nested_types] Rust Vec<T> element resolved: {}",
+                    element.type_info().name
+                );
+                return Ok(element);
+            }
+        }
+    }
+
     // Fallback: return unknown scalar type
-    detrix_logging::debug!("[nested_types] Slice 'array' field not found, returning unknown type");
+    detrix_logging::debug!("[nested_types] Slice element type not found, returning unknown type");
     Ok(NestedType::Scalar(TypeInfo::unknown()))
+}
+
+fn is_rust_hash_map_name(name: &str) -> bool {
+    name.contains("HashMap<") || name.contains("hash::map::HashMap<")
+}
+
+fn rust_container_element_name(name: &str) -> Option<String> {
+    if let Some(inner) = name
+        .strip_prefix("&[")
+        .or_else(|| name.strip_prefix("&mut ["))
+    {
+        return inner
+            .strip_suffix(']')
+            .map(|value| value.trim().to_string());
+    }
+    let start = name.find('<')? + 1;
+    let mut depth = 0usize;
+    for (index, ch) in name[start..].char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' if depth > 0 => depth -= 1,
+            ',' if depth == 0 => return Some(name[start..start + index].trim().to_string()),
+            '>' if depth == 0 => return Some(name[start..start + index].trim().to_string()),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn rust_map_type_arguments(name: &str) -> Option<(String, String)> {
+    let start = name.find('<')? + 1;
+    let mut depth = 0usize;
+    let mut comma = None;
+    for (index, ch) in name[start..].char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' if depth > 0 => depth -= 1,
+            ',' if depth == 0 => {
+                comma = Some(index);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let comma = comma?;
+    let key = name[start..start + comma].trim().to_string();
+    let rest = &name[start + comma + 1..];
+    let mut value = rest.trim();
+    let mut depth = 0usize;
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' if depth > 0 => depth -= 1,
+            ',' if depth == 0 => {
+                value = &value[..index];
+                break;
+            }
+            '>' if depth == 0 => {
+                value = &value[..index];
+                break;
+            }
+            _ => {}
+        }
+    }
+    Some((key, value.trim().to_string()))
+}
+
+fn resolve_named_rust_type<R: Reader>(
+    wanted: &str,
+    dwarf: &gimli::Dwarf<R>,
+    config: &NestedTypeConfig,
+    depth: usize,
+) -> Option<NestedType> {
+    let wanted_short = wanted.rsplit("::").next().unwrap_or(wanted);
+    let mut units = dwarf.units();
+    while let Some(header) = units.next().ok()? {
+        let target_unit = dwarf.unit(header).ok()?;
+        let mut entries = target_unit.entries();
+        while let Some(candidate) = entries.next_dfs().ok()? {
+            if !matches!(
+                candidate.tag(),
+                gimli::DW_TAG_structure_type
+                    | gimli::DW_TAG_base_type
+                    | gimli::DW_TAG_array_type
+                    | gimli::DW_TAG_enumeration_type
+            ) {
+                continue;
+            }
+            let Some(candidate_name) = read_die_name_string(candidate, dwarf) else {
+                continue;
+            };
+            let qualified_match =
+                candidate_name == wanted || candidate_name.ends_with(&format!("::{wanted_short}"));
+            // rustc commonly emits application-local names without their
+            // crate qualification (for example `Tag`), while dependencies
+            // may contain unrelated short names (hashbrown::Tag).  Accept a
+            // short application name only when the DIE is a real aggregate;
+            // the size/field shape check below filters zero/one-byte helper
+            // types such as hashbrown::control::Tag.
+            let short_match = candidate_name == wanted_short
+                && (wanted == wanted_short || !matches!(candidate.tag(), gimli::DW_TAG_base_type));
+            if !qualified_match && !short_match {
+                continue;
+            }
+            // A named type DIE is itself the target, not a variable carrying
+            // DW_AT_type.  Calling resolve_type_info(candidate) therefore
+            // returns `unknown` for the common Rust structure/base/enum DIEs.
+            // Build the metadata directly from the DIE, then let the normal
+            // classifier recurse through its gimli children.
+            let byte_size = match candidate.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0)) {
+                Some(AttributeValue::Udata(size)) => size,
+                Some(AttributeValue::Data1(size)) => size as u64,
+                Some(AttributeValue::Data2(size)) => size as u64,
+                Some(AttributeValue::Data4(size)) => size as u64,
+                Some(AttributeValue::Data8(size)) => size,
+                _ => 8,
+            };
+            let type_info = match candidate.tag() {
+                gimli::DW_TAG_structure_type => TypeInfo {
+                    name: candidate_name.clone(),
+                    size: crate::dwarf::types::VariableSize::from_byte_size(byte_size)
+                        .unwrap_or(crate::dwarf::types::VariableSize::QWord),
+                    byte_size,
+                    is_pointer: false,
+                    is_string: candidate_name == "String"
+                        || candidate_name.ends_with("::String")
+                        || candidate_name == "&str"
+                        || candidate_name == "&mut str",
+                    is_slice: candidate_name.starts_with("Vec<")
+                        || candidate_name.starts_with("&["),
+                    is_array: false,
+                    is_struct: true,
+                    is_map: candidate_name.contains("HashMap<"),
+                    is_enum: false,
+                    array_element_count: 0,
+                    array_element_type: String::new(),
+                    slice_element_type: String::new(),
+                    element_byte_size: 0,
+                    enum_layout: None,
+                },
+                gimli::DW_TAG_enumeration_type => TypeInfo {
+                    name: candidate_name.clone(),
+                    size: crate::dwarf::types::VariableSize::from_byte_size(byte_size)
+                        .unwrap_or(crate::dwarf::types::VariableSize::QWord),
+                    byte_size,
+                    is_pointer: false,
+                    is_string: false,
+                    is_slice: false,
+                    is_array: false,
+                    is_struct: false,
+                    is_map: false,
+                    is_enum: true,
+                    array_element_count: 0,
+                    array_element_type: String::new(),
+                    slice_element_type: String::new(),
+                    element_byte_size: 0,
+                    enum_layout: crate::dwarf::typeinfo::extract_rust_enum_layout(
+                        candidate,
+                        &target_unit,
+                        dwarf,
+                    ),
+                },
+                _ => TypeInfo {
+                    name: candidate_name.clone(),
+                    size: crate::dwarf::types::VariableSize::from_byte_size(byte_size)
+                        .unwrap_or(crate::dwarf::types::VariableSize::QWord),
+                    byte_size,
+                    is_pointer: false,
+                    is_string: false,
+                    is_slice: false,
+                    is_array: false,
+                    is_struct: false,
+                    is_map: false,
+                    is_enum: false,
+                    array_element_count: 0,
+                    array_element_type: String::new(),
+                    slice_element_type: String::new(),
+                    element_byte_size: 0,
+                    enum_layout: None,
+                },
+            };
+            if !qualified_match && short_match && type_info.byte_size <= 1 {
+                continue;
+            }
+            if candidate.tag() == gimli::DW_TAG_structure_type && !type_info.is_string {
+                return resolve_struct_fields(
+                    candidate,
+                    &target_unit,
+                    dwarf,
+                    type_info,
+                    config,
+                    depth,
+                )
+                .ok();
+            }
+            return classify_type(candidate, &target_unit, dwarf, type_info, config, depth).ok();
+        }
+    }
+    None
 }
 
 /// Resolve the target type of a pointer type attribute.
@@ -781,19 +1034,107 @@ fn resolve_map_type<R: Reader>(
     const DW_AT_GO_KEY: u16 = 0x2901;
     const DW_AT_GO_ELEM: u16 = 0x2902;
 
-    let key_nested =
+    let mut key_nested =
         try_resolve_go_map_component(entry, unit, dwarf, config, depth, DwAt(DW_AT_GO_KEY))
+            .or_else(|| try_resolve_rust_map_template(entry, unit, dwarf, config, depth, "K"))
             .unwrap_or_else(|| infer_nested_from_map_name(&type_info.name, 0));
 
-    let val_nested =
+    let mut val_nested =
         try_resolve_go_map_component(entry, unit, dwarf, config, depth, DwAt(DW_AT_GO_ELEM))
+            .or_else(|| try_resolve_rust_map_template(entry, unit, dwarf, config, depth, "V"))
             .unwrap_or_else(|| infer_nested_from_map_name(&type_info.name, 1));
+
+    if key_nested.type_info().name == "unknown" || val_nested.type_info().name == "unknown" {
+        detrix_logging::warn!(
+            "[nested_types] map component resolution fallback for '{}' (key='{}', value='{}')",
+            type_info.name,
+            key_nested.type_info().name,
+            val_nested.type_info().name
+        );
+        if let Some((key_name, value_name)) = rust_map_type_arguments(&type_info.name) {
+            if key_nested.type_info().name == "unknown" {
+                if let Some(resolved) = resolve_named_rust_type(&key_name, dwarf, config, depth + 1)
+                {
+                    key_nested = resolved;
+                }
+            }
+            if val_nested.type_info().name == "unknown" {
+                if let Some(resolved) =
+                    resolve_named_rust_type(&value_name, dwarf, config, depth + 1)
+                {
+                    val_nested = resolved;
+                }
+            }
+        }
+    }
 
     Ok(NestedType::Map {
         type_info,
         key_type: Box::new(key_nested),
         value_type: Box::new(val_nested),
     })
+}
+
+fn try_resolve_rust_map_template<R: Reader>(
+    entry: &DebuggingInformationEntry<R>,
+    unit: &Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+    config: &NestedTypeConfig,
+    depth: usize,
+    wanted: &str,
+) -> Option<NestedType> {
+    // The resolver is called with the member DIE. Template parameters live on
+    // the referenced Rust `HashMap` type DIE, not on that member, so scanning
+    // the member's children silently produced unknown K/V types.
+    let type_attr = entry.attr_value(DwAt(gimli::constants::DW_AT_type.0))?;
+
+    fn scan<R: Reader>(
+        type_offset: gimli::UnitOffset<R::Offset>,
+        target_unit: &Unit<R>,
+        dwarf: &gimli::Dwarf<R>,
+        config: &NestedTypeConfig,
+        depth: usize,
+        wanted: &str,
+    ) -> Option<NestedType> {
+        let mut tree = target_unit.entries_tree(Some(type_offset)).ok()?;
+        let root = tree.root().ok()?;
+        let mut children = root.children();
+        while let Some(child_node) = children.next().ok()? {
+            let child = child_node.entry();
+            if child.tag() != gimli::DW_TAG_template_type_parameter
+                || read_die_name_string(child, dwarf).as_deref() != Some(wanted)
+            {
+                continue;
+            }
+            let type_attr = child.attr_value(DwAt(gimli::constants::DW_AT_type.0))?;
+            let nested =
+                resolve_nested_from_attr_value(type_attr, target_unit, dwarf, config, depth)
+                    .ok()?;
+            if nested.type_info().name != "unknown" {
+                return Some(nested);
+            }
+        }
+        None
+    }
+
+    match type_attr {
+        AttributeValue::UnitRef(offset) => scan(offset, unit, dwarf, config, depth, wanted),
+        AttributeValue::DebugInfoRef(debug_info_offset) => {
+            let target_offset = debug_info_offset.0;
+            let mut units = dwarf.units();
+            while let Some(header) = units.next().ok()? {
+                let unit_start = header.offset().0;
+                let unit_end = unit_start + header.unit_length();
+                if target_offset >= unit_start && target_offset < unit_end {
+                    let target_unit = dwarf.unit(header).ok()?;
+                    let local_offset = gimli::UnitOffset(target_offset - unit_start);
+                    return scan(local_offset, &target_unit, dwarf, config, depth, wanted);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Try to resolve a map key or value type using a Go-specific DWARF attribute

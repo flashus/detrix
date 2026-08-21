@@ -1061,29 +1061,14 @@ fn resolve_variables_at_pc<R: Reader>(
                 // Multi-piece = Go register ABI; single-piece = stack-allocated.
                 let location = {
                     let upgraded = upgrade_location_for_type(locations, &type_info)?;
-                    // For heap-escaped variables (& prefix in DWARF name): the location
-                    // expression gives the stack slot of a pointer to the heap value.
-                    // upgrade_location_for_type sees a struct type + StackOffset and returns
-                    // StackBlob — but the stack slot holds only the pointer, not the struct
-                    // bytes. Convert to StackIndirect so BPF reads 8 bytes (the pointer),
-                    // and user-space dereferences it to get the actual struct from the heap.
-                    if is_heap_escaped {
-                        match upgraded {
-                            VariableLocation::StackBlob { offset, byte_size } => {
-                                detrix_logging::info!(
-                                    "[DWARF] '{}' heap-escaped (& prefix): \
-                                     StackBlob→StackIndirect offset={} byte_size={}",
-                                    name,
-                                    offset,
-                                    byte_size
-                                );
-                                VariableLocation::StackIndirect { offset, byte_size }
-                            }
-                            other => other,
-                        }
-                    } else {
-                        upgraded
-                    }
+                    // A DW_OP_fbreg/DW_OP_breg location for an aggregate is
+                    // already the aggregate's address.  The '&' name prefix
+                    // indicates escape/addressability, not an extra pointer
+                    // indirection.  Preserve only explicit DW_OP_deref as
+                    // StackIndirect; converting every escaped aggregate here
+                    // makes ptrWrapper read its first field (&order) as the
+                    // wrapper address.
+                    upgraded
                 };
 
                 detrix_logging::debug!(
@@ -1516,7 +1501,7 @@ fn upgrade_location_for_type<L: IntoVariablePiece>(
             // capacity rather than the data address.  Borrowed `&str` keeps
             // the conventional fat-pointer layout `{ data_ptr @ 0, len @ 8 }`.
             let (ptr_offset, len_offset) = if is_rust_owned_string(&type_info.name) {
-                (8, 16)
+                (0, 16)
             } else {
                 (0, 8)
             };
@@ -1591,6 +1576,18 @@ fn upgrade_location_for_type<L: IntoVariablePiece>(
             VariableLocation::StackOffset { offset } => {
                 return Ok(VariableLocation::StackBlob {
                     offset,
+                    byte_size: type_info.byte_size as usize,
+                });
+            }
+            VariableLocation::FrameOffset { register, offset } => {
+                // Preserve the DWARF frame register by using a one-piece blob;
+                // lowering to StackBlob would incorrectly substitute RSP for
+                // an RBP-based CFA on x86.
+                return Ok(VariableLocation::PiecewiseBlob {
+                    pieces: vec![VariablePiece {
+                        location: Some(VariableLocation::FrameOffset { register, offset }),
+                        byte_size: type_info.byte_size as usize,
+                    }],
                     byte_size: type_info.byte_size as usize,
                 });
             }
@@ -1828,7 +1825,10 @@ mod tests {
         assert_eq!(
             result,
             VariableLocation::StringHeader {
-                ptr: Box::new(VariableLocation::stack(-56)),
+                // The parser preserves the selected PC's Rust String base
+                // (capacity word at -64); the Rust compiler lowers the
+                // physical pointer to base+8 when generating the probe.
+                ptr: Box::new(VariableLocation::stack(-64)),
                 len: Box::new(VariableLocation::stack(-48)),
             }
         );
@@ -1994,6 +1994,28 @@ mod tests {
             VariableLocation::StackBlob {
                 offset: -80,
                 byte_size: 40
+            }
+        );
+    }
+
+    #[test]
+    fn upgrade_frame_offset_to_piecewise_blob_preserves_cfa_register() {
+        let loc = vec![VariableLocation::FrameOffset {
+            register: Register::Rbp,
+            offset: -80,
+        }];
+        let result = upgrade_location_for_type(loc, &struct_type(40)).unwrap();
+        assert_eq!(
+            result,
+            VariableLocation::PiecewiseBlob {
+                pieces: vec![VariablePiece {
+                    location: Some(VariableLocation::FrameOffset {
+                        register: Register::Rbp,
+                        offset: -80,
+                    }),
+                    byte_size: 40,
+                }],
+                byte_size: 40,
             }
         );
     }

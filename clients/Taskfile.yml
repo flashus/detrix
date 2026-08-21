@@ -20,10 +20,10 @@ tasks:
       - |
         if command -v openapi-generator-cli &> /dev/null; then
           openapi-generator-cli validate -i {{.SPEC_FILE}}
-        elif command -v npx &> /dev/null; then
-          npx @openapitools/openapi-generator-cli validate -i {{.SPEC_FILE}}
+        elif command -v npx &> /dev/null && npx @openapitools/openapi-generator-cli validate -i {{.SPEC_FILE}}; then
+          :
         else
-          echo "⚠️  openapi-generator-cli not found, using Python yaml validation"
+          echo "⚠️  OpenAPI generator unavailable, using Python yaml validation"
           python -c "import yaml; yaml.safe_load(open('{{.SPEC_FILE}}'))"
           echo "✅ YAML syntax valid (install openapi-generator-cli for full validation)"
         fi

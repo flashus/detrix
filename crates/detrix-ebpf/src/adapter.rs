@@ -120,6 +120,10 @@ struct ActiveMetric {
     raw_envelope: Option<RawEnvelopeExpectation>,
 }
 
+fn capture_goid_for_profile(profile: ProfileId, configured: bool) -> bool {
+    configured && profile == ProfileId::Go
+}
+
 /// Return the stable internal key used for probe attachment and event correlation.
 ///
 /// Metric names are operator-facing labels and are intentionally not unique in
@@ -503,6 +507,7 @@ impl DapAdapter for EbpfAdapter {
                         matches!(
                             &variable.location,
                             VariableLocation::StackBlob { .. }
+                                | VariableLocation::PiecewiseBlob { .. }
                                 | VariableLocation::GoString { .. }
                                 | VariableLocation::StringHeader { .. }
                                 | VariableLocation::GoSlice { .. }
@@ -549,7 +554,16 @@ impl DapAdapter for EbpfAdapter {
             ActiveMetric {
                 metric: metric.clone(),
                 probe_point,
-                capture_goid: self.capture_config.capture_goid,
+                // Go's goroutine ID layout is not part of Rust's ABI.  The
+                // shared test configuration enables capture_goid for Go
+                // probes, but Rust's CapturePlan renderer does not emit that
+                // field; keep the parser layout identical to the Rust wire
+                // layout instead of consuming the first 8 aggregate bytes as
+                // a synthetic goid.
+                capture_goid: capture_goid_for_profile(
+                    self.profile_id,
+                    self.capture_config.capture_goid,
+                ),
                 runtime,
                 raw_envelope,
             },
@@ -670,6 +684,13 @@ async fn run_event_correlator(
     use crate::probe::ringbuf::parse_ring_buffer_event_with_envelope;
 
     while let Some((probe_key, raw_bytes)) = raw_rx.recv().await {
+        if raw_bytes.len() < 128 {
+            detrix_logging::warn!(
+                "[ringbuf] short raw event before decode: probe={} bytes={}",
+                probe_key,
+                raw_bytes.len()
+            );
+        }
         // Clone the immutable metric context before doing any async runtime or
         // transport work. Holding the RwLock read guard across `.await` would
         // starve set/remove/stop writers whenever the event channel is slow.
@@ -758,7 +779,11 @@ fn rust_scalar_fields(variables: &[ResolvedVariable]) -> detrix_core::Result<Vec
     let mut fields = Vec::with_capacity(variables.len());
     for variable in variables {
         let size = variable.size.bytes();
-        if size == 0 || size > 8 || variable.nested_type.is_some() {
+        let aggregate_location = matches!(
+            &variable.location,
+            VariableLocation::StackBlob { .. } | VariableLocation::PiecewiseBlob { .. }
+        );
+        if size == 0 || size > 8 || variable.nested_type.is_some() || aggregate_location {
             return Err(detrix_core::Error::Adapter(format!(
                 "Rust eBPF supports scalar fields up to 8 bytes; '{}' is unsupported",
                 variable.name
@@ -880,6 +905,13 @@ mod tests {
         assert_ne!(first_key, second_key);
         assert!(first_key.contains("41"));
         assert!(second_key.contains("42"));
+    }
+
+    #[test]
+    fn rust_profile_does_not_consume_go_only_goid_field() {
+        assert!(capture_goid_for_profile(ProfileId::Go, true));
+        assert!(!capture_goid_for_profile(ProfileId::Rust, true));
+        assert!(!capture_goid_for_profile(ProfileId::Go, false));
     }
 
     #[test]

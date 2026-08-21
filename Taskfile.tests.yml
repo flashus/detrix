@@ -324,8 +324,10 @@ tasks:
           -w /src \
           {{.BUILDER}} \
           sh -c "
+            set -eux
             mkdir -p /out /build/target &&
             CARGO_TARGET_DIR=/build/target cargo build --release --locked --bin detrix &&
+            test -s /build/target/release/detrix &&
             cat /build/target/release/detrix > /out/detrix.tmp &&
             chmod 755 /out/detrix.tmp &&
             mv -f /out/detrix.tmp /out/detrix
@@ -339,10 +341,12 @@ tasks:
           -v "ebpf-go-build:/root/.cache/go-build" \
           -w /src/fixtures/go/string_capture \
           {{.GO_IMAGE}} \
+          env CGO_ENABLED=0 \
           go build \
             -gcflags="all=-N -l" \
             -ldflags="-compressdwarf=false" \
             -o /out/detrix_example_app .
+        test -s "{{.OUT_DIR}}/detrix_example_app"
       # Build the Rust fixture with DWARF in the same Rust builder image.
       # --target-dir bypasses fixtures/rust/.cargo/config.toml, whose host path
       # is intentionally unsuitable inside the container. The path remains in
@@ -356,6 +360,7 @@ tasks:
           -w /src \
           {{.BUILDER}} \
           sh -c '
+            set -eux
             mkdir -p /out /build/target &&
             RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release --locked \
               --manifest-path fixtures/rust/Cargo.toml \
@@ -372,6 +377,10 @@ tasks:
               /out/rust_special_layout_app.tmp && \
             chmod 755 /out/rust_special_layout_app.tmp && \
             mv -f /out/rust_special_layout_app.tmp /out/rust_special_layout_app && \
+            cat /build/target/fixture-rust/release/detrix_nested_types_app > \
+              /out/rust_nested_types_app.tmp && \
+            chmod 755 /out/rust_nested_types_app.tmp && \
+            mv -f /out/rust_nested_types_app.tmp /out/rust_nested_types_app && \
             RUSTFLAGS="-C force-frame-pointers=yes" cargo rustc --release --locked \
               --manifest-path fixtures/rust/Cargo.toml \
               --target-dir /build/target/fixture-rust \
@@ -380,6 +389,11 @@ tasks:
               /out/rust_optimized_app.tmp && \
             chmod 755 /out/rust_optimized_app.tmp && \
             mv -f /out/rust_optimized_app.tmp /out/rust_optimized_app
+            test -s /out/rust_detrix_example_app
+            test -s /out/rust_composite_app
+            test -s /out/rust_special_layout_app
+            test -s /out/rust_nested_types_app
+            test -s /out/rust_optimized_app
           '
       - |
         {
@@ -389,6 +403,7 @@ tasks:
           echo "rust_example_sha256=$(hash_file {{.OUT_DIR}}/rust_detrix_example_app)"
           echo "rust_composite_sha256=$(hash_file {{.OUT_DIR}}/rust_composite_app)"
           echo "rust_special_layout_sha256=$(hash_file {{.OUT_DIR}}/rust_special_layout_app)"
+          echo "rust_nested_types_sha256=$(hash_file {{.OUT_DIR}}/rust_nested_types_app)"
           echo "rust_optimized_sha256=$(hash_file {{.OUT_DIR}}/rust_optimized_app)"
           docker run --rm -v "ebpf-cargo-home:/usr/local/cargo" {{.BUILDER}} rustc -Vv
         } > "{{.OUT_DIR}}/rust-ebpf-build-metadata.txt"
@@ -452,10 +467,17 @@ tasks:
               --package detrix-testing --test ebpf_e2e &&
             CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
               --package detrix-testing --test ebpf_nested_types_e2e &&
+            CARGO_TARGET_DIR=/build/target cargo test --no-run --locked \
+              --package detrix-testing --test ebpf_rust_nested_types_e2e &&
             find /build/target/debug/deps -maxdepth 1 -type f -perm -111 -name 'ebpf_e2e-*' -printf '%T@ %p\n' \
-              | sort -nr | head -1 | cut -d' ' -f2- | xargs -I{} cp -p {} /out/ebpf_e2e_test &&
+              | sort -nr | head -1 | cut -d' ' -f2- \
+              | xargs -I{} sh -c 'cat "{}" > /out/ebpf_e2e_test.tmp && chmod 755 /out/ebpf_e2e_test.tmp && mv -f /out/ebpf_e2e_test.tmp /out/ebpf_e2e_test' &&
             find /build/target/debug/deps -maxdepth 1 -type f -perm -111 -name 'ebpf_nested_types_e2e-*' -printf '%T@ %p\n' \
-              | sort -nr | head -1 | cut -d' ' -f2- | xargs -I{} cp -p {} /out/ebpf_nested_types_e2e_test
+              | sort -nr | head -1 | cut -d' ' -f2- \
+              | xargs -I{} sh -c 'cat "{}" > /out/ebpf_nested_types_e2e_test.tmp && chmod 755 /out/ebpf_nested_types_e2e_test.tmp && mv -f /out/ebpf_nested_types_e2e_test.tmp /out/ebpf_nested_types_e2e_test' &&
+            find /build/target/debug/deps -maxdepth 1 -type f -perm -111 -name 'ebpf_rust_nested_types_e2e-*' -printf '%T@ %p\n' \
+              | sort -nr | head -1 | cut -d' ' -f2- \
+              | xargs -I{} sh -c 'cat "{}" > /out/ebpf_rust_nested_types_e2e_test.tmp && chmod 755 /out/ebpf_rust_nested_types_e2e_test.tmp && mv -f /out/ebpf_rust_nested_types_e2e_test.tmp /out/ebpf_rust_nested_types_e2e_test'
           "
       # Build nested_types fixture (nested struct capture tests)
       - |
@@ -548,6 +570,24 @@ tasks:
           -e GO_FIXTURE_SOURCE=/src/fixtures/go/nested_types/main.go \
           {{.PLAYGROUND}} \
           /usr/local/bin/ebpf_nested_types_e2e_test --ignored --nocapture
+
+  test-ebpf-rust-nested-inject:
+    desc: "Run comprehensive Rust nested aggregate eBPF test in the privileged playground"
+    vars:
+      PLAYGROUND: detrix-ebpf-playground
+      OUT: "{{.OUT_DIR}}"
+    deps: [build-ebpf-playground, build-ebpf-bins]
+    cmds:
+      - |
+        docker run --privileged --rm \
+          -v "{{.OUT}}/detrix:/usr/local/bin/detrix:ro" \
+          -v "{{.OUT}}/rust_nested_types_app:/usr/local/bin/rust_nested_types_app:ro" \
+          -v "{{.OUT}}/ebpf_rust_nested_types_e2e_test:/usr/local/bin/ebpf_rust_nested_types_e2e_test:ro" \
+          -v "{{.ROOT_DIR}}/fixtures/rust:/src/fixtures/rust:ro" \
+          -e DETRIX_BIN=/usr/local/bin/detrix \
+          -e RUST_NESTED_FIXTURE_BINARY=/usr/local/bin/rust_nested_types_app \
+          {{.PLAYGROUND}} \
+          /usr/local/bin/ebpf_rust_nested_types_e2e_test --ignored --nocapture
 
   # ── eBPF Classic Map E2E Test (inject variant) ──────────────────────────────
   # Tests Go < 1.24 classic hash map (hmap/bmap/overflow chains).
