@@ -284,6 +284,9 @@ jobs:
             sudo tee /etc/apt/sources.list.d/llvm-21.list
           sudo apt-get update
           sudo apt-get install -y lldb-21
+          # The versioned package does not always install the unversioned
+          # command that Detrix's Rust DAP discovery and tests invoke.
+          sudo ln -sf /usr/bin/lldb-dap-21 /usr/local/bin/lldb-dap
       - name: Go compatibility eBPF gates
         run: |
           task tests:test-ebpf-inject

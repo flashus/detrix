@@ -79,6 +79,7 @@ tasks:
       - task: clients:format-check
       - task: lint
       - task: clients:lint
+      - task: tests:check-unused-imports
       - task: tests:test
       - task: clients:test
       - echo "✅ All checks passed! Ready to commit."

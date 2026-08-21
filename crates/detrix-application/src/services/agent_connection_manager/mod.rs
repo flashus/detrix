@@ -1244,8 +1244,7 @@ impl AgentConnectionManager {
 
 #[cfg(test)]
 mod tests {
-    use super::helpers::*;
-    use super::types::{AgentInfo, OutgoingAgentMessage};
+    use super::types::AgentInfo;
     use super::*;
     use detrix_testing::{MockConnectionRepository, MockMetricRepository};
     use std::sync::Arc;

@@ -74,6 +74,13 @@ tasks:
     cmds:
       - cargo test --test '*' --all
 
+  check-unused-imports:
+    desc: Compile all Rust library tests with unused imports denied
+    cmds:
+      # Keep this separate from the full suite so pre-commit catches imports
+      # that are warnings under normal rustc settings but errors in CI.
+      - 'RUSTFLAGS="${RUSTFLAGS:-} -D unused-imports" cargo test --lib --all --no-run'
+
   # Test by language/debugger (all skip gracefully when tools unavailable)
   test-python:
     desc: Run all Python-related tests (skips if debugpy/pylsp/pyright unavailable)
