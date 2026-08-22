@@ -205,10 +205,11 @@ jobs:
       - uses: ./.github/actions/setup-detrix-bin
       - uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
+          # Keep the toolchain paired with the pinned Delve release below.
+          go-version: '1.27.x'
       - name: Install Go tools
         run: |
-          go install github.com/go-delve/delve/cmd/dlv@latest
+          go install github.com/go-delve/delve/cmd/dlv@v1.27.0
           go install golang.org/x/tools/gopls@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
       - name: Allow ptrace for Delve

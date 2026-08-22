@@ -41,65 +41,6 @@ use tokio::sync::mpsc;
 /// userspace copy and is reported by the poller, distinct from kernel drops.
 pub const RAW_EVENT_CHANNEL_CAPACITY: usize = 4096;
 
-#[cfg(target_os = "linux")]
-fn rust_frame_probe_point(point: &ProbePoint) -> ProbePoint {
-    let register = if point.variables.iter().any(|v| {
-        matches!(
-            v.location,
-            VariableLocation::Register(crate::dwarf::types::Register::Arm64(_))
-        )
-    }) || cfg!(target_arch = "aarch64")
-    {
-        crate::dwarf::types::Register::Arm64(29)
-    } else {
-        crate::dwarf::types::Register::Rbp
-    };
-    let mut out = point.clone();
-    for variable in &mut out.variables {
-        variable.location = rust_frame_location(variable.location.clone(), register);
-    }
-    out
-}
-
-#[cfg(target_os = "linux")]
-fn rust_frame_location(
-    location: VariableLocation,
-    register: crate::dwarf::types::Register,
-) -> VariableLocation {
-    match location {
-        // Rust DWARF stack locations are normally relative to the selected
-        // LLVM frame register (RBP on x86-64, X29 on AArch64), not the uprobe
-        // SP. Preserve that semantic boundary in the location passed to the
-        // CapturePlan compiler; treating it as a plain StackOffset reads the
-        // wrong activation record under optimized frame-pointer builds.
-        VariableLocation::StackOffset { offset } => {
-            VariableLocation::FrameOffset { register, offset }
-        }
-        // Header locations are emitted by rustc as compact SP-relative spills;
-        // retain those locations. The selected PC's live spill can differ from
-        // the nominal nested DIE offsets.
-        VariableLocation::GoString { ptr, len } => VariableLocation::GoString { ptr, len },
-        VariableLocation::StringHeader { ptr, len } => VariableLocation::StringHeader { ptr, len },
-        VariableLocation::GoSlice { ptr, len, cap } => VariableLocation::GoSlice { ptr, len, cap },
-        VariableLocation::SliceHeader { ptr, len, cap } => {
-            VariableLocation::SliceHeader { ptr, len, cap }
-        }
-        VariableLocation::PiecewiseBlob { pieces, byte_size } => VariableLocation::PiecewiseBlob {
-            pieces: pieces
-                .into_iter()
-                .map(|mut piece| {
-                    piece.location = piece
-                        .location
-                        .map(|location| rust_frame_location(location, register));
-                    piece
-                })
-                .collect(),
-            byte_size,
-        },
-        other => other,
-    }
-}
-
 /// Manages active uprobe attachments for a single target binary.
 ///
 /// Each logpoint gets its own uprobe with an individually compiled BPF program.
@@ -401,11 +342,7 @@ impl UprobeManager {
         use aya::programs::uprobe::UProbeLink;
         use aya::programs::UProbe;
 
-        let compile_point = if profile == ProfileId::Rust {
-            rust_frame_probe_point(probe_point)
-        } else {
-            probe_point.clone()
-        };
+        let compile_point = probe_point.clone();
         if profile == ProfileId::Rust {
             detrix_logging::debug!(
                 "[uprobe] Rust compile locations: {:?}",

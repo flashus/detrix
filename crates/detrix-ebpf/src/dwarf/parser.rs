@@ -1295,6 +1295,65 @@ fn usable_location_attribute<R: Reader>(
 /// (Go string passed in two registers: ptr in RAX, len in RBX) or
 /// `DW_OP_breg31 -32 DW_OP_piece 8 DW_OP_breg31 -24 DW_OP_piece 8`
 /// (Go string spilled to stack: ptr at SP-32, len at SP-24 on ARM64).
+fn atom_to_variable_location(
+    atom: crate::dwarf::evaluator::LocationAtom,
+    cfa_register: Option<Register>,
+    cfa_offset: i64,
+    target_architecture: TargetArchitecture,
+) -> Option<VariableLocation> {
+    use crate::dwarf::evaluator::LocationAtom;
+    match atom {
+        LocationAtom::Register(register) => Some(VariableLocation::Register(register)),
+        LocationAtom::RegisterOffset { register, offset } => match register {
+            Register::Rsp | Register::Arm64(31) => Some(VariableLocation::stack(offset)),
+            register => Some(VariableLocation::FrameOffset { register, offset }),
+        },
+        LocationAtom::FrameOffset { offset } => Some(match cfa_register {
+            Some(register) => VariableLocation::FrameOffset {
+                register,
+                offset: cfa_offset.saturating_add(offset),
+            },
+            // Keep DW_OP_fbreg distinct from DW_OP_breg(sp) when unwind
+            // metadata is unavailable. The former is frame-relative; the
+            // latter is already represented as StackOffset above.
+            None => VariableLocation::FrameOffset {
+                register: if target_architecture == TargetArchitecture::Aarch64 {
+                    Register::Arm64(29)
+                } else {
+                    Register::Rbp
+                },
+                offset,
+            },
+        }),
+        LocationAtom::CfaOffset { offset } => Some(match cfa_register {
+            Some(register) => VariableLocation::FrameOffset {
+                register,
+                offset: cfa_offset.saturating_add(offset),
+            },
+            None => VariableLocation::stack(cfa_offset.saturating_add(offset)),
+        }),
+        LocationAtom::Dereference(inner) => match *inner {
+            LocationAtom::RegisterOffset {
+                register: Register::Rsp | Register::Arm64(31),
+                offset,
+            } => Some(VariableLocation::StackIndirect {
+                offset,
+                byte_size: 0,
+            }),
+            LocationAtom::FrameOffset { offset } | LocationAtom::CfaOffset { offset } => {
+                Some(VariableLocation::StackIndirect {
+                    offset: cfa_offset.saturating_add(offset),
+                    byte_size: 0,
+                })
+            }
+            _ => None,
+        },
+        LocationAtom::Absolute(_) | LocationAtom::Constant(_) | LocationAtom::Unavailable(_) => {
+            None
+        }
+    }
+}
+
 fn evaluate_location_expr<R: Reader>(
     expr: gimli::Expression<R>,
     encoding: gimli::Encoding,
@@ -1304,49 +1363,6 @@ fn evaluate_location_expr<R: Reader>(
     let evaluated =
         crate::dwarf::evaluator::evaluate_expression(expr, encoding, target_architecture)?;
     let (cfa_register, cfa_offset) = cfa_base;
-
-    fn atom_to_location(
-        atom: crate::dwarf::evaluator::LocationAtom,
-        cfa_register: Option<Register>,
-        cfa_offset: i64,
-    ) -> Option<VariableLocation> {
-        use crate::dwarf::evaluator::LocationAtom;
-        match atom {
-            LocationAtom::Register(register) => Some(VariableLocation::Register(register)),
-            LocationAtom::RegisterOffset { register, offset } => match register {
-                Register::Rsp | Register::Arm64(31) => Some(VariableLocation::stack(offset)),
-                register => Some(VariableLocation::FrameOffset { register, offset }),
-            },
-            LocationAtom::FrameOffset { offset } | LocationAtom::CfaOffset { offset } => {
-                Some(match cfa_register {
-                    Some(register) => VariableLocation::FrameOffset {
-                        register,
-                        offset: cfa_offset.saturating_add(offset),
-                    },
-                    None => VariableLocation::stack(cfa_offset.saturating_add(offset)),
-                })
-            }
-            LocationAtom::Dereference(inner) => match *inner {
-                LocationAtom::RegisterOffset {
-                    register: Register::Rsp | Register::Arm64(31),
-                    offset,
-                } => Some(VariableLocation::StackIndirect {
-                    offset,
-                    byte_size: 0,
-                }),
-                LocationAtom::FrameOffset { offset } | LocationAtom::CfaOffset { offset } => {
-                    Some(VariableLocation::StackIndirect {
-                        offset: cfa_offset.saturating_add(offset),
-                        byte_size: 0,
-                    })
-                }
-                _ => None,
-            },
-            LocationAtom::Absolute(_)
-            | LocationAtom::Constant(_)
-            | LocationAtom::Unavailable(_) => None,
-        }
-    }
 
     let pieces: Vec<VariablePiece> = evaluated
         .into_iter()
@@ -1358,7 +1374,9 @@ fn evaluate_location_expr<R: Reader>(
             location: (piece.value_offset == 0)
                 .then_some(piece.atom)
                 .flatten()
-                .and_then(|atom| atom_to_location(atom, cfa_register, cfa_offset)),
+                .and_then(|atom| {
+                    atom_to_variable_location(atom, cfa_register, cfa_offset, target_architecture)
+                }),
             byte_size: piece.byte_size,
         })
         .collect();
@@ -2017,6 +2035,36 @@ mod tests {
                 }],
                 byte_size: 40,
             }
+        );
+    }
+
+    #[test]
+    fn frame_and_stack_locations_remain_distinct_without_cfi() {
+        use crate::dwarf::evaluator::LocationAtom;
+
+        assert_eq!(
+            atom_to_variable_location(
+                LocationAtom::FrameOffset { offset: -104 },
+                None,
+                0,
+                TargetArchitecture::X86_64,
+            ),
+            Some(VariableLocation::FrameOffset {
+                register: Register::Rbp,
+                offset: -104,
+            })
+        );
+        assert_eq!(
+            atom_to_variable_location(
+                LocationAtom::RegisterOffset {
+                    register: Register::Arm64(31),
+                    offset: 16,
+                },
+                None,
+                0,
+                TargetArchitecture::Aarch64,
+            ),
+            Some(VariableLocation::StackOffset { offset: 16 })
         );
     }
 
