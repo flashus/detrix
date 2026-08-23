@@ -802,7 +802,7 @@ impl AdapterLifecycleManager {
 
         // Spawn event listener task
         let (handle, shutdown_tx) =
-            self.spawn_event_listener(connection_id.clone(), event_rx, language);
+            self.spawn_event_listener(connection_id.clone(), adapter.clone(), event_rx, language);
 
         // Track degradation indicators
         let mut result = StartAdapterResult::default();
@@ -977,7 +977,7 @@ impl AdapterLifecycleManager {
 
         // Spawn event listener task
         let (handle, shutdown_tx) =
-            self.spawn_event_listener(connection_id.clone(), event_rx, language);
+            self.spawn_event_listener(connection_id.clone(), adapter.clone(), event_rx, language);
 
         // Store managed adapter
         let managed = ManagedAdapter {
@@ -1004,6 +1004,7 @@ impl AdapterLifecycleManager {
     fn spawn_event_listener(
         &self,
         connection_id: ConnectionId,
+        adapter: DapAdapterRef,
         mut event_rx: tokio::sync::mpsc::Receiver<MetricEvent>,
         language: SourceLanguage,
     ) -> (JoinHandle<()>, watch::Sender<bool>) {
@@ -1065,11 +1066,53 @@ impl AdapterLifecycleManager {
                                 ).await;
                             }
                             None => {
-                                // Event channel closed - adapter disconnected or crashed
+                                // The underlying DAP session can be replaced during an
+                                // automatic reconnect. In that case the old event receiver
+                                // closes while the logical adapter is still usable. Reconnect
+                                // the subscription before treating the connection as crashed;
+                                // otherwise cleanup removes the live adapter from the registry.
                                 warn!(
-                                    "Event channel closed for connection {} - adapter disconnected or crashed",
+                                    "Event channel closed for connection {} - checking whether the adapter can recover",
                                     conn_id.0
                                 );
+
+                                if !*shutdown_rx.borrow() {
+                                    match adapter.ensure_connected().await {
+                                        Ok(()) if adapter.is_connected() => {
+                                            match adapter.subscribe_events().await {
+                                                Ok(next_event_rx) => {
+                                                    info!(
+                                                        "Event subscription restored for connection {}",
+                                                        conn_id.0
+                                                    );
+                                                    event_rx = next_event_rx;
+                                                    continue;
+                                                }
+                                                Err(e) => {
+                                                    warn!(
+                                                        "Failed to restore event subscription for connection {}: {}",
+                                                        conn_id.0, e
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Ok(()) => {
+                                            warn!(
+                                                "Adapter recovery reported success but connection {} is still disconnected",
+                                                conn_id.0
+                                            );
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "Adapter recovery failed for connection {}: {}",
+                                                conn_id.0, e
+                                            );
+                                        }
+                                    }
+                                }
+
+                                // Recovery failed (or shutdown was requested): the event
+                                // channel closure is a real debugger crash/disconnect.
 
                                 let crash_event = SystemEvent::debugger_crash(
                                     conn_id.clone(),
