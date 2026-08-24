@@ -52,10 +52,33 @@ fetches file content via `ReadFile` command over the gRPC stream.
 
 New `SourceKind::Agent` variant for VFS source priority configuration.
 
+#### Go and Rust eBPF capture
+
+- Profile-driven eBPF capture now supports both Go and Rust agent connections
+  on Linux.
+- Rust observation supports bounded scalar, pointer/reference, string, slice,
+  vector, fixed-array, enum, and inline aggregate captures when usable DWARF
+  locations are available.
+- Rust composite values use a bounded wire representation and fail closed for
+  unsupported or optimized-out layouts instead of guessing from type names or
+  raw byte sizes.
+- Rust eBPF remains an explicit backend choice; Rust `auto` selection is kept
+  behind its release gate while DAP remains the safe fallback.
+
+#### Reliability and release validation
+
+- Added native Linux eBPF release-gate coverage for Go and Rust agent flows,
+  including reconnect, sustained event accounting, composite values, and
+  unavailable/optimized-out variables.
+- Debugger event subscriptions now recover across an automatic DAP session
+  restart without prematurely removing the logical connection.
+
 ### Testing
 
 - 14 agent integration tests (connection ID determinism, circuit breaker,
   proto conversions, scanner, event messages).
+- Privileged Linux coverage for Go and Rust eBPF capture, including nested and
+  composite values, reconnects, sustained accounting, and fail-closed paths.
 - Docker deployment files: `Dockerfile.agent`, `docker-compose.agent.yml`,
   `detrix.agent.toml`.
 

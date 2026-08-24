@@ -1,4 +1,8 @@
-# eBPF Logpoints for Go on Linux
+# eBPF Logpoints on Linux
+
+This page documents the Go eBPF path. For Rust capture profiles, bounded
+DWARF layouts, explicit backend selection, and privileged validation commands,
+see [Rust eBPF Agent Mode](ebpf-rust-agent.md).
 
 Detrix supports two backends for Go observability:
 

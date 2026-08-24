@@ -9,7 +9,7 @@ Detrix is an LLM-first dynamic observability platform that enables developers an
 Detrix uses three backends for capturing metrics without modifying source code or pausing execution:
 
 - **DAP (Debug Adapter Protocol)** — connects to a running debugger (debugpy, Delve, lldb-dap)
-- **eBPF uprobes** — attaches directly to Go binaries on Linux without a debugger (10–50× lower overhead)
+- **eBPF uprobes** — attaches directly to Go or Rust binaries on Linux without a debugger (10–50× lower overhead)
 - **Agent mode** — a lightweight binary deployed on each observed machine that runs eBPF locally and streams to a centralized server
 
 ```
@@ -20,7 +20,7 @@ Detrix uses three backends for capturing metrics without modifying source code o
 └─────────────────┘         └─────────────────┘         └──────┬─────┬─────┘
                                                                │     │
                                              ┌─────────────────┘     └──────────────────┐
-                                             │ DAP Protocol                              │ eBPF (Linux Go)
+                                             │ DAP Protocol                              │ eBPF (Linux Go/Rust)
                                              │                                           │
                          ┌───────────────────┼───────────────┐                    ┌─────┴──────┐
                          │                   │               │                    │   uprobe   │
@@ -34,7 +34,7 @@ Detrix uses three backends for capturing metrics without modifying source code o
                     Your Python         Your Go App   Your Rust App              (Linux only)
 ```
 
-**Go on Linux** uses eBPF automatically — set `host` to the binary path instead of a Delve address. See [EBPF.md](EBPF.md) for details.
+**Go on Linux** uses eBPF automatically — set `host` to the binary path instead of a Delve address. Rust eBPF is available through the agent path as an explicit backend, with DAP remaining the fallback. See [EBPF.md](EBPF.md) and [Rust eBPF Agent Mode](ebpf-rust-agent.md) for details.
 
 **Flow (Bridge Mode - Default):**
 1. **Claude Code** calls MCP tools (e.g., `add_metric`) via stdio
@@ -304,9 +304,9 @@ detrix-testing    → detrix-ports, detrix-core, detrix-application (test mocks)
 - `RustOutputParser` - Rust/lldb-dap specifics
 - All use same logpoint format: `DETRICS:name={expr1}\x1F{expr2}\x1F...` (expressions delimited by ASCII Unit Separator)
 
-**detrix-ebpf** - eBPF uprobe adapter for Go on Linux
+**detrix-ebpf** - eBPF uprobe adapters for Go and Rust on Linux
 - `EbpfAdapter` - Implements `DapAdapter` trait via eBPF uprobes (Linux-only, gated with `cfg(target_os = "linux")`)
-- `EbpfGoFactory` - Composite factory: routes Go connections to eBPF on Linux, falls back to Delve/DAP on macOS
+- Profile registry and factories route Go and Rust connections to their language-specific eBPF capture plans, with DAP fallback where supported
 - DWARF parsing (`dwarf/`) - Reads variable locations, types, and struct layouts from ELF debug info
 - BPF C codegen (`probe/program.rs`) - Generates uprobe C source from variable locations, compiles at runtime
 - Ring buffer parsing (`probe/ringbuf.rs`) - Reads raw BPF events; resolves strings/slices/maps via `process_vm_readv`

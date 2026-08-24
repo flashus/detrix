@@ -1,13 +1,18 @@
 # Standalone Agent Mode
 
 Agent mode runs a Detrix agent on a Linux host and connects it to a central
-Detrix server over an authenticated gRPC stream. The agent discovers Go ELF
-processes with DWARF information, performs the eBPF capture locally, and
-forwards connections and events to the server.
+Detrix server over an authenticated gRPC stream. The agent discovers Go and
+Rust ELF processes with usable DWARF information, performs the eBPF capture
+locally, and forwards connections and events to the server.
 
-This is a v1.3.0 feature. The current scanner path is Linux/Go/eBPF; the
-normal daemon/DAP workflow remains the supported path for Python, Rust, and
-local development.
+This is a v1.3.0 feature. Go and Rust eBPF capture are supported on Linux;
+the normal daemon/DAP workflow remains the supported path for Python, Rust
+development, and platforms without the required eBPF capabilities. Rust
+eBPF is currently an explicit backend choice, while Rust `auto` selection
+remains behind its release gate.
+
+For Rust-specific capture profiles and validation requirements, see the
+[Rust eBPF Agent Mode guide](ebpf-rust-agent.md).
 
 ## Security model
 

@@ -3,7 +3,8 @@
 Rust eBPF observation is an explicit opt-in backend. Set
 `DETRIX_AGENT_RUST_EBPF=1` in the privileged Linux test harness or request
 `capture_backend=ebpf` for a Rust connection. `auto` continues to select DAP
-for Rust until the release gates are complete.
+for Rust unless the Rust auto-selection release gate is enabled with
+`DETRIX_RUST_EBPF_AUTO=1`.
 
 ## Supported pilot
 

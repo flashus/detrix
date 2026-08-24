@@ -352,9 +352,10 @@ Normally configured in `.mcp.json`, not run manually. See [INSTALL.md](INSTALL.m
 
 ## Standalone Agent
 
-Agent mode is Linux-only in this pre-release and currently discovers Go ELF
-binaries for local eBPF capture. See the [Agent Mode Guide](AGENT.md) before
-deploying it to a remote host.
+Agent mode is Linux-only and discovers Go and Rust ELF binaries for local eBPF
+capture. Rust eBPF is currently an explicit backend choice; DAP remains the
+fallback for Rust when eBPF is not requested or unavailable. See the
+[Agent Mode Guide](AGENT_MODE.md) before deploying it to a remote host.
 
 ### `detrix agent start`
 

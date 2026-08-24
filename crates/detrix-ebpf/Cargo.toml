@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
-description = "eBPF-based logpoint adapter for Go on Linux — zero-pause variable capture via uprobes"
+description = "eBPF-based logpoint adapters for Go and Rust on Linux — zero-pause variable capture via uprobes"
 
 [features]
 default = []
