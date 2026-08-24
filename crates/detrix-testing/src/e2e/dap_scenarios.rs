@@ -174,22 +174,22 @@ pub mod go_nested_lines {
     use super::FixtureCodeMap;
 
     /// Line of `func main()` in nested_types/main.go
-    pub const NESTED_MAIN_LINE: u32 = 126;
+    pub const NESTED_MAIN_LINE: u32 = 133;
 
     /// Symbol map for nested types fixture
     const SYMBOL_MAP: &[(&str, u32, u32)] = &[
         // (name,             decl, logpt)
-        ("order", 28, 30),      // order := createRandomOrder()
-        ("history", 35, 36),    // history := PriceHistory{...}
-        ("ptrWrapper", 39, 40), // ptrWrapper := OrderPtr{...}
-        ("logOrder", 42, 42),   // logOrder(order) call
-        ("i", 46, 46),          // for i, item := range order.Items
-        ("item", 46, 46),
-        ("key", 52, 52), // for key, tag := range order.Tags
-        ("tag", 52, 52),
-        ("status", 57, 57),       // status := order.Status
-        ("categoryName", 60, 60), // categoryName := order.Product.Category.Name
-        ("timestamp", 63, 63),    // timestamp := order.Timestamp
+        ("order", 14, 32),      // order := createOrder(iteration); safe at logOrder
+        ("history", 20, 35),    // history := PriceHistory{...}; safe at OFFSET_HISTORY
+        ("ptrWrapper", 26, 38), // ptrWrapper := OrderPtr{...}; safe at OFFSET_POINTER
+        ("logOrder", 32, 32),   // logOrder(order) call
+        ("i", 50, 50),          // for i, item := range order.Items
+        ("item", 50, 52),       // item is used at OFFSET_ITEMS
+        ("key", 56, 56),        // for key, tag := range order.Tags
+        ("tag", 56, 58),        // tag is used at OFFSET_MAP
+        ("status", 62, 62),     // status := order.Status
+        ("categoryName", 65, 65), // categoryName := order.Product.Category.Name
+        ("timestamp", 68, 68),  // timestamp := order.Timestamp
     ];
 
     /// Code map for the nested types fixture.
@@ -197,6 +197,34 @@ pub mod go_nested_lines {
 
     pub const fn line(offset: u32) -> u32 {
         NESTED_MAIN_LINE + offset
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn codemap_matches_fixture_markers() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/go/nested_types/main.go");
+        let source = std::fs::read_to_string(path).expect("nested_types fixture must exist");
+        let lines: Vec<&str> = source.lines().collect();
+        let main_line = lines
+            .iter()
+            .position(|line| line.trim() == "func main() {")
+            .map(|index| index as u32 + 1)
+            .expect("nested_types fixture must define func main");
+        assert_eq!(main_line, NESTED_MAIN_LINE);
+
+        for marker in [
+            "// OFFSET_ORDER",
+            "// OFFSET_HISTORY",
+            "// OFFSET_POINTER",
+            "// OFFSET_ITEMS",
+            "// OFFSET_MAP",
+        ] {
+            assert!(
+                lines.iter().any(|line| line.contains(marker)),
+                "nested_types fixture is missing {marker}"
+            );
+        }
     }
 }
 

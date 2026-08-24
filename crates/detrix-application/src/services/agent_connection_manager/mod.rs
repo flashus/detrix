@@ -66,6 +66,16 @@ fn incoming_request_id(msg: &IncomingAgentMessage) -> Option<&str> {
     }
 }
 
+/// Optional external DWARF image used by the privileged agent harness.
+///
+/// Scanner-discovered processes normally use embedded DWARF. Keeping this
+/// opt-in environment seam here lets a controlled deployment pair a stripped
+/// executable with a separately mounted debug image without changing the
+/// persisted connection identity or production defaults.
+fn configured_agent_debug_info_path() -> String {
+    std::env::var("DETRIX_AGENT_DEBUG_INFO_PATH").unwrap_or_default()
+}
+
 impl AgentConnectionManager {
     pub async fn set_adapter_lifecycle_manager(
         &self,
@@ -219,6 +229,14 @@ impl AgentConnectionManager {
         // receives this frame.
         for (identity, binary_path, safe_mode) in &identities {
             let conn_id = ConnectionId(identity.to_uuid());
+            // Test runners can opt Rust binaries into the explicit eBPF path
+            // without changing the production default (auto/DAP).  This is
+            // intentionally process-scoped: Docker's privileged agent test
+            // sets it only for the Rust eBPF scenario.
+            let rust_ebpf = identity.language == SourceLanguage::Rust
+                && std::env::var("DETRIX_AGENT_RUST_EBPF")
+                    .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
             let _ = outgoing_tx.send(OutgoingAgentMessage::CreateConnection {
                 connection_id: conn_id.0.clone(),
                 language: identity.language.as_str().to_string(),
@@ -226,6 +244,9 @@ impl AgentConnectionManager {
                 host: hostname.clone(),
                 port: 0,
                 safe_mode: *safe_mode,
+                capture_backend: if rust_ebpf { "ebpf" } else { "" }.to_string(),
+                capture_profile: if rust_ebpf { "rust" } else { "" }.to_string(),
+                debug_info_path: configured_agent_debug_info_path(),
             });
         }
 
@@ -287,7 +308,76 @@ impl AgentConnectionManager {
                 connection_id,
                 status,
                 error: _,
+                selected_backend,
+                capture_profile,
+                backend_reason,
+                debug_image_source,
+                failure_class,
+                supported_envelope_schemas,
+                supported_capture_profiles,
+                max_capture_payload_bytes,
+                target_architecture,
             } => {
+                tracing::debug!(
+                    connection_id = %connection_id.0,
+                    selected_backend = %selected_backend,
+                    capture_profile = %capture_profile,
+                    backend_reason = %backend_reason,
+                    debug_image_source = %debug_image_source,
+                    failure_class = %failure_class,
+                    supported_envelope_schemas = ?supported_envelope_schemas,
+                    supported_capture_profiles = ?supported_capture_profiles,
+                    max_capture_payload_bytes,
+                    target_architecture = %target_architecture,
+                    "Agent backend decision"
+                );
+
+                // Do not start an adapter or persist Connected when an
+                // explicitly selected Rust eBPF connection has not completed
+                // the DRX1 capability handshake. Legacy Go/DAP connections
+                // intentionally pass through because they use the legacy
+                // framing and advertise empty negotiation fields.
+                let admission_error = self.agents.get(agent_id).and_then(|agent| {
+                    agent
+                        .capabilities
+                        .validate_capture_admission(
+                            &selected_backend,
+                            &capture_profile,
+                            &supported_envelope_schemas,
+                            &supported_capture_profiles,
+                            max_capture_payload_bytes,
+                        )
+                        .err()
+                });
+                if let Some(reason) = admission_error {
+                    warn!(
+                        agent_id = %agent_id,
+                        connection_id = %connection_id.0,
+                        reason = %reason,
+                        "Rejecting Rust eBPF connection without negotiated DRX1 capabilities"
+                    );
+                    if let Some(agent) = self.agents.get(agent_id) {
+                        let _ = agent
+                            .outgoing_tx
+                            .send(OutgoingAgentMessage::CloseConnection {
+                                connection_id: connection_id.0.clone(),
+                            });
+                    }
+                    let failed = detrix_core::ConnectionStatus::Failed(reason);
+                    if let Err(error) = self
+                        .connection_repo
+                        .update_status(&connection_id, failed)
+                        .await
+                    {
+                        warn!(
+                            connection_id = %connection_id.0,
+                            error = %error,
+                            "Failed to persist capability-admission failure"
+                        );
+                    }
+                    return;
+                }
+
                 let was_connected = matches!(status, detrix_core::ConnectionStatus::Connected);
                 let was_disconnected = matches!(
                     status,
@@ -474,10 +564,18 @@ impl AgentConnectionManager {
             IncomingAgentMessage::DropCount {
                 connection_id,
                 total_events_dropped,
+                kernel_events_dropped,
+                decode_events_dropped,
+                unavailable_fields,
+                events_decoded,
             } => {
                 info!(
                     connection_id = %connection_id.0,
                     dropped = total_events_dropped,
+                    kernel_dropped = kernel_events_dropped,
+                    decode_dropped = decode_events_dropped,
+                    unavailable = unavailable_fields,
+                    decoded = events_decoded,
                     "Agent dropped events"
                 );
             }
@@ -509,6 +607,7 @@ impl AgentConnectionManager {
                 }
             }
             IncomingAgentMessage::RegisterUpdate { binaries } => {
+                tracing::debug!(agent_id = %agent_id, binary_count = binaries.len(), "Register update dispatched");
                 self.handle_register_update(agent_id, binaries).await;
             }
             IncomingAgentMessage::Pong => {
@@ -533,6 +632,11 @@ impl AgentConnectionManager {
 
     /// Handle mid-session re-registration (scanner detected changes).
     async fn handle_register_update(&self, agent_id: &str, binaries: Vec<AgentBinaryInfo>) {
+        // dispatch() intentionally reads the stream concurrently so event and
+        // request responses cannot be blocked by durable work. Snapshot
+        // reconciliation itself is stateful and must remain ordered.
+        let _update_guard = self.register_update_lock.lock().await;
+        tracing::debug!(agent_id = %agent_id, binary_count = binaries.len(), "Reconciling agent register update");
         // Clone fields needed across await points, then drop the shard lock before any await.
         let (current_binaries, hostname, outgoing_tx) = {
             let Some(entry) = self.agents.get(agent_id) else {
@@ -546,31 +650,42 @@ impl AgentConnectionManager {
             )
         }; // DashMap shard lock released here — no guard held across awaits below
 
-        let current_paths: std::collections::HashMap<&str, &AgentBinaryInfo> = current_binaries
+        // `/proc/<pid>/exe` is path-stable and its inode identifies the
+        // executable file, not the running process. Reconcile by path + PID +
+        // inode so a restarted process using the same binary is discovered.
+        let current_paths: std::collections::HashMap<(&str, u32, u64), &AgentBinaryInfo> =
+            current_binaries
+                .iter()
+                .map(|b| ((b.binary_path.as_str(), b.pid, b.inode), b))
+                .collect();
+        let new_paths: std::collections::HashMap<(&str, u32, u64), &AgentBinaryInfo> = binaries
             .iter()
-            .map(|b| (b.binary_path.as_str(), b))
-            .collect();
-        let new_paths: std::collections::HashMap<&str, &AgentBinaryInfo> = binaries
-            .iter()
-            .map(|b| (b.binary_path.as_str(), b))
+            .map(|b| ((b.binary_path.as_str(), b.pid, b.inode), b))
             .collect();
 
         // Find added binaries
         let added: Vec<&AgentBinaryInfo> = binaries
             .iter()
-            .filter(|b| !current_paths.contains_key(b.binary_path.as_str()))
+            .filter(|b| !current_paths.contains_key(&(b.binary_path.as_str(), b.pid, b.inode)))
             .collect();
 
         // Find removed binaries
-        let removed_paths: Vec<String> = current_paths
+        let removed_paths: Vec<(String, u32, u64)> = current_paths
             .keys()
-            .filter(|p| !new_paths.contains_key(*p))
-            .map(|s| s.to_string())
+            .filter(|key| !new_paths.contains_key(*key))
+            .map(|(path, pid, inode)| (path.to_string(), *pid, *inode))
             .collect();
+        tracing::debug!(
+            agent_id = %agent_id,
+            added = added.len(),
+            removed = removed_paths.len(),
+            "Register update diff"
+        );
 
         // Handle removed: cancel pending, cleanup, disconnect
-        for removed_path in &removed_paths {
-            let removed_binary = current_paths[removed_path.as_str()];
+        for (removed_path, removed_pid, removed_inode) in &removed_paths {
+            let removed_binary =
+                current_paths[&(removed_path.as_str(), *removed_pid, *removed_inode)];
             let identity =
                 agent_connection_identity(removed_path, removed_binary.language, &hostname);
             let conn_id = ConnectionId(identity.to_uuid());
@@ -644,14 +759,24 @@ impl AgentConnectionManager {
 
             // Publish only after persistence and ownership registration. The
             // agent may report Connected immediately after receiving this.
-            let _ = outgoing_tx.send(OutgoingAgentMessage::CreateConnection {
-                connection_id: conn_id.0,
+            let outgoing_connection_id = conn_id.0.clone();
+            let send_result = outgoing_tx.send(OutgoingAgentMessage::CreateConnection {
+                connection_id: outgoing_connection_id,
                 language,
                 binary_path: binary.binary_path.clone(),
                 host: hostname.clone(),
                 port: 0,
                 safe_mode: true,
+                capture_backend: String::new(),
+                capture_profile: String::new(),
+                debug_info_path: configured_agent_debug_info_path(),
             });
+            tracing::debug!(
+                agent_id = %agent_id,
+                connection_id = %conn_id.0,
+                delivered = send_result.is_ok(),
+                "Register update CreateConnection queued"
+            );
         }
 
         // Re-acquire briefly to update binaries — all awaits are complete.
@@ -1119,8 +1244,7 @@ impl AgentConnectionManager {
 
 #[cfg(test)]
 mod tests {
-    use super::helpers::*;
-    use super::types::{AgentInfo, OutgoingAgentMessage};
+    use super::types::AgentInfo;
     use super::*;
     use detrix_testing::{MockConnectionRepository, MockMetricRepository};
     use std::sync::Arc;
@@ -1335,5 +1459,54 @@ mod tests {
             )
             .await;
         assert!(manager.agents.get("agent-a").unwrap().binaries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn register_update_reconciles_process_restart_with_same_binary_inode() {
+        let manager = test_manager();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let old = AgentBinaryInfo {
+            binary_path: "/proc/10/exe".into(),
+            pid: 10,
+            inode: 100,
+            build_info: String::new(),
+            has_dwarf: true,
+            exported_functions: Vec::new(),
+            language: SourceLanguage::Go,
+        };
+        manager.agents.insert(
+            "agent-a".into(),
+            AgentInfo {
+                agent_id: "agent-a".into(),
+                hostname: "host".into(),
+                capabilities: AgentCapabilities::default(),
+                binaries: vec![old.clone()],
+                outgoing_tx: tx.clone(),
+                connected_at: std::time::Instant::now(),
+            },
+        );
+        let old_id = ConnectionId(
+            agent_connection_identity(&old.binary_path, old.language, "host").to_uuid(),
+        );
+        manager.connection_to_agent.insert(old_id, "agent-a".into());
+
+        let mut replacement = old.clone();
+        replacement.inode = 100; // executable file is unchanged
+        replacement.pid = 11; // replacement process identity changed
+        manager
+            .dispatch(
+                "agent-a",
+                &tx,
+                IncomingAgentMessage::RegisterUpdate {
+                    binaries: vec![replacement],
+                },
+            )
+            .await;
+
+        assert_eq!(manager.agents.get("agent-a").unwrap().binaries[0].pid, 11);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(OutgoingAgentMessage::CreateConnection { .. })
+        ));
     }
 }

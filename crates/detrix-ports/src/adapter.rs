@@ -374,6 +374,30 @@ pub trait DapAdapter: Send + Sync {
         // Default: DAP adapters don't have ring buffer drops
         Ok(0)
     }
+
+    /// Get the cumulative kernel/ring-buffer drops across all active metrics.
+    /// DAP adapters have no kernel ring and therefore return zero.
+    fn get_total_drop_count(&self) -> Result<u64> {
+        Ok(0)
+    }
+
+    /// Number of malformed/stale records rejected by the adapter decoder.
+    fn get_decode_drop_count(&self) -> Result<u64> {
+        Ok(0)
+    }
+
+    /// Number of fields represented as unavailable due to unsupported or
+    /// optimized-out DWARF locations.
+    fn get_unavailable_field_count(&self) -> Result<u64> {
+        Ok(0)
+    }
+
+    /// Number of raw records successfully decoded into metric events.  This
+    /// is separate from transport forwarding so load tests can reconcile
+    /// kernel, decode, and transport accounting independently.
+    fn get_decoded_event_count(&self) -> Result<u64> {
+        Ok(0)
+    }
 }
 
 // ============================================================================

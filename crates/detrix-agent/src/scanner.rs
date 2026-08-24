@@ -7,6 +7,7 @@
 use detrix_config::ScannerConfig;
 use detrix_logging::warn;
 use glob::Pattern;
+use object::{Object, ObjectSection};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
@@ -24,6 +25,7 @@ pub struct BinaryInfo {
     pub build_info: String,
     pub has_dwarf: bool,
     pub exported_functions: Vec<String>,
+    pub language: String,
 }
 
 /// /proc scanner that tracks discovered binaries and detects changes.
@@ -33,6 +35,7 @@ pub struct ProcScanner {
     #[allow(dead_code)]
     exclude_patterns: Vec<Pattern>,
     require_dwarf: bool,
+    language_override: Option<String>,
     /// Key is (pid, exe_inode). Same PID + new inode = PID was reused.
     known: HashMap<(u32, u64), BinaryInfo>,
     last_registered_at: Option<Instant>,
@@ -56,6 +59,9 @@ impl ProcScanner {
             include_patterns,
             exclude_patterns,
             require_dwarf: config.require_dwarf,
+            language_override: std::env::var("DETRIX_SCANNER_LANGUAGE")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
             known: HashMap::new(),
             last_registered_at: None,
             min_reregister_secs: 300, // 5 minutes cooldown
@@ -83,22 +89,30 @@ impl ProcScanner {
     /// Apply a scan result to the tracked snapshot.
     ///
     /// Keeping this separate from `/proc` discovery makes the cooldown semantics
-    /// explicit and testable. While the cooldown is active, retain the previous
-    /// snapshot so changes are reported by the first scan after the cooldown.
+    /// explicit and testable. Additions are retained until the cooldown expires,
+    /// while removals are reported immediately so exited targets are detached.
     fn scan_delta_from(&mut self, new_binaries: Vec<BinaryInfo>) -> Option<Vec<BinaryInfo>> {
-        if let Some(last) = self.last_registered_at {
-            if last.elapsed().as_secs() < self.min_reregister_secs {
-                // Cooldown active — do not advance `known`. Advancing it here
-                // would permanently hide processes that appear during the
-                // cooldown from the first eligible re-registration.
-                return None;
-            }
-        }
-
         let new_known: HashMap<(u32, u64), BinaryInfo> = new_binaries
             .iter()
             .map(|b| ((b.pid, b.inode), b.clone()))
             .collect();
+        let removal_detected = self.known.keys().any(|key| !new_known.contains_key(key));
+
+        if let Some(last) = self.last_registered_at {
+            if last.elapsed().as_secs() < self.min_reregister_secs {
+                // Additions are throttled to avoid repeatedly rebuilding
+                // adapters during process churn, but removals are lifecycle
+                // safety events: delaying them leaves probes/forwarders
+                // associated with an exited target. Report a snapshot change
+                // immediately when any tracked process disappeared or its
+                // (pid,inode) identity was replaced.
+                if !removal_detected {
+                    // Do not advance `known`; otherwise an addition observed
+                    // during cooldown would be permanently hidden.
+                    return None;
+                }
+            }
+        }
 
         let changed = new_known.len() != self.known.len()
             || new_known.iter().any(|(k, v)| self.known.get(k) != Some(v));
@@ -106,7 +120,10 @@ impl ProcScanner {
         self.known = new_known;
 
         if changed {
-            self.last_registered_at = Some(Instant::now());
+            // A removal is a cleanup edge, not a registration burst. Leave
+            // the cooldown open so a replacement process can be registered on
+            // the next scan instead of waiting five minutes.
+            self.last_registered_at = (!removal_detected).then(Instant::now);
             Some(new_binaries)
         } else {
             None
@@ -172,6 +189,10 @@ impl ProcScanner {
             } else {
                 true
             };
+            let language = self
+                .language_override
+                .clone()
+                .unwrap_or_else(|| detect_language(&binary_path_str));
             binaries.push(BinaryInfo {
                 binary_path: binary_path_str,
                 pid,
@@ -179,6 +200,7 @@ impl ProcScanner {
                 build_info: String::new(),
                 has_dwarf,
                 exported_functions: Vec::new(),
+                language,
             });
         }
 
@@ -186,9 +208,68 @@ impl ProcScanner {
     }
 }
 
+/// Identify the producer language from embedded compiler markers. Go remains
+/// the conservative default; Rust binaries contain `rustc` in DWARF/string
+/// tables. This is deliberately best-effort because the server still validates
+/// the requested capture profile before attaching a probe.
+fn detect_language(path: &str) -> String {
+    let target = fs::read_link(path)
+        .ok()
+        .unwrap_or_else(|| std::path::PathBuf::from(path));
+    if target
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .contains("rust")
+    {
+        return "rust".to_string();
+    }
+    // In a shared PID namespace `/proc/<pid>/exe` may resolve to a path that
+    // exists only in the target process' mount namespace.  Reading the proc
+    // symlink itself still gives us the ELF bytes, so try the original path
+    // before falling back to the resolved target.
+    let Ok(bytes) = fs::read(path).or_else(|_| fs::read(&target)) else {
+        return "go".to_string();
+    };
+    // Rust producer strings are often in DWARF sections well beyond the first
+    // few megabytes of a large statically linked binary (Reth is a typical
+    // example).  Inspect the compact producer/debug sections instead of a
+    // fixed prefix, while retaining the byte-prefix fallback for malformed
+    // or unusual ELF files.
+    let rust_marker = |data: &[u8]| data.windows(5).any(|w| w == b"rustc");
+    let is_rust = object::File::parse(bytes.as_slice())
+        .ok()
+        .map(|file| {
+            file.sections().any(|section| {
+                let name = section.name().unwrap_or_default();
+                matches!(
+                    name,
+                    ".comment" | ".debug_str" | ".debug_line_str" | ".debug_info"
+                ) && section.data().map(rust_marker).unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+        || rust_marker(&bytes[..bytes.len().min(8 * 1024 * 1024)]);
+    if is_rust {
+        "rust".to_string()
+    } else {
+        "go".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_rust_producer_from_debug_sections() {
+        let rustc = std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .map(|dir| dir.join("rustc"))
+            .find(|path| path.is_file())
+            .expect("rustc must be available for the agent test toolchain");
+        assert_eq!(detect_language(&rustc.to_string_lossy()), "rust");
+    }
 
     fn binary(pid: u32, inode: u64) -> BinaryInfo {
         BinaryInfo {
@@ -198,6 +279,7 @@ mod tests {
             build_info: String::new(),
             has_dwarf: true,
             exported_functions: Vec::new(),
+            language: "go".to_string(),
         }
     }
 
@@ -223,6 +305,23 @@ mod tests {
             .scan_delta_from(vec![existing, discovered_during_cooldown.clone()])
             .expect("the post-cooldown scan must report the new process");
         assert_eq!(delta, vec![binary(10, 100), discovered_during_cooldown]);
+    }
+
+    #[test]
+    fn removals_bypass_cooldown_for_target_cleanup() {
+        let mut scanner = ProcScanner::new(&ScannerConfig::default());
+        let existing = binary(7, 11);
+        scanner
+            .known
+            .insert((existing.pid, existing.inode), existing);
+        scanner.last_registered_at = Some(Instant::now());
+
+        assert_eq!(scanner.scan_delta_from(Vec::new()), Some(Vec::new()));
+        assert!(scanner.known.is_empty());
+        assert_eq!(
+            scanner.scan_delta_from(vec![binary(7, 12)]),
+            Some(vec![binary(7, 12)])
+        );
     }
 }
 
@@ -321,5 +420,6 @@ pub fn binary_info_to_proto(info: &BinaryInfo) -> detrix_api::generated::detrix:
         has_dwarf: info.has_dwarf,
         exported_functions: info.exported_functions.clone(),
         inode: info.inode,
+        language: info.language.clone(),
     }
 }

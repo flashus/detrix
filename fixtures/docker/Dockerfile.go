@@ -25,7 +25,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # Install Delve (static binary)
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 go install github.com/go-delve/delve/cmd/dlv@latest
+    CGO_ENABLED=0 go install github.com/go-delve/delve/cmd/dlv@v1.27.0
 
 # ---- Runtime Stage (scratch — no OS, ~30MB total) ----
 FROM scratch

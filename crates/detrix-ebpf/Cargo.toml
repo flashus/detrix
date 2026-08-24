@@ -8,6 +8,13 @@ repository.workspace = true
 license.workspace = true
 description = "eBPF-based logpoint adapter for Go on Linux — zero-pause variable capture via uprobes"
 
+[features]
+default = []
+# Capability marker for supplementary `.dwo`/`.dwp` loading. The loader is
+# still explicitly exercised by the Docker fixture gate; this feature does
+# not silently enable Rust `auto` routing or weaken missing-sidecar failures.
+split-dwarf = []
+
 [lints]
 workspace = true
 
@@ -31,6 +38,7 @@ thiserror.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+sha2.workspace = true
 tempfile.workspace = true
 
 # eBPF (Linux-only, optional)

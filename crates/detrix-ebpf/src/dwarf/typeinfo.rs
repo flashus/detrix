@@ -61,6 +61,10 @@ pub struct TypeInfo {
     pub is_struct: bool,
     /// Whether this is a Go map type.
     pub is_map: bool,
+    /// Whether this is an enum/sum type.  The discriminant is only considered
+    /// capture-ready when a profile supplies a verified layout; Rust niche
+    /// layouts deliberately remain unavailable by default.
+    pub is_enum: bool,
     /// Element count for arrays (0 for non-arrays).
     pub array_element_count: u64,
     /// Element type name for arrays (empty for non-arrays).
@@ -69,6 +73,46 @@ pub struct TypeInfo {
     pub slice_element_type: String,
     /// Element byte size for arrays/slices (0 for non-arrays/slices).
     pub element_byte_size: u64,
+    /// Compiler-emitted enum layout, when DWARF exposes an explicit variant
+    /// part and discriminants. Niche layouts intentionally remain `None`.
+    pub enum_layout: Option<EnumLayout>,
+}
+
+/// A bounded, metadata-only description of a Rust enum representation.
+///
+/// This is deliberately separate from `VariableLocation`: it describes where
+/// the discriminant and variant payload live inside an inline value, but does
+/// not claim that either is live at a particular PC. The capture planner must
+/// still validate the variable location and reject niche/implicit layouts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumLayout {
+    pub discriminant_offset: u64,
+    pub discriminant_size: u64,
+    pub variants: Vec<EnumVariantLayout>,
+    pub niche: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumVariantLayout {
+    pub name: String,
+    pub discriminant: Option<i128>,
+    pub payload_offset: Option<u64>,
+    pub payload_size: Option<u64>,
+}
+
+impl EnumLayout {
+    /// Return true only for a representation that can safely be lowered as an
+    /// explicit discriminant read. Niche encodings and incomplete DIEs are
+    /// rejected here, before a profile can advertise live enum capture.
+    pub fn is_explicit_non_niche(&self) -> bool {
+        !self.niche
+            && matches!(self.discriminant_size, 1 | 2 | 4 | 8)
+            && self.variants.len() >= 2
+            && self
+                .variants
+                .iter()
+                .all(|variant| variant.discriminant.is_some())
+    }
 }
 
 impl TypeInfo {
@@ -84,10 +128,12 @@ impl TypeInfo {
             is_array: false,
             is_struct: false,
             is_map: false,
+            is_enum: false,
             array_element_count: 0,
             array_element_type: String::new(),
             slice_element_type: String::new(),
             element_byte_size: 0,
+            enum_layout: None,
         }
     }
 }
@@ -272,20 +318,32 @@ fn resolve_type_at_offset<R: Reader>(
         // Pointer type: *T — always 8 bytes on amd64
         gimli::DW_TAG_pointer_type => {
             let pointee_name = get_pointee_name(entry, unit, dwarf, depth)?;
+            let byte_size = match entry.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0)) {
+                Some(AttributeValue::Udata(size)) => size,
+                _ => 8,
+            };
+            let is_rust_str = pointee_name == "str";
+            let is_rust_slice = pointee_name.starts_with('[');
             Ok(TypeInfo {
-                name: format!("*{pointee_name}"),
-                size: VariableSize::QWord,
-                byte_size: 8,
+                name: if is_rust_str {
+                    "&str".into()
+                } else {
+                    format!("*{pointee_name}")
+                },
+                size: VariableSize::from_byte_size(byte_size).unwrap_or(VariableSize::QWord),
+                byte_size,
                 is_pointer: true,
-                is_string: false,
-                is_slice: false,
+                is_string: is_rust_str,
+                is_slice: is_rust_slice,
                 is_array: false,
                 is_struct: false,
                 is_map: false,
+                is_enum: false,
                 array_element_count: 0,
                 array_element_type: String::new(),
                 slice_element_type: String::new(),
                 element_byte_size: 0,
+                enum_layout: None,
             })
         }
 
@@ -335,19 +393,62 @@ fn resolve_type_at_offset<R: Reader>(
         // Go string is a struct with two fields (ptr + len), total 16 bytes
         gimli::DW_TAG_structure_type => resolve_struct_type(entry, unit, dwarf),
 
+        // Rust enums and sum types.  DWARF gives us the aggregate size and
+        // variant DIEs, but a niche discriminant is not necessarily stored at
+        // byte zero.  Record the category here and let the Rust profile admit
+        // only layouts backed by explicit fixture evidence.
+        gimli::DW_TAG_enumeration_type => {
+            let name = read_attr_string(entry, dwarf, gimli::constants::DW_AT_name)?
+                .unwrap_or_else(|| "enum".to_string());
+            let byte_size = match entry.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0)) {
+                Some(AttributeValue::Udata(size)) => size,
+                _ => 0,
+            };
+            Ok(TypeInfo {
+                name,
+                size: VariableSize::from_byte_size(byte_size).unwrap_or(VariableSize::QWord),
+                byte_size,
+                is_pointer: false,
+                is_string: false,
+                is_slice: false,
+                is_array: false,
+                is_struct: false,
+                is_map: false,
+                is_enum: true,
+                array_element_count: 0,
+                array_element_type: String::new(),
+                slice_element_type: String::new(),
+                element_byte_size: 0,
+                enum_layout: None,
+            })
+        }
+
         // Fixed-size array type `[N]T` — stores N elements inline on stack.
         // Go DWARF includes DW_AT_byte_size on the array type itself.
         // Element count is in DW_TAG_subrange_type child with DW_AT_count.
         gimli::DW_TAG_array_type => {
-            let byte_size = match entry.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0)) {
+            let dwarf_byte_size = match entry.attr_value(DwAt(gimli::constants::DW_AT_byte_size.0))
+            {
                 Some(AttributeValue::Udata(n)) => n,
-                _ => 0, // Unknown size — will be treated as zero-byte blob
+                _ => 0,
             };
             // Use resolve_typedef_target to handle cross-unit element type references
             let elem_info = resolve_typedef_target(entry, unit, dwarf, depth)?;
 
             // Get element count from DW_TAG_subrange_type child
             let element_count = get_array_element_count(entry, unit, dwarf)?;
+            // Some Go toolchains omit DW_AT_byte_size on array DIEs even
+            // though the element DIE and subrange are complete.  A zero size
+            // makes the capture planner fall through to a scalar/register
+            // read, which turns the first float/int bits into a fake pointer
+            // during nested decoding.  Derive the inline size from the type
+            // graph before exposing TypeInfo to the capture planner.
+            let byte_size = infer_array_byte_size(
+                dwarf_byte_size,
+                element_count,
+                elem_info.byte_size,
+                elem_info.size,
+            );
             let name = format!("[{}]{}", element_count, elem_info.name);
 
             Ok(TypeInfo {
@@ -360,10 +461,12 @@ fn resolve_type_at_offset<R: Reader>(
                 is_array: true,
                 is_struct: false,
                 is_map: false,
+                is_enum: false,
                 array_element_count: element_count,
                 array_element_type: elem_info.name.clone(),
                 slice_element_type: String::new(),
                 element_byte_size: 0,
+                enum_layout: None,
             })
         }
 
@@ -374,6 +477,22 @@ fn resolve_type_at_offset<R: Reader>(
 
         _ => Ok(TypeInfo::unknown()),
     }
+}
+
+/// Return the inline size of an array, preferring the authoritative DIE size
+/// and deriving it from the element type when a compiler omits that attribute.
+fn infer_array_byte_size(
+    dwarf_byte_size: u64,
+    element_count: u64,
+    element_byte_size: u64,
+    element_size: VariableSize,
+) -> u64 {
+    if dwarf_byte_size != 0 {
+        return dwarf_byte_size;
+    }
+    element_count
+        .checked_mul(element_byte_size.max(element_size.bytes() as u64))
+        .unwrap_or(0)
 }
 
 /// Resolve a DW_TAG_base_type DIE (int, float, bool, etc.).
@@ -429,10 +548,12 @@ fn resolve_base_type<R: Reader>(
         is_array: false,
         is_struct: false,
         is_map: false,
+        is_enum: false,
         array_element_count: 0,
         array_element_type: String::new(),
         slice_element_type: String::new(),
         element_byte_size: 0,
+        enum_layout: None,
     })
 }
 
@@ -597,6 +718,15 @@ fn resolve_struct_type<R: Reader>(
         is_string = is_go_string_type_by_name_and_size(&name, &linkage_name, byte_size);
     }
 
+    // Rust's owned String is a bounded pointer/length/capacity header.  It is
+    // intentionally recognized only by canonical compiler names; arbitrary
+    // user structs containing "String" must remain ordinary structs.
+    let rust_string = is_rust_string_name(&name) && byte_size >= 16;
+    let rust_str = matches!(name.as_str(), "&str" | "&mut str") && byte_size >= 16;
+    if rust_string || rust_str {
+        is_string = true;
+    }
+
     // Final fallback: 16-byte structs with str+len fields are string aliases
     // Go represents string type aliases as 16-byte structs with str (ptr) + len fields
     // We must check for str+len fields to avoid misidentifying other 16-byte structs
@@ -612,13 +742,21 @@ fn resolve_struct_type<R: Reader>(
         }
     }
 
+    // Rust data-bearing enums are emitted as structures with an explicit
+    // DW_TAG_variant_part.  Extract only non-niche metadata; ordinary Rust
+    // structs and niche enums remain distinct and fail closed downstream.
+    let enum_layout = extract_rust_enum_layout(entry, unit, dwarf);
+    let is_enum = enum_layout.is_some();
+
     // time.Time is a 24-byte struct (wall uint64 + ext int64 + loc *Location)
     // Don't confuse it with slices
     let is_time = name == "time.Time" || name.ends_with(".Time");
     // Go slice = struct with array ptr + len + cap = 24 bytes (but not time.Time)
-    let is_slice = byte_size == 24 && !is_string && !is_time;
+    let is_slice = (byte_size == 24 && !is_string && !is_time)
+        || (is_rust_slice_name(&name) && !is_string && (byte_size == 16 || byte_size == 24));
     // Everything else is a user-defined struct (captured as blob)
-    let is_struct = !is_string && !is_slice && !is_time;
+    let is_map = is_rust_hash_map_name(&name);
+    let is_struct = !is_string && !is_slice && !is_time && !is_enum && !is_map;
 
     // For slices, try to extract element type info from DWARF
     let (slice_element_type, element_byte_size) = if is_slice {
@@ -639,12 +777,218 @@ fn resolve_struct_type<R: Reader>(
         is_slice,
         is_array: false,
         is_struct,
-        is_map: false,
+        is_map,
+        is_enum,
         array_element_count: 0,
         array_element_type: String::new(),
         slice_element_type,
         element_byte_size,
+        enum_layout,
     })
+}
+
+/// Rust's `HashMap` is represented by a hashbrown struct in DWARF, but must
+/// remain a semantic map for nested capture planning.  Keep this deliberately
+/// narrow so ordinary user structs containing the word "Map" are unaffected.
+fn is_rust_hash_map_name(name: &str) -> bool {
+    name.contains("HashMap<") || name.contains("hash::map::HashMap<")
+}
+
+/// Extract the explicit, non-niche enum representation rustc emits as a
+/// `DW_TAG_variant_part`.  codelldb uses richer synthetic metadata for niche
+/// enums; without a real discriminant member and explicit values we return
+/// `None` so the capture path cannot invent a tag or payload offset.
+pub(crate) fn extract_rust_enum_layout<R: Reader>(
+    entry: &DebuggingInformationEntry<R>,
+    unit: &gimli::Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+) -> Option<EnumLayout> {
+    let mut tree = unit.entries_tree(Some(entry.offset())).ok()?;
+    let root = tree.root().ok()?;
+    let mut discriminant_offset = None;
+    let mut discriminant_size = 1u64;
+    let mut children = root.children();
+    while let Ok(Some(child)) = children.next() {
+        let variant_part = child.entry();
+        if variant_part.tag() == gimli::DW_TAG_member && is_discriminant_member(variant_part, dwarf)
+        {
+            discriminant_offset =
+                read_unsigned_attr(variant_part, gimli::constants::DW_AT_data_member_location);
+            discriminant_size = member_byte_size(variant_part, unit, dwarf).unwrap_or(1);
+        }
+        if variant_part.tag() != gimli::DW_TAG_variant_part {
+            continue;
+        }
+
+        // rustc commonly puts the discriminant reference on the variant part
+        // (`DW_AT_discr`) and emits an unnamed artificial member immediately
+        // before the variants.  Do not require a synthetic field name: the
+        // reference/ artificial marker is the stable DWARF signal.
+        let mut discr_member = None;
+        if let Some(AttributeValue::UnitRef(offset)) =
+            variant_part.attr_value(DwAt(gimli::constants::DW_AT_discr.0))
+        {
+            if let Ok(entry) = unit.entry(offset) {
+                discr_member = Some(entry);
+            }
+        }
+        if let Some(member) = discr_member {
+            discriminant_offset =
+                read_unsigned_attr(&member, gimli::constants::DW_AT_data_member_location);
+            discriminant_size = member_byte_size(&member, unit, dwarf).unwrap_or(1);
+        }
+
+        let mut variants = Vec::new();
+        let mut variant_children = child.children();
+        while let Ok(Some(node)) = variant_children.next() {
+            let child_entry = node.entry();
+            match child_entry.tag() {
+                gimli::DW_TAG_member => {
+                    // rustc's artificial discriminant is normally named
+                    // `<<variant>>`; accept the LLDB encoded spelling too.
+                    if is_discriminant_member(child_entry, dwarf) {
+                        discriminant_offset = read_unsigned_attr(
+                            child_entry,
+                            gimli::constants::DW_AT_data_member_location,
+                        );
+                        discriminant_size = member_byte_size(child_entry, unit, dwarf).unwrap_or(1);
+                    }
+                }
+                gimli::DW_TAG_variant => {
+                    let mut name =
+                        read_attr_string(child_entry, dwarf, gimli::constants::DW_AT_name)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| "<anonymous>".into());
+                    let discriminant =
+                        read_signed_attr(child_entry, gimli::constants::DW_AT_discr_value);
+                    let mut payload_offset = None;
+                    let mut payload_size = None;
+                    let mut members = node.children();
+                    while let Ok(Some(member_node)) = members.next() {
+                        let member = member_node.entry();
+                        if member.tag() != gimli::DW_TAG_member {
+                            continue;
+                        }
+                        // rustc emits the variant label on the payload
+                        // member (`DW_AT_name("Pending")`) rather than on
+                        // the DW_TAG_variant itself. Preserve that semantic
+                        // name instead of exposing `<anonymous>`.
+                        if name == "<anonymous>" {
+                            if let Ok(Some(member_name)) =
+                                read_attr_string(member, dwarf, gimli::constants::DW_AT_name)
+                            {
+                                name = member_name;
+                            }
+                        }
+                        payload_offset = read_unsigned_attr(
+                            member,
+                            gimli::constants::DW_AT_data_member_location,
+                        );
+                        payload_size = member_byte_size(member, unit, dwarf);
+                        break;
+                    }
+                    variants.push(EnumVariantLayout {
+                        name,
+                        discriminant,
+                        payload_offset,
+                        payload_size,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        if discriminant_offset.is_some()
+            && variants.len() >= 2
+            && variants
+                .iter()
+                .all(|variant| variant.discriminant.is_some())
+        {
+            return Some(EnumLayout {
+                discriminant_offset: discriminant_offset.unwrap_or_default(),
+                discriminant_size,
+                variants,
+                niche: false,
+            });
+        }
+    }
+    None
+}
+
+fn is_discriminant_member<R: Reader>(
+    member: &DebuggingInformationEntry<R>,
+    dwarf: &gimli::Dwarf<R>,
+) -> bool {
+    let name = read_attr_string(member, dwarf, gimli::constants::DW_AT_name)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let artificial = matches!(
+        member.attr_value(DwAt(gimli::constants::DW_AT_artificial.0)),
+        Some(AttributeValue::Flag(true))
+    );
+    artificial || name.contains("variant") || name.contains("discr")
+}
+
+fn member_byte_size<R: Reader>(
+    member: &DebuggingInformationEntry<R>,
+    unit: &gimli::Unit<R>,
+    dwarf: &gimli::Dwarf<R>,
+) -> Option<u64> {
+    read_unsigned_attr(member, gimli::constants::DW_AT_byte_size).or_else(|| {
+        resolve_type_info(member, unit, dwarf)
+            .ok()
+            .map(|type_info| type_info.byte_size)
+            .filter(|size| *size != 0)
+    })
+}
+
+fn read_unsigned_attr<R: Reader>(
+    entry: &DebuggingInformationEntry<R>,
+    attr: gimli::constants::DwAt,
+) -> Option<u64> {
+    match entry.attr_value(DwAt(attr.0)) {
+        Some(AttributeValue::Udata(value)) => Some(value),
+        Some(AttributeValue::Sdata(value)) if value >= 0 => Some(value as u64),
+        Some(AttributeValue::Data1(value)) => Some(value as u64),
+        Some(AttributeValue::Data2(value)) => Some(value as u64),
+        Some(AttributeValue::Data4(value)) => Some(value as u64),
+        Some(AttributeValue::Data8(value)) => Some(value),
+        _ => None,
+    }
+}
+
+fn read_signed_attr<R: Reader>(
+    entry: &DebuggingInformationEntry<R>,
+    attr: gimli::constants::DwAt,
+) -> Option<i128> {
+    match entry.attr_value(DwAt(attr.0)) {
+        Some(AttributeValue::Sdata(value)) => Some(value as i128),
+        Some(AttributeValue::Udata(value)) => Some(value as i128),
+        Some(AttributeValue::Data1(value)) => Some(value as i128),
+        Some(AttributeValue::Data2(value)) => Some(value as i128),
+        Some(AttributeValue::Data4(value)) => Some(value as i128),
+        Some(AttributeValue::Data8(value)) => Some(value as i128),
+        _ => None,
+    }
+}
+
+fn is_rust_string_name(name: &str) -> bool {
+    matches!(
+        name,
+        "String" | "alloc::string::String" | "std::string::String"
+    )
+}
+
+fn is_rust_slice_name(name: &str) -> bool {
+    name == "&str"
+        || name == "&mut str"
+        || name.starts_with("&[")
+        || name.starts_with("&mut [")
+        || name.starts_with("Vec<")
+        || name.starts_with("alloc::vec::Vec<")
+        || name.starts_with("std::vec::Vec<")
 }
 
 /// Detect if a struct type is a Go string based on name and size.
@@ -1039,6 +1383,69 @@ mod tests {
         assert!(info.is_array);
         assert_eq!(info.byte_size, 40);
         assert_eq!(info.array_element_count, 5);
+    }
+
+    #[test]
+    fn array_size_prefers_dwarf_attribute() {
+        assert_eq!(infer_array_byte_size(40, 5, 8, VariableSize::QWord), 40);
+    }
+
+    #[test]
+    fn array_size_derives_missing_dwarf_attribute() {
+        assert_eq!(infer_array_byte_size(0, 5, 8, VariableSize::QWord), 40);
+        assert_eq!(infer_array_byte_size(0, 3, 0, VariableSize::DWord), 12);
+    }
+
+    #[test]
+    fn array_size_fails_closed_on_overflow() {
+        assert_eq!(
+            infer_array_byte_size(0, u64::MAX, 8, VariableSize::QWord),
+            0
+        );
+    }
+
+    #[test]
+    fn rust_header_names_are_classified_without_broad_string_heuristics() {
+        assert!(is_rust_string_name("alloc::string::String"));
+        assert!(is_rust_slice_name("alloc::vec::Vec<i32>"));
+        assert!(is_rust_slice_name("Vec<i32, alloc::alloc::Global>"));
+        assert!(is_rust_slice_name("&[u8]"));
+        assert!(is_rust_slice_name("&mut [u8]"));
+        assert!(is_rust_slice_name("&mut str"));
+        assert!(!is_rust_string_name("my::StringBuffer"));
+        assert!(!is_rust_slice_name("my::StringSlice"));
+    }
+
+    #[test]
+    fn enum_layout_is_fail_closed_for_niche_or_incomplete_metadata() {
+        let explicit = EnumLayout {
+            discriminant_offset: 0,
+            discriminant_size: 1,
+            variants: vec![
+                EnumVariantLayout {
+                    name: "Pending".into(),
+                    discriminant: Some(0),
+                    payload_offset: None,
+                    payload_size: None,
+                },
+                EnumVariantLayout {
+                    name: "Settled".into(),
+                    discriminant: Some(1),
+                    payload_offset: Some(1),
+                    payload_size: Some(1),
+                },
+            ],
+            niche: false,
+        };
+        assert!(explicit.is_explicit_non_niche());
+
+        let mut niche = explicit.clone();
+        niche.niche = true;
+        assert!(!niche.is_explicit_non_niche());
+
+        let mut incomplete = explicit;
+        incomplete.variants[1].discriminant = None;
+        assert!(!incomplete.is_explicit_non_niche());
     }
 
     #[test]

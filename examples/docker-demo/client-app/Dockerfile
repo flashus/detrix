@@ -8,7 +8,7 @@ WORKDIR /src
 # Install Delve — cache mount keeps the module download across base image updates
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 go install github.com/go-delve/delve/cmd/dlv@latest
+    CGO_ENABLED=0 go install github.com/go-delve/delve/cmd/dlv@v1.27.0
 
 # Copy Go client (referenced via replace directive, no external deps)
 COPY clients/go /src/clients/go

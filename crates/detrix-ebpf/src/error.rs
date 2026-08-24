@@ -92,6 +92,18 @@ pub enum Error {
     #[error("Variable not found: {0}")]
     VariableNotFound(String),
 
+    /// A validated capture plan could not be lowered or violated a bound.
+    #[error("Capture plan rejected: {0}")]
+    PlanRejected(String),
+
+    /// The kernel eBPF verifier rejected a compiled program.
+    #[error("eBPF verifier rejected: {0}")]
+    VerifierRejected(String),
+
+    /// A uprobe could not be attached to the target image.
+    #[error("uprobe attach failed: {0}")]
+    AttachFailed(String),
+
     /// eBPF program load/attach failure (Linux only).
     #[error("eBPF error: {0}")]
     Ebpf(String),
@@ -99,6 +111,22 @@ pub enum Error {
     /// Ring buffer read error.
     #[error("Ring buffer error: {0}")]
     RingBuffer(String),
+
+    /// A raw record failed schema/field decoding.
+    #[error("event decode failed: {0}")]
+    DecodeFailed(String),
+
+    /// The observed process exited before the requested capture completed.
+    #[error("target exited: {0}")]
+    TargetExited(String),
+
+    /// The target ABI is not supported by the selected profile/backend.
+    #[error("unsupported ABI: {0}")]
+    UnsupportedAbi(String),
+
+    /// The selected profile is not registered by the backend.
+    #[error("unsupported profile: {0}")]
+    UnsupportedProfile(String),
 
     /// Adapter lifecycle error.
     #[error("Adapter error: {0}")]
@@ -187,6 +215,25 @@ mod tests {
     fn error_display() {
         let err = Error::Ebpf("verifier rejected".to_string());
         assert_eq!(err.to_string(), "eBPF error: verifier rejected");
+    }
+
+    #[test]
+    fn structured_runtime_failure_classes_are_distinguishable() {
+        assert!(Error::PlanRejected("oversized".into())
+            .to_string()
+            .starts_with("Capture plan rejected:"));
+        assert!(Error::VerifierRejected("bounds".into())
+            .to_string()
+            .starts_with("eBPF verifier rejected:"));
+        assert!(Error::AttachFailed("permission".into())
+            .to_string()
+            .starts_with("uprobe attach failed:"));
+        assert!(Error::DecodeFailed("stale".into())
+            .to_string()
+            .starts_with("event decode failed:"));
+        assert!(Error::TargetExited("pid 7".into())
+            .to_string()
+            .starts_with("target exited:"));
     }
 
     #[test]

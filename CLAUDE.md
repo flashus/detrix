@@ -338,12 +338,12 @@ task pre-commit
 
 ### Build Configuration
 ```toml
-# .cargo/config.toml specifies custom build directory:
+# .cargo/config.toml specifies the shared disposable build directory:
 [build]
-target-dir = "../../../../../detrix/target"  # resolves to ~/detrix/target
+target-dir = "/private/tmp/detrix-session-target/host"
 ```
 
-Always use the configured build directory for binary paths. The relative path resolves to `~/detrix/target` from the workspace root.
+Always use the configured build directory for binary paths. Run `task tests:clean-session-target` to reclaim build/check artifacts when disk pressure requires it.
 
 ### Running Detrix
 ```bash

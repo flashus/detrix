@@ -64,6 +64,7 @@ base64 = "0.22"
 
 # Cross-platform file locking (for cross-process port registry)
 fs2.workspace = true
+sysinfo.workspace = true
 
 # Unix-specific dependencies (must be last section)
 [target.'cfg(unix)'.dependencies]

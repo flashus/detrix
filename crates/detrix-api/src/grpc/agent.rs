@@ -82,6 +82,21 @@ impl AgentService for AgentServiceImpl {
                 .is_some_and(|c| c.dap_python),
             dap_go: agent_msg.capabilities.as_ref().is_some_and(|c| c.dap_go),
             dap_rust: agent_msg.capabilities.as_ref().is_some_and(|c| c.dap_rust),
+            supported_envelope_schemas: agent_msg
+                .capabilities
+                .as_ref()
+                .map(|c| c.supported_envelope_schemas.clone())
+                .unwrap_or_default(),
+            supported_capture_profiles: agent_msg
+                .capabilities
+                .as_ref()
+                .map(|c| c.supported_capture_profiles.clone())
+                .unwrap_or_default(),
+            max_capture_payload_bytes: agent_msg
+                .capabilities
+                .as_ref()
+                .map(|c| c.max_capture_payload_bytes)
+                .unwrap_or_default(),
         };
 
         let binaries: Vec<AgentBinaryInfo> = agent_msg
@@ -94,8 +109,10 @@ impl AgentService for AgentServiceImpl {
                 build_info: b.build_info,
                 has_dwarf: b.has_dwarf,
                 exported_functions: b.exported_functions,
-                // Agent scanner currently only reports eBPF-observable Go ELF binaries.
-                language: detrix_core::SourceLanguage::Go,
+                language: match b.language.as_str() {
+                    "rust" => detrix_core::SourceLanguage::Rust,
+                    _ => detrix_core::SourceLanguage::Go,
+                },
             })
             .collect();
 
@@ -113,6 +130,7 @@ impl AgentService for AgentServiceImpl {
             let tx = proto_tx;
             tokio::pin!(out_rx_stream);
             while let Some(msg) = out_rx_stream.next().await {
+                tracing::debug!(kind = ?std::mem::discriminant(&msg), "Sending server command to agent stream");
                 let proto_msg = domain_to_proto(msg);
                 if tx.send(Ok(proto_msg)).await.is_err() {
                     break; // Receiver dropped
@@ -160,6 +178,11 @@ impl AgentService for AgentServiceImpl {
             loop {
                 match incoming.message().await {
                     Ok(Some(msg)) => {
+                        tracing::debug!(
+                            agent_id = %agent_id_clone,
+                            kind = ?msg.msg.as_ref().map(std::mem::discriminant),
+                            "Agent message received on stream"
+                        );
                         if let Some(domain_msg) = proto_to_domain(msg) {
                             // Dispatch on a separate task so handlers that await
                             // request/response work over the same gRPC stream
@@ -221,6 +244,15 @@ fn proto_to_domain(msg: AgentMessage) -> Option<IncomingAgentMessage> {
                 } else {
                     Some(error_msg)
                 },
+                selected_backend: u.selected_backend,
+                capture_profile: u.capture_profile,
+                backend_reason: u.backend_reason,
+                debug_image_source: u.debug_image_source,
+                failure_class: u.failure_class,
+                supported_envelope_schemas: u.supported_envelope_schemas,
+                supported_capture_profiles: u.supported_capture_profiles,
+                max_capture_payload_bytes: u.max_capture_payload_bytes,
+                target_architecture: u.target_architecture,
             })
         }
         agent_message::Msg::Events(e) => {
@@ -315,6 +347,10 @@ fn proto_to_domain(msg: AgentMessage) -> Option<IncomingAgentMessage> {
         agent_message::Msg::DropCount(d) => Some(IncomingAgentMessage::DropCount {
             connection_id: detrix_core::ConnectionId(d.connection_id),
             total_events_dropped: d.total_events_dropped,
+            kernel_events_dropped: d.kernel_events_dropped,
+            decode_events_dropped: d.decode_events_dropped,
+            unavailable_fields: d.unavailable_fields,
+            events_decoded: d.events_decoded,
         }),
         agent_message::Msg::SetMetricAck(a) => Some(IncomingAgentMessage::SetMetricAck {
             request_id: a.request_id,
@@ -356,7 +392,17 @@ fn proto_to_domain(msg: AgentMessage) -> Option<IncomingAgentMessage> {
                     build_info: b.build_info,
                     has_dwarf: b.has_dwarf,
                     exported_functions: b.exported_functions,
-                    language: detrix_core::SourceLanguage::Go,
+                    // Re-registration carries the complete scanner snapshot,
+                    // including the language selected by the agent.  Do not
+                    // silently coerce every replacement binary to Go: doing
+                    // so changes the connection identity for Rust targets
+                    // and prevents lifecycle reconciliation from matching the
+                    // original connection semantics.
+                    language: match b.language.as_str() {
+                        "rust" => detrix_core::SourceLanguage::Rust,
+                        "python" => detrix_core::SourceLanguage::Python,
+                        _ => detrix_core::SourceLanguage::Go,
+                    },
                 })
                 .collect();
             Some(IncomingAgentMessage::RegisterUpdate { binaries })
@@ -384,6 +430,9 @@ fn domain_to_proto(msg: OutgoingAgentMessage) -> ServerMessage {
                 host,
                 port,
                 safe_mode,
+                capture_backend,
+                capture_profile,
+                debug_info_path,
             } => Msg::CreateConnection(AgentCreateConnection {
                 connection_id,
                 language,
@@ -391,6 +440,9 @@ fn domain_to_proto(msg: OutgoingAgentMessage) -> ServerMessage {
                 host,
                 port,
                 safe_mode,
+                capture_backend,
+                capture_profile,
+                debug_info_path,
             }),
             OutgoingAgentMessage::CloseConnection { connection_id } => {
                 Msg::CloseConnection(AgentCloseConnection { connection_id })

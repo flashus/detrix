@@ -1463,3 +1463,41 @@ async fn test_restore_connections_skips_agent_managed_snapshot_entries() {
         "daemon must not start a local adapter for agent-managed rows during startup restore"
     );
 }
+
+/// Agent-managed connections cannot be restored by the daemon.  If the previous
+/// daemon/agent process ended without persisting a disconnect, startup must
+/// normalize the stale Connected row so the next agent registration can remove
+/// or migrate it instead of leaving it permanently active.
+#[tokio::test]
+async fn test_restore_marks_stale_agent_managed_connected_row_disconnected() {
+    let (repo, metric_repo, reference_repo, lifecycle_manager, system_event_tx, vfs) =
+        create_test_fixtures();
+    let service = ConnectionService::new(
+        repo.clone(),
+        metric_repo,
+        reference_repo,
+        lifecycle_manager,
+        system_event_tx,
+        vfs,
+    );
+
+    let identity = ConnectionIdentity::new("agent/stale/exe", SourceLanguage::Rust, "/", "host1");
+    let mut conn =
+        Connection::new_with_identity(identity, "/proc/1/exe".to_string(), 1024).unwrap();
+    conn.safe_mode = true;
+    conn.set_status(ConnectionStatus::Connected);
+    repo.save(&conn).await.unwrap();
+
+    let snapshot = repo.list_all().await.unwrap();
+    let (reconnected, deleted) = service.restore_connections_on_startup(snapshot).await;
+
+    assert_eq!(reconnected, 0);
+    assert_eq!(deleted, 0);
+    let conn_after = repo.get_connection(&conn.id).await.unwrap();
+    assert_eq!(
+        conn_after.status,
+        ConnectionStatus::Disconnected,
+        "stale agent-managed rows must be normalized for agent reconciliation"
+    );
+    assert!(!service.has_running_adapter(&conn.id).await);
+}

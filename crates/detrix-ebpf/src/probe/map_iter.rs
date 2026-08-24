@@ -47,7 +47,9 @@ const HASH_MIN_TOPHASH_GO111: u64 = 4;
 const HASH_TOPHASH_EMPTY_ONE_GO112: u64 = 1;
 const HASH_MIN_TOPHASH_GO112: u64 = 5;
 
-/// Read entries from a Go map at `map_ptr`, auto-detecting classic vs Swiss Table.
+/// Read entries from a runtime map at `map_ptr`, auto-detecting the supported
+/// classic and Swiss-table layouts. The current layout implementations are
+/// Go-compatible; the decoder boundary is intentionally language-neutral.
 ///
 /// Detection heuristic:
 /// - Swiss Table (Go 1.24+): 32-byte header with `used` (uint64), `dirPtr` (uint64), `dirLen` (int64)
@@ -57,7 +59,7 @@ const HASH_MIN_TOPHASH_GO112: u64 = 5;
 /// We detect by checking if bytes 8-16 (seed in Swiss, flags+B+noverflow+hash0 in classic) look
 /// like a valid Swiss Table header. If `dirLen` (bytes 24-32) is a reasonable value (>= -1 and <= 64),
 /// we treat it as Swiss Table. Otherwise, classic.
-pub fn read_go_map(
+pub fn read_map(
     map_ptr: u64,
     key_nested: Option<&NestedType>,
     val_nested: Option<&NestedType>,
@@ -323,6 +325,227 @@ pub fn read_go_map(
         entries,
         reason: String::new(),
     }
+}
+
+/// Iterate a `std::collections::HashMap` backed by hashbrown's `RawTable`.
+///
+/// On the supported 64-bit Rust toolchains the value is laid out as:
+///
+/// ```text
+/// HashMap { hash_builder: 16, table: RawTable }
+/// RawTable { bucket_mask: usize, ctrl: *u8, growth_left: usize, items: usize }
+/// ```
+///
+/// `ctrl` points at the control-byte array.  The element array follows the
+/// control bytes and the mirrored SIMD group (`Group::WIDTH`, currently 16).
+/// We deliberately validate every derived address/count before reading it;
+/// stale or optimized-out values must produce an explicit partial map rather
+/// than fabricated keys or lengths.
+pub fn read_rust_hash_map(
+    map_addr: u64,
+    key_nested: Option<&NestedType>,
+    val_nested: Option<&NestedType>,
+    config: &CaptureConfig,
+    mem_reader: &dyn ProcessMemoryReader,
+    pid: u32,
+) -> CapturedValue {
+    let header = match mem_reader.read_bytes(pid, map_addr, 64) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return rust_map_error(key_nested, val_nested, format!("header read failed: {e}"))
+        }
+    };
+    read_rust_hash_map_header(&header, key_nested, val_nested, config, mem_reader, pid)
+}
+
+/// Same iterator for a map header embedded in a captured struct blob.  The
+/// pointers in that header still refer to the target process, so only the
+/// fixed header is read from `blob`; controls and slots are read from `pid`.
+pub fn read_rust_hash_map_from_blob(
+    header: &[u8],
+    key_nested: Option<&NestedType>,
+    val_nested: Option<&NestedType>,
+    config: &CaptureConfig,
+    mem_reader: &dyn ProcessMemoryReader,
+    pid: u32,
+) -> CapturedValue {
+    read_rust_hash_map_header(header, key_nested, val_nested, config, mem_reader, pid)
+}
+
+fn rust_map_error(
+    key_nested: Option<&NestedType>,
+    val_nested: Option<&NestedType>,
+    reason: String,
+) -> CapturedValue {
+    CapturedValue::Map {
+        key_type: key_nested
+            .map(|n| n.type_info().name.clone())
+            .unwrap_or_else(|| "unknown".into()),
+        value_type: val_nested
+            .map(|n| n.type_info().name.clone())
+            .unwrap_or_else(|| "unknown".into()),
+        entries: vec![],
+        reason,
+    }
+}
+
+fn read_rust_hash_map_header(
+    header: &[u8],
+    key_nested: Option<&NestedType>,
+    val_nested: Option<&NestedType>,
+    config: &CaptureConfig,
+    mem_reader: &dyn ProcessMemoryReader,
+    pid: u32,
+) -> CapturedValue {
+    if header.len() < 32 {
+        return rust_map_error(
+            key_nested,
+            val_nested,
+            format!("header too short: {} bytes", header.len()),
+        );
+    }
+    let key_name = key_nested
+        .map(|n| n.type_info().name.clone())
+        .unwrap_or_else(|| "unknown".into());
+    let val_name = val_nested
+        .map(|n| n.type_info().name.clone())
+        .unwrap_or_else(|| "unknown".into());
+
+    if header.iter().all(|b| *b == 0) {
+        return CapturedValue::Map {
+            key_type: key_name,
+            value_type: val_name,
+            entries: vec![],
+            reason: "nil map".into(),
+        };
+    }
+
+    let mut layout = None;
+    for &(bucket_off, ctrl_off, items_off) in &[
+        (8usize, 0usize, 24usize),
+        (16, 24, 40),
+        (0, 8, 24),
+        (8, 16, 32),
+    ] {
+        if header.len() < items_off + 8 {
+            continue;
+        }
+        let read_u64 = |offset: usize| {
+            header
+                .get(offset..offset + 8)
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                .map(u64::from_le_bytes)
+        };
+        let (Some(bucket_mask), Some(ctrl), Some(items)) = (
+            read_u64(bucket_off),
+            read_u64(ctrl_off),
+            read_u64(items_off),
+        ) else {
+            continue;
+        };
+        if ctrl != 0
+            && bucket_mask < (1 << 20)
+            && (bucket_mask + 1) & bucket_mask == 0
+            && items <= bucket_mask + 1
+            && items <= config.max_array_values as u64
+        {
+            layout = Some((bucket_mask, ctrl, items));
+            break;
+        }
+    }
+    let Some((bucket_mask, ctrl, items)) = layout else {
+        return rust_map_error(
+            key_nested,
+            val_nested,
+            "unrecognized hashbrown RawTable layout".into(),
+        );
+    };
+
+    if ctrl == 0 || items == 0 {
+        return CapturedValue::Map {
+            key_type: key_name,
+            value_type: val_name,
+            entries: vec![],
+            reason: String::new(),
+        };
+    }
+    let buckets = bucket_mask + 1;
+    let controls = match mem_reader.read_bytes(pid, ctrl, buckets as usize) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return rust_map_error(key_nested, val_nested, format!("control read failed: {e}"))
+        }
+    };
+
+    let key_size = slot_type_size_fallback(key_nested, &key_name);
+    let val_size = slot_type_size_fallback(val_nested, &val_name);
+    if key_size == 0 || val_size == 0 || key_size > 1 << 20 || val_size > 1 << 20 {
+        return rust_map_error(key_nested, val_nested, "invalid key/value size".into());
+    }
+    let val_offset = align_up(key_size, align_of(val_size));
+    let pair_size = align_up(val_offset + val_size, align_of(val_offset + val_size));
+    // hashbrown stores the element array immediately *before* the control
+    // bytes. `ctrl` is `data_end`, i.e. one-past the last bucket; the first
+    // bucket is `ctrl - buckets * size_of<(K,V)>`.
+    if ctrl
+        .checked_sub(pair_size.saturating_mul(buckets))
+        .is_none()
+    {
+        return rust_map_error(key_nested, val_nested, "slot address overflow".into());
+    }
+
+    let mut entries = Vec::new();
+    for (index, marker) in controls.iter().enumerate() {
+        if entries.len() >= config.max_array_values {
+            break;
+        }
+        // hashbrown control bytes: 0..=0x7f occupied, 0x80 empty, 0xfe deleted.
+        if *marker >= 0x80 {
+            continue;
+        }
+        // `data_end` is the base used by hashbrown's Bucket indexing: bucket
+        // zero is immediately before `ctrl`, bucket one before that, etc.
+        // Controls and elements therefore run in opposite directions.
+        let slot = ctrl.saturating_sub((index as u64 + 1) * pair_size);
+        let key = read_slot_value(slot, key_nested, key_size, config, mem_reader, pid);
+        let value = read_slot_value(
+            slot + val_offset,
+            val_nested,
+            val_size,
+            config,
+            mem_reader,
+            pid,
+        );
+        entries.push((key, value));
+    }
+    let reason = if entries.len() as u64 == items {
+        String::new()
+    } else {
+        format!(
+            "partial hashbrown table: expected {items}, decoded {}",
+            entries.len()
+        )
+    };
+    CapturedValue::Map {
+        key_type: key_name,
+        value_type: val_name,
+        entries,
+        reason,
+    }
+}
+
+/// Compatibility spelling for callers that still identify this reader by the
+/// original Go implementation. New profile code should call [`read_map`].
+#[deprecated(note = "use read_map; the reader is behind the generic map seam")]
+pub fn read_go_map(
+    map_ptr: u64,
+    key_nested: Option<&NestedType>,
+    val_nested: Option<&NestedType>,
+    config: &CaptureConfig,
+    mem_reader: &dyn ProcessMemoryReader,
+    pid: u32,
+) -> CapturedValue {
+    read_map(map_ptr, key_nested, val_nested, config, mem_reader, pid)
 }
 
 fn read_swiss_map_inner(
@@ -609,8 +832,15 @@ fn compute_slot_layout(
 /// For strings the slot is always 16 bytes ({ptr, len} header).
 fn slot_type_size_fallback(nested: Option<&NestedType>, type_name: &str) -> u64 {
     match nested {
-        // Go string in a slot: always 16 bytes (ptr + len header)
-        Some(NestedType::Scalar(ti)) if ti.is_string || ti.name == "string" => 16,
+        // Go strings are 16 bytes. Rust `String` is a 24-byte Vec-backed
+        // header; using 16 here shifts every following map value slot.
+        Some(NestedType::Scalar(ti)) if ti.is_string || ti.name == "string" => {
+            if is_rust_owned_string_name(&ti.name) {
+                24
+            } else {
+                16
+            }
+        }
         // Use DWARF byte_size if available
         Some(n) => {
             let s = n.type_info().byte_size;
@@ -674,7 +904,11 @@ fn read_slot_value(
 
     match nested {
         Some(NestedType::Scalar(ti)) if ti.is_string || ti.name == "string" => {
-            read_string_slot(addr, mem_reader, pid, config)
+            if is_rust_owned_string_name(&ti.name) {
+                read_rust_string_slot(addr, mem_reader, pid, config)
+            } else {
+                read_string_slot(addr, mem_reader, pid, config)
+            }
         }
         Some(NestedType::Struct {
             type_info, fields, ..
@@ -719,6 +953,54 @@ fn read_slot_value(
             // Unknown or unsupported type: read as raw bytes
             read_raw_bytes(addr, size, mem_reader, pid)
         }
+    }
+}
+
+fn is_rust_owned_string_name(name: &str) -> bool {
+    name == "String"
+        || name == "alloc::string::String"
+        || name == "std::string::String"
+        || name.ends_with("::String")
+}
+
+/// Rust `String`/`Vec<T>` stores `(ptr, cap, len)` on the supported ABI.
+fn read_rust_string_slot(
+    addr: u64,
+    mem_reader: &dyn ProcessMemoryReader,
+    pid: u32,
+    config: &CaptureConfig,
+) -> CapturedValue {
+    let hdr = match mem_reader.read_bytes(pid, addr, 24) {
+        Ok(b) if b.len() >= 24 => b,
+        Ok(b) => {
+            return CapturedValue::Error(format!("Rust String header too short: {} bytes", b.len()))
+        }
+        Err(_) => return CapturedValue::Error("Rust String header read failed".into()),
+    };
+    // Rust 1.94's DWARF describes String -> Vec -> RawVecInner as
+    // `{cap@0, ptr@8, len@16}`. CodeLLDB's formatter follows the same
+    // compiler-emitted fields rather than assuming Go's `{ptr,len}` header.
+    let mut ptr_bytes = [0u8; 8];
+    ptr_bytes.copy_from_slice(&hdr[8..16]);
+    let ptr = u64::from_le_bytes(ptr_bytes);
+    let mut len_bytes = [0u8; 8];
+    len_bytes.copy_from_slice(&hdr[16..24]);
+    let len = u64::from_le_bytes(len_bytes);
+    if len > config.max_string_capture as u64 * 1024 || (ptr == 0 && len != 0) {
+        return CapturedValue::Error(format!("invalid Rust String header ptr={ptr:#x} len={len}"));
+    }
+    if ptr == 0 || len == 0 {
+        return CapturedValue::String {
+            data: Vec::new(),
+            len: len as usize,
+        };
+    }
+    match mem_reader.read_string(pid, ptr, (len as usize).min(config.max_string_capture)) {
+        Ok(s) => CapturedValue::String {
+            data: s.into_bytes(),
+            len: len as usize,
+        },
+        Err(_) => CapturedValue::Error("Rust String data read failed".into()),
     }
 }
 
@@ -1165,8 +1447,10 @@ mod tests {
             is_struct: false,
             is_pointer: false,
             is_map: false,
+            is_enum: false,
             array_element_count: 0,
             element_byte_size: 0,
+            enum_layout: None,
             array_element_type: String::new(),
             slice_element_type: String::new(),
         })
@@ -1175,7 +1459,7 @@ mod tests {
     #[test]
     fn classic_map_nil_map_returns_empty() {
         let reader = MockMemReader::new();
-        let result = read_go_map(
+        let result = read_map(
             0, // nil map pointer
             None,
             None,
@@ -1207,7 +1491,7 @@ mod tests {
 
         // We can't fully test Swiss Table without proper group data,
         // but we can verify the detection logic doesn't panic
-        let _result = read_go_map(0x5000, None, None, &CaptureConfig::default(), &reader, 1234);
+        let _result = read_map(0x5000, None, None, &CaptureConfig::default(), &reader, 1234);
         // Should not panic, returns whatever it can read
     }
 
@@ -1225,7 +1509,7 @@ mod tests {
         reader.put(0x6000, classic_header);
 
         // Should detect as classic (dirLen > 64) and attempt classic iteration
-        let _result = read_go_map(0x6000, None, None, &CaptureConfig::default(), &reader, 1234);
+        let _result = read_map(0x6000, None, None, &CaptureConfig::default(), &reader, 1234);
     }
 
     #[test]
@@ -1247,7 +1531,7 @@ mod tests {
 
         // Should be detected as classic (flags=0 < 16 AND B=1 < 32)
         // and attempt classic iteration (won't find entries without bucket data, but won't panic)
-        let _result = read_go_map(0x7000, None, None, &CaptureConfig::default(), &reader, 1234);
+        let _result = read_map(0x7000, None, None, &CaptureConfig::default(), &reader, 1234);
         // Key assertion: it should not panic and should not attempt Swiss Table group parsing
     }
 
@@ -1285,7 +1569,7 @@ mod tests {
         reader.put(0x9000, group);
 
         let string_nested = string_nested_type();
-        let result = read_go_map(
+        let result = read_map(
             0x8000,
             Some(&string_nested),
             Some(&string_nested),
@@ -1337,8 +1621,10 @@ mod tests {
             is_struct: false,
             is_pointer: false,
             is_map: false,
+            is_enum: false,
             array_element_count: 0,
             element_byte_size: 0,
+            enum_layout: None,
             array_element_type: String::new(),
             slice_element_type: String::new(),
         });
@@ -1359,8 +1645,10 @@ mod tests {
             is_struct: false,
             is_pointer: false,
             is_map: false,
+            is_enum: false,
             array_element_count: 0,
             element_byte_size: 0,
+            enum_layout: None,
             array_element_type: String::new(),
             slice_element_type: String::new(),
         });

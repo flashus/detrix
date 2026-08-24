@@ -12,18 +12,31 @@ includes:
     dir: ./clients
     aliases: [client, c]
 
+# One override controls every host and Docker build/test artifact location.
+# The tests include consumes these variables as well, so callers only need to
+# set DETRIX_SESSION_TARGET_DIR once (the default remains disposable).
+vars:
+  SESSION_TARGET_DIR:
+    sh: "{{.ROOT_DIR}}/scripts/session-root-dir.sh root"
+  HOST_TARGET_DIR:
+    sh: "{{.ROOT_DIR}}/scripts/session-root-dir.sh host"
+  OUT_DIR:
+    sh: "{{.ROOT_DIR}}/scripts/session-root-dir.sh out"
+  DOCKER_TARGET_DIR:
+    sh: "{{.ROOT_DIR}}/scripts/session-root-dir.sh docker"
+
 tasks:
   build:
     desc: Build Detrix in release mode (formats first to avoid stale-binary warnings)
     cmds:
       - cargo fmt --all
-      - cargo build --release
+      - CARGO_TARGET_DIR={{.HOST_TARGET_DIR}} cargo build --release
 
   lint:
     desc: Run clippy linter
     cmds:
       # - cargo clippy --all -- -D warnings
-      - cargo clippy --all
+      - CARGO_TARGET_DIR={{.HOST_TARGET_DIR}} cargo clippy --all
 
   format:
     desc: Format code with rustfmt
@@ -40,18 +53,18 @@ tasks:
     cmds:
       - echo "Regenerating protobuf code from .proto files..."
       - echo "This will trigger build.rs in detrix-api which uses tonic-build (prost)"
-      - cargo build --package detrix-api
+      - CARGO_TARGET_DIR={{.HOST_TARGET_DIR}} cargo build --package detrix-api
       - echo "✅ Protobuf code regenerated in crates/detrix-api/src/generated/"
       - echo "Note Proto files are in crates/detrix-api/proto/"
 
   clean:
     desc: Clean build artifacts
     cmds:
-      - cargo clean
+      - CARGO_TARGET_DIR={{.HOST_TARGET_DIR}} cargo clean
       - rm -f fixtures/detrix.db
 
   docker-clean:
-    desc: Delete Docker cache volumes for agent-mode tests (alias to tests:docker-clean)
+    desc: Clean the shared disposable build/cache target (preserves Docker images and volumes)
     cmds:
       - task: tests:docker-clean
 
@@ -62,8 +75,11 @@ tasks:
       - task: clients:generate-all
       - task: format
       - task: clients:format
+      - task: format-check
+      - task: clients:format-check
       - task: lint
       - task: clients:lint
+      - task: tests:check-unused-imports
       - task: tests:test
       - task: clients:test
       - echo "✅ All checks passed! Ready to commit."
@@ -83,6 +99,16 @@ tasks:
     desc: Run ALL E2E tests (alias to tests:e2e)
     cmds:
       - task: tests:e2e
+
+  test-agent-all:
+    desc: Run the complete Go and Rust Agent/eBPF validation suite
+    cmds:
+      - task: tests:test-agent-all
+
+  docker-clean-e2e:
+    desc: Remove local cloud/agent E2E resources and Docker build cache
+    cmds:
+      - task: tests:docker-clean-e2e
 
   release:
     desc: "Tag and publish current Cargo.toml version (errors if tag already exists)"

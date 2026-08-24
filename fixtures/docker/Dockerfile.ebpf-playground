@@ -28,7 +28,8 @@
 #   Only rebuild when package versions need updating.
 #   Source code changes never invalidate this image.
 
-FROM detrix-ebpf-builder
+ARG EBPF_BUILDER_IMAGE=detrix-ebpf-builder
+FROM ${EBPF_BUILDER_IMAGE}
 
 # Test binaries compiled in /src have workspace_root=/src baked at compile time.
 # executor.rs uses current_dir(workspace_root) when spawning the daemon — /src must exist.

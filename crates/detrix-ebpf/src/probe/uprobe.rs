@@ -21,14 +21,25 @@
 //! ```
 
 use crate::dwarf::types::ProbePoint;
+#[cfg(target_os = "linux")]
+use crate::dwarf::types::{Register, VariableLocation};
 #[allow(unused_imports)] // used inside #[cfg(target_os = "linux")] blocks
 use crate::error::ErrContext;
 use crate::error::{Error, Result};
 use crate::probe::types::{CaptureConfig, ProbeConfig};
+use crate::profile::ProfileId;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
+
+/// Bound the userspace handoff between ring-buffer pollers and the correlator.
+///
+/// The kernel ring buffer already has its own bounded storage and drop counter;
+/// keeping this queue bounded prevents a slow DWARF decoder or subscriber from
+/// turning a burst into unbounded host-memory growth. A full queue drops the
+/// userspace copy and is reported by the poller, distinct from kernel drops.
+pub const RAW_EVENT_CHANNEL_CAPACITY: usize = 4096;
 
 /// Manages active uprobe attachments for a single target binary.
 ///
@@ -44,7 +55,7 @@ pub struct UprobeManager {
     /// On Linux, each probe's ring buffer polling task sends events here.
     /// Unused on non-Linux (the field exists to keep the API uniform).
     #[allow(dead_code)]
-    raw_event_tx: Option<mpsc::UnboundedSender<(String, Vec<u8>)>>,
+    raw_event_tx: Option<mpsc::Sender<(String, Vec<u8>)>>,
     /// Capture limits — used when generating per-metric BPF programs (Linux only).
     #[allow(dead_code)]
     capture_config: CaptureConfig,
@@ -105,7 +116,7 @@ impl UprobeManager {
     /// `(metric_name, raw_bytes)` tuples for correlation by the adapter.
     pub fn new_with_events(
         binary_path: impl Into<PathBuf>,
-        tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
+        tx: mpsc::Sender<(String, Vec<u8>)>,
     ) -> Self {
         Self {
             _binary_path: binary_path.into(),
@@ -118,7 +129,7 @@ impl UprobeManager {
     /// Create a manager with custom capture limits.
     pub fn new_with_config(
         binary_path: impl Into<PathBuf>,
-        tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
+        tx: mpsc::Sender<(String, Vec<u8>)>,
         capture_config: CaptureConfig,
     ) -> Self {
         Self {
@@ -134,8 +145,17 @@ impl UprobeManager {
     /// Called by `EbpfAdapter::start()` on each restart to supply a fresh channel.
     /// Previously attached probes that still send on the old sender will have their
     /// events dropped; this is acceptable since probes are detached on `stop()`.
-    pub fn set_raw_tx(&mut self, tx: mpsc::UnboundedSender<(String, Vec<u8>)>) {
+    pub fn set_raw_tx(&mut self, tx: mpsc::Sender<(String, Vec<u8>)>) {
         self.raw_event_tx = Some(tx);
+    }
+
+    /// Close the adapter-owned raw-event sender during shutdown.
+    ///
+    /// Probe pollers clone the sender, but their handles are detached first by
+    /// `detach_all()`. Clearing this final owner lets the correlator observe
+    /// channel closure and finish its shutdown instead of waiting forever.
+    pub fn clear_raw_tx(&mut self) {
+        self.raw_event_tx = None;
     }
 
     /// Number of active probes.
@@ -160,6 +180,50 @@ impl UprobeManager {
         g_addr_offset: Option<i64>,
         goid_offset: Option<u64>,
     ) -> Result<()> {
+        self.attach_for_profile(
+            metric_name,
+            probe_point,
+            g_addr_offset,
+            goid_offset,
+            ProfileId::Go,
+        )
+    }
+
+    /// Attach using a language profile. Go and Rust both use the validated
+    /// CapturePlan renderer; the legacy no-plan API remains for compatibility.
+    #[allow(unused_variables)]
+    pub fn attach_for_profile(
+        &mut self,
+        metric_name: &str,
+        probe_point: &ProbePoint,
+        g_addr_offset: Option<i64>,
+        goid_offset: Option<u64>,
+        profile: ProfileId,
+    ) -> Result<()> {
+        // Rust probes always carry a validated CapturePlan identity. Keep the
+        // legacy no-plan API for Go compatibility, but do not let a direct
+        // Rust caller silently bypass the plan compiler.
+        let plan_hash = (profile == ProfileId::Rust).then(|| format!("probe:{:x}", probe_point.pc));
+        self.attach_for_profile_with_plan(
+            metric_name,
+            probe_point,
+            g_addr_offset,
+            goid_offset,
+            profile,
+            plan_hash.as_deref(),
+        )
+    }
+
+    #[allow(unused_variables)]
+    pub fn attach_for_profile_with_plan(
+        &mut self,
+        metric_name: &str,
+        probe_point: &ProbePoint,
+        g_addr_offset: Option<i64>,
+        goid_offset: Option<u64>,
+        profile: ProfileId,
+        plan_hash: Option<&str>,
+    ) -> Result<()> {
         #[allow(unused_variables)]
         // g_addr_offset/goid_offset are only used on Linux for TLS-based goid capture
         let _ = (g_addr_offset, goid_offset);
@@ -177,8 +241,14 @@ impl UprobeManager {
         };
 
         #[cfg(target_os = "linux")]
-        let handles =
-            self.load_and_attach_linux(metric_name, probe_point, g_addr_offset, goid_offset)?;
+        let handles = self.load_and_attach_linux(
+            metric_name,
+            probe_point,
+            g_addr_offset,
+            goid_offset,
+            profile,
+            plan_hash,
+        )?;
 
         let probe = AttachedProbe {
             _config: config,
@@ -263,20 +333,129 @@ impl UprobeManager {
         probe_point: &ProbePoint,
         g_addr_offset: Option<i64>,
         goid_offset: Option<u64>,
+        profile: ProfileId,
+        plan_hash: Option<&str>,
     ) -> Result<AyaHandles> {
-        use crate::probe::loader::compile_bpf;
-        use crate::probe::program::generate_bpf_program;
+        use crate::compiler::{GoBpfCompiler, RustBpfCompiler};
+        use crate::probe::loader::compile_bpf_for_arch;
+        use crate::probe::program::{BpfProgram, RawEnvelopeSpec};
         use aya::programs::uprobe::UProbeLink;
         use aya::programs::UProbe;
 
+        let compile_point = probe_point.clone();
+        if profile == ProfileId::Rust {
+            detrix_logging::debug!(
+                "[uprobe] Rust compile locations: {:?}",
+                compile_point
+                    .variables
+                    .iter()
+                    .map(|v| (&v.name, &v.location))
+                    .collect::<Vec<_>>()
+            );
+        }
+
         // Step 1: Generate BPF C source from variable locations
-        let bpf_program = generate_bpf_program(
-            &probe_point.variables,
-            self.capture_config.capture_goid,
-            g_addr_offset,
-            goid_offset,
-            &self.capture_config,
-        )?;
+        let bpf_program = match profile {
+            ProfileId::Go => {
+                let compiler = GoBpfCompiler {
+                    config: self.capture_config.clone(),
+                    capture_goid: self.capture_config.capture_goid,
+                    g_addr_offset,
+                    goid_offset,
+                };
+                // Every Go location form must enter through the validated
+                // CapturePlan boundary. The existing Go generator remains the
+                // compatibility renderer behind `CaptureCompiler::compile`,
+                // but an unrepresentable layout now fails closed instead of
+                // silently bypassing plan validation.
+                let plan = GoBpfCompiler::plan_from_probe(
+                    probe_point,
+                    format!("probe:{:x}", probe_point.pc),
+                )
+                .map_err(|error| {
+                    detrix_logging::warn!(
+                        "[uprobe] Go CapturePlan rejected '{}': {}",
+                        metric_name,
+                        error
+                    );
+                    Error::Ebpf(error.to_string())
+                })?;
+                let envelope = plan_hash.map(|hash| RawEnvelopeSpec {
+                    profile_tag: crate::compiler::profile_tag("go"),
+                    plan_tag: crate::compiler::plan_tag(hash),
+                });
+                compiler
+                    .compile_with_envelope(&plan, envelope)
+                    .and_then(|compiled| {
+                        String::from_utf8(compiled.artifact)
+                            .map(|source| BpfProgram {
+                                source,
+                                var_count: probe_point.variables.len(),
+                                captures_goid: self.capture_config.capture_goid,
+                                g_addr_offset,
+                                goid_offset,
+                                versioned_envelope: envelope.is_some(),
+                            })
+                            .map_err(|error| {
+                                crate::compiler::CompileError::Backend(error.to_string())
+                            })
+                    })
+                    .map_err(|error| Error::Ebpf(error.to_string()))?
+            }
+            ProfileId::Rust => {
+                let compiler = RustBpfCompiler {
+                    config: self.capture_config.clone(),
+                };
+                if let Some(plan_hash) = plan_hash {
+                    let plan = RustBpfCompiler::plan_from_probe(&compile_point, plan_hash)
+                        .map_err(|error| Error::Ebpf(error.to_string()))?;
+                    compiler
+                        .compile_plan_to_program(&plan)
+                        .map_err(|error| Error::Ebpf(error.to_string()))?
+                } else {
+                    compiler.compile_variables(&compile_point.variables)?
+                }
+            }
+        };
+
+        if profile == ProfileId::Rust {
+            for (index, variable) in compile_point.variables.iter().enumerate() {
+                let aggregate_size = match &variable.location {
+                    VariableLocation::StackBlob { byte_size, .. }
+                    | VariableLocation::PiecewiseBlob { byte_size, .. } => {
+                        Some((*byte_size).min(self.capture_config.max_blob_capture))
+                    }
+                    _ => None,
+                };
+                if let Some(aggregate_size) = aggregate_size {
+                    let declaration = format!("var{index}_blob[{aggregate_size}]");
+                    if !bpf_program.source.contains(&declaration) {
+                        return Err(Error::Ebpf(format!(
+                            "Rust aggregate field '{}' is missing generated declaration '{}'",
+                            variable.name, declaration
+                        )));
+                    }
+                } else if variable.size.bytes() > 8
+                    && !bpf_program.source.contains(&format!("var{index}_blob["))
+                {
+                    return Err(Error::Ebpf(format!(
+                        "Rust aggregate field '{}' ({} bytes) has no blob in generated event layout",
+                        variable.name,
+                        variable.size.bytes()
+                    )));
+                }
+            }
+            detrix_logging::debug!(
+                "[uprobe] Rust generated layout: bytes={} has_var0_blob={} declaration={}",
+                bpf_program.source.len(),
+                bpf_program.source.contains("var0_blob["),
+                bpf_program
+                    .source
+                    .lines()
+                    .find(|line| line.contains("var0_blob["))
+                    .unwrap_or("<none>")
+            );
+        }
 
         // Debug: log generated BPF source
         detrix_logging::debug!(
@@ -284,9 +463,31 @@ impl UprobeManager {
             metric_name,
             bpf_program.source
         );
-
-        // Step 2: Compile C → ELF via clang
-        let compiled = compile_bpf(&bpf_program)?;
+        // Step 2: Compile C → ELF via clang. Select the target from the
+        // resolved DWARF probe, not from the Detrix build host; this is what
+        // keeps x86-64 and AArch64 plans from silently sharing register ABI.
+        let architecture = probe_point
+            .variables
+            .iter()
+            .find_map(|variable| match variable.location {
+                VariableLocation::Register(Register::Arm64(_))
+                | VariableLocation::FrameOffset {
+                    register: Register::Arm64(_),
+                    ..
+                } => Some(crate::dwarf::types::TargetArchitecture::Aarch64),
+                VariableLocation::Register(_) | VariableLocation::FrameOffset { .. } => {
+                    Some(crate::dwarf::types::TargetArchitecture::X86_64)
+                }
+                _ => None,
+            })
+            .unwrap_or({
+                if cfg!(target_arch = "aarch64") {
+                    crate::dwarf::types::TargetArchitecture::Aarch64
+                } else {
+                    crate::dwarf::types::TargetArchitecture::X86_64
+                }
+            });
+        let compiled = compile_bpf_for_arch(&bpf_program, architecture)?;
 
         // Step 3: Load the ELF object with aya
         let mut ebpf = aya::Ebpf::load(&compiled.elf_bytes).context("aya load failed")?;
@@ -312,7 +513,9 @@ impl UprobeManager {
                 .try_into()
                 .context("Not a uprobe program")?;
 
-            program.load().context("BPF verifier rejected")?;
+            program
+                .load()
+                .map_err(|error| Error::VerifierRejected(error.to_string()))?;
 
             // Attach at symbol_offset in the target binary.
             // fn_name=None + offset=symbol_offset → mid-function attachment.
@@ -323,7 +526,7 @@ impl UprobeManager {
                     binary_path_str,
                     None, // namespace (cgroups)
                 )
-                .context("uprobe attach failed")?;
+                .map_err(|error| Error::AttachFailed(error.to_string()))?;
 
             program.take_link(link_id).context("take_link failed")?
             // &mut UProbe borrow released here
@@ -377,6 +580,7 @@ impl UprobeManager {
                 let mut idle_polls = 0u32;
                 let mut drop_check_polls = 0u32;
                 let mut last_drop_total: u64 = 0;
+                let mut userspace_drops: u64 = 0;
                 const IDLE_THRESHOLD: u32 = 10; // Back off after 10 idle polls
                                                 // Check drop counter approximately every 100 slow polls (~1 second)
                 const DROP_CHECK_INTERVAL: u32 = 100;
@@ -386,8 +590,26 @@ impl UprobeManager {
                 loop {
                     while let Some(item) = ring_buf.next() {
                         idle_polls = 0; // Reset backoff on event
-                        if tx.send((name.clone(), item.to_vec())).is_err() {
-                            return; // Receiver dropped — stop polling
+                        match tx.try_send((name.clone(), item.to_vec())) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                // The kernel-side drop counter cannot account for
+                                // userspace backpressure. Keep polling so one full
+                                // burst does not permanently disable the probe.
+                                userspace_drops = userspace_drops.saturating_add(1);
+                                // Avoid turning a sustained overload into a log
+                                // amplification loop while retaining evidence of
+                                // the first loss and periodic progress.
+                                if userspace_drops == 1 || userspace_drops.is_multiple_of(1024) {
+                                    detrix_logging::warn!(
+                                        dropped = userspace_drops,
+                                        "eBPF userspace event queue full — events dropped"
+                                    );
+                                }
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                return; // Receiver dropped — stop polling
+                            }
                         }
                     }
                     // Adaptive sleep: fast when active, slow when idle
@@ -528,9 +750,20 @@ mod tests {
 
     #[test]
     fn new_with_events_stores_sender() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(RAW_EVENT_CHANNEL_CAPACITY);
         let mgr = UprobeManager::new_with_events("/test/binary", tx);
         assert!(mgr.raw_event_tx.is_some());
+    }
+
+    #[test]
+    fn raw_event_channel_is_bounded() {
+        let (tx, mut rx) = mpsc::channel::<(String, Vec<u8>)>(RAW_EVENT_CHANNEL_CAPACITY);
+        for index in 0..RAW_EVENT_CHANNEL_CAPACITY {
+            tx.try_send(("metric".into(), vec![index as u8]))
+                .expect("capacity should accept exactly the configured bound");
+        }
+        assert!(tx.try_send(("metric".into(), vec![0])).is_err());
+        assert_eq!(rx.try_recv().unwrap().1, vec![0]);
     }
 
     #[test]
@@ -569,6 +802,15 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("No probe attached"));
+    }
+
+    #[test]
+    fn clear_raw_tx_releases_manager_sender() {
+        let (tx, _rx) = mpsc::channel(RAW_EVENT_CHANNEL_CAPACITY);
+        let mut mgr = UprobeManager::new_with_events("/test/binary", tx);
+        assert!(mgr.raw_event_tx.is_some());
+        mgr.clear_raw_tx();
+        assert!(mgr.raw_event_tx.is_none());
     }
 
     #[test]
@@ -616,7 +858,7 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "linux"))]
     fn attach_with_events_records_probe() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(RAW_EVENT_CHANNEL_CAPACITY);
         let mut mgr = UprobeManager::new_with_events("/test/binary", tx);
         let point = test_probe_point();
 

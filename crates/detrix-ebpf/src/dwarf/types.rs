@@ -139,6 +139,12 @@ pub enum VariableLocation {
         offset: i64,
     },
 
+    /// Variable at an offset from an explicit DWARF frame-base register
+    /// (typically RBP for Rust/LLVM).  Unlike `StackOffset`, this preserves
+    /// the register identity so uprobes do not incorrectly read RSP when the
+    /// compiler selected a frame-pointer CFA.
+    FrameOffset { register: Register, offset: i64 },
+
     /// Variable is a Go string (ptr + len at adjacent locations).
     /// Requires two reads: pointer and length.
     GoString {
@@ -148,8 +154,26 @@ pub enum VariableLocation {
         len: Box<VariableLocation>,
     },
 
+    /// Language-neutral pointer/length header (for Rust `String`, `&str`,
+    /// and future profile-owned string layouts). The wire representation is
+    /// identical to `GoString`; the distinct variant prevents non-Go profiles
+    /// from depending on Go runtime terminology.
+    StringHeader {
+        ptr: Box<VariableLocation>,
+        len: Box<VariableLocation>,
+    },
+
     /// Variable is a Go slice (ptr + len + cap).
     GoSlice {
+        ptr: Box<VariableLocation>,
+        len: Box<VariableLocation>,
+        cap: Box<VariableLocation>,
+    },
+
+    /// Language-neutral pointer/length/capacity header. Profiles may alias
+    /// capacity to length when the source layout has no capacity word (for
+    /// example a borrowed Rust slice).
+    SliceHeader {
         ptr: Box<VariableLocation>,
         len: Box<VariableLocation>,
         cap: Box<VariableLocation>,
@@ -223,7 +247,10 @@ impl VariableLocation {
 
     /// Returns true if this is a simple scalar location (register or stack).
     pub fn is_scalar(&self) -> bool {
-        matches!(self, Self::Register(_) | Self::StackOffset { .. })
+        matches!(
+            self,
+            Self::Register(_) | Self::StackOffset { .. } | Self::FrameOffset { .. }
+        )
     }
 
     /// Number of BPF reads needed to capture this variable.
@@ -231,8 +258,11 @@ impl VariableLocation {
         match self {
             Self::Register(_) => 1,
             Self::StackOffset { .. } => 1,
+            Self::FrameOffset { .. } => 1,
             Self::GoString { .. } => 2,
+            Self::StringHeader { .. } => 2,
             Self::GoSlice { .. } => 3,
+            Self::SliceHeader { .. } => 3,
             Self::StackBlob { .. } => 1,
             Self::PiecewiseBlob { pieces, .. } => {
                 pieces.iter().filter(|p| p.location.is_some()).count()
@@ -254,8 +284,17 @@ impl fmt::Display for VariableLocation {
                     write!(f, "[sp-{:#x}]", offset.unsigned_abs())
                 }
             }
+            Self::FrameOffset { register, offset } => {
+                if *offset >= 0 {
+                    write!(f, "[{register}+{offset:#x}]")
+                } else {
+                    write!(f, "[{register}-{:#x}]", offset.unsigned_abs())
+                }
+            }
             Self::GoString { .. } => write!(f, "go.string{{ptr, len}}"),
+            Self::StringHeader { .. } => write!(f, "string.header{{ptr, len}}"),
             Self::GoSlice { .. } => write!(f, "go.slice{{ptr, len, cap}}"),
+            Self::SliceHeader { .. } => write!(f, "slice.header{{ptr, len, cap}}"),
             Self::StackBlob { offset, byte_size } => {
                 if *offset >= 0 {
                     write!(f, "blob[{byte_size}b@sp+{offset:#x}]")
@@ -343,6 +382,24 @@ pub struct ProbePoint {
     pub function_name: String,
     /// Variables available at this PC with their locations.
     pub variables: Vec<ResolvedVariable>,
+}
+
+/// Evidence from exact-line PC selection.  This is intentionally separate
+/// from `ProbePoint` so existing adapter consumers remain source-compatible,
+/// while diagnostics can explain why earlier statement-boundary PCs were not
+/// selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeResolutionDiagnostics {
+    pub selected_pc: u64,
+    pub candidates: Vec<ProbePcCandidate>,
+    pub rejections: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbePcCandidate {
+    pub pc: u64,
+    pub available: usize,
+    pub requested: usize,
 }
 
 #[cfg(test)]

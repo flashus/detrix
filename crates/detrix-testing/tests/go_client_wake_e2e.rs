@@ -17,6 +17,11 @@ use regex::Regex;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+/// Delve acknowledges `setBreakpoints` before all asynchronous breakpoint
+/// bookkeeping has settled.  A short pause is important here because this
+/// test deliberately reconfigures the same source file several times.
+const DELVE_BREAKPOINT_SETTLE: Duration = Duration::from_secs(1);
+
 /// Test: Go client wake/sleep with logpoints and breakpoints
 ///
 /// Verifies:
@@ -145,6 +150,16 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         )),
     );
 
+    let metric_id = |response: &serde_json::Value, label: &str| -> u64 {
+        response["metricId"].as_u64().unwrap_or_else(|| {
+            // A missing adapter is usually reported only as a generic REST
+            // error. Include the daemon log at the assertion site so CI
+            // captures the DAP disconnect/cleanup cause in the same failure.
+            executor.print_daemon_logs(100);
+            panic!("No metricId in {label} response: {response}");
+        })
+    };
+
     // Wait for connection to register with daemon
     tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -189,15 +204,12 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         .json()
         .await
         .expect("Failed to parse response");
-    let metric1_id = metric1_response["metricId"]
-        .as_u64()
-        .unwrap_or_else(|| panic!("No metricId in metric1 response: {}", metric1_response));
+    let metric1_id = metric_id(&metric1_response, "metric1");
     reporter.step_success(step, Some(&format!("ID={}", metric1_id)));
 
-    // Small delay: give delve time to register the logpoint before sending the next request.
-    // Under heavy CI load, delve can be briefly in a "processing breakpoints" state and
-    // return an error for rapid back-to-back metric additions.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Give Delve time to finish asynchronous breakpoint bookkeeping before
+    // reconfiguring the same source file again.
+    tokio::time::sleep(DELVE_BREAKPOINT_SETTLE).await;
 
     // Metric 2: LOGPOINT - simple variable 'pnl' at OFFSET_TOTAL_PNL line
     let step = reporter.step_start(
@@ -233,12 +245,10 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         .json()
         .await
         .expect("Failed to parse response");
-    let metric2_id = metric2_response["metricId"]
-        .as_u64()
-        .unwrap_or_else(|| panic!("No metricId in metric2 response: {}", metric2_response));
+    let metric2_id = metric_id(&metric2_response, "metric2");
     reporter.step_success(step, Some(&format!("ID={}", metric2_id)));
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(DELVE_BREAKPOINT_SETTLE).await;
 
     // Metric 3: BREAKPOINT - function call 'len(symbol)' at OFFSET_ORDER_ID line
     let step = reporter.step_start(
@@ -274,12 +284,10 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         .json()
         .await
         .expect("Failed to parse response");
-    let metric3_id = metric3_response["metricId"]
-        .as_u64()
-        .unwrap_or_else(|| panic!("No metricId in metric3 response: {}", metric3_response));
+    let metric3_id = metric_id(&metric3_response, "metric3");
     reporter.step_success(step, Some(&format!("ID={}", metric3_id)));
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(DELVE_BREAKPOINT_SETTLE).await;
 
     // Metric 4: BREAKPOINT - with stack trace at OFFSET_CURRENT_PRICE line
     let step = reporter.step_start(
@@ -316,9 +324,7 @@ async fn test_go_client_wake_logpoints_and_breakpoints() {
         .json()
         .await
         .expect("Failed to parse response");
-    let metric4_id = metric4_response["metricId"]
-        .as_u64()
-        .unwrap_or_else(|| panic!("No metricId in metric4 response: {}", metric4_response));
+    let metric4_id = metric_id(&metric4_response, "metric4");
     reporter.step_success(step, Some(&format!("ID={}", metric4_id)));
 
     // ====================================================================

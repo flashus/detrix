@@ -15,6 +15,7 @@
 
 use detrix_testing::e2e::dap_scenarios::go_classic_lines;
 use detrix_testing::e2e::{executor::TestExecutor, reporter::TestReporter};
+use serial_test::serial;
 use std::env;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -55,6 +56,7 @@ fn start_fixture(binary_path: &str) -> Child {
 }
 
 #[tokio::test]
+#[serial(ebpf_classic_map)]
 #[ignore = "requires Go < 1.24 fixture and CAP_BPF — run via: task test-ebpf-classic-inject"]
 async fn test_ebpf_classic_map_order_with_map() {
     let reporter = TestReporter::new("eBPF Classic Map — Order with Map Field", "EbpfAdapter");
@@ -316,6 +318,7 @@ async fn test_ebpf_classic_map_order_with_map() {
 }
 
 #[tokio::test]
+#[serial(ebpf_classic_map)]
 #[ignore = "requires Go < 1.24 fixture and CAP_BPF — run via: task test-ebpf-classic-inject"]
 async fn test_ebpf_classic_map_nil_map() {
     let reporter = TestReporter::new("eBPF Classic Map — Nil Map", "EbpfAdapter");
@@ -539,6 +542,7 @@ async fn test_ebpf_classic_map_nil_map() {
 }
 
 #[tokio::test]
+#[serial(ebpf_classic_map)]
 #[ignore = "requires Go < 1.24 fixture and CAP_BPF — run via: task test-ebpf-classic-inject"]
 async fn test_ebpf_classic_map_iteration_int() {
     // Smoke test: capture a plain int variable to verify uprobe mechanism works

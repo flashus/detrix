@@ -23,6 +23,7 @@ use crate::dwarf::nested_types::NestedType;
 use crate::dwarf::types::ResolvedVariable;
 use crate::error::{Error, Result};
 use crate::mem_reader::ProcessMemoryReader;
+use crate::probe::program::{RAW_ENVELOPE_MAGIC, RAW_ENVELOPE_SCHEMA, RAW_ENVELOPE_SIZE};
 use crate::probe::types::{CaptureConfig, CapturedValue, ProbeEvent};
 
 /// Minimum event size: pid(4) + tid(4) + ns_pid(4) + reserved(4) + timestamp(8) = 24 bytes.
@@ -80,6 +81,24 @@ pub fn parse_ring_buffer_event(
     config: &CaptureConfig,
     mem_reader: &dyn ProcessMemoryReader,
 ) -> Result<ProbeEvent> {
+    parse_ring_buffer_event_with_envelope(data, variables, capture_goid, config, mem_reader, None)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawEnvelopeExpectation {
+    pub profile_tag: u32,
+    pub plan_tag: u64,
+    pub field_count: usize,
+}
+
+pub fn parse_ring_buffer_event_with_envelope(
+    data: &[u8],
+    variables: &[ResolvedVariable],
+    capture_goid: bool,
+    config: &CaptureConfig,
+    mem_reader: &dyn ProcessMemoryReader,
+    envelope: Option<RawEnvelopeExpectation>,
+) -> Result<ProbeEvent> {
     if data.len() < MIN_EVENT_SIZE {
         return Err(Error::RingBuffer(format!(
             "Event too small: {} bytes (min {MIN_EVENT_SIZE})",
@@ -102,6 +121,44 @@ pub fn parse_ring_buffer_event(
     // Note: This was broken when capture_goid was enabled — parser read goid before timestamp.
     let timestamp_ns = read_u64(data, &mut offset)?;
 
+    if let Some(expected) = envelope {
+        if expected.field_count != variables.len() {
+            return Err(Error::RingBuffer(format!(
+                "Envelope field count mismatch: expected {}, variables {}",
+                expected.field_count,
+                variables.len()
+            )));
+        }
+        if data.len() < offset + RAW_ENVELOPE_SIZE {
+            return Err(Error::RingBuffer("Truncated DRX1 envelope header".into()));
+        }
+        let magic = read_u32(data, &mut offset)?;
+        let schema = read_u16(data, &mut offset)?;
+        let field_count = read_u16(data, &mut offset)? as usize;
+        let payload_len = read_u32(data, &mut offset)? as usize;
+        let profile_tag = read_u32(data, &mut offset)?;
+        let plan_tag = read_u64(data, &mut offset)?;
+        if magic != RAW_ENVELOPE_MAGIC || schema != RAW_ENVELOPE_SCHEMA {
+            return Err(Error::RingBuffer(format!(
+                "Unsupported DRX1 envelope magic/schema: {magic:#x}/{schema}"
+            )));
+        }
+        if field_count != expected.field_count
+            || profile_tag != expected.profile_tag
+            || plan_tag != expected.plan_tag
+        {
+            return Err(Error::RingBuffer(
+                "Stale or mismatched DRX1 envelope".into(),
+            ));
+        }
+        let actual_payload_len = data.len().saturating_sub(offset);
+        if payload_len != actual_payload_len {
+            return Err(Error::RingBuffer(format!(
+                "DRX1 payload length mismatch: declared {payload_len}, actual {actual_payload_len}"
+            )));
+        }
+    }
+
     let goid = if capture_goid {
         Some(read_u64(data, &mut offset)?)
     } else {
@@ -114,13 +171,17 @@ pub fn parse_ring_buffer_event(
             Error::RingBuffer(format!("Failed to read variable '{}': {e}", var.name))
         })?;
         let captured = match &var.location {
-            crate::dwarf::types::VariableLocation::GoString { .. } => {
+            crate::dwarf::types::VariableLocation::GoString { .. }
+            | crate::dwarf::types::VariableLocation::StringHeader { .. } => {
                 // Read string length from the event (BPF read this from stack)
                 let len = read_u64(data, &mut offset).map_err(|e| {
                     Error::RingBuffer(format!("Failed to read string len for '{}': {e}", var.name))
                 })? as usize;
-                // Skip the empty buffer (BPF doesn't read Go heap)
-                let _ = read_bytes(data, &mut offset, config.max_string_capture);
+                // The probe snapshots bytes synchronously while the value is
+                // live. This is essential for Rust heap-backed `String`s,
+                // which may be moved or dropped before asynchronous decoding.
+                // Keep process-memory reading as a fallback for older paths.
+                let inline = read_bytes(data, &mut offset, config.max_string_capture)?;
 
                 // Validate string length against configured limit.
                 // Strings longer than max_string_capture are rejected to prevent
@@ -139,10 +200,19 @@ pub fn parse_ring_buffer_event(
                     // ALWAYS use user-space memory reader for Go strings
                     // BPF cannot access Go heap memory reliably
 
+                    // AArch64 user pointers may carry a top-byte allocation
+                    // tag (TBI/MTE).  LLDB/codelldb canonicalize such pointers
+                    // before process reads; do the same for the shared eBPF
+                    // envelope so a valid Rust `String` is not mistaken for a
+                    // kernel address.
+                    let val = canonicalize_user_pointer(val);
+
                     // Validate string pointer before attempting read.
-                    // Reject null pointers and kernel-space addresses (>= 0x8000_0000_0000 on x86_64).
-                    // This prevents accidental reads from arbitrary addresses if the BPF program
-                    // captures garbage data (e.g. from uninitialized stack memory).
+                    // Reject null pointers and addresses outside the 56-bit user
+                    // address envelope.  The previous x86-only 0x8000_0000_0000
+                    // cutoff rejected valid tagged/high VA AArch64 pointers.
+                    // This still prevents accidental reads from arbitrary kernel
+                    // addresses if the BPF program captures garbage.
                     if val == 0 {
                         detrix_logging::debug!(
                             "[ringbuf] Go string ptr is null for '{}' (ns_pid={}), skipping read",
@@ -163,9 +233,8 @@ pub fn parse_ring_buffer_event(
                             data: vec![],
                             len: 0,
                         }
-                    } else if val >= 0x8000_0000_0000 {
-                        // Kernel-space address — the BPF program cannot safely read it from
-                        // user-space and attempting to do so would fault or return garbage.
+                    } else if val >= 0x0100_0000_0000_0000 {
+                        // Outside the supported 56-bit user-space envelope.
                         detrix_logging::warn!(
                             "[ringbuf] ptr={:#x} for '{}' is in kernel space (ns_pid={}), rejecting",
                             val, var.name, ns_pid
@@ -174,15 +243,18 @@ pub fn parse_ring_buffer_event(
                             data: vec![],
                             len: 0,
                         }
+                    } else if len <= inline.len() && inline[..len].iter().any(|byte| *byte != 0) {
+                        CapturedValue::String {
+                            data: inline[..len].to_vec(),
+                            len,
+                        }
                     } else {
                         detrix_logging::debug!(
                             "[ringbuf] Reading Go string via user-space: ns_pid={} ptr={:#x} len={}",
                             ns_pid, val, len
                         );
 
-                        let result = mem_reader.read_string(ns_pid, val, len);
-
-                        match result {
+                        match mem_reader.read_string(ns_pid, val, len) {
                             Ok(s) => CapturedValue::String {
                                 data: s.into_bytes(),
                                 len,
@@ -201,21 +273,50 @@ pub fn parse_ring_buffer_event(
                     }
                 }
             }
-            crate::dwarf::types::VariableLocation::GoSlice { .. } => {
-                let len = read_u64(data, &mut offset).map_err(|e| {
+            crate::dwarf::types::VariableLocation::GoSlice { .. }
+            | crate::dwarf::types::VariableLocation::SliceHeader { .. } => {
+                let second = read_u64(data, &mut offset).map_err(|e| {
                     Error::RingBuffer(format!("Failed to read slice len for '{}': {e}", var.name))
                 })?;
-                let cap = read_u64(data, &mut offset).map_err(|e| {
+                let third = read_u64(data, &mut offset).map_err(|e| {
                     Error::RingBuffer(format!("Failed to read slice cap for '{}': {e}", var.name))
                 })?;
-                CapturedValue::Slice { len, cap }
+                // The parser/compiler normalize every supported layout to the
+                // language-neutral event order `(ptr, len, cap)`. Rust Vec's
+                // physical `{cap, ptr, len}` layout is handled while lowering
+                // its DWARF locations, so the ring-buffer decoder must not
+                // reinterpret the already-normalized words (doing so turns
+                // the data pointer into the reported capacity).
+                CapturedValue::Slice {
+                    len: second,
+                    cap: third,
+                }
             }
             crate::dwarf::types::VariableLocation::StackBlob { byte_size, .. }
             | crate::dwarf::types::VariableLocation::PiecewiseBlob { byte_size, .. } => {
                 // var{idx} (u64) was already read above as `val` — it is 0 (unused).
                 // The BPF program filled var{idx}_blob[N] with the actual bytes inline.
                 let capture = (*byte_size).min(config.max_blob_capture);
-                let bytes = read_bytes(data, &mut offset, capture).map_err(|e| {
+                let bytes = if data.len().saturating_sub(offset) >= capture {
+                    read_bytes(data, &mut offset, capture).map_err(|e| {
+                        Error::RingBuffer(format!("Failed to read StackBlob '{}': {}", var.name, e))
+                    })?
+                } else if val != 0 {
+                    // Some kernels/clang versions emit only the fixed event
+                    // prefix for large inline aggregates. The first word is
+                    // also emitted as the target stack address, allowing a
+                    // safe user-space snapshot fallback.
+                    mem_reader.read_bytes(ns_pid, val, capture).map_err(|e| {
+                        detrix_logging::warn!(
+                            "[ringbuf] StackBlob '{}' inline data missing and stack fallback failed (ns_pid={} ptr={:#x} byte_size={}): {}",
+                            var.name, ns_pid, val, byte_size, e
+                        );
+                        Error::RingBuffer(format!("Failed to read StackBlob '{}': {}", var.name, e))
+                    })?
+                } else {
+                    let e = format!(
+                        "Unexpected end of event reading {capture} bytes at offset {offset}"
+                    );
                     detrix_logging::warn!(
                         "[ringbuf] StackBlob '{}' read failed (ns_pid={} byte_size={}): {}",
                         var.name,
@@ -223,8 +324,11 @@ pub fn parse_ring_buffer_event(
                         byte_size,
                         e
                     );
-                    Error::RingBuffer(format!("Failed to read StackBlob '{}': {}", var.name, e))
-                })?;
+                    return Err(Error::RingBuffer(format!(
+                        "Failed to read StackBlob '{}': {}",
+                        var.name, e
+                    )));
+                };
 
                 detrix_logging::debug!(
                     "[ringbuf] StackBlob '{}' ns_pid={} byte_size={} capture={}",
@@ -234,22 +338,173 @@ pub fn parse_ring_buffer_event(
                     capture
                 );
 
-                // If we have DWARF field info, parse the blob into named fields
-                if let Some(crate::dwarf::nested_types::NestedType::Struct {
-                    fields: dwarf_fields,
-                    ..
-                }) = &var.nested_type
-                {
-                    parse_struct_fields_from_blob(
-                        &bytes,
-                        &var.type_name,
-                        dwarf_fields,
-                        config,
-                        mem_reader,
-                        ns_pid,
-                    )
+                // Rust-specific bounded ABI contracts.  These are address/state
+                // observations only: no target code is called and no arbitrary
+                // heap graph is traversed.  If the type name does not prove one
+                // of the contracts, retain the existing nested/blob decoder.
+                let special_value = if is_probably_rust_type(&var.type_name) {
+                    match crate::rust_layout::infer(&var.type_name, *byte_size) {
+                        Some(crate::rust_layout::RustLayoutContract::NicheOption {
+                            pointer_offset,
+                            word_size,
+                        }) => {
+                            let pointer = read_layout_word(&bytes, pointer_offset, word_size)
+                                .ok_or_else(|| {
+                                    Error::RingBuffer(format!(
+                                        "Rust niche Option '{}' is truncated",
+                                        var.name
+                                    ))
+                                })?;
+                            let variant = if pointer == 0 { "None" } else { "Some" };
+                            Some(CapturedValue::Struct {
+                                type_name: var.type_name.clone(),
+                                fields: vec![
+                                    (
+                                        "variant".into(),
+                                        Box::new(CapturedValue::String {
+                                            data: variant.as_bytes().to_vec(),
+                                            len: variant.len(),
+                                        }),
+                                    ),
+                                    ("pointer".into(), Box::new(CapturedValue::Scalar(pointer))),
+                                ],
+                            })
+                        }
+                        Some(crate::rust_layout::RustLayoutContract::TraitObject {
+                            data_offset,
+                            vtable_offset,
+                            word_size,
+                        }) => {
+                            let data_ptr = read_layout_word(&bytes, data_offset, word_size)
+                                .ok_or_else(|| {
+                                    Error::RingBuffer(format!(
+                                        "Rust trait object '{}' data pointer is truncated",
+                                        var.name
+                                    ))
+                                })?;
+                            let vtable_ptr = read_layout_word(&bytes, vtable_offset, word_size)
+                                .ok_or_else(|| {
+                                    Error::RingBuffer(format!(
+                                        "Rust trait object '{}' vtable pointer is truncated",
+                                        var.name
+                                    ))
+                                })?;
+                            Some(CapturedValue::Struct {
+                                type_name: var.type_name.clone(),
+                                fields: vec![
+                                    ("data_ptr".into(), Box::new(CapturedValue::Scalar(data_ptr))),
+                                    (
+                                        "vtable_ptr".into(),
+                                        Box::new(CapturedValue::Scalar(vtable_ptr)),
+                                    ),
+                                ],
+                            })
+                        }
+                        Some(crate::rust_layout::RustLayoutContract::AsyncState {
+                            state_offset,
+                            state_size,
+                        }) => {
+                            let state = read_layout_word(&bytes, state_offset, state_size)
+                                .ok_or_else(|| {
+                                    Error::RingBuffer(format!(
+                                        "Rust async state '{}' is truncated",
+                                        var.name
+                                    ))
+                                })?;
+                            Some(CapturedValue::Struct {
+                                type_name: var.type_name.clone(),
+                                fields: vec![(
+                                    "state".into(),
+                                    Box::new(CapturedValue::Scalar(state)),
+                                )],
+                            })
+                        }
+                        None => None,
+                    }
                 } else {
-                    CapturedValue::Bytes(bytes)
+                    None
+                };
+
+                if let Some(special_value) = special_value {
+                    special_value
+                } else {
+                    let enum_layout = var.nested_type.as_ref().and_then(|nested| match nested {
+                        NestedType::Scalar(type_info) => type_info.enum_layout.as_ref(),
+                        _ => None,
+                    });
+                    if let Some(layout) = enum_layout {
+                        if !layout.is_explicit_non_niche() {
+                            return Err(Error::RingBuffer(format!(
+                                "Enum '{}' has incomplete or niche DWARF layout",
+                                var.name
+                            )));
+                        }
+                        let variants: Vec<crate::decode::EnumVariantSpec> = layout
+                            .variants
+                            .iter()
+                            .filter_map(|variant| {
+                                Some(crate::decode::EnumVariantSpec {
+                                    name: variant.name.clone(),
+                                    discriminant: u64::try_from(variant.discriminant?).ok()?,
+                                    payload_offset: variant
+                                        .payload_offset
+                                        .map(|offset| offset as usize),
+                                    payload_size: variant.payload_size.map(|size| size as usize),
+                                })
+                            })
+                            .collect();
+                        let decoded = crate::decode::decode_enum_variant(
+                            &crate::decode::DecodedBlob {
+                                name: var.name.clone(),
+                                bytes: bytes.clone(),
+                            },
+                            layout.discriminant_offset as usize,
+                            layout.discriminant_size as usize,
+                            &variants,
+                            config.max_blob_capture,
+                        )
+                        .map_err(|error| Error::RingBuffer(error.to_string()))?;
+                        let mut fields = vec![
+                            (
+                                "variant".to_string(),
+                                Box::new(CapturedValue::String {
+                                    len: decoded.variant.len(),
+                                    data: decoded.variant.into_bytes(),
+                                }),
+                            ),
+                            (
+                                "discriminant".to_string(),
+                                Box::new(CapturedValue::Scalar(decoded.discriminant)),
+                            ),
+                        ];
+                        if let Some(payload) = decoded.payload {
+                            fields.push((
+                                "payload".to_string(),
+                                Box::new(CapturedValue::Bytes(payload)),
+                            ));
+                        }
+                        CapturedValue::Struct {
+                            type_name: var.type_name.clone(),
+                            fields,
+                        }
+                    } else
+                    // If we have DWARF field info, parse the blob into named fields
+                    if let Some(crate::dwarf::nested_types::NestedType::Struct {
+                        fields: dwarf_fields,
+                        ..
+                    }) = &var.nested_type
+                    {
+                        parse_struct_fields_from_blob(
+                            &bytes,
+                            &var.type_name,
+                            dwarf_fields,
+                            config,
+                            mem_reader,
+                            ns_pid,
+                        )
+                    } else {
+                        CapturedValue::Bytes(bytes)
+                    }
                 }
             }
             crate::dwarf::types::VariableLocation::StackIndirect { byte_size, .. } => {
@@ -309,12 +564,11 @@ pub fn parse_ring_buffer_event(
                     _ => (None, None),
                 };
 
-                super::map_iter::read_go_map(
-                    val, key_nested, val_nested, config, mem_reader, ns_pid,
-                )
+                super::map_iter::read_map(val, key_nested, val_nested, config, mem_reader, ns_pid)
             }
             crate::dwarf::types::VariableLocation::Register(_)
-            | crate::dwarf::types::VariableLocation::StackOffset { .. } => {
+            | crate::dwarf::types::VariableLocation::StackOffset { .. }
+            | crate::dwarf::types::VariableLocation::FrameOffset { .. } => {
                 // When nested_type is present, `val` is the base address of a struct
                 // that BPF captured from a register or stack slot. Read the struct bytes
                 // from user-space and parse fields using DWARF info.
@@ -330,8 +584,10 @@ pub fn parse_ring_buffer_event(
                     )?
                 } else {
                     match var.type_name.as_str() {
-                        "float64" => CapturedValue::Float(f64::from_bits(val)),
-                        "float32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
+                        "float64" | "f64" => CapturedValue::Float(f64::from_bits(val)),
+                        "float32" | "f32" => {
+                            CapturedValue::Float(f32::from_bits(val as u32) as f64)
+                        }
                         _ => CapturedValue::Scalar(val),
                     }
                 }
@@ -347,6 +603,14 @@ pub fn parse_ring_buffer_event(
         timestamp_ns,
         values,
     })
+}
+
+/// Remove an AArch64 top-byte tag while leaving ordinary x86-64 and canonical
+/// user addresses unchanged. Linux user virtual addresses in the supported
+/// targets are below bit 56; masking only the top byte preserves the complete
+/// 56-bit address payload and keeps the operation safe for tagged pointers.
+fn canonicalize_user_pointer(ptr: u64) -> u64 {
+    ptr & 0x00ff_ffff_ffff_ffff
 }
 
 fn read_bytes(data: &[u8], offset: &mut usize, count: usize) -> Result<Vec<u8>> {
@@ -372,6 +636,21 @@ fn read_u32(data: &[u8], offset: &mut usize) -> Result<u32> {
             .map_err(|_| Error::RingBuffer("u32 parse failed".to_string()))?,
     );
     *offset += 4;
+    Ok(val)
+}
+
+fn read_u16(data: &[u8], offset: &mut usize) -> Result<u16> {
+    if *offset + 2 > data.len() {
+        return Err(Error::RingBuffer(format!(
+            "Unexpected end of event at offset {offset}"
+        )));
+    }
+    let val = u16::from_le_bytes(
+        data[*offset..*offset + 2]
+            .try_into()
+            .map_err(|_| Error::RingBuffer("u16 parse failed".to_string()))?,
+    );
+    *offset += 2;
     Ok(val)
 }
 
@@ -411,13 +690,24 @@ mod tests {
     use crate::dwarf::types::{Register, ResolvedVariable, VariableLocation, VariableSize};
     use crate::probe::types::{CaptureConfig, MAX_STRING_CAPTURE};
 
+    #[test]
+    fn map_dispatch_keeps_go_maps_on_go_reader() {
+        assert!(!is_rust_map_field("map[string]main.Tag", true));
+        assert!(!is_rust_map_field("map< string, string>", true));
+        assert!(is_rust_map_field(
+            "std::collections::HashMap<alloc::string::String, main::Tag>",
+            true
+        ));
+        assert!(is_rust_map_field("HashMap<String, Tag>", true));
+    }
+
     /// Stub memory reader that tracks which PIDs were used for reads.
     struct StubMemReader;
     impl ProcessMemoryReader for StubMemReader {
         fn read_string(&self, _pid: u32, ptr: u64, len: usize) -> Result<String> {
             match ptr {
-                0xDEADBEEF => Ok("hello".to_string()),
-                0xCAFEBABE => Ok("BTCUSD".to_string()),
+                0xDEAD_BEEF => Ok("hello".to_string()),
+                0xCAFE_BABE => Ok("BTCUSD".to_string()),
                 _ => Ok("x".repeat(len)),
             }
         }
@@ -454,7 +744,7 @@ mod tests {
             if pid == self.fail_pid {
                 return Err(crate::error::Error::Ebpf("read failed".to_string()));
             }
-            Ok(0x12345678)
+            Ok(0x1234_5678)
         }
     }
 
@@ -548,6 +838,18 @@ mod tests {
     }
 
     #[test]
+    fn canonicalizes_aarch64_top_byte_pointer_tags() {
+        assert_eq!(
+            super::canonicalize_user_pointer(0xaa00_1234_5678_9abc),
+            0x0000_1234_5678_9abc
+        );
+        assert_eq!(
+            super::canonicalize_user_pointer(0x0000_7fff_1234_5678),
+            0x0000_7fff_1234_5678
+        );
+    }
+
+    #[test]
     fn parse_single_scalar_var() {
         let data = build_event_bytes(1, 2, 100, &[42]);
         let vars = vec![scalar_var("amount")];
@@ -565,29 +867,85 @@ mod tests {
     }
 
     #[test]
-    fn parse_top_level_float64_var() {
-        let amount = 1234.5_f64;
-        let data = build_event_bytes(1, 2, 100, &[amount.to_bits()]);
-        let vars = vec![ResolvedVariable {
-            name: "amount".to_string(),
-            location: VariableLocation::Register(Register::Rax),
-            size: VariableSize::QWord,
-            type_name: "float64".to_string(),
-            nested_type: None,
-        }];
-        let event = parse_ring_buffer_event(
+    fn parse_versioned_raw_envelope_before_scalars() {
+        let profile_tag = crate::compiler::profile_tag("rust");
+        let plan_tag = crate::compiler::plan_tag("probe:1000");
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&RAW_ENVELOPE_MAGIC.to_le_bytes());
+        data.extend_from_slice(&RAW_ENVELOPE_SCHEMA.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&8u32.to_le_bytes());
+        data.extend_from_slice(&profile_tag.to_le_bytes());
+        data.extend_from_slice(&plan_tag.to_le_bytes());
+        data.extend_from_slice(&42u64.to_le_bytes());
+        let vars = vec![scalar_var("amount")];
+        let event = parse_ring_buffer_event_with_envelope(
             &data,
             &vars,
             false,
             &CaptureConfig::default(),
             &StubMemReader,
+            Some(RawEnvelopeExpectation {
+                profile_tag,
+                plan_tag,
+                field_count: 1,
+            }),
         )
         .unwrap();
+        assert_eq!(event.values[0].as_u64(), Some(42));
+    }
 
-        assert_eq!(event.values.len(), 1);
-        match &event.values[0] {
-            CapturedValue::Float(v) => assert!((*v - amount).abs() < f64::EPSILON),
-            other => panic!("Expected Float, got {other:?}"),
+    #[test]
+    fn stale_versioned_raw_envelope_is_rejected() {
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&RAW_ENVELOPE_MAGIC.to_le_bytes());
+        data.extend_from_slice(&RAW_ENVELOPE_SCHEMA.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&8u32.to_le_bytes());
+        data.extend_from_slice(&crate::compiler::profile_tag("rust").to_le_bytes());
+        data.extend_from_slice(&crate::compiler::plan_tag("probe:old").to_le_bytes());
+        data.extend_from_slice(&42u64.to_le_bytes());
+        let result = parse_ring_buffer_event_with_envelope(
+            &data,
+            &[scalar_var("amount")],
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+            Some(RawEnvelopeExpectation {
+                profile_tag: crate::compiler::profile_tag("rust"),
+                plan_tag: crate::compiler::plan_tag("probe:new"),
+                field_count: 1,
+            }),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_top_level_float64_var() {
+        let amount = 1234.5_f64;
+        for type_name in ["float64", "f64"] {
+            let data = build_event_bytes(1, 2, 100, &[amount.to_bits()]);
+            let vars = vec![ResolvedVariable {
+                name: "amount".to_string(),
+                location: VariableLocation::Register(Register::Rax),
+                size: VariableSize::QWord,
+                type_name: type_name.to_string(),
+                nested_type: None,
+            }];
+            let event = parse_ring_buffer_event(
+                &data,
+                &vars,
+                false,
+                &CaptureConfig::default(),
+                &StubMemReader,
+            )
+            .unwrap();
+
+            assert_eq!(event.values.len(), 1);
+            match &event.values[0] {
+                CapturedValue::Float(v) => assert!((*v - amount).abs() < f64::EPSILON),
+                other => panic!("Expected Float for {type_name}, got {other:?}"),
+            }
         }
     }
 
@@ -663,7 +1021,7 @@ mod tests {
     fn parse_go_string_var() {
         let mut data = build_event_bytes(1, 2, 100, &[]);
         // String pointer - stub reader returns "hello" for this address
-        data.extend_from_slice(&0xDEADBEEF_u64.to_le_bytes());
+        data.extend_from_slice(&0xDEAD_BEEF_u64.to_le_bytes());
         // String length
         data.extend_from_slice(&5_u64.to_le_bytes());
         // Skip buffer - memory reader provides content now
@@ -702,7 +1060,7 @@ mod tests {
     fn parse_go_string_with_symbol_content() {
         let symbol = b"BTCUSD";
         let mut data = build_event_bytes(1, 2, 100, &[]);
-        data.extend_from_slice(&0xCAFEBABE_u64.to_le_bytes()); // ptr - stub returns "BTCUSD"
+        data.extend_from_slice(&0xCAFE_BABE_u64.to_le_bytes()); // ptr - stub returns "BTCUSD"
         data.extend_from_slice(&(symbol.len() as u64).to_le_bytes()); // len
                                                                       // Skip buffer - memory reader provides content now
         data.extend_from_slice(&[0u8; MAX_STRING_CAPTURE]);
@@ -772,6 +1130,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_rust_vec_uses_compiler_normalized_ptr_len_cap_header() {
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&0xDEAD_u64.to_le_bytes()); // ptr (var0)
+        data.extend_from_slice(&7_u64.to_le_bytes()); // len (var0_len)
+        data.extend_from_slice(&16_u64.to_le_bytes()); // cap (var0_cap)
+
+        let vars = vec![ResolvedVariable {
+            name: "values".to_string(),
+            location: VariableLocation::GoSlice {
+                ptr: Box::new(VariableLocation::Register(Register::Rax)),
+                len: Box::new(VariableLocation::Register(Register::Rbx)),
+                cap: Box::new(VariableLocation::Register(Register::Rcx)),
+            },
+            size: VariableSize::QWord,
+            type_name: "alloc::vec::Vec<u64, alloc::alloc::Global>".to_string(),
+            nested_type: None,
+        }];
+
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
+        assert_eq!(event.values, vec![CapturedValue::Slice { len: 7, cap: 16 }]);
+    }
+
+    #[test]
     fn parse_stack_blob_returns_bytes() {
         let blob: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
         let mut data = build_event_bytes(1, 2, 100, &[]);
@@ -801,6 +1189,125 @@ mod tests {
                 assert_eq!(b.as_slice(), &blob);
             }
             other => panic!("Expected Bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_rust_niche_option_as_variant_and_address() {
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&0_u64.to_le_bytes());
+        data.extend_from_slice(&0x1234_u64.to_le_bytes());
+        let vars = vec![ResolvedVariable {
+            name: "maybe".into(),
+            location: VariableLocation::StackBlob {
+                offset: -8,
+                byte_size: 8,
+            },
+            size: VariableSize::QWord,
+            type_name: "Option<&u64>".into(),
+            nested_type: None,
+        }];
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
+        assert!(matches!(event.values[0], CapturedValue::Struct { .. }));
+        assert!(event.values[0]
+            .to_json_value(VariableSize::QWord)
+            .contains("Some"));
+    }
+
+    #[test]
+    fn parse_rust_trait_object_preserves_data_and_vtable_addresses() {
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&0_u64.to_le_bytes());
+        data.extend_from_slice(&0x1111_u64.to_le_bytes());
+        data.extend_from_slice(&0x2222_u64.to_le_bytes());
+        let vars = vec![ResolvedVariable {
+            name: "object".into(),
+            location: VariableLocation::StackBlob {
+                offset: -16,
+                byte_size: 16,
+            },
+            size: VariableSize::QWord,
+            type_name: "&dyn Display".into(),
+            nested_type: None,
+        }];
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
+        let json = event.values[0].to_json_value(VariableSize::QWord);
+        assert!(json.contains("data_ptr") && json.contains("vtable_ptr"));
+    }
+
+    #[test]
+    fn parse_explicit_enum_blob_returns_selected_variant() {
+        let mut data = build_event_bytes(1, 2, 100, &[]);
+        data.extend_from_slice(&0_u64.to_le_bytes());
+        data.extend_from_slice(&[1, 42]);
+        let type_info = crate::dwarf::typeinfo::TypeInfo {
+            name: "TradeState".into(),
+            byte_size: 2,
+            is_enum: true,
+            enum_layout: Some(crate::dwarf::typeinfo::EnumLayout {
+                discriminant_offset: 0,
+                discriminant_size: 1,
+                variants: vec![
+                    crate::dwarf::typeinfo::EnumVariantLayout {
+                        name: "Pending".into(),
+                        discriminant: Some(0),
+                        payload_offset: None,
+                        payload_size: None,
+                    },
+                    crate::dwarf::typeinfo::EnumVariantLayout {
+                        name: "Settled".into(),
+                        discriminant: Some(1),
+                        payload_offset: Some(1),
+                        payload_size: Some(1),
+                    },
+                ],
+                niche: false,
+            }),
+            ..crate::dwarf::typeinfo::TypeInfo::unknown()
+        };
+        let vars = vec![ResolvedVariable {
+            name: "state".into(),
+            location: VariableLocation::StackBlob {
+                offset: -16,
+                byte_size: 2,
+            },
+            size: VariableSize::QWord,
+            type_name: "TradeState".into(),
+            nested_type: Some(NestedType::Scalar(type_info)),
+        }];
+        let event = parse_ring_buffer_event(
+            &data,
+            &vars,
+            false,
+            &CaptureConfig::default(),
+            &StubMemReader,
+        )
+        .unwrap();
+        match &event.values[0] {
+            CapturedValue::Struct { fields, .. } => {
+                assert!(fields.iter().any(|(name, value)| {
+                    name == "variant"
+                        && matches!(value.as_ref(), CapturedValue::String { data, .. } if data == b"Settled")
+                }));
+                assert!(fields.iter().any(|(name, value)| {
+                    name == "discriminant" && matches!(value.as_ref(), CapturedValue::Scalar(1))
+                }));
+            }
+            other => panic!("Expected decoded enum struct, got {other:?}"),
         }
     }
 
@@ -899,7 +1406,7 @@ mod tests {
         // process_vm_readv could read from arbitrary processes.
         let reader = TrackingMemReader::new();
         let mut data = build_event_bytes(1234, 5678, 100, &[]);
-        data.extend_from_slice(&0xDEADBEEF_u64.to_le_bytes()); // string ptr
+        data.extend_from_slice(&0xDEAD_BEEF_u64.to_le_bytes()); // string ptr
         data.extend_from_slice(&5_u64.to_le_bytes()); // string len
         data.extend_from_slice(&[0u8; MAX_STRING_CAPTURE]); // skip buffer
 
@@ -928,7 +1435,7 @@ mod tests {
         // C1: When pid read fails, should return error value, NOT fall back to tid.
         let reader = FailingMemReader { fail_pid: 1234 };
         let mut data = build_event_bytes(1234, 5678, 100, &[]);
-        data.extend_from_slice(&0xDEADBEEF_u64.to_le_bytes());
+        data.extend_from_slice(&0xDEAD_BEEF_u64.to_le_bytes());
         data.extend_from_slice(&5_u64.to_le_bytes());
         data.extend_from_slice(&[0u8; MAX_STRING_CAPTURE]);
 
@@ -990,8 +1497,8 @@ mod tests {
         // not max_string_capture * 16.
         let reader = TrackingMemReader::new();
         let mut data = build_event_bytes(1234, 5678, 100, &[]);
-        data.extend_from_slice(&0xDEADBEEF_u64.to_le_bytes()); // ptr
-                                                               // len = 200, which is > max_string_capture (64) but < 64*16=1024
+        data.extend_from_slice(&0xDEAD_BEEF_u64.to_le_bytes()); // ptr
+                                                                // len = 200, which is > max_string_capture (64) but < 64*16=1024
         data.extend_from_slice(&200_u64.to_le_bytes());
         data.extend_from_slice(&[0u8; MAX_STRING_CAPTURE]);
 
@@ -1192,10 +1699,12 @@ mod tests {
                 is_array: false,
                 is_struct: false,
                 is_map: false,
+                is_enum: false,
                 array_element_count: 0,
                 array_element_type: String::new(),
                 slice_element_type: String::new(),
                 element_byte_size: 0,
+                enum_layout: None,
             }
         }
 
@@ -1275,8 +1784,10 @@ mod tests {
                 is_struct: true,
                 is_pointer: false,
                 is_map: false,
+                is_enum: false,
                 array_element_count: 0,
                 element_byte_size: 0,
+                enum_layout: None,
                 array_element_type: String::new(),
                 slice_element_type: String::new(),
             },
@@ -1294,8 +1805,10 @@ mod tests {
                     is_struct: false,
                     is_pointer: false,
                     is_map: false,
+                    is_enum: false,
                     array_element_count: 0,
                     element_byte_size: 0,
+                    enum_layout: None,
                     array_element_type: String::new(),
                     slice_element_type: String::new(),
                 },
@@ -1520,6 +2033,8 @@ fn is_struct_type(type_name: &str) -> bool {
         "uintptr",
         "float32",
         "float64",
+        "f32",
+        "f64",
         "complex64",
         "complex128",
         "bool",
@@ -1591,17 +2106,23 @@ fn parse_slice_element(
         NestedType::Scalar(type_info) => {
             // Element is a scalar - read based on type
             if type_info.is_string {
-                // String element - read ptr+len and then content
-                let str_ptr = mem_reader.read_u64(pid, elem_addr).map_err(|e| {
-                    crate::error::Error::RingBuffer(format!(
-                        "Failed to read string ptr at {elem_addr:#x}: {e}"
-                    ))
-                })?;
-                let str_len = mem_reader.read_u64(pid, elem_addr + 8).map_err(|e| {
-                    crate::error::Error::RingBuffer(format!(
-                        "Failed to read string len at {elem_addr:#x}: {e}"
-                    ))
-                })? as usize;
+                // Rust String elements use `{capacity, pointer, length}`;
+                // borrowed strings and Go strings use `{pointer, length}`.
+                let (ptr_offset, len_offset, _) = rust_string_header_offsets(&type_info.name);
+                let str_ptr = mem_reader
+                    .read_u64(pid, elem_addr + ptr_offset as u64)
+                    .map_err(|e| {
+                        crate::error::Error::RingBuffer(format!(
+                            "Failed to read string ptr at {elem_addr:#x}: {e}"
+                        ))
+                    })?;
+                let str_len = mem_reader
+                    .read_u64(pid, elem_addr + len_offset as u64)
+                    .map_err(|e| {
+                        crate::error::Error::RingBuffer(format!(
+                            "Failed to read string len at {elem_addr:#x}: {e}"
+                        ))
+                    })? as usize;
                 if str_ptr != 0 && str_len > 0 {
                     match mem_reader.read_string(
                         pid,
@@ -1623,7 +2144,7 @@ fn parse_slice_element(
                         len: 0,
                     })
                 }
-            } else if type_info.name == "float64" {
+            } else if type_info.name == "float64" || type_info.name == "f64" {
                 // Float64 element
                 let val = mem_reader.read_u64(pid, elem_addr).map_err(|e| {
                     crate::error::Error::RingBuffer(format!(
@@ -1631,7 +2152,7 @@ fn parse_slice_element(
                     ))
                 })?;
                 Ok(CapturedValue::Float(f64::from_bits(val)))
-            } else if type_info.name == "float32" {
+            } else if type_info.name == "float32" || type_info.name == "f32" {
                 // Float32 element - read as u64 and take lower 32 bits
                 let val = mem_reader.read_u64(pid, elem_addr).map_err(|e| {
                     crate::error::Error::RingBuffer(format!(
@@ -1772,17 +2293,19 @@ pub fn parse_struct_fields_from_addr(
 
             // Parse field based on its type
             let field_value = if field.type_info.is_string {
-                // String field: read ptr and len from user-space, then read content
+                // Rust String is `{capacity, pointer, length}` while `&str`
+                // and Go strings are `{pointer, length}`.
+                let (ptr_offset, len_offset, _) = rust_string_header_offsets(&field.type_info.name);
                 let str_ptr = read_u64_or_error(
                     mem_reader,
                     pid,
-                    field_addr,
+                    field_addr + ptr_offset as u64,
                     &format!("string ptr for '{}'", field_name),
                 );
                 let str_len = read_u64_or_error(
                     mem_reader,
                     pid,
-                    field_addr + 8,
+                    field_addr + len_offset as u64,
                     &format!("string len for '{}'", field_name),
                 );
 
@@ -1812,27 +2335,127 @@ pub fn parse_struct_fields_from_addr(
                         len: 0,
                     },
                 }
+            } else if field.type_info.is_enum {
+                match field.type_info.enum_layout.as_ref() {
+                    Some(layout) if layout.is_explicit_non_niche() => {
+                        let variants: Vec<crate::decode::EnumVariantSpec> = layout
+                            .variants
+                            .iter()
+                            .filter_map(|variant| {
+                                Some(crate::decode::EnumVariantSpec {
+                                    name: variant.name.clone(),
+                                    discriminant: u64::try_from(variant.discriminant?).ok()?,
+                                    payload_offset: variant.payload_offset.map(|v| v as usize),
+                                    payload_size: variant.payload_size.map(|v| v as usize),
+                                })
+                            })
+                            .collect();
+                        let size = (field.byte_size as usize).clamp(1, 8);
+                        match mem_reader
+                            .read_bytes(pid, field_addr, size)
+                            .and_then(|bytes| {
+                                crate::decode::decode_enum_variant(
+                                    &crate::decode::DecodedBlob {
+                                        name: field.type_info.name.clone(),
+                                        bytes,
+                                    },
+                                    layout.discriminant_offset as usize,
+                                    layout.discriminant_size as usize,
+                                    &variants,
+                                    config.max_blob_capture,
+                                )
+                                .map_err(|e| crate::error::Error::RingBuffer(e.to_string()))
+                            }) {
+                            Ok(decoded) => CapturedValue::Struct {
+                                type_name: field.type_info.name.clone(),
+                                fields: vec![
+                                    (
+                                        "variant".into(),
+                                        Box::new(CapturedValue::String {
+                                            data: decoded.variant.clone().into_bytes(),
+                                            len: decoded.variant.len(),
+                                        }),
+                                    ),
+                                    (
+                                        "discriminant".into(),
+                                        Box::new(CapturedValue::Scalar(decoded.discriminant)),
+                                    ),
+                                ],
+                            },
+                            Err(e) => CapturedValue::Error(e.to_string()),
+                        }
+                    }
+                    _ => CapturedValue::Error(format!(
+                        "enum '{}' has incomplete or niche DWARF layout",
+                        field.type_info.name
+                    )),
+                }
+            } else if field.type_info.is_array && field.type_info.array_element_count > 0 {
+                let count = field.type_info.array_element_count;
+                let elem_size = (field.byte_size / count).max(1);
+                let element_nested = match field.nested_type.as_ref() {
+                    Some(NestedType::Array { element_type, .. }) => Some(element_type.as_ref()),
+                    _ => None,
+                };
+                let element_name = element_nested
+                    .map(|n| n.type_info().name.clone())
+                    .filter(|n| n != "unknown")
+                    .unwrap_or_else(|| field.type_info.array_element_type.clone());
+                let mut elements = Vec::new();
+                for index in 0..count {
+                    let addr = field_addr + index * elem_size;
+                    let value = if let Some(element_nested) = element_nested {
+                        parse_slice_element(
+                            addr,
+                            element_nested,
+                            elem_size,
+                            config,
+                            mem_reader,
+                            pid,
+                        )?
+                    } else if element_name == "f64" || element_name == "float64" {
+                        CapturedValue::Float(f64::from_bits(read_u64_or_error(
+                            mem_reader,
+                            pid,
+                            addr,
+                            &format!("array element {}", index),
+                        )?))
+                    } else {
+                        CapturedValue::Scalar(read_u64_or_error(
+                            mem_reader,
+                            pid,
+                            addr,
+                            &format!("array element {}", index),
+                        )?)
+                    };
+                    elements.push(value);
+                }
+                CapturedValue::Array {
+                    element_type: element_name,
+                    elements,
+                }
             } else if field.type_info.is_slice {
-                // Slice field: read {ptr, len, cap} header and elements
-                // Following Delve's loadSliceInfo + loadArrayValues
-                // Go slice header: ptr (8 bytes) + len (8 bytes) + cap (8 bytes) = 24 bytes
+                // Normalize Go `{ptr,len,cap}`, Rust Vec
+                // `{cap,ptr,len}`, and borrowed Rust `{ptr,len}` headers.
+                let (ptr_offset, len_offset, cap_offset, _) =
+                    rust_slice_header_offsets(&field.type_info.name);
                 match (
                     read_u64_or_error(
                         mem_reader,
                         pid,
-                        field_addr,
+                        field_addr + ptr_offset as u64,
                         &format!("slice ptr for '{}'", field_name),
                     ),
                     read_u64_or_error(
                         mem_reader,
                         pid,
-                        field_addr + 8,
+                        field_addr + len_offset as u64,
                         &format!("slice len for '{}'", field_name),
                     ),
                     read_u64_or_error(
                         mem_reader,
                         pid,
-                        field_addr + 16,
+                        field_addr + cap_offset as u64,
                         &format!("slice cap for '{}'", field_name),
                     ),
                 ) {
@@ -2048,6 +2671,18 @@ pub fn parse_struct_fields_from_addr(
                     Ok(bytes) => CapturedValue::Bytes(bytes),
                     Err(_) => CapturedValue::Bytes(vec![0u8; blob_size]),
                 }
+            } else if is_rust_map_field(&field.type_info.name, field.type_info.is_map) {
+                let (key_nested, val_nested) = match &field.nested_type {
+                    Some(NestedType::Map {
+                        key_type,
+                        value_type,
+                        ..
+                    }) => (Some(key_type.as_ref()), Some(value_type.as_ref())),
+                    _ => (None, None),
+                };
+                super::map_iter::read_rust_hash_map(
+                    field_addr, key_nested, val_nested, config, mem_reader, pid,
+                )
             } else if field.type_info.name.starts_with("map[")
                 || field.type_info.name.starts_with("map<")
             {
@@ -2074,7 +2709,7 @@ pub fn parse_struct_fields_from_addr(
                             }) => (Some(key_type.as_ref()), Some(value_type.as_ref())),
                             _ => (None, None),
                         };
-                        super::map_iter::read_go_map(
+                        super::map_iter::read_map(
                             map_ptr, key_nested, val_nested, config, mem_reader, pid,
                         )
                     }
@@ -2190,10 +2825,24 @@ pub fn parse_struct_fields_from_addr(
                 );
                 match scalar_val {
                     Ok(val) => {
+                        // process_vm_readv reads a machine word for the
+                        // generic scalar path.  Narrow Rust fields (u8/u16/
+                        // u32 and signed counterparts) must be truncated to
+                        // their DWARF width; otherwise the adjacent padding
+                        // bytes make Vec/array struct elements look like
+                        // pointer-sized integers.
+                        let val = match field.type_info.name.as_str() {
+                            "u8" | "i8" | "bool" => val & 0xff,
+                            "u16" | "i16" => val & 0xffff,
+                            "u32" | "i32" | "f32" => val & 0xffff_ffff,
+                            _ => val,
+                        };
                         // Decode IEEE 754 float for float types
                         match field.type_info.name.as_str() {
-                            "float64" => CapturedValue::Float(f64::from_bits(val)),
-                            "float32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
+                            "float64" | "f64" => CapturedValue::Float(f64::from_bits(val)),
+                            "float32" | "f32" => {
+                                CapturedValue::Float(f32::from_bits(val as u32) as f64)
+                            }
                             _ => CapturedValue::Scalar(val),
                         }
                     }
@@ -2261,32 +2910,103 @@ fn parse_struct_fields_from_blob(
             break;
         }
 
-        let field_value = if field.type_info.is_string && start + 16 <= blob.len() {
-            // String header: ptr (8 bytes) + len (8 bytes) stored inline in blob
-            let ptr_result = read_u64_le(&blob[start..start + 8], "string ptr");
-            let len_result = read_u64_le(&blob[start + 8..start + 16], "string len");
-
-            match (ptr_result, len_result) {
-                (Ok(ptr), Ok(len))
-                    if ptr != 0 && len > 0 && len as usize <= config.max_string_capture =>
-                {
-                    let len = len as usize;
-                    match mem_reader.read_string(pid, ptr, len) {
-                        Ok(s) => CapturedValue::String {
-                            len: s.len(),
-                            data: s.into_bytes(),
+        let field_value = if field.type_info.is_enum {
+            let end = (start + field.byte_size as usize).min(blob.len());
+            match field.type_info.enum_layout.as_ref() {
+                Some(layout) if layout.is_explicit_non_niche() && start < end => {
+                    let variants: Vec<crate::decode::EnumVariantSpec> = layout
+                        .variants
+                        .iter()
+                        .filter_map(|variant| {
+                            Some(crate::decode::EnumVariantSpec {
+                                name: variant.name.clone(),
+                                discriminant: u64::try_from(variant.discriminant?).ok()?,
+                                payload_offset: variant
+                                    .payload_offset
+                                    .map(|offset| offset as usize),
+                                payload_size: variant.payload_size.map(|size| size as usize),
+                            })
+                        })
+                        .collect();
+                    match crate::decode::decode_enum_variant(
+                        &crate::decode::DecodedBlob {
+                            name: field.type_info.name.clone(),
+                            bytes: blob[start..end].to_vec(),
                         },
-                        Err(_) => CapturedValue::String {
-                            data: b"<read-failed>".to_vec(),
-                            len,
+                        layout.discriminant_offset as usize,
+                        layout.discriminant_size as usize,
+                        &variants,
+                        config.max_blob_capture,
+                    ) {
+                        Ok(decoded) => CapturedValue::Struct {
+                            type_name: field.type_info.name.clone(),
+                            fields: vec![
+                                (
+                                    "variant".to_string(),
+                                    Box::new(CapturedValue::String {
+                                        len: decoded.variant.len(),
+                                        data: decoded.variant.into_bytes(),
+                                    }),
+                                ),
+                                (
+                                    "discriminant".to_string(),
+                                    Box::new(CapturedValue::Scalar(decoded.discriminant)),
+                                ),
+                            ],
                         },
+                        Err(error) => CapturedValue::Error(error.to_string()),
                     }
                 }
-                (Err(e), _) | (_, Err(e)) => CapturedValue::Error(e.to_string()),
-                _ => CapturedValue::String {
-                    data: vec![],
-                    len: 0,
-                },
+                _ => CapturedValue::Error(format!(
+                    "enum '{}' has incomplete or niche DWARF layout",
+                    field.type_info.name
+                )),
+            }
+        } else if field.type_info.is_string {
+            // Rust's owned String is a Vec<u8> with the current rustc layout
+            // `{capacity, pointer, length}`. Borrowed `&str` and Go strings
+            // use `{pointer, length}`. The nested decoder must use the same
+            // layout contract as the top-level Rust header renderer.
+            let (ptr_offset, len_offset, header_size) =
+                if is_rust_owned_string_type(&field.type_info.name) {
+                    (0usize, 16usize, 24usize)
+                } else {
+                    (0usize, 8usize, 16usize)
+                };
+            if start + header_size > blob.len() {
+                CapturedValue::Error(format!("string header for '{}' is truncated", field.name))
+            } else {
+                let ptr_result = read_u64_le(
+                    &blob[start + ptr_offset..start + ptr_offset + 8],
+                    "string ptr",
+                );
+                let len_result = read_u64_le(
+                    &blob[start + len_offset..start + len_offset + 8],
+                    "string len",
+                );
+
+                match (ptr_result, len_result) {
+                    (Ok(ptr), Ok(len))
+                        if ptr != 0 && len > 0 && len as usize <= config.max_string_capture =>
+                    {
+                        let len = len as usize;
+                        match mem_reader.read_string(pid, ptr, len) {
+                            Ok(s) => CapturedValue::String {
+                                len: s.len(),
+                                data: s.into_bytes(),
+                            },
+                            Err(_) => CapturedValue::String {
+                                data: b"<read-failed>".to_vec(),
+                                len,
+                            },
+                        }
+                    }
+                    (Err(e), _) | (_, Err(e)) => CapturedValue::Error(e.to_string()),
+                    _ => CapturedValue::String {
+                        data: vec![],
+                        len: 0,
+                    },
+                }
             }
         } else if field.type_info.is_array && field.type_info.array_element_count > 0 {
             // Fixed-size array: iterate elements and decode each
@@ -2319,8 +3039,8 @@ fn parse_struct_fields_from_blob(
 
                 // Decode IEEE 754 float for float arrays
                 let elem_value = match field.type_info.array_element_type.as_str() {
-                    "float64" => CapturedValue::Float(f64::from_bits(val)),
-                    "float32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
+                    "float64" | "f64" => CapturedValue::Float(f64::from_bits(val)),
+                    "float32" | "f32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
                     _ => CapturedValue::Scalar(val),
                 };
 
@@ -2360,6 +3080,28 @@ fn parse_struct_fields_from_blob(
             } else {
                 // No type info — return raw bytes
                 CapturedValue::Bytes(sub_blob.to_vec())
+            }
+        } else if is_rust_map_field(&field.type_info.name, field.type_info.is_map) {
+            let (key_nested, val_nested) = match &field.nested_type {
+                Some(NestedType::Map {
+                    key_type,
+                    value_type,
+                    ..
+                }) => (Some(key_type.as_ref()), Some(value_type.as_ref())),
+                _ => (None, None),
+            };
+            let end = (start + field.byte_size as usize).min(blob.len());
+            if end <= start {
+                CapturedValue::Error("Rust HashMap header outside captured blob".into())
+            } else {
+                super::map_iter::read_rust_hash_map_from_blob(
+                    &blob[start..end],
+                    key_nested,
+                    val_nested,
+                    config,
+                    mem_reader,
+                    pid,
+                )
             }
         } else if field.type_info.name.starts_with("map[")
             || field.type_info.name.starts_with("map<")
@@ -2408,7 +3150,7 @@ fn parse_struct_fields_from_blob(
                                 (None, None)
                             }
                         };
-                        super::map_iter::read_go_map(
+                        super::map_iter::read_map(
                             map_ptr, key_nested, val_nested, config, mem_reader, pid,
                         )
                     }
@@ -2472,12 +3214,24 @@ fn parse_struct_fields_from_blob(
                 Err(e) => CapturedValue::Error(e.to_string()),
             }
         } else if field.type_info.is_slice {
-            // Slice field in blob: read {ptr, len, cap} header (24 bytes)
-            // Go slice header: ptr (8 bytes) + len (8 bytes) + cap (8 bytes)
-            if start + 24 <= blob.len() {
-                let slice_ptr_result = read_u64_le(&blob[start..start + 8], "slice ptr");
-                let slice_len_result = read_u64_le(&blob[start + 8..start + 16], "slice len");
-                let slice_cap_result = read_u64_le(&blob[start + 16..start + 24], "slice cap");
+            // Go slices are `{ptr, len, cap}`. Rust Vec is currently
+            // `{cap, ptr, len}` and a borrowed `&[T]` is `{ptr, len}`.
+            // Normalize both Rust forms to the same logical values here.
+            let (ptr_offset, len_offset, cap_offset, header_size) =
+                rust_slice_header_offsets(&field.type_info.name);
+            if start + header_size <= blob.len() {
+                let slice_ptr_result = read_u64_le(
+                    &blob[start + ptr_offset..start + ptr_offset + 8],
+                    "slice ptr",
+                );
+                let slice_len_result = read_u64_le(
+                    &blob[start + len_offset..start + len_offset + 8],
+                    "slice len",
+                );
+                let slice_cap_result = read_u64_le(
+                    &blob[start + cap_offset..start + cap_offset + 8],
+                    "slice cap",
+                );
 
                 let field_value = match (slice_ptr_result, slice_len_result, slice_cap_result) {
                     (Ok(slice_ptr), Ok(slice_len), Ok(slice_cap)) => {
@@ -2575,8 +3329,8 @@ fn parse_struct_fields_from_blob(
             // Decode IEEE 754 float instead of treating as integer
             match val_result {
                 Ok(val) => match field.type_info.name.as_str() {
-                    "float64" => CapturedValue::Float(f64::from_bits(val)),
-                    "float32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
+                    "float64" | "f64" => CapturedValue::Float(f64::from_bits(val)),
+                    "float32" | "f32" => CapturedValue::Float(f32::from_bits(val as u32) as f64),
                     _ => CapturedValue::Scalar(val),
                 },
                 Err(e) => CapturedValue::Error(e.to_string()),
@@ -2633,4 +3387,78 @@ fn format_unix_timestamp(unix_secs: i64) -> String {
         Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
         None => format!("{unix_secs} (invalid timestamp)"),
     }
+}
+
+fn is_probably_rust_type(type_name: &str) -> bool {
+    let name = type_name.trim();
+    name.starts_with("Option<")
+        || name.starts_with("core::option::Option<")
+        || name.starts_with("std::option::Option<")
+        || name.contains("dyn ")
+        || name.contains("DetrixAsyncState")
+        || name.contains("detrix::AsyncState")
+}
+
+fn is_rust_owned_string_type(type_name: &str) -> bool {
+    matches!(
+        type_name.trim(),
+        "String" | "alloc::string::String" | "std::string::String"
+    )
+}
+
+fn is_rust_hash_map_type(type_name: &str) -> bool {
+    type_name.contains("HashMap<") || type_name.contains("hash::map::HashMap<")
+}
+
+/// Go maps are also marked as `is_map` by DWARF type classification, but they
+/// use the runtime Swiss/classic `hmap` reader rather than Rust's RawTable
+/// reader. Keep the language/runtime dispatch explicit so `map[K]V` can never
+/// be misinterpreted as a Rust `HashMap` header.
+fn is_rust_map_field(type_name: &str, is_map: bool) -> bool {
+    is_rust_hash_map_type(type_name)
+        || (is_map
+            && !type_name.trim_start().starts_with("map[")
+            && !type_name.trim_start().starts_with("map<"))
+}
+
+/// Return `(pointer offset, length offset, header size)` for a string value.
+fn rust_string_header_offsets(type_name: &str) -> (usize, usize, usize) {
+    if is_rust_owned_string_type(type_name) {
+        // `String` contains a `Vec<u8>`. Current rustc lays out Vec as
+        // `{buf: RawVec, len}`, and RawVec stores `{cap, ptr}`; therefore the
+        // data pointer is word 1 and the length is word 2.
+        (8, 16, 24)
+    } else {
+        (0, 8, 16)
+    }
+}
+
+/// Return `(pointer offset, length offset, capacity offset, header size)`.
+/// Borrowed Rust slices have no capacity word; alias capacity to length so
+/// callers receive a bounded, truthful capacity rather than the next field.
+fn rust_slice_header_offsets(type_name: &str) -> (usize, usize, usize, usize) {
+    let name = type_name.trim();
+    if name.starts_with("Vec<")
+        || name.starts_with("alloc::vec::Vec<")
+        || name.starts_with("std::vec::Vec<")
+    {
+        // Current rustc RawVec layout: {capacity, pointer}, followed by len.
+        (8, 16, 16, 24)
+    } else if name.starts_with("&[") || name.starts_with("&mut [") {
+        // Fat pointer: {data pointer, length}; no physical capacity word.
+        (0, 8, 8, 16)
+    } else {
+        (0, 8, 16, 24)
+    }
+}
+
+fn read_layout_word(bytes: &[u8], offset: usize, size: usize) -> Option<u64> {
+    if !matches!(size, 1 | 2 | 4 | 8) {
+        return None;
+    }
+    let end = offset.checked_add(size)?;
+    let source = bytes.get(offset..end)?;
+    let mut word = [0u8; 8];
+    word[..size].copy_from_slice(source);
+    Some(u64::from_le_bytes(word))
 }

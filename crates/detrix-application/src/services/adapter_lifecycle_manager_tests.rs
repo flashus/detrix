@@ -59,6 +59,11 @@ impl MockDapAdapter {
         }
     }
 
+    /// Close the current event stream to simulate a debugger session restart.
+    pub async fn close_event_stream(&self) {
+        self.event_tx.lock().await.take();
+    }
+
     /// Check if start was called
     pub fn was_started(&self) -> bool {
         self.started.load(Ordering::SeqCst)
@@ -758,6 +763,40 @@ async fn test_multiple_events_are_captured() {
     // Verify all events were captured
     let captured = event_repo.get_events().await;
     assert_eq!(captured.len(), 5, "Should have captured 5 events");
+}
+
+#[tokio::test]
+async fn test_event_subscription_recovers_after_debugger_session_restart() {
+    let adapter = Arc::new(MockDapAdapter::new());
+    let (manager, event_repo, adapter_ref) = create_test_manager_with_adapter(adapter).await;
+    let conn_id = ConnectionId::new("test-conn");
+
+    manager
+        .start_adapter(
+            conn_id,
+            "127.0.0.1",
+            5678,
+            SourceLanguage::Python,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    adapter_ref.close_event_stream().await;
+
+    // The listener must resubscribe instead of scheduling crash cleanup for the
+    // logical connection. Give the recovery path time to replace the receiver.
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    adapter_ref
+        .send_event(create_test_event(1, "after_restart"))
+        .await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(FLUSH_WAIT_MS)).await;
+
+    assert_eq!(manager.adapter_count().await, 1);
+    assert_eq!(event_repo.get_events().await.len(), 1);
 }
 
 /// Test that starting an adapter with existing ID replaces the old one

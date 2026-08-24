@@ -215,6 +215,15 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_bare_scalar_expression() {
+        let validator = default_validator();
+        for expression in ["quantity", "price"] {
+            let result = validator.validate(expression, SafetyLevel::Strict).unwrap();
+            assert!(result.is_safe, "{expression}: {:?}", result.errors);
+        }
+    }
+
+    #[test]
     fn test_validate_unsafe_keyword() {
         let validator = default_validator();
 

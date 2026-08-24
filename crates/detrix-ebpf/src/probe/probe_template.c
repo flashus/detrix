@@ -15,6 +15,7 @@
 
 // linux/types.h (via linux/bpf.h) defines __u32/__u64 but NOT u32/u64 in userspace.
 typedef __u8 u8;
+typedef __u16 u16;
 typedef __u32 u32;
 typedef __u64 u64;
 
@@ -94,7 +95,7 @@ struct {
 SEC("uprobe")
 int detrix_capture(struct pt_regs *ctx) {
     struct probe_event *event;
-    event = bpf_ringbuf_reserve(&DETRIX_EVENTS, sizeof(*event), 0);
+    event = bpf_ringbuf_reserve(&DETRIX_EVENTS, /*DETRIX_EVENT_SIZE*/, 0);
     if (!event) {
         // Ring buffer full — increment drop counter and exit.
         __u32 key = 0;

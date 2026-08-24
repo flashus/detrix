@@ -5,8 +5,14 @@
 //! `EbpfGoFactory` transparently delegates to the inner DAP factory.
 
 use crate::adapter::EbpfAdapter;
+use crate::debug_image::{
+    DebugImageError, DebugImageMetadata, DebugImageProvider, EmbeddedDebugImageProvider,
+    ExternalDebugImageProvider,
+};
 use crate::error::{Error, Result};
 use crate::probe::types::CaptureConfig;
+use crate::profile::{LanguageProfile, ProfileId};
+use crate::registry::{BackendRegistry, CaptureBackendFactory, ProfileRegistry};
 
 use async_trait::async_trait;
 use detrix_ports::{DapAdapterFactory, DapAdapterFactoryRef, DapAdapterRef};
@@ -23,6 +29,8 @@ pub struct EbpfAdapterFactory {
     base_path: PathBuf,
     /// Capture limits for generated BPF programs and ring buffer parsing.
     capture_config: CaptureConfig,
+    profiles: ProfileRegistry,
+    backends: BackendRegistry,
 }
 
 impl EbpfAdapterFactory {
@@ -30,6 +38,8 @@ impl EbpfAdapterFactory {
         Self {
             base_path: base_path.into(),
             capture_config: CaptureConfig::default(),
+            profiles: ProfileRegistry::with_defaults(),
+            backends: BackendRegistry::with_defaults(),
         }
     }
 
@@ -38,10 +48,100 @@ impl EbpfAdapterFactory {
         Self {
             base_path: base_path.into(),
             capture_config,
+            profiles: ProfileRegistry::with_defaults(),
+            backends: BackendRegistry::with_defaults(),
         }
     }
 
-    /// Create an eBPF adapter for a Go binary.
+    /// Register an additional language profile before the factory is shared
+    /// with the agent. The profile key is later resolved through the same
+    /// registry used by built-in Go/Rust adapters.
+    pub fn register_profile(&mut self, profile: Arc<dyn LanguageProfile>) {
+        self.profiles.register(profile);
+    }
+
+    /// Register an additional capture backend. Backends remain responsible
+    /// for attachment/runtime mechanics; profiles remain responsible for
+    /// language/type lowering.
+    pub fn register_backend(&mut self, backend: Arc<dyn CaptureBackendFactory>) {
+        self.backends.register(backend);
+    }
+
+    pub fn has_registered_profile(&self, profile: &str) -> bool {
+        self.profiles.get(profile).is_some()
+    }
+
+    pub fn has_registered_backend_for_profile(&self, profile: &str) -> bool {
+        self.backends.for_profile_name(profile).is_some()
+    }
+
+    /// String-keyed construction entry point for control-plane callers.
+    /// Built-in profiles are mapped to their compatibility identities; an
+    /// unknown registered profile is rejected until its runtime adapter can
+    /// carry the profile object end-to-end.
+    pub fn create_registered_adapter(
+        &self,
+        profile: &str,
+        binary_path: impl AsRef<Path>,
+    ) -> Result<DapAdapterRef> {
+        self.create_registered_adapter_with_debug_path(profile, binary_path, None::<&Path>)
+    }
+
+    /// String-keyed construction with an optional external DWARF image. This
+    /// is the manager-facing path for built-in and third-party profiles alike.
+    pub fn create_registered_adapter_with_debug_path(
+        &self,
+        profile: &str,
+        binary_path: impl AsRef<Path>,
+        debug_path: Option<impl AsRef<Path>>,
+    ) -> Result<DapAdapterRef> {
+        let profile = profile.trim().to_ascii_lowercase();
+        let profile_impl = self
+            .profiles
+            .get(&profile)
+            .ok_or_else(|| Error::Adapter(format!("No registered eBPF profile for {profile}")))?;
+        let backend = self
+            .backends
+            .for_profile_name(&profile)
+            .ok_or_else(|| Error::Adapter(format!("No registered eBPF backend for {profile}")))?;
+        let path = if binary_path.as_ref().is_absolute() {
+            binary_path.as_ref().to_path_buf()
+        } else {
+            self.base_path.join(binary_path)
+        };
+        if !path.exists() {
+            return Err(Error::Adapter(format!(
+                "Binary not found: {}",
+                path.display()
+            )));
+        }
+        let debug_path = debug_path.map(|candidate| {
+            let candidate = candidate.as_ref();
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                self.base_path.join(candidate)
+            }
+        });
+        if let Some(debug_path) = &debug_path {
+            if !debug_path.exists() {
+                return Err(Error::Adapter(format!(
+                    "Debug image not found: {}",
+                    debug_path.display()
+                )));
+            }
+        }
+        backend.create_adapter_with_profile_and_debug_path(
+            &profile,
+            profile_impl,
+            &path,
+            &self.base_path,
+            &self.capture_config,
+            debug_path.as_deref(),
+        )
+    }
+
+    /// Create an eBPF adapter for a Go or Rust ELF binary.
     ///
     /// # Arguments
     /// * `binary_path` - Path to the Go ELF binary with DWARF debug info.
@@ -51,6 +151,117 @@ impl EbpfAdapterFactory {
     /// - Not running on Linux
     /// - Binary doesn't exist or isn't readable
     pub fn create_go_adapter(&self, binary_path: impl AsRef<Path>) -> Result<DapAdapterRef> {
+        self.create_profile_adapter(ProfileId::Go, binary_path)
+    }
+
+    pub fn create_rust_adapter(&self, binary_path: impl AsRef<Path>) -> Result<DapAdapterRef> {
+        self.create_profile_adapter(ProfileId::Rust, binary_path)
+    }
+
+    fn create_profile_adapter(
+        &self,
+        profile: ProfileId,
+        binary_path: impl AsRef<Path>,
+    ) -> Result<DapAdapterRef> {
+        self.create_profile_adapter_with_debug_path(profile, binary_path, None::<&Path>)
+    }
+
+    pub fn create_adapter_with_debug_path(
+        &self,
+        profile: ProfileId,
+        binary_path: impl AsRef<Path>,
+        debug_path: Option<impl AsRef<Path>>,
+    ) -> Result<DapAdapterRef> {
+        self.create_profile_adapter_with_debug_path(profile, binary_path, debug_path)
+    }
+
+    /// Resolve the debug image before constructing an adapter.  This is the
+    /// transactional preflight used by the agent backend selector: a binary
+    /// with symbols but no usable variable DWARF is not observation-ready.
+    pub fn preflight_debug_image(
+        &self,
+        _profile: ProfileId,
+        binary_path: impl AsRef<Path>,
+        debug_path: Option<impl AsRef<Path>>,
+    ) -> Result<DebugImageMetadata> {
+        let path = if binary_path.as_ref().is_absolute() {
+            binary_path.as_ref().to_path_buf()
+        } else {
+            self.base_path.join(binary_path)
+        };
+        if !path.exists() {
+            return Err(Error::Adapter(format!(
+                "Binary not found: {}",
+                path.display()
+            )));
+        }
+        let provider =
+            ExternalDebugImageProvider::new(path.parent().into_iter().map(Path::to_path_buf));
+        let configured = debug_path.map(|p| {
+            let candidate = p.as_ref();
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                self.base_path.join(candidate)
+            }
+        });
+        let selected = configured.clone().unwrap_or_else(|| path.clone());
+        if !selected.exists() {
+            return Err(Error::Adapter(format!(
+                "Debug image not found: {}",
+                selected.display()
+            )));
+        }
+        let metadata = if configured.is_some() && selected != path {
+            let selected_metadata = EmbeddedDebugImageProvider
+                .load(&selected)
+                .map_err(|error: DebugImageError| Error::Adapter(error.to_string()))?;
+            DebugImageMetadata {
+                path: path.clone(),
+                source: if selected_metadata.has_variable_dwarf {
+                    crate::debug_image::DebugImageSource::External
+                } else {
+                    selected_metadata.source
+                },
+                debug_path: selected,
+                ..selected_metadata
+            }
+        } else {
+            provider
+                .load(&path)
+                .map_err(|error: DebugImageError| Error::Adapter(error.to_string()))?
+        };
+        if !metadata.has_variable_dwarf {
+            return Err(Error::Adapter(format!(
+                "Debug image has no usable variable DWARF: {}",
+                metadata.debug_path.display()
+            )));
+        }
+        Ok(metadata)
+    }
+
+    fn create_profile_adapter_with_debug_path(
+        &self,
+        profile: ProfileId,
+        binary_path: impl AsRef<Path>,
+        debug_path: Option<impl AsRef<Path>>,
+    ) -> Result<DapAdapterRef> {
+        if self.profiles.get(profile.as_str()).is_none() {
+            return Err(Error::Adapter(format!(
+                "No registered eBPF profile for {}",
+                profile.as_str()
+            )));
+        }
+        let backend = self
+            .backends
+            .for_profile(profile)
+            .ok_or_else(|| Error::Adapter("No registered eBPF backend".into()))?;
+        if !backend.supports(profile) {
+            return Err(Error::Adapter(format!(
+                "Registered eBPF backend does not support {}",
+                profile.as_str()
+            )));
+        }
         let path = if binary_path.as_ref().is_absolute() {
             binary_path.as_ref().to_path_buf()
         } else {
@@ -64,9 +275,48 @@ impl EbpfAdapterFactory {
             )));
         }
 
-        let adapter = EbpfAdapter::new_with_config(path, self.capture_config.clone())
-            .map_err(|e: crate::error::Error| Error::Adapter(e.to_string()))?;
+        let debug_path = debug_path.map(|debug| {
+            let path = debug.as_ref();
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                self.base_path.join(path)
+            }
+        });
+        if let Some(debug_path) = &debug_path {
+            if !debug_path.exists() {
+                return Err(Error::Adapter(format!(
+                    "Debug image not found: {}",
+                    debug_path.display()
+                )));
+            }
+        }
+        let profile_impl = self.profiles.get(profile.as_str()).ok_or_else(|| {
+            Error::Adapter(format!(
+                "No registered eBPF profile for {}",
+                profile.as_str()
+            ))
+        })?;
+        let adapter = EbpfAdapter::new_with_profile_object_and_debug_path(
+            path,
+            self.capture_config.clone(),
+            profile,
+            profile_impl,
+            debug_path,
+        )
+        .map_err(|e: crate::error::Error| Error::Adapter(e.to_string()))?;
         Ok(Arc::new(adapter) as DapAdapterRef)
+    }
+
+    /// Profile-dispatched construction seam.  Rust is registered in the
+    /// profile registry; Rust is scalar-only and must never reuse Go runtime
+    /// layout handling for composites.
+    pub fn create_adapter(
+        &self,
+        profile: ProfileId,
+        binary_path: impl AsRef<Path>,
+    ) -> Result<DapAdapterRef> {
+        self.create_profile_adapter(profile, binary_path)
     }
 
     /// Check if eBPF adapters are available on this platform.
@@ -78,7 +328,87 @@ impl EbpfAdapterFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::CaptureCompiler;
+    use crate::profile::{LanguageProfile, ProfileCapabilities, TypeDescriptor};
+    use crate::registry::CaptureBackendFactory;
+    use crate::runtime::RuntimeError;
+    use crate::ScalarFieldSpec;
+    use detrix_ports::DapAdapterRef;
+    use std::path::Path;
     use tempfile::NamedTempFile;
+
+    #[derive(Debug)]
+    struct DynamicProfile;
+
+    impl LanguageProfile for DynamicProfile {
+        fn id(&self) -> &'static str {
+            "test-language"
+        }
+        fn architectures(&self) -> &'static [crate::dwarf::types::TargetArchitecture] {
+            &[]
+        }
+        fn capabilities(&self) -> ProfileCapabilities {
+            ProfileCapabilities {
+                scalar: true,
+                pointer: false,
+                inline_struct: false,
+                fixed_array: false,
+                string: false,
+                borrowed_str: false,
+                vector: false,
+                borrowed_slice: false,
+                slice: false,
+                enumeration: false,
+                niche_enumeration: false,
+                trait_object: false,
+                async_state: false,
+            }
+        }
+        fn classify_type(&self, _name: &str, byte_size: usize) -> TypeDescriptor {
+            TypeDescriptor::Scalar { size: byte_size }
+        }
+    }
+
+    #[derive(Debug)]
+    struct DynamicBackend;
+
+    impl CaptureBackendFactory for DynamicBackend {
+        fn id(&self) -> &'static str {
+            "dynamic-test"
+        }
+        fn supports(&self, _profile: crate::profile::ProfileId) -> bool {
+            false
+        }
+        fn supports_profile(&self, profile: &str) -> bool {
+            profile.eq_ignore_ascii_case("test-language")
+        }
+        fn compiler(
+            &self,
+            _profile: crate::profile::ProfileId,
+        ) -> std::result::Result<Box<dyn CaptureCompiler>, RuntimeError> {
+            Err(RuntimeError::MissingIdentity)
+        }
+        fn create_runtime(
+            &self,
+            _profile: crate::profile::ProfileId,
+            _plan_hash: &str,
+            _fields: Vec<ScalarFieldSpec>,
+            _max_payload: usize,
+        ) -> std::result::Result<crate::runtime::ProfiledCaptureRuntime, RuntimeError> {
+            Err(RuntimeError::MissingIdentity)
+        }
+        fn create_adapter(
+            &self,
+            profile: &str,
+            _binary_path: &Path,
+            _base_path: &Path,
+            _capture_config: &CaptureConfig,
+        ) -> crate::error::Result<DapAdapterRef> {
+            Err(crate::error::Error::Adapter(format!(
+                "dynamic constructor invoked for {profile}"
+            )))
+        }
+    }
 
     #[test]
     fn factory_create_with_existing_binary() {
@@ -102,6 +432,43 @@ mod tests {
         let factory = EbpfAdapterFactory::new("/tmp");
         let result = factory.create_go_adapter(filename);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rust_profile_uses_profiled_adapter_without_reusing_go_factory() {
+        let tmp = NamedTempFile::new().unwrap();
+        let factory = EbpfAdapterFactory::new("/tmp");
+        let result = factory.create_adapter(ProfileId::Rust, tmp.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn string_profile_entry_point_preserves_builtin_adapters() {
+        let tmp = NamedTempFile::new().unwrap();
+        let factory = EbpfAdapterFactory::new("/tmp");
+        assert!(factory.has_registered_profile("GO"));
+        assert!(factory.create_registered_adapter("go", tmp.path()).is_ok());
+        assert!(factory
+            .create_registered_adapter("rust", tmp.path())
+            .is_ok());
+        assert!(factory
+            .create_registered_adapter("not-registered", tmp.path())
+            .is_err());
+    }
+
+    #[test]
+    fn string_profile_entry_point_dispatches_dynamic_backend_constructor() {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut factory = EbpfAdapterFactory::new("/tmp");
+        factory.register_profile(Arc::new(DynamicProfile));
+        factory.register_backend(Arc::new(DynamicBackend));
+        let error = match factory.create_registered_adapter("TEST-LANGUAGE", tmp.path()) {
+            Ok(_) => panic!("dynamic constructor should return its diagnostic"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("dynamic constructor invoked for test-language"));
     }
 
     #[test]
@@ -196,6 +563,14 @@ impl DapAdapterFactory for EbpfGoFactory {
         program: Option<&str>,
         pid: Option<u32>,
     ) -> detrix_core::Result<DapAdapterRef> {
+        #[cfg(target_os = "linux")]
+        if host.starts_with('/') && program.is_none() && pid.is_none() {
+            let _ = port;
+            return self
+                .ebpf
+                .create_rust_adapter(host)
+                .map_err(|e| detrix_core::Error::Adapter(e.to_string()));
+        }
         self.inner
             .create_rust_adapter(host, port, program, pid)
             .await

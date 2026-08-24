@@ -163,7 +163,13 @@ impl Agent {
                 event_tx.clone(),
                 Arc::clone(&events_dropped),
                 self.capture_config.clone(),
+                Arc::clone(&metrics_state.events_received),
+                Arc::clone(&metrics_state.events_in_flight),
                 Arc::clone(&metrics_state.events_forwarded),
+                Arc::clone(&metrics_state.events_decoded),
+                Arc::clone(&metrics_state.kernel_events_dropped),
+                Arc::clone(&metrics_state.decode_events_dropped),
+                Arc::clone(&metrics_state.active_connections),
                 self.config.scanner.allowed_read_prefixes.clone(),
             ));
 
@@ -267,6 +273,9 @@ impl Agent {
                 agent_version: env!("CARGO_PKG_VERSION").to_string(),
                 capabilities: Some(AgentCapabilities {
                     ebpf: cfg!(target_os = "linux"),
+                    supported_envelope_schemas: vec![1],
+                    supported_capture_profiles: vec!["go".into(), "rust".into()],
+                    max_capture_payload_bytes: 4096,
                     ..Default::default()
                 }),
                 binaries: binaries.iter().map(binary_info_to_proto).collect(),
@@ -339,13 +348,31 @@ impl Agent {
                         });
                     }
                 }
-                while let Ok(Some(msg)) = incoming.message().await {
+                loop {
+                    let next = incoming.message().await;
+                    let Some(msg) = (match next {
+                        Ok(Some(msg)) => Some(msg),
+                        Ok(None) => {
+                            tracing::warn!("server stream closed while reading agent commands");
+                            break;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "server stream read failed");
+                            break;
+                        }
+                    }) else {
+                        break;
+                    };
                     match msg.msg {
                         Some(server_message::Msg::CreateConnection(cc)) => {
-                            am.create_connection(cc).await;
+                            let am = Arc::clone(&am);
+                            tokio::spawn(async move { am.create_connection(cc).await });
                         }
                         Some(server_message::Msg::CloseConnection(cc)) => {
-                            am.close_connection(&cc.connection_id).await;
+                            let am = Arc::clone(&am);
+                            tokio::spawn(
+                                async move { am.close_connection(&cc.connection_id).await },
+                            );
                         }
                         Some(server_message::Msg::SetMetric(sm)) => {
                             am.handle_set_metric(sm).await;
@@ -449,20 +476,40 @@ impl Agent {
         // 5. Scanner task — shares the Arc<Mutex<ProcScanner>> so the `known`
         // PID-tracking state survives reconnect cycles in the outer run() loop.
         tasks.spawn({
-            let ctrl_tx_s = ctrl_tx.clone();
+            // Registration updates are stream-control messages, but route
+            // them directly to the request stream. This prevents a busy
+            // adapter-control queue (metric acks/events) from delaying or
+            // reordering lifecycle reconciliation after a target exit.
+            let stream_tx_s = stream_tx.clone();
             let agent_id_s = agent_id.to_string();
             let hostname_s = hostname.to_string();
             let scanner_s = Arc::clone(&scanner);
+            let scan_refresh = adapter_manager.scan_refresh_signal();
             let interval = Duration::from_secs(self.config.scanner.scan_interval_secs);
             async move {
                 let mut ticker = tokio::time::interval(interval);
                 loop {
                     ticker.tick().await;
-                    let maybe_binaries = {
+                    let force_full = scan_refresh.swap(false, Ordering::AcqRel);
+                    let maybe_binaries = if force_full {
+                        let binaries = scanner_s
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .scan_full();
+                        tracing::debug!(
+                            binary_count = binaries.len(),
+                            "Refreshing full scanner snapshot after target close"
+                        );
+                        Some(binaries)
+                    } else {
                         let mut s = scanner_s.lock().unwrap_or_else(|p| p.into_inner());
                         s.scan_delta()
                     };
                     if let Some(binaries) = maybe_binaries {
+                        tracing::debug!(
+                            binary_count = binaries.len(),
+                            "Scanner detected a binary snapshot change; sending registration update"
+                        );
                         let register = AgentMessage {
                             msg: Some(agent_message::Msg::Register(RegisterAgent {
                                 agent_id: agent_id_s.clone(),
@@ -470,12 +517,18 @@ impl Agent {
                                 agent_version: env!("CARGO_PKG_VERSION").to_string(),
                                 capabilities: Some(AgentCapabilities {
                                     ebpf: cfg!(target_os = "linux"),
+                                    supported_envelope_schemas: vec![1],
+                                    supported_capture_profiles: vec!["go".into(), "rust".into()],
+                                    max_capture_payload_bytes: 4096,
                                     ..Default::default()
                                 }),
                                 binaries: binaries.iter().map(binary_info_to_proto).collect(),
                             })),
                         };
-                        let _ = ctrl_tx_s.send(register);
+                        if stream_tx_s.send(register).await.is_err() {
+                            tracing::warn!("registration update dropped: agent stream is closed");
+                            break;
+                        }
                     }
                 }
             }

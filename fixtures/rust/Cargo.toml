@@ -10,6 +10,22 @@ publish = false
 name = "detrix_example_app"
 path = "src/main.rs"
 
+[[bin]]
+name = "detrix_composite_app"
+path = "src/composite.rs"
+
+[[bin]]
+name = "detrix_optimized_app"
+path = "src/optimized.rs"
+
+[[bin]]
+name = "detrix_special_layout_app"
+path = "src/special_layout.rs"
+
+[[bin]]
+name = "detrix_nested_types_app"
+path = "src/nested_types.rs"
+
 [features]
 default = []
 # Enable detrix-rs integration (for client E2E tests)
@@ -28,4 +44,11 @@ opt-level = 0
 
 [profile.release]
 # Keep debug symbols in release builds for observability
-debug = true
+debug = 2
+strip = "none"
+# Agent/eBPF fixtures must expose stable stack/register DWARF locations.  The
+# production optimizer commonly keeps f64 values in SIMD registers (which are
+# not present in Linux pt_regs), making a non-pausing eBPF probe impossible.
+# Keep this fixture debugger-grade and deterministic; this does not affect
+# application release profiles outside the test fixture.
+opt-level = 0

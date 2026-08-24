@@ -4868,7 +4868,7 @@ pub struct RegisterAgent {
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AgentCapabilities {
     #[prost(bool, tag = "1")]
     pub ebpf: bool,
@@ -4878,6 +4878,17 @@ pub struct AgentCapabilities {
     pub dap_go: bool,
     #[prost(bool, tag = "4")]
     pub dap_rust: bool,
+    /// Additive capture-wire capabilities. Empty values preserve compatibility
+    /// with older agents; populated values let the server reject an incompatible
+    /// envelope/profile before creating a metric.
+    #[prost(uint32, repeated, tag = "5")]
+    pub supported_envelope_schemas: ::prost::alloc::vec::Vec<u32>,
+    #[prost(string, repeated, tag = "6")]
+    pub supported_capture_profiles: ::prost::alloc::vec::Vec<
+        ::prost::alloc::string::String,
+    >,
+    #[prost(uint32, tag = "7")]
+    pub max_capture_payload_bytes: u32,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -4896,6 +4907,9 @@ pub struct BinaryInfo {
     pub exported_functions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(uint64, tag = "6")]
     pub inode: u64,
+    /// scanner-detected source language (go, rust)
+    #[prost(string, tag = "7")]
+    pub language: ::prost::alloc::string::String,
 }
 /// Reuses ConnectionStatus from connections.proto
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -4908,6 +4922,30 @@ pub struct AgentConnectionUpdate {
     pub status: i32,
     #[prost(string, tag = "3")]
     pub error_message: ::prost::alloc::string::String,
+    /// Additive backend-selection diagnostics. Older servers ignore these fields.
+    #[prost(string, tag = "4")]
+    pub selected_backend: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub capture_profile: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub backend_reason: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub debug_image_source: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub failure_class: ::prost::alloc::string::String,
+    /// Capture wire capabilities negotiated for this connection. Empty values
+    /// preserve compatibility with legacy Go framing.
+    #[prost(uint32, repeated, tag = "9")]
+    pub supported_envelope_schemas: ::prost::alloc::vec::Vec<u32>,
+    #[prost(string, repeated, tag = "10")]
+    pub supported_capture_profiles: ::prost::alloc::vec::Vec<
+        ::prost::alloc::string::String,
+    >,
+    #[prost(uint32, tag = "11")]
+    pub max_capture_payload_bytes: u32,
+    /// Target register ABI selected for this connection (x86_64, aarch64, or unknown).
+    #[prost(string, tag = "12")]
+    pub target_architecture: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -5013,6 +5051,15 @@ pub struct DropCountUpdate {
     pub connection_id: ::prost::alloc::string::String,
     #[prost(uint64, tag = "2")]
     pub total_events_dropped: u64,
+    #[prost(uint64, tag = "3")]
+    pub kernel_events_dropped: u64,
+    #[prost(uint64, tag = "4")]
+    pub decode_events_dropped: u64,
+    #[prost(uint64, tag = "5")]
+    pub unavailable_fields: u64,
+    /// records decoded into MetricEvents before transport
+    #[prost(uint64, tag = "6")]
+    pub events_decoded: u64,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -5112,6 +5159,17 @@ pub struct AgentCreateConnection {
     #[prost(bool, tag = "6")]
     #[serde(default)]
     pub safe_mode: bool,
+    /// Additive capture policy. Empty is equivalent to auto for compatibility.
+    ///
+    /// auto, dap, ebpf
+    #[prost(string, tag = "7")]
+    pub capture_backend: ::prost::alloc::string::String,
+    /// inferred from language when empty
+    #[prost(string, tag = "8")]
+    pub capture_profile: ::prost::alloc::string::String,
+    /// optional external DWARF image
+    #[prost(string, tag = "9")]
+    pub debug_info_path: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

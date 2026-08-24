@@ -15,6 +15,7 @@
 //! - `max_struct_fields`: Max fields per struct (-1 = all)
 //! - `max_array_values`: Max array/slice elements (default: 64)
 
+use crate::capture_plan::{CaptureField, CapturePlan, HeaderKind, ReadOp};
 use crate::dwarf::types::{ResolvedVariable, VariableLocation};
 use crate::error::{Error, Result};
 use crate::probe::types::CaptureConfig;
@@ -37,7 +38,22 @@ pub struct BpfProgram {
     pub g_addr_offset: Option<i64>,
     /// Byte offset of goid field within runtime.g (from DWARF; None = use #ifndef default).
     pub goid_offset: Option<u64>,
+    /// Whether this program emits the fixed-size DRX1 raw envelope header.
+    pub versioned_envelope: bool,
 }
+
+/// Compact identity used in the fixed-size kernel record header. The full
+/// profile/plan strings remain in the user-space `EventEnvelope`; the kernel
+/// only needs bounded tags for stale-record rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawEnvelopeSpec {
+    pub profile_tag: u32,
+    pub plan_tag: u64,
+}
+
+pub const RAW_ENVELOPE_MAGIC: u32 = u32::from_le_bytes(*b"DRX1");
+pub const RAW_ENVELOPE_SCHEMA: u16 = 1;
+pub const RAW_ENVELOPE_SIZE: usize = 24;
 
 /// Generate a BPF C program that captures the given variables at a uprobe hit.
 ///
@@ -55,6 +71,24 @@ pub fn generate_bpf_program(
     goid_offset: Option<u64>,
     config: &CaptureConfig,
 ) -> Result<BpfProgram> {
+    generate_bpf_program_with_envelope(
+        variables,
+        capture_goid,
+        g_addr_offset,
+        goid_offset,
+        config,
+        None,
+    )
+}
+
+pub fn generate_bpf_program_with_envelope(
+    variables: &[ResolvedVariable],
+    capture_goid: bool,
+    g_addr_offset: Option<i64>,
+    goid_offset: Option<u64>,
+    config: &CaptureConfig,
+    envelope: Option<RawEnvelopeSpec>,
+) -> Result<BpfProgram> {
     if variables.len() > config.max_capture_vars {
         return Err(Error::Ebpf(format!(
             "Too many variables: {} (max {})",
@@ -66,12 +100,14 @@ pub fn generate_bpf_program(
     let var_count = variables.len();
 
     // Build the two dynamic sections, then substitute into the template.
-    let event_fields = build_event_fields(variables, capture_goid, config);
-    let var_reads = build_var_reads(variables, capture_goid, config);
+    let event_fields = build_event_fields(variables, capture_goid, config, envelope);
+    let var_reads = build_var_reads(variables, capture_goid, config, envelope);
+    let event_size = legacy_event_size(variables, capture_goid, config, envelope);
 
     let source = PROBE_TEMPLATE
         .replace("/*DETRIX_EVENT_FIELDS*/", &event_fields)
-        .replace("/*DETRIX_VAR_READS*/", &var_reads);
+        .replace("/*DETRIX_VAR_READS*/", &var_reads)
+        .replace("/*DETRIX_EVENT_SIZE*/", &event_size.to_string());
 
     Ok(BpfProgram {
         source,
@@ -79,7 +115,428 @@ pub fn generate_bpf_program(
         captures_goid: capture_goid,
         g_addr_offset,
         goid_offset,
+        versioned_envelope: envelope.is_some(),
     })
+}
+
+fn legacy_event_size(
+    variables: &[ResolvedVariable],
+    capture_goid: bool,
+    config: &CaptureConfig,
+    envelope: Option<RawEnvelopeSpec>,
+) -> usize {
+    let mut size = 24 + envelope.map_or(0, |_| 24) + usize::from(capture_goid) * 8;
+    for variable in variables {
+        size += 8;
+        size += match &variable.location {
+            VariableLocation::GoString { .. } | VariableLocation::StringHeader { .. } => {
+                8 + config.max_string_capture.min(255)
+            }
+            VariableLocation::GoSlice { .. } | VariableLocation::SliceHeader { .. } => 16,
+            VariableLocation::StackBlob { byte_size, .. }
+            | VariableLocation::PiecewiseBlob { byte_size, .. } => {
+                (*byte_size).min(config.max_blob_capture)
+            }
+            _ => 0,
+        };
+    }
+    (size + 7) & !7
+}
+
+/// Generate a BPF program directly from the validated language-neutral plan.
+///
+/// This is the authoritative renderer for plan-native captures.  It keeps
+/// Go's legacy `generate_bpf_program` API available for compatibility, but
+/// avoids converting a plan back into `ResolvedVariable` locations for live
+/// Go/Rust probes.  Every operation is bounded by `CapturePlan::validate`.
+pub fn generate_bpf_program_from_plan(
+    plan: &CapturePlan,
+    capture_goid: bool,
+    g_addr_offset: Option<i64>,
+    goid_offset: Option<u64>,
+    config: &CaptureConfig,
+    envelope: Option<RawEnvelopeSpec>,
+) -> Result<BpfProgram> {
+    plan.validate()
+        .map_err(|error| Error::Ebpf(format!("invalid capture plan: {error}")))?;
+    if plan.fields.len() > config.max_capture_vars {
+        return Err(Error::Ebpf(format!(
+            "Too many variables: {} (max {})",
+            plan.fields.len(),
+            config.max_capture_vars
+        )));
+    }
+
+    let event_fields = build_plan_event_fields(&plan.fields, capture_goid, config, envelope);
+    let var_reads = build_plan_var_reads(&plan.fields, capture_goid, config, envelope)?;
+    let event_size = plan_event_size(&plan.fields, capture_goid, config, envelope);
+    let source = PROBE_TEMPLATE
+        .replace("/*DETRIX_EVENT_FIELDS*/", &event_fields)
+        .replace("/*DETRIX_VAR_READS*/", &var_reads)
+        .replace("/*DETRIX_EVENT_SIZE*/", &event_size.to_string());
+
+    Ok(BpfProgram {
+        source,
+        var_count: plan.fields.len(),
+        captures_goid: capture_goid,
+        g_addr_offset,
+        goid_offset,
+        versioned_envelope: envelope.is_some(),
+    })
+}
+
+fn plan_event_size(
+    fields: &[CaptureField],
+    capture_goid: bool,
+    config: &CaptureConfig,
+    envelope: Option<RawEnvelopeSpec>,
+) -> usize {
+    let mut size = 24 + envelope.map_or(0, |_| 24) + usize::from(capture_goid) * 8;
+    for field in fields {
+        size += 8;
+        size += match &field.op {
+            ReadOp::Header { kind, .. } | ReadOp::HeaderExplicit { kind, .. } => match kind {
+                HeaderKind::String | HeaderKind::RustString | HeaderKind::BorrowedStr => {
+                    8 + config.max_string_capture.min(255)
+                }
+                HeaderKind::Slice | HeaderKind::RustVec | HeaderKind::BorrowedSlice => 16,
+            },
+            ReadOp::Blob { size, .. } => (*size).min(config.max_blob_capture),
+            ReadOp::Piecewise { .. } | ReadOp::Piece { .. } => {
+                field.size.min(config.max_blob_capture)
+            }
+            ReadOp::Register { .. } | ReadOp::Stack { .. } | ReadOp::Frame { .. }
+                if field.size > 8 =>
+            {
+                field.size.min(config.max_blob_capture)
+            }
+            _ => 0,
+        };
+    }
+    (size + 7) & !7
+}
+
+fn build_plan_event_fields(
+    fields: &[CaptureField],
+    capture_goid: bool,
+    config: &CaptureConfig,
+    envelope: Option<RawEnvelopeSpec>,
+) -> String {
+    let mut out = String::new();
+    if envelope.is_some() {
+        out.push_str("    u32 drx_magic;\n");
+        out.push_str("    u16 drx_schema;\n");
+        out.push_str("    u16 drx_field_count;\n");
+        out.push_str("    u32 drx_payload_len;\n");
+        out.push_str("    u32 drx_profile_tag;\n");
+        out.push_str("    u64 drx_plan_tag;\n");
+    }
+    if capture_goid {
+        out.push_str("    u64 goid;\n");
+    }
+    for (index, field) in fields.iter().enumerate() {
+        out.push_str(&format!("    u64 var{index}; // {}: plan-op\n", field.name));
+        match &field.op {
+            ReadOp::Header { kind, .. } | ReadOp::HeaderExplicit { kind, .. } => match kind {
+                HeaderKind::String | HeaderKind::RustString | HeaderKind::BorrowedStr => {
+                    out.push_str(&format!("    u64 var{index}_len;\n"));
+                    let size = config.max_string_capture.min(255);
+                    out.push_str(&format!("    u8 var{index}_str[{size}];\n"));
+                }
+                HeaderKind::Slice | HeaderKind::RustVec | HeaderKind::BorrowedSlice => {
+                    out.push_str(&format!("    u64 var{index}_len;\n"));
+                    out.push_str(&format!("    u64 var{index}_cap;\n"));
+                }
+            },
+            ReadOp::Blob { size, .. } => {
+                let size = (*size).min(config.max_blob_capture);
+                out.push_str(&format!("    u8 var{index}_blob[{size}];\n"));
+            }
+            ReadOp::Piecewise { .. } => {
+                let size = field.size.min(config.max_blob_capture);
+                out.push_str(&format!("    u8 var{index}_blob[{size}];\n"));
+            }
+            ReadOp::Piece { .. } => {
+                let size = field.size.min(config.max_blob_capture);
+                out.push_str(&format!("    u8 var{index}_blob[{size}];\n"));
+            }
+            // Defensive layout rule: a composite-sized scalar op must still
+            // receive a bounded byte buffer. This protects the wire contract
+            // if a language lowering loses its composite marker while
+            // retaining the DWARF byte size.
+            ReadOp::Register { .. } | ReadOp::Stack { .. } | ReadOp::Frame { .. }
+                if field.size > 8 =>
+            {
+                let size = field.size.min(config.max_blob_capture);
+                out.push_str(&format!("    u8 var{index}_blob[{size}];\n"));
+            }
+            _ if field.size > 8 => {
+                let size = field.size.min(config.max_blob_capture);
+                out.push_str(&format!("    u8 var{index}_blob[{size}];\n"));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn build_plan_var_reads(
+    fields: &[CaptureField],
+    capture_goid: bool,
+    config: &CaptureConfig,
+    envelope: Option<RawEnvelopeSpec>,
+) -> Result<String> {
+    let mut out = String::new();
+    if let Some(envelope) = envelope {
+        out.push_str(&format!(
+            "    event->drx_magic = {:#x};\n    event->drx_schema = {};\n    event->drx_field_count = {};\n    event->drx_payload_len = sizeof(*event) - {};\n    event->drx_profile_tag = {:#x};\n    event->drx_plan_tag = {:#x};\n",
+            RAW_ENVELOPE_MAGIC,
+            RAW_ENVELOPE_SCHEMA,
+            fields.len(),
+            24 + RAW_ENVELOPE_SIZE,
+            envelope.profile_tag,
+            envelope.plan_tag,
+        ));
+    }
+    if capture_goid {
+        out.push_str(GOID_EXTRACT);
+    }
+    for (index, field) in fields.iter().enumerate() {
+        out.push_str(&format!("    // {}: plan-op\n", field.name));
+        out.push_str(&generate_plan_read_expr(
+            &field.op, index, field.size, config,
+        )?);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn generate_plan_read_expr(
+    op: &ReadOp,
+    index: usize,
+    field_size: usize,
+    config: &CaptureConfig,
+) -> Result<String> {
+    let value = format!("event->var{index}");
+    match op {
+        ReadOp::Register { register, .. } if field_size > 8 => {
+            let size = field_size.min(config.max_blob_capture);
+            Ok(format!(
+                "    bpf_probe_read_user(event->var{index}_blob, {size}, (void *){});",
+                register.pt_regs_access()
+            ))
+        }
+        ReadOp::Register { register, .. } => {
+            Ok(format!("    {value} = (u64){};", register.pt_regs_access()))
+        }
+        ReadOp::Stack { offset, .. } if field_size > 8 => Ok(format!(
+            "    bpf_probe_read_user(event->var{index}_blob, {}, (void *){});",
+            field_size.min(config.max_blob_capture),
+            plan_address("DETRIX_STACK_PTR", *offset)
+        )),
+        ReadOp::Stack { offset, size, .. } => {
+            Ok(plan_memory_read(&value, "DETRIX_STACK_PTR", *offset, *size))
+        }
+        ReadOp::Frame {
+            register, offset, ..
+        } if field_size > 8 => Ok(format!(
+            "    bpf_probe_read_user(event->var{index}_blob, {}, (void *)({}));",
+            field_size.min(config.max_blob_capture),
+            plan_address(&register.pt_regs_access(), *offset)
+        )),
+        ReadOp::Frame {
+            register,
+            offset,
+            size,
+            ..
+        } => Ok(plan_memory_read(
+            &value,
+            &register.pt_regs_access(),
+            *offset,
+            *size,
+        )),
+        ReadOp::Blob { offset, size, .. } => {
+            let size = (*size).min(config.max_blob_capture);
+            Ok(format!(
+                "    event->var{index} = (u64){};\n    bpf_probe_read_user(event->var{index}_blob, {size}, (void *){});",
+                plan_address("DETRIX_STACK_PTR", *offset),
+                plan_address("DETRIX_STACK_PTR", *offset)
+            ))
+        }
+        ReadOp::Indirect { base, .. } | ReadOp::Map { base } => {
+            Ok(generate_plan_read_into(base, &value, 8)?)
+        }
+        ReadOp::Header { base, kind, .. } => {
+            let (ptr_delta, len_delta, cap_delta) = match kind {
+                HeaderKind::String | HeaderKind::BorrowedStr => (0, 8, None),
+                HeaderKind::RustString => (8, 16, None),
+                HeaderKind::Slice => (0, 8, Some(16)),
+                HeaderKind::RustVec => (0, 16, Some(16)),
+                HeaderKind::BorrowedSlice => (0, 8, Some(8)),
+            };
+            let mut out = String::new();
+            out.push_str(&generate_plan_read_into(
+                &shift_plan_op(base, ptr_delta),
+                &value,
+                8,
+            )?);
+            out.push('\n');
+            let len = format!("event->var{index}_len");
+            out.push_str(&generate_plan_read_into(
+                &shift_plan_op(base, len_delta),
+                &len,
+                8,
+            )?);
+            if let Some(cap_delta) = cap_delta {
+                out.push('\n');
+                let cap = format!("event->var{index}_cap");
+                out.push_str(&generate_plan_read_into(
+                    &shift_plan_op(base, cap_delta),
+                    &cap,
+                    8,
+                )?);
+            } else {
+                let max = config.max_string_capture.min(255);
+                out.push_str(&format!(
+                    "\n    __builtin_memset(event->var{index}_str, 0, {max});\n    {{\n        u32 _len{index} = (u32)event->var{index}_len;\n        _len{index} &= 0xFF;\n        if (event->var{index} && _len{index} > 0 && _len{index} <= {max}) {{\n            bpf_probe_read_user(event->var{index}_str, _len{index}, (void *)event->var{index});\n        }}\n    }}"
+                ));
+            }
+            Ok(out)
+        }
+        ReadOp::HeaderExplicit { ptr, len, cap, .. } => {
+            let mut out = String::new();
+            out.push_str(&generate_plan_read_into(ptr, &value, 8)?);
+            out.push('\n');
+            out.push_str(&generate_plan_read_into(
+                len,
+                &format!("event->var{index}_len"),
+                8,
+            )?);
+            if let Some(cap) = cap {
+                out.push('\n');
+                out.push_str(&generate_plan_read_into(
+                    cap,
+                    &format!("event->var{index}_cap"),
+                    8,
+                )?);
+            } else {
+                let max = config.max_string_capture.min(255);
+                out.push_str(&format!(
+                    "\n    __builtin_memset(event->var{index}_str, 0, {max});\n    {{\n        u32 _len{index} = (u32)event->var{index}_len;\n        _len{index} &= 0xFF;\n        if (event->var{index} && _len{index} > 0 && _len{index} <= {max}) {{\n            bpf_probe_read_user(event->var{index}_str, _len{index}, (void *)event->var{index});\n        }}\n    }}"
+                ));
+            }
+            Ok(out)
+        }
+        ReadOp::Piecewise { pieces } => {
+            let capture = field_size.min(config.max_blob_capture);
+            let mut out = format!("    __builtin_memset(event->var{index}_blob, 0, {capture});");
+            for piece in pieces {
+                if piece.offset >= capture {
+                    continue;
+                }
+                let size = piece.size.min(capture - piece.offset);
+                if let Some(piece_op) = &piece.op {
+                    out.push('\n');
+                    out.push_str(&generate_plan_read_into(
+                        piece_op,
+                        &format!("event->var{index}_blob[{}]", piece.offset),
+                        size,
+                    )?);
+                }
+            }
+            Ok(out)
+        }
+        ReadOp::Piece { offset, size, op } => {
+            let size = (*size).min(field_size.saturating_sub(*offset));
+            generate_plan_read_into(op, &format!("event->var{index}_blob[{offset}]"), size)
+        }
+        ReadOp::Unavailable { .. } => Ok(format!("    {value} = 0;")),
+        ReadOp::Constant { bytes } => {
+            let mut constant = 0u64;
+            for (shift, byte) in bytes.iter().take(8).enumerate() {
+                constant |= u64::from(*byte) << (shift * 8);
+            }
+            Ok(format!("    {value} = {constant:#x};"))
+        }
+        ReadOp::Cfa { .. } | ReadOp::UserBytes { .. } => Err(Error::Ebpf(
+            "capture plan operation requires user-space lowering".into(),
+        )),
+    }
+}
+
+fn generate_plan_read_into(op: &ReadOp, destination: &str, size: usize) -> Result<String> {
+    if size == 0 {
+        return Err(Error::Ebpf(
+            "capture plan contains a zero-sized read".into(),
+        ));
+    }
+    match op {
+        ReadOp::Register { register, .. } => Ok(format!(
+            "    {destination} = (u64){};",
+            register.pt_regs_access()
+        )),
+        ReadOp::Stack { offset, .. } => Ok(plan_memory_read(
+            destination,
+            "DETRIX_STACK_PTR",
+            *offset,
+            size,
+        )),
+        ReadOp::Frame {
+            register, offset, ..
+        } => Ok(plan_memory_read(
+            destination,
+            &register.pt_regs_access(),
+            *offset,
+            size,
+        )),
+        ReadOp::Indirect { base, .. } | ReadOp::Map { base } => {
+            generate_plan_read_into(base, destination, size)
+        }
+        _ => Err(Error::Ebpf(format!(
+            "unsupported nested plan read operation: {op:?}"
+        ))),
+    }
+}
+
+fn plan_memory_read(destination: &str, base: &str, offset: i64, size: usize) -> String {
+    format!(
+        "    {destination} = 0;\n    bpf_probe_read_user(&{destination}, {size}, (void *){});",
+        plan_address(base, offset)
+    )
+}
+
+fn plan_address(base: &str, offset: i64) -> String {
+    if offset >= 0 {
+        format!("({base} + {offset})")
+    } else {
+        format!("({base} - {})", offset.unsigned_abs())
+    }
+}
+
+fn shift_plan_op(op: &ReadOp, delta: i64) -> ReadOp {
+    match op {
+        ReadOp::Stack {
+            offset,
+            size,
+            semantics,
+        } => ReadOp::Stack {
+            offset: offset.saturating_add(delta),
+            size: *size,
+            semantics: *semantics,
+        },
+        ReadOp::Frame {
+            register,
+            offset,
+            size,
+            semantics,
+        } => ReadOp::Frame {
+            register: *register,
+            offset: offset.saturating_add(delta),
+            size: *size,
+            semantics: *semantics,
+        },
+        other => other.clone(),
+    }
 }
 
 /// Build the dynamic event struct fields for the `/*DETRIX_EVENT_FIELDS*/` placeholder.
@@ -90,8 +547,18 @@ fn build_event_fields(
     variables: &[ResolvedVariable],
     capture_goid: bool,
     config: &CaptureConfig,
+    envelope: Option<RawEnvelopeSpec>,
 ) -> String {
     let mut out = String::new();
+
+    if envelope.is_some() {
+        out.push_str("    u32 drx_magic;\n");
+        out.push_str("    u16 drx_schema;\n");
+        out.push_str("    u16 drx_field_count;\n");
+        out.push_str("    u32 drx_payload_len;\n");
+        out.push_str("    u32 drx_profile_tag;\n");
+        out.push_str("    u64 drx_plan_tag;\n");
+    }
 
     if capture_goid {
         out.push_str("    u64 goid;\n");
@@ -105,7 +572,7 @@ fn build_event_fields(
         ));
 
         match &var.location {
-            VariableLocation::GoString { .. } => {
+            VariableLocation::GoString { .. } | VariableLocation::StringHeader { .. } => {
                 out.push_str(&format!("    u64 var{i}_len;\n"));
                 // Fixed-size buffer for string content — filled by bpf_probe_read_user.
                 // Capped at 255 to match the verifier hint (_len &= 0xFF) in build_var_reads.
@@ -116,7 +583,7 @@ fn build_event_fields(
                 let buf_size = config.max_string_capture.min(255);
                 out.push_str(&format!("    u8  var{i}_str[{}];\n", buf_size));
             }
-            VariableLocation::GoSlice { .. } => {
+            VariableLocation::GoSlice { .. } | VariableLocation::SliceHeader { .. } => {
                 out.push_str(&format!("    u64 var{i}_len;\n"));
                 out.push_str(&format!("    u64 var{i}_cap;\n"));
             }
@@ -144,8 +611,21 @@ fn build_var_reads(
     variables: &[ResolvedVariable],
     capture_goid: bool,
     config: &CaptureConfig,
+    envelope: Option<RawEnvelopeSpec>,
 ) -> String {
     let mut out = String::new();
+
+    if let Some(envelope) = envelope {
+        out.push_str(&format!(
+            "    event->drx_magic = {:#x};\n    event->drx_schema = {};\n    event->drx_field_count = {};\n    event->drx_payload_len = sizeof(*event) - {};\n    event->drx_profile_tag = {:#x};\n    event->drx_plan_tag = {:#x};\n",
+            RAW_ENVELOPE_MAGIC,
+            RAW_ENVELOPE_SCHEMA,
+            variables.len(),
+            24 + RAW_ENVELOPE_SIZE,
+            envelope.profile_tag,
+            envelope.plan_tag,
+        ));
+    }
 
     if capture_goid {
         out.push_str(GOID_EXTRACT);
@@ -184,7 +664,20 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
             };
             format!("{zero_fill}\n{read}")
         }
-        VariableLocation::GoString { ptr, len } => {
+        VariableLocation::FrameOffset { register, offset } => {
+            let size = var.size.bytes();
+            let zero_fill = format!("    event->var{idx} = 0;");
+            let base = register.pt_regs_access();
+            let address = if *offset >= 0 {
+                format!("({base} + {offset})")
+            } else {
+                format!("({base} - {})", offset.unsigned_abs())
+            };
+            let read =
+                format!("    bpf_probe_read_user(&event->var{idx}, {size}, (void *){address});");
+            format!("{zero_fill}\n{read}")
+        }
+        VariableLocation::GoString { ptr, len } | VariableLocation::StringHeader { ptr, len } => {
             // Go string struct {ptr uintptr, len int} lives on the stack.
             // Step 1: read the ptr and len fields from their DWARF locations.
             // Step 2: dereference ptr to read the actual string bytes.
@@ -212,6 +705,15 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                 VariableLocation::Register(reg) => {
                     format!("    event->var{idx} = (u64){};", reg.pt_regs_access())
                 }
+                VariableLocation::FrameOffset { register, offset } => {
+                    let base = register.pt_regs_access();
+                    let address = if *offset >= 0 {
+                        format!("({base} + {offset})")
+                    } else {
+                        format!("({base} - {})", offset.unsigned_abs())
+                    };
+                    format!("    event->var{idx} = 0;\n    bpf_probe_read_user(&event->var{idx}, 8, (void *){address});")
+                }
                 _ => format!("    event->var{idx} = 0;"),
             };
 
@@ -225,6 +727,15 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                 }
                 VariableLocation::Register(reg) => {
                     format!("    event->var{idx}_len = (u64){};", reg.pt_regs_access())
+                }
+                VariableLocation::FrameOffset { register, offset } => {
+                    let base = register.pt_regs_access();
+                    let address = if *offset >= 0 {
+                        format!("({base} + {offset})")
+                    } else {
+                        format!("({base} - {})", offset.unsigned_abs())
+                    };
+                    format!("    event->var{idx}_len = 0;\n    bpf_probe_read_user(&event->var{idx}_len, 8, (void *){address});")
                 }
                 _ => format!("    event->var{idx}_len = 0;"),
             };
@@ -253,7 +764,8 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
 
             format!("{ptr_read}\n{len_read}\n{content_read}")
         }
-        VariableLocation::GoSlice { ptr, len, cap } => {
+        VariableLocation::GoSlice { ptr, len, cap }
+        | VariableLocation::SliceHeader { ptr, len, cap } => {
             // Read ptr, len, cap from their sub-locations.
             let ptr_expr = simple_read_expr(ptr, &format!("var{idx}"));
             let len_expr = simple_read_expr(len, &format!("var{idx}_len"));
@@ -265,10 +777,11 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
             // var{idx} (u64) is left as 0; actual data goes in var{idx}_blob[N].
             let capture = (*byte_size).min(config.max_blob_capture);
             if *offset >= 0 {
-                format!("    bpf_probe_read_user(event->var{idx}_blob, {capture}, (void *)(DETRIX_STACK_PTR + {offset}));")
+                format!("    event->var{idx} = (u64)(DETRIX_STACK_PTR + {offset});\n    bpf_probe_read_user(event->var{idx}_blob, {capture}, (void *)(DETRIX_STACK_PTR + {offset}));")
             } else {
                 format!(
-                    "    bpf_probe_read_user(event->var{idx}_blob, {capture}, (void *)(DETRIX_STACK_PTR - {}));",
+                    "    event->var{idx} = (u64)(DETRIX_STACK_PTR - {});\n    bpf_probe_read_user(event->var{idx}_blob, {capture}, (void *)(DETRIX_STACK_PTR - {}));",
+                    offset.unsigned_abs(),
                     offset.unsigned_abs()
                 )
             }
@@ -308,8 +821,19 @@ pub fn generate_read_expr(var: &ResolvedVariable, idx: usize, config: &CaptureCo
                             "\n    bpf_probe_read_user(&event->var{idx}_blob[{written}], {piece_size}, (void *)({address}));"
                         ));
                     }
+                    VariableLocation::FrameOffset { register, offset } => {
+                        let base = register.pt_regs_access();
+                        let address = if *offset >= 0 {
+                            format!("{base} + {offset}")
+                        } else {
+                            format!("{base} - {}", offset.unsigned_abs())
+                        };
+                        out.push_str(&format!(
+                            "\n    bpf_probe_read_user(&event->var{idx}_blob[{written}], {piece_size}, (void *)({address}));"
+                        ));
+                    }
                     _ => unreachable!(
-                        "PiecewiseBlob is constructed only from scalar register/stack pieces"
+                        "PiecewiseBlob is constructed only from scalar register/stack/frame pieces"
                     ),
                 }
                 written += piece_size;
@@ -387,6 +911,15 @@ fn simple_read_expr(loc: &VariableLocation, field: &str) -> String {
                 "bpf_probe_read_user(&event->{field}, 8, (void *)(DETRIX_STACK_PTR + ({offset})));"
             )
         }
+        VariableLocation::FrameOffset { register, offset } => {
+            let base = register.pt_regs_access();
+            let address = if *offset >= 0 {
+                format!("({base} + {offset})")
+            } else {
+                format!("({base} - {})", offset.unsigned_abs())
+            };
+            format!("bpf_probe_read_user(&event->{field}, 8, (void *){address});")
+        }
         _ => format!("event->{field} = 0; // unsupported"),
     }
 }
@@ -441,6 +974,11 @@ const GOID_EXTRACT: &str = r#"    // Extract goroutine ID (goid) from runtime.g 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture_plan::{
+        CaptureField, CapturePiece, CapturePlan, HeaderKind, ReadOp, ValueSemantics,
+        CAPTURE_PLAN_SCHEMA_VERSION,
+    };
+    use crate::dwarf::types::TargetArchitecture;
     use crate::dwarf::types::{Register, VariableLocation, VariablePiece, VariableSize};
     use crate::probe::types::{CaptureConfig, MAX_CAPTURE_VARS, MAX_STRING_CAPTURE};
 
@@ -461,6 +999,336 @@ mod tests {
         assert!(!prog.captures_goid);
         assert!(prog.source.contains("detrix_capture"));
         assert!(prog.source.contains("bpf_ringbuf_submit"));
+    }
+
+    #[test]
+    fn generate_versioned_envelope_program() {
+        let vars = vec![make_var(
+            "amount",
+            VariableLocation::Register(Register::Rax),
+            VariableSize::QWord,
+        )];
+        let prog = generate_bpf_program_with_envelope(
+            &vars,
+            false,
+            None,
+            None,
+            &CaptureConfig::default(),
+            Some(RawEnvelopeSpec {
+                profile_tag: 0x7275,
+                plan_tag: 0x1234,
+            }),
+        )
+        .unwrap();
+        assert!(prog.versioned_envelope);
+        assert!(prog.source.contains("drx_magic"));
+        assert!(prog.source.contains("drx_plan_tag = 0x1234"));
+    }
+
+    #[test]
+    fn direct_plan_renderer_preserves_composite_operations() {
+        let plan = CapturePlan {
+            schema_version: CAPTURE_PLAN_SCHEMA_VERSION,
+            architecture: TargetArchitecture::X86_64,
+            profile_id: "rust".into(),
+            plan_hash: "sha256:composite".into(),
+            probe_pc: 0x44,
+            fields: vec![
+                CaptureField {
+                    name: "map".into(),
+                    offset: 0,
+                    size: 8,
+                    op: ReadOp::Map {
+                        base: Box::new(ReadOp::Stack {
+                            offset: -40,
+                            size: 8,
+                            semantics: ValueSemantics::Value,
+                        }),
+                    },
+                },
+                CaptureField {
+                    name: "header".into(),
+                    offset: 8,
+                    size: 16,
+                    op: ReadOp::Header {
+                        base: Box::new(ReadOp::Frame {
+                            register: Register::Rbp,
+                            offset: -32,
+                            size: 8,
+                            semantics: ValueSemantics::Address,
+                        }),
+                        size: 16,
+                        kind: HeaderKind::BorrowedStr,
+                    },
+                },
+                CaptureField {
+                    name: "pieces".into(),
+                    offset: 24,
+                    size: 12,
+                    op: ReadOp::Piecewise {
+                        pieces: vec![
+                            CapturePiece {
+                                offset: 0,
+                                size: 8,
+                                op: Some(ReadOp::Register {
+                                    register: Register::Rax,
+                                    semantics: ValueSemantics::Value,
+                                }),
+                            },
+                            CapturePiece {
+                                offset: 8,
+                                size: 4,
+                                op: Some(ReadOp::Stack {
+                                    offset: -16,
+                                    size: 4,
+                                    semantics: ValueSemantics::Value,
+                                }),
+                            },
+                        ],
+                    },
+                },
+            ],
+            max_payload_bytes: 36,
+        };
+
+        let source = generate_bpf_program_from_plan(
+            &plan,
+            false,
+            None,
+            None,
+            &CaptureConfig::default(),
+            None,
+        )
+        .unwrap()
+        .source;
+        assert!(source.contains("DETRIX_STACK_PTR - 40"));
+        assert!(source.contains("ctx->rbp - 32"));
+        assert!(source.contains("ctx->rax"));
+        assert!(source.contains("DETRIX_STACK_PTR - 16"));
+    }
+
+    #[test]
+    fn direct_plan_renderer_covers_each_kernel_operation_family() {
+        // Keep one field per IR operation so this test checks the generated
+        // reads/fields rather than merely proving that a plan validates.
+        let fields = vec![
+            CaptureField {
+                name: "register".into(),
+                offset: 0,
+                size: 8,
+                op: ReadOp::Register {
+                    register: Register::Rdi,
+                    semantics: ValueSemantics::Value,
+                },
+            },
+            CaptureField {
+                name: "stack".into(),
+                offset: 8,
+                size: 4,
+                op: ReadOp::Stack {
+                    offset: -8,
+                    size: 4,
+                    semantics: ValueSemantics::Value,
+                },
+            },
+            CaptureField {
+                name: "frame".into(),
+                offset: 12,
+                size: 8,
+                op: ReadOp::Frame {
+                    register: Register::Rbp,
+                    offset: -16,
+                    size: 8,
+                    semantics: ValueSemantics::Value,
+                },
+            },
+            CaptureField {
+                name: "blob".into(),
+                offset: 20,
+                size: 4,
+                op: ReadOp::Blob {
+                    offset: -32,
+                    size: 4,
+                    semantics: ValueSemantics::Value,
+                },
+            },
+            CaptureField {
+                name: "indirect".into(),
+                offset: 24,
+                size: 8,
+                op: ReadOp::Indirect {
+                    base: Box::new(ReadOp::Stack {
+                        offset: -40,
+                        size: 8,
+                        semantics: ValueSemantics::Address,
+                    }),
+                    size: 16,
+                },
+            },
+            CaptureField {
+                name: "map".into(),
+                offset: 32,
+                size: 8,
+                op: ReadOp::Map {
+                    base: Box::new(ReadOp::Frame {
+                        register: Register::Rbp,
+                        offset: -48,
+                        size: 8,
+                        semantics: ValueSemantics::Address,
+                    }),
+                },
+            },
+            CaptureField {
+                name: "header".into(),
+                offset: 40,
+                size: 16,
+                op: ReadOp::Header {
+                    base: Box::new(ReadOp::Stack {
+                        offset: -56,
+                        size: 8,
+                        semantics: ValueSemantics::Address,
+                    }),
+                    size: 16,
+                    kind: HeaderKind::BorrowedStr,
+                },
+            },
+            CaptureField {
+                name: "constant".into(),
+                offset: 56,
+                size: 8,
+                op: ReadOp::Constant {
+                    bytes: vec![0x78, 0x56, 0x34, 0x12],
+                },
+            },
+            CaptureField {
+                name: "unavailable".into(),
+                offset: 64,
+                size: 8,
+                op: ReadOp::Unavailable {
+                    reason: "optimized out".into(),
+                },
+            },
+            CaptureField {
+                name: "piece".into(),
+                offset: 72,
+                size: 8,
+                op: ReadOp::Piece {
+                    offset: 0,
+                    size: 8,
+                    op: Box::new(ReadOp::Register {
+                        register: Register::Rax,
+                        semantics: ValueSemantics::Value,
+                    }),
+                },
+            },
+            CaptureField {
+                name: "piecewise".into(),
+                offset: 80,
+                size: 12,
+                op: ReadOp::Piecewise {
+                    pieces: vec![
+                        CapturePiece {
+                            offset: 0,
+                            size: 8,
+                            op: Some(ReadOp::Register {
+                                register: Register::Rsi,
+                                semantics: ValueSemantics::Value,
+                            }),
+                        },
+                        CapturePiece {
+                            offset: 8,
+                            size: 4,
+                            op: Some(ReadOp::Stack {
+                                offset: -64,
+                                size: 4,
+                                semantics: ValueSemantics::Value,
+                            }),
+                        },
+                    ],
+                },
+            },
+        ];
+        let plan = CapturePlan {
+            schema_version: CAPTURE_PLAN_SCHEMA_VERSION,
+            architecture: TargetArchitecture::X86_64,
+            profile_id: "go".into(),
+            plan_hash: "sha256:all-ops".into(),
+            probe_pc: 0x45,
+            fields,
+            max_payload_bytes: 92,
+        };
+        let config = CaptureConfig {
+            max_capture_vars: 16,
+            ..CaptureConfig::default()
+        };
+        let source = generate_bpf_program_from_plan(
+            &plan,
+            false,
+            None,
+            None,
+            &config,
+            Some(RawEnvelopeSpec {
+                profile_tag: 0x676f,
+                plan_tag: 0x45,
+            }),
+        )
+        .unwrap()
+        .source;
+
+        for marker in [
+            "ctx->rdi",
+            "DETRIX_STACK_PTR - 8",
+            "ctx->rbp - 16",
+            "DETRIX_STACK_PTR - 32",
+            "DETRIX_STACK_PTR - 40",
+            "ctx->rbp - 48",
+            "DETRIX_STACK_PTR - 56",
+            "0x12345678",
+            "event->var8 = 0",
+            "ctx->rax",
+            "ctx->rsi",
+            "DETRIX_STACK_PTR - 64",
+            "drx_plan_tag = 0x45",
+        ] {
+            assert!(
+                source.contains(marker),
+                "generated plan missing marker: {marker}"
+            );
+        }
+        assert!(source.contains("var3_blob[4]"));
+        assert!(source.contains("var10_blob[12]"));
+        assert!(source.contains("var6_str["));
+    }
+
+    #[test]
+    fn direct_plan_renderer_rejects_user_space_only_operations() {
+        let plan = CapturePlan {
+            schema_version: CAPTURE_PLAN_SCHEMA_VERSION,
+            architecture: TargetArchitecture::X86_64,
+            profile_id: "go".into(),
+            plan_hash: "sha256:user-bytes".into(),
+            probe_pc: 1,
+            fields: vec![CaptureField {
+                name: "heap".into(),
+                offset: 0,
+                size: 8,
+                op: ReadOp::UserBytes {
+                    address_field: 0,
+                    size: 8,
+                },
+            }],
+            max_payload_bytes: 8,
+        };
+        let error = generate_bpf_program_from_plan(
+            &plan,
+            false,
+            None,
+            None,
+            &CaptureConfig::default(),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("requires user-space lowering"));
     }
 
     #[test]

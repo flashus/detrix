@@ -1,4 +1,4 @@
-//! eBPF adapter implementing DapAdapter for Go on Linux
+//! eBPF adapter implementing DapAdapter for Go/Rust scalar capture on Linux
 //!
 //! Provides the same interface as DAP-based adapters but uses eBPF uprobes
 //! instead of the Debug Adapter Protocol. This gives ~10-50x lower overhead
@@ -24,34 +24,46 @@
 //!                       └─ event_tx → subscribe_events() caller
 //! ```
 
-use crate::dwarf::{DwarfInfo, ProbePoint, ResolvedVariable, VariableSize};
+use crate::decode::{ScalarFieldSpec, ScalarKind};
+use crate::dwarf::{DwarfInfo, ProbePoint, ResolvedVariable, VariableLocation, VariableSize};
 #[cfg(target_os = "linux")]
 use crate::error::Error;
 use crate::error::Result;
+use crate::probe::ringbuf::RawEnvelopeExpectation;
 use crate::probe::types::{CaptureConfig, CapturedValue};
-use crate::probe::UprobeManager;
+use crate::probe::{UprobeManager, RAW_EVENT_CHANNEL_CAPACITY};
+use crate::profile::{GoProfile, LanguageProfile, ProfileId, RustProfile};
+use crate::runtime::ProfiledCaptureRuntime;
 
 use async_trait::async_trait;
 use detrix_core::{ExpressionValue, Metric, MetricEvent, MetricId, TypedValue};
 use detrix_ports::{DapAdapter, RemoveMetricResult, SetMetricResult};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 #[cfg(target_os = "linux")]
 use tokio::task::JoinHandle;
 
 /// Raw event channel receiver type — used for the placeholder channel.
-type RawEventRx = mpsc::UnboundedReceiver<(String, Vec<u8>)>;
+type RawEventRx = mpsc::Receiver<(String, Vec<u8>)>;
 
 /// eBPF-based adapter for Go logpoints on Linux.
 ///
 /// Implements the same `DapAdapter` trait as DAP-based adapters,
 /// making it a drop-in replacement from MetricService's perspective.
 pub struct EbpfAdapter {
-    /// Path to the target Go binary (ELF with DWARF).
+    /// Executable used for uprobe attachment and text-address mapping.
     binary_path: PathBuf,
+    /// Optional external ELF carrying DWARF sections. Address space remains
+    /// anchored to `binary_path` for uprobe attachment.
+    dwarf_path: PathBuf,
+    profile_id: ProfileId,
+    /// Language profile strategy.  The typed `profile_id` remains only for
+    /// compatibility with the existing uprobe attachment API; all profile
+    /// metadata decisions flow through this object.
+    profile: Arc<dyn LanguageProfile>,
     /// Parsed DWARF info (populated on start).
     dwarf: RwLock<Option<DwarfInfo>>,
     /// Uprobe manager — owns the BPF programs and ring buffer pollers.
@@ -66,8 +78,17 @@ pub struct EbpfAdapter {
     event_tx: mpsc::Sender<MetricEvent>,
     /// Event receiver — handed out exactly once via subscribe_events().
     event_rx: RwLock<Option<mpsc::Receiver<MetricEvent>>>,
+    /// Correlator accounting dimensions, reported independently from
+    /// transport drops.
+    decode_drops: Arc<AtomicU64>,
+    unavailable_fields: Arc<AtomicU64>,
+    decoded_events: Arc<AtomicU64>,
     /// Whether the adapter is started. AtomicBool for lock-free check-and-set in start().
     started: AtomicBool,
+    /// Serializes start/stop so a concurrent restart cannot install resources
+    /// after shutdown has begun. The atomic above remains the cheap status
+    /// query used by `is_connected()`.
+    lifecycle: Mutex<()>,
     /// Placeholder raw event receiver — keeps the pre-start channel open so ring
     /// buffer pollers don't see a broken channel if set_metric() is called before start().
     /// Dropped (set to None) in start() when the real correlator channel is created.
@@ -84,6 +105,7 @@ pub struct EbpfAdapter {
 ///
 /// Fields are read by `run_event_correlator` (Linux-only).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone)]
 struct ActiveMetric {
     metric: Metric,
     probe_point: ProbePoint,
@@ -94,6 +116,12 @@ struct ActiveMetric {
     /// The correlator passes this flag to `parse_ring_buffer_event` to parse the
     /// goid field from ring buffer events.
     capture_goid: bool,
+    runtime: Option<Arc<Mutex<ProfiledCaptureRuntime>>>,
+    raw_envelope: Option<RawEnvelopeExpectation>,
+}
+
+fn capture_goid_for_profile(profile: ProfileId, configured: bool) -> bool {
+    configured && profile == ProfileId::Go
 }
 
 /// Return the stable internal key used for probe attachment and event correlation.
@@ -109,7 +137,7 @@ fn metric_probe_key(metric: &Metric) -> String {
 }
 
 impl EbpfAdapter {
-    /// Create a new eBPF adapter for a Go binary.
+    /// Create a new eBPF adapter for a Go binary (compatibility default).
     ///
     /// The binary must be compiled with `-gcflags=all=-N -l` for
     /// reliable DWARF variable locations.
@@ -124,7 +152,55 @@ impl EbpfAdapter {
         binary_path: impl AsRef<Path>,
         capture_config: CaptureConfig,
     ) -> Result<Self> {
+        Self::new_with_profile(binary_path, capture_config, ProfileId::Go)
+    }
+
+    pub fn new_with_profile(
+        binary_path: impl AsRef<Path>,
+        capture_config: CaptureConfig,
+        profile_id: ProfileId,
+    ) -> Result<Self> {
+        Self::new_with_profile_and_debug_path(
+            binary_path,
+            capture_config,
+            profile_id,
+            None::<&Path>,
+        )
+    }
+
+    pub fn new_with_profile_and_debug_path(
+        binary_path: impl AsRef<Path>,
+        capture_config: CaptureConfig,
+        profile_id: ProfileId,
+        debug_path: Option<impl AsRef<Path>>,
+    ) -> Result<Self> {
+        let profile: Arc<dyn LanguageProfile> = match profile_id {
+            ProfileId::Go => Arc::new(GoProfile),
+            ProfileId::Rust => Arc::new(RustProfile),
+        };
+        Self::new_with_profile_object_and_debug_path(
+            binary_path,
+            capture_config,
+            profile_id,
+            profile,
+            debug_path,
+        )
+    }
+
+    /// Construct an adapter with a registry-owned profile object.  Built-in
+    /// profiles use the compatibility `ProfileId`; third-party backends can
+    /// provide their own adapter through `CaptureBackendFactory::create_adapter`.
+    pub fn new_with_profile_object_and_debug_path(
+        binary_path: impl AsRef<Path>,
+        capture_config: CaptureConfig,
+        profile_id: ProfileId,
+        profile: Arc<dyn LanguageProfile>,
+        debug_path: Option<impl AsRef<Path>>,
+    ) -> Result<Self> {
         let path = binary_path.as_ref().to_path_buf();
+        let dwarf_path = debug_path
+            .map(|path| path.as_ref().to_path_buf())
+            .unwrap_or_else(|| path.clone());
         let (event_tx, event_rx) = mpsc::channel(1024);
 
         #[cfg(target_os = "linux")]
@@ -142,9 +218,12 @@ impl EbpfAdapter {
         // Create a placeholder raw-event channel so ring buffer pollers don't see a
         // broken sender if set_metric() is called before start(). start() replaces
         // this with a fresh channel and drops the placeholder receiver.
-        let (placeholder_tx, placeholder_rx) = mpsc::unbounded_channel();
+        let (placeholder_tx, placeholder_rx) = mpsc::channel(RAW_EVENT_CHANNEL_CAPACITY);
         Ok(Self {
             binary_path: path.clone(),
+            dwarf_path,
+            profile_id,
+            profile,
             dwarf: RwLock::new(None),
             uprobe_manager: RwLock::new(UprobeManager::new_with_config(
                 &path,
@@ -154,7 +233,11 @@ impl EbpfAdapter {
             active_metrics: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             event_rx: RwLock::new(Some(event_rx)),
+            decode_drops: Arc::new(AtomicU64::new(0)),
+            unavailable_fields: Arc::new(AtomicU64::new(0)),
+            decoded_events: Arc::new(AtomicU64::new(0)),
             started: AtomicBool::new(false),
+            lifecycle: Mutex::new(()),
             _placeholder_raw_rx: RwLock::new(Some(placeholder_rx)),
             capture_config,
             #[cfg(target_os = "linux")]
@@ -229,6 +312,7 @@ impl EbpfAdapter {
 #[async_trait]
 impl DapAdapter for EbpfAdapter {
     async fn start(&self) -> detrix_core::Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
         // Atomic check-and-set: only one concurrent caller proceeds.
         if self
             .started
@@ -239,7 +323,8 @@ impl DapAdapter for EbpfAdapter {
         }
 
         let result: detrix_core::Result<()> = async {
-            let dwarf = DwarfInfo::parse(&self.binary_path)?;
+            let dwarf =
+                DwarfInfo::parse_with_debug_path(&self.binary_path, Some(&self.dwarf_path))?;
             *self.dwarf.write().await = Some(dwarf);
 
             // On Linux: create a fresh raw-event channel on each start() so the adapter
@@ -247,7 +332,7 @@ impl DapAdapter for EbpfAdapter {
             // UprobeManager; newly attached probes will use the new sender.
             #[cfg(target_os = "linux")]
             {
-                let (raw_tx, raw_rx) = mpsc::unbounded_channel();
+                let (raw_tx, raw_rx) = mpsc::channel(RAW_EVENT_CHANNEL_CAPACITY);
                 self.uprobe_manager.write().await.set_raw_tx(raw_tx);
                 // Drop the placeholder receiver now that the real channel is active.
                 *self._placeholder_raw_rx.write().await = None;
@@ -255,12 +340,18 @@ impl DapAdapter for EbpfAdapter {
                 let event_tx = self.event_tx.clone();
                 let capture_config = self.capture_config.clone();
                 let mem_reader = Arc::clone(&self.mem_reader);
+                let decode_drops = Arc::clone(&self.decode_drops);
+                let unavailable_fields = Arc::clone(&self.unavailable_fields);
+                let decoded_events = Arc::clone(&self.decoded_events);
                 let handle = tokio::spawn(run_event_correlator(
                     raw_rx,
                     active_metrics,
                     event_tx,
                     capture_config,
                     mem_reader,
+                    decode_drops,
+                    unavailable_fields,
+                    decoded_events,
                 ));
                 *self.correlator_handle.write().await = Some(handle);
             }
@@ -276,7 +367,14 @@ impl DapAdapter for EbpfAdapter {
     }
 
     async fn stop(&self) -> detrix_core::Result<()> {
-        self.uprobe_manager.write().await.detach_all();
+        let _lifecycle = self.lifecycle.lock().await;
+        let mut uprobe_manager = self.uprobe_manager.write().await;
+        uprobe_manager.detach_all();
+        // Drop the manager's final raw sender after pollers are detached so
+        // the correlator receiver can observe closure and terminate.
+        #[cfg(target_os = "linux")]
+        uprobe_manager.clear_raw_tx();
+        drop(uprobe_manager);
         self.active_metrics.write().await.clear();
 
         // Gracefully shut down the correlator task by dropping raw_event_rx
@@ -324,8 +422,8 @@ impl DapAdapter for EbpfAdapter {
             metric.expressions
         );
 
-        let probe_point = dwarf
-            .resolve_probe_point(
+        let (probe_point, resolution) = dwarf
+            .resolve_probe_point_with_diagnostics(
                 &metric.location.file,
                 metric.location.line,
                 &metric.expressions,
@@ -339,6 +437,13 @@ impl DapAdapter for EbpfAdapter {
                 );
                 detrix_core::Error::Adapter(format!("DWARF resolution failed: {e}"))
             })?;
+
+        detrix_logging::debug!(
+            "[EbpfAdapter] PC selection: selected={:#x} candidates={} rejected={:?}",
+            resolution.selected_pc,
+            resolution.candidates.len(),
+            resolution.rejections
+        );
 
         detrix_logging::debug!(
             "[EbpfAdapter] resolved probe_point: pc={:#x} function={} variables={} symbol_offset={:#x}",
@@ -356,16 +461,11 @@ impl DapAdapter for EbpfAdapter {
         // Compute TLS-based goid offset when goid capture is enabled.
         // This offset tells the BPF program where to find the G pointer
         // in the thread's TLS block (via fs_base on x86_64).
-        let g_addr_offset = if self.capture_config.capture_goid {
-            dwarf.g_addr_offset().unwrap_or(None)
-        } else {
-            None
-        };
-        let goid_offset = if self.capture_config.capture_goid {
-            dwarf.goid_field_offset()
-        } else {
-            None
-        };
+        let runtime_metadata = self
+            .profile
+            .runtime_metadata(dwarf, self.capture_config.capture_goid);
+        let g_addr_offset = runtime_metadata.g_addr_offset;
+        let goid_offset = runtime_metadata.goid_offset;
         detrix_logging::debug!(
             "[EbpfAdapter] g_addr_offset={:?} goid_offset={:?} for '{}'",
             g_addr_offset,
@@ -375,10 +475,69 @@ impl DapAdapter for EbpfAdapter {
 
         let probe_key = metric_probe_key(metric);
 
+        // The plan identity is shared by all eBPF profiles.  Rust adopted
+        // DRX1 first; Go now uses the same envelope when the connection has
+        // negotiated it, while the parser still accepts legacy records for
+        // older agents.
+        let runtime_plan_hash = format!("probe:{:x}", probe_point.pc);
+        let raw_envelope = Some(RawEnvelopeExpectation {
+            profile_tag: crate::compiler::profile_tag(self.profile.id()),
+            plan_tag: crate::compiler::plan_tag(&runtime_plan_hash),
+            field_count: probe_point.variables.len(),
+        });
+        let runtime = if self.profile_id == ProfileId::Rust {
+            match rust_scalar_fields(&probe_point.variables) {
+                Ok(fields) => {
+                    let mut runtime = ProfiledCaptureRuntime::new(
+                        "rust",
+                        runtime_plan_hash.clone(),
+                        fields,
+                        self.capture_config.max_blob_capture.max(64),
+                    )
+                    .map_err(|e| detrix_core::Error::Adapter(e.to_string()))?;
+                    runtime
+                        .prepare()
+                        .and_then(|_| runtime.attach())
+                        .and_then(|_| runtime.activate())
+                        .map_err(|e| detrix_core::Error::Adapter(e.to_string()))?;
+                    Some(Arc::new(Mutex::new(runtime)))
+                }
+                Err(error)
+                    if probe_point.variables.iter().all(|variable| {
+                        matches!(
+                            &variable.location,
+                            VariableLocation::StackBlob { .. }
+                                | VariableLocation::PiecewiseBlob { .. }
+                                | VariableLocation::GoString { .. }
+                                | VariableLocation::StringHeader { .. }
+                                | VariableLocation::GoSlice { .. }
+                                | VariableLocation::SliceHeader { .. }
+                        )
+                    }) =>
+                {
+                    detrix_logging::debug!(
+                        "[EbpfAdapter] using bounded inline Rust composite capture without scalar runtime: {error}"
+                    );
+                    None
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+
+        let attach_point = probe_point.clone();
         self.uprobe_manager
             .write()
             .await
-            .attach(&probe_key, &probe_point, g_addr_offset, goid_offset)
+            .attach_for_profile_with_plan(
+                &probe_key,
+                &attach_point,
+                g_addr_offset,
+                goid_offset,
+                self.profile_id,
+                Some(&runtime_plan_hash),
+            )
             .map_err(|e| {
                 detrix_logging::error!(
                     "[EbpfAdapter] uprobe attach failed for '{}': {}",
@@ -395,7 +554,18 @@ impl DapAdapter for EbpfAdapter {
             ActiveMetric {
                 metric: metric.clone(),
                 probe_point,
-                capture_goid: self.capture_config.capture_goid,
+                // Go's goroutine ID layout is not part of Rust's ABI.  The
+                // shared test configuration enables capture_goid for Go
+                // probes, but Rust's CapturePlan renderer does not emit that
+                // field; keep the parser layout identical to the Rust wire
+                // layout instead of consuming the first 8 aggregate bytes as
+                // a synthetic goid.
+                capture_goid: capture_goid_for_profile(
+                    self.profile_id,
+                    self.capture_config.capture_goid,
+                ),
+                runtime,
+                raw_envelope,
             },
         );
 
@@ -446,6 +616,32 @@ impl DapAdapter for EbpfAdapter {
             .unwrap_or(0);
         Ok(count)
     }
+
+    fn get_total_drop_count(&self) -> detrix_core::Result<u64> {
+        let probe_keys: Vec<String> = self
+            .active_metrics
+            .try_read()
+            .map(|metrics| metrics.keys().cloned().collect())
+            .unwrap_or_default();
+        let count = self
+            .uprobe_manager
+            .try_read()
+            .map(|guard| probe_keys.iter().map(|key| guard.get_drop_count(key)).sum())
+            .unwrap_or(0);
+        Ok(count)
+    }
+
+    fn get_decode_drop_count(&self) -> detrix_core::Result<u64> {
+        Ok(self.decode_drops.load(Ordering::Relaxed))
+    }
+
+    fn get_unavailable_field_count(&self) -> detrix_core::Result<u64> {
+        Ok(self.unavailable_fields.load(Ordering::Relaxed))
+    }
+
+    fn get_decoded_event_count(&self) -> detrix_core::Result<u64> {
+        Ok(self.decoded_events.load(Ordering::Relaxed))
+    }
 }
 
 impl Drop for EbpfAdapter {
@@ -476,31 +672,80 @@ impl Drop for EbpfAdapter {
 /// resulting `MetricEvent` to `event_tx`.
 #[cfg(target_os = "linux")]
 async fn run_event_correlator(
-    mut raw_rx: mpsc::UnboundedReceiver<(String, Vec<u8>)>,
+    mut raw_rx: mpsc::Receiver<(String, Vec<u8>)>,
     active_metrics: Arc<RwLock<HashMap<String, ActiveMetric>>>,
     event_tx: mpsc::Sender<MetricEvent>,
     capture_config: CaptureConfig,
     mem_reader: crate::mem_reader::ProcessMemoryReaderRef,
+    decode_drops: Arc<AtomicU64>,
+    unavailable_fields: Arc<AtomicU64>,
+    decoded_events: Arc<AtomicU64>,
 ) {
-    use crate::probe::ringbuf::parse_ring_buffer_event;
+    use crate::probe::ringbuf::parse_ring_buffer_event_with_envelope;
 
     while let Some((probe_key, raw_bytes)) = raw_rx.recv().await {
-        let guard = active_metrics.read().await;
-        let Some(active) = guard.get(&probe_key) else {
+        if raw_bytes.len() < 128 {
+            detrix_logging::warn!(
+                "[ringbuf] short raw event before decode: probe={} bytes={}",
+                probe_key,
+                raw_bytes.len()
+            );
+        }
+        // Clone the immutable metric context before doing any async runtime or
+        // transport work. Holding the RwLock read guard across `.await` would
+        // starve set/remove/stop writers whenever the event channel is slow.
+        let active = {
+            let guard = active_metrics.read().await;
+            guard.get(&probe_key).cloned()
+        };
+        let Some(active) = active else {
             continue;
         };
 
         // Read PID from the event (first 4 bytes) - used by parse_ring_buffer_event internally
         // No need to pass it separately - the function reads it from the data
 
-        match parse_ring_buffer_event(
+        match parse_ring_buffer_event_with_envelope(
             &raw_bytes,
             &active.probe_point.variables,
             active.capture_goid,
             &capture_config,
             mem_reader.as_ref(),
+            active.raw_envelope,
         ) {
             Ok(probe_event) => {
+                unavailable_fields.fetch_add(
+                    probe_event
+                        .values
+                        .iter()
+                        .filter(|value| matches!(value, CapturedValue::Error(_)))
+                        .count() as u64,
+                    Ordering::Relaxed,
+                );
+                decoded_events.fetch_add(1, Ordering::Relaxed);
+                if let Some(runtime) = &active.runtime {
+                    let (payload, partial) =
+                        scalar_payload(&probe_event.values, &active.probe_point.variables);
+                    let mut runtime = runtime.lock().await;
+                    match runtime.encode_payload(&payload, partial) {
+                        Ok(record) => {
+                            if let Err(error) = runtime.ingest(&record) {
+                                decode_drops.fetch_add(1, Ordering::Relaxed);
+                                detrix_logging::warn!(
+                                    "Rust profile runtime rejected event for '{}': {error}",
+                                    active.metric.name
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            decode_drops.fetch_add(1, Ordering::Relaxed);
+                            detrix_logging::warn!(
+                                "Rust profile runtime could not encode event for '{}': {error}",
+                                active.metric.name
+                            );
+                        }
+                    }
+                }
                 // Prefer goroutine ID over OS thread ID for Go correlation.
                 let thread_id = probe_event
                     .goid
@@ -519,12 +764,107 @@ async fn run_event_correlator(
                 }
             }
             Err(e) => {
+                decode_drops.fetch_add(1, Ordering::Relaxed);
                 detrix_logging::warn!(
                     "Failed to parse ring buffer event for '{}' ({probe_key}): {e}",
                     active.metric.name
                 );
             }
         }
+    }
+}
+
+fn rust_scalar_fields(variables: &[ResolvedVariable]) -> detrix_core::Result<Vec<ScalarFieldSpec>> {
+    let mut offset = 0usize;
+    let mut fields = Vec::with_capacity(variables.len());
+    for variable in variables {
+        let size = variable.size.bytes();
+        let aggregate_location = matches!(
+            &variable.location,
+            VariableLocation::StackBlob { .. } | VariableLocation::PiecewiseBlob { .. }
+        );
+        if size == 0 || size > 8 || variable.nested_type.is_some() || aggregate_location {
+            return Err(detrix_core::Error::Adapter(format!(
+                "Rust eBPF supports scalar fields up to 8 bytes; '{}' is unsupported",
+                variable.name
+            )));
+        }
+        let kind = if variable.type_name.contains("f32") {
+            ScalarKind::Float32
+        } else if variable.type_name.contains("f64") {
+            ScalarKind::Float64
+        } else if variable.type_name == "bool" {
+            ScalarKind::Bool
+        } else if variable.type_name.starts_with('&') || variable.type_name.starts_with('*') {
+            ScalarKind::Address
+        } else if variable.type_name.starts_with('i') {
+            ScalarKind::Signed
+        } else {
+            ScalarKind::Unsigned
+        };
+        fields.push(ScalarFieldSpec {
+            name: variable.name.clone(),
+            offset,
+            size,
+            kind,
+        });
+        offset = offset.saturating_add(size);
+    }
+    Ok(fields)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn scalar_payload(values: &[CapturedValue], variables: &[ResolvedVariable]) -> (Vec<u8>, bool) {
+    let mut payload = Vec::new();
+    let mut partial = values.len() != variables.len();
+    for (index, variable) in variables.iter().enumerate() {
+        let size = variable.size.bytes();
+        let value = values.get(index);
+        let raw = match value {
+            Some(CapturedValue::Error(_)) | None => {
+                partial = true;
+                vec![0; size]
+            }
+            Some(CapturedValue::Scalar(value)) => value.to_le_bytes().to_vec(),
+            Some(CapturedValue::Float(value)) => value.to_bits().to_le_bytes().to_vec(),
+            Some(_) => {
+                partial = true;
+                vec![0; size]
+            }
+        };
+        payload.extend_from_slice(&raw[..size.min(raw.len())]);
+    }
+    (payload, partial)
+}
+
+#[cfg(test)]
+mod scalar_payload_tests {
+    use super::*;
+    use crate::dwarf::types::Register;
+
+    #[test]
+    fn scalar_payload_preserves_field_count_when_value_is_missing() {
+        let variables = vec![
+            ResolvedVariable {
+                name: "a".into(),
+                type_name: "u64".into(),
+                size: VariableSize::QWord,
+                location: VariableLocation::Register(Register::Rax),
+                nested_type: None,
+            },
+            ResolvedVariable {
+                name: "b".into(),
+                type_name: "u64".into(),
+                size: VariableSize::QWord,
+                location: VariableLocation::Register(Register::Rbx),
+                nested_type: None,
+            },
+        ];
+        let (payload, partial) = scalar_payload(&[CapturedValue::Scalar(7)], &variables);
+        assert_eq!(payload.len(), 16);
+        assert_eq!(&payload[..8], &7u64.to_le_bytes());
+        assert_eq!(&payload[8..], &[0; 8]);
+        assert!(partial);
     }
 }
 
@@ -565,6 +905,13 @@ mod tests {
         assert_ne!(first_key, second_key);
         assert!(first_key.contains("41"));
         assert!(second_key.contains("42"));
+    }
+
+    #[test]
+    fn rust_profile_does_not_consume_go_only_goid_field() {
+        assert!(capture_goid_for_profile(ProfileId::Go, true));
+        assert!(!capture_goid_for_profile(ProfileId::Rust, true));
+        assert!(!capture_goid_for_profile(ProfileId::Go, false));
     }
 
     #[test]
@@ -738,13 +1085,15 @@ mod tests {
                 ActiveMetric {
                     metric: metric.clone(),
                     probe_point: crate::dwarf::ProbePoint {
-                        binary_path: std::path::PathBuf::from("/tmp/test"),
+                        binary_path: std::path::PathBuf::from("/tmp/test-binary"),
                         pc: 0x1000,
                         symbol_offset: 0x100,
                         function_name: "main.test".to_string(),
                         variables: vec![],
                     },
                     capture_goid: false,
+                    runtime: None,
+                    raw_envelope: None,
                 },
             );
         }

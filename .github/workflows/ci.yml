@@ -94,6 +94,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DETRIX_SKIP_FRESHNESS_CHECK: "1"
+      # daemon_discovery library tests spawn a real daemon. The release build
+      # is copied to this stable path instead of the workspace target because
+      # CI uses the shared target-dir configuration.
+      DETRIX_BIN: /tmp/detrix-bin/detrix
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
@@ -201,10 +205,11 @@ jobs:
       - uses: ./.github/actions/setup-detrix-bin
       - uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
+          # Keep the toolchain paired with the pinned Delve release below.
+          go-version: '1.27.x'
       - name: Install Go tools
         run: |
-          go install github.com/go-delve/delve/cmd/dlv@latest
+          go install github.com/go-delve/delve/cmd/dlv@v1.27.0
           go install golang.org/x/tools/gopls@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
       - name: Allow ptrace for Delve
@@ -251,8 +256,83 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-task@v2
+      - name: Configure shared session target
+        run: echo "DETRIX_SESSION_TARGET_DIR=${RUNNER_TEMP}/detrix-session-target" >> "$GITHUB_ENV"
       - name: Agent mode E2E
         run: task tests:test-agent
+
+  # Rust eBPF release gate.  Keep this on a native x86-64 Linux runner: the
+  # macOS/OrbStack ARM64 playground is valuable evidence, but cannot establish
+  # the x86 perf_event/uprobe capability required by the rollout plan.
+  test-agent-rust-ebpf:
+    needs: changes
+    if: needs.changes.outputs.agent == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-task@v2
+      - uses: ./.github/actions/setup-rust
+      - name: Configure shared session target
+        run: echo "DETRIX_SESSION_TARGET_DIR=${RUNNER_TEMP}/detrix-session-target" >> "$GITHUB_ENV"
+      - name: Install LLDB 21 for DAP parity control
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | \
+            sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          . /etc/os-release
+          CODENAME=${VERSION_CODENAME:-noble}
+          echo "deb http://apt.llvm.org/$CODENAME/ llvm-toolchain-$CODENAME-21 main" | \
+            sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update
+          sudo apt-get install -y lldb-21
+          # The versioned package does not always install the unversioned
+          # command that Detrix's Rust DAP discovery and tests invoke.
+          sudo ln -sf /usr/bin/lldb-dap-21 /usr/local/bin/lldb-dap
+      - name: Go compatibility eBPF gates
+        run: |
+          task tests:test-ebpf-inject
+          task tests:test-ebpf-nested-inject
+          task tests:test-ebpf-classic-inject
+      - name: Rust DAP semantic fallback control
+        run: task tests:test-dap-rust-semantic-control
+      - name: Rust eBPF scalar and composite gates
+        run: |
+          task tests:test-agent-rust
+          task tests:test-agent-rust-composite
+          task tests:test-agent-rust-headers
+          task tests:test-agent-rust-external-debug
+          task tests:test-rust-external-debug-provider
+      - name: Rust eBPF lifecycle and fail-closed gates
+        run: |
+          task tests:test-agent-rust-reconnect
+          task tests:test-agent-rust-unavailable
+          task tests:test-agent-rust-optimized-unavailable
+          task tests:test-agent-lifecycle
+      - name: Rust eBPF sustained accounting and mixed-agent gate
+        run: |
+          task tests:test-agent-rust-composite-sustained
+          task tests:test-agent-both
+      - name: Capture runner provenance
+        if: always()
+        run: |
+          mkdir -p "${DETRIX_SESSION_TARGET_DIR}/host/out"
+          {
+            echo "revision=$(git rev-parse HEAD)"
+            echo "architecture=$(uname -m)"
+            echo "kernel=$(uname -srv)"
+            rustc -Vv
+            docker version || true
+          } > "${DETRIX_SESSION_TARGET_DIR}/host/out/rust-ebpf-release-gate-provenance.txt" 2>&1
+      - name: Preserve eBPF release-gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-ebpf-release-gate-evidence
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/detrix-session-target/host/out/rust-ebpf-build-metadata.txt
+            ${{ runner.temp }}/detrix-session-target/host/out/*.log
+            ${{ runner.temp }}/detrix-session-target/host/logs/**
 
   # ── Core: E2E — Rust / lldb-dap ───────────────────────────────────────────
   test-e2e-rust:
