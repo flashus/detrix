@@ -1,3 +1,5 @@
+
+
 <table style="border:none;">
 <tr>
 <td width="300">
@@ -97,7 +99,7 @@ That bug that cost you hours last week — redeploy after redeploy, still can't 
 
 **macOS** (Homebrew):
 ```bash
-brew install flashus/tap/detrix
+brew install flashus/homebrew-tap/detrix
 ```
 
 **macOS / Linux** (shell script):
